@@ -87,7 +87,9 @@ jobs:
           files: "*.node"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: List available binaries
+        run: ls -la *.node
       - name: Publish to npm
-        run: npm publish
+        run: npm publish --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
