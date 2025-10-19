@@ -151,7 +151,11 @@ impl GraphDB {
     pub fn checkpoint(&mut self) -> Result<()> {
         self.persist_btree_index()?;
         self.write_header()?;
-        self.pager.checkpoint()
+        self.pager.checkpoint()?;
+        if !self.load_btree_index()? {
+            return Err(GraphError::Corruption("failed to reload btree index after checkpoint".into()));
+        }
+        Ok(())
     }
 
     pub fn page_size(&self) -> usize {

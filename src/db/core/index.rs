@@ -106,9 +106,24 @@ impl GraphDB {
         let mut max_node_id = 0;
         let mut max_edge_id = 0;
         let page_count = self.pager.page_count();
+        
+        let btree_pages: std::collections::HashSet<PageId> = if let Some(btree_start) = self.header.btree_index_page {
+            let btree_size = self.header.btree_index_size as usize;
+            let page_size = self.pager.page_size();
+            let btree_page_count = btree_size.div_ceil(page_size);
+            (btree_start..btree_start + btree_page_count as u32).collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
+            
+            if btree_pages.contains(&page_id) {
+                continue;
+            }
+            
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
@@ -206,9 +221,24 @@ impl GraphDB {
         let mut last_record_page: Option<PageId> = None;
         let mut max_edge_id = 0;
         let page_count = self.pager.page_count();
+        
+        let btree_pages: std::collections::HashSet<PageId> = if let Some(btree_start) = self.header.btree_index_page {
+            let btree_size = self.header.btree_index_size as usize;
+            let page_size = self.pager.page_size();
+            let btree_page_count = btree_size.div_ceil(page_size);
+            (btree_start..btree_start + btree_page_count as u32).collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
+            
+            if btree_pages.contains(&page_id) {
+                continue;
+            }
+            
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
