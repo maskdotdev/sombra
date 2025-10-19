@@ -37,3 +37,5 @@ Issues = "https://github.com/maskdotdev/sombra/issues"
 [tool.maturin]
 features = ["python"]
 module-name = "sombra"
+python-source = "python"
+generate-import-lib = true
