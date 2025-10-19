@@ -17,6 +17,11 @@ export interface SombraEdge {
   properties: Record<string, SombraPropertyValue>;
 }
 
+export interface BfsResult {
+  nodeId: number;
+  depth: number;
+}
+
 export declare class SombraDB {
   constructor(path: string);
   
@@ -31,6 +36,20 @@ export declare class SombraDB {
   getEdge(edgeId: number): SombraEdge;
   
   getNeighbors(nodeId: number): number[];
+  
+  getIncomingNeighbors(nodeId: number): number[];
+  
+  getNeighborsTwoHops(nodeId: number): number[];
+  
+  getNeighborsThreeHops(nodeId: number): number[];
+  
+  bfsTraversal(startNodeId: number, maxDepth: number): BfsResult[];
+  
+  getNodesByLabel(label: string): number[];
+  
+  countOutgoingEdges(nodeId: number): number;
+  
+  countIncomingEdges(nodeId: number): number;
   
   getOutgoingEdges(nodeId: number): number[];
   
@@ -57,6 +76,20 @@ export declare class SombraTransaction {
   getEdge(edgeId: number): SombraEdge;
   
   getNeighbors(nodeId: number): number[];
+  
+  getIncomingNeighbors(nodeId: number): number[];
+  
+  getNeighborsTwoHops(nodeId: number): number[];
+  
+  getNeighborsThreeHops(nodeId: number): number[];
+  
+  bfsTraversal(startNodeId: number, maxDepth: number): BfsResult[];
+  
+  getNodesByLabel(label: string): number[];
+  
+  countOutgoingEdges(nodeId: number): number;
+  
+  countIncomingEdges(nodeId: number): number;
   
   getOutgoingEdges(nodeId: number): number[];
   

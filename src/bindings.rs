@@ -190,6 +190,79 @@ impl SombraDB {
         
         Ok(())
     }
+
+    #[napi]
+    pub fn get_incoming_neighbors(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let neighbors = db.get_incoming_neighbors(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get incoming neighbors: {}", e)))?;
+        
+        Ok(neighbors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_neighbors_two_hops(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let neighbors = db.get_neighbors_two_hops(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get two-hop neighbors: {}", e)))?;
+        
+        Ok(neighbors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_neighbors_three_hops(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let neighbors = db.get_neighbors_three_hops(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get three-hop neighbors: {}", e)))?;
+        
+        Ok(neighbors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn bfs_traversal(&mut self, start_node_id: f64, max_depth: f64) -> std::result::Result<Vec<BfsResult>, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let results = db.bfs_traversal(start_node_id as u64, max_depth as usize)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to perform BFS traversal: {}", e)))?;
+        
+        Ok(results.into_iter().map(|(node_id, depth)| BfsResult {
+            node_id: node_id as f64,
+            depth: depth as f64,
+        }).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_by_label(&mut self, label: String) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let node_ids = db.get_nodes_by_label(&label)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get nodes by label: {}", e)))?;
+        
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn count_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let count = db.count_outgoing_edges(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to count outgoing edges: {}", e)))?;
+        
+        Ok(count as f64)
+    }
+
+    #[napi]
+    pub fn count_incoming_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
+        let mut db = self.inner.lock().unwrap();
+        
+        let count = db.count_incoming_edges(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to count incoming edges: {}", e)))?;
+        
+        Ok(count as f64)
+    }
 }
 
 #[napi(js_name = "SombraTransaction")]
@@ -383,6 +456,79 @@ impl SombraTransaction {
         self.committed = true;
         Ok(())
     }
+
+    #[napi]
+    pub fn get_incoming_neighbors(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let neighbors = db.get_incoming_neighbors(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get incoming neighbors in transaction: {}", e)))?;
+        
+        Ok(neighbors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_neighbors_two_hops(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let neighbors = db.get_neighbors_two_hops(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get two-hop neighbors in transaction: {}", e)))?;
+        
+        Ok(neighbors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_neighbors_three_hops(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let neighbors = db.get_neighbors_three_hops(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get three-hop neighbors in transaction: {}", e)))?;
+        
+        Ok(neighbors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn bfs_traversal(&mut self, start_node_id: f64, max_depth: f64) -> std::result::Result<Vec<BfsResult>, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let results = db.bfs_traversal(start_node_id as u64, max_depth as usize)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to perform BFS traversal in transaction: {}", e)))?;
+        
+        Ok(results.into_iter().map(|(node_id, depth)| BfsResult {
+            node_id: node_id as f64,
+            depth: depth as f64,
+        }).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_by_label(&mut self, label: String) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let node_ids = db.get_nodes_by_label(&label)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get nodes by label in transaction: {}", e)))?;
+        
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn count_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let count = db.count_outgoing_edges(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to count outgoing edges in transaction: {}", e)))?;
+        
+        Ok(count as f64)
+    }
+
+    #[napi]
+    pub fn count_incoming_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
+        let mut db = self.db.lock().unwrap();
+        
+        let count = db.count_incoming_edges(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to count incoming edges in transaction: {}", e)))?;
+        
+        Ok(count as f64)
+    }
 }
 
 #[napi(object, js_name = "SombraPropertyValue")]
@@ -508,6 +654,12 @@ pub struct SombraEdge {
     pub target_node_id: f64,
     pub type_name: String,
     pub properties: HashMap<String, SombraPropertyValue>,
+}
+
+#[napi(object, js_name = "BfsResult")]
+pub struct BfsResult {
+    pub node_id: f64,
+    pub depth: f64,
 }
 
 impl From<Edge> for SombraEdge {

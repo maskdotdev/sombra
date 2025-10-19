@@ -109,34 +109,15 @@ impl GraphDB {
         for depth in 0..max_depth {
             let mut next_level = Vec::new();
             
+            for node_id in &current_level {
+                result.push((*node_id, depth));
+            }
+            
             for node_id in current_level.drain(..) {
-                result.push((node_id, depth));
-                
-                if let Some(adjacency) = self.outgoing_adjacency.get(&node_id).cloned() {
-                    for edge_id in adjacency {
-                        if let Some(edge) = self.edge_cache.get(&edge_id) {
-                            let target = edge.target_node_id;
-                            if visited.insert(target) {
-                                next_level.push(target);
-                            }
-                        } else {
-                            let edge = self.load_edge(edge_id)?;
-                            let target = edge.target_node_id;
-                            if visited.insert(target) {
-                                next_level.push(target);
-                            }
-                        }
-                    }
-                } else {
-                    let node = self.get_node(node_id)?;
-                    let mut edge_id = node.first_outgoing_edge_id;
-                    while edge_id != NULL_EDGE_ID {
-                        let edge = self.load_edge(edge_id)?;
-                        let target = edge.target_node_id;
-                        if visited.insert(target) {
-                            next_level.push(target);
-                        }
-                        edge_id = edge.next_outgoing_edge_id;
+                let neighbors = self.get_neighbors_fast(node_id)?;
+                for target in neighbors {
+                    if visited.insert(target) {
+                        next_level.push(target);
                     }
                 }
             }
@@ -148,5 +129,28 @@ impl GraphDB {
         }
         
         Ok(result)
+    }
+    
+    fn get_neighbors_fast(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
+        if let Some(neighbors) = self.outgoing_neighbors_cache.get(&node_id) {
+            return Ok(neighbors.clone());
+        }
+        
+        let node = self.get_node(node_id)?;
+        let mut neighbors = Vec::new();
+        let mut edge_ids = Vec::new();
+        let mut edge_id = node.first_outgoing_edge_id;
+        
+        while edge_id != NULL_EDGE_ID {
+            self.metrics.edge_traversals += 1;
+            let edge = self.load_edge(edge_id)?;
+            neighbors.push(edge.target_node_id);
+            edge_ids.push(edge_id);
+            edge_id = edge.next_outgoing_edge_id;
+        }
+        
+        self.outgoing_adjacency.insert(node_id, edge_ids);
+        self.outgoing_neighbors_cache.insert(node_id, neighbors.clone());
+        Ok(neighbors)
     }
 }

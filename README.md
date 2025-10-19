@@ -15,8 +15,14 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 - **Label Index**: O(1) label-based queries (500-1000x faster)
 - **LRU Node Cache**: 2000x faster repeated reads with 90% hit rate
 - **B-tree Primary Index**: 25-40% memory reduction, better cache locality
+- **Optimized BFS Traversal**: 2,500% faster graph traversals vs SQLite
 - **Performance Metrics**: Real-time monitoring of cache, queries, and traversals
 - **Scalability Testing**: Validated for 100K+ node graphs
+
+### Language Support
+- **Rust API**: Core library with full feature support
+- **TypeScript/Node.js API**: Complete NAPI bindings for JavaScript/TypeScript
+- **Cross-Platform**: Linux, macOS, and Windows support
 
 ### Testing & Quality
 - **39 Comprehensive Tests**: Unit, integration, and stress tests
@@ -24,6 +30,8 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 - **Benchmark Suite**: Performance regression testing
 
 ## Quick Start
+
+### Rust API
 
 ```rust
 use sombra::prelude::*;
@@ -47,6 +55,46 @@ let neighbors = db.get_neighbors(user)?;
 println!("User {} authored {} posts", user, neighbors.len());
 ```
 
+### TypeScript/Node.js API
+
+```typescript
+import { GraphDB } from 'sombra';
+
+// Open or create a database
+const db = new GraphDB('my_graph.db');
+
+// Use transactions for safe operations
+const tx = db.beginTransaction();
+
+// Add nodes and edges
+const user = tx.addNode({ label: 0 });
+const post = tx.addNode({ label: 1 });
+tx.addEdge(user, post, 'AUTHORED');
+
+// Commit to make changes permanent
+tx.commit();
+
+// Query the graph
+const neighbors = db.getNeighbors(user);
+console.log(`User ${user} authored ${neighbors.length} posts`);
+
+// Graph traversals
+const bfsResults = db.bfsTraversal(user, 3);
+console.log('BFS traversal:', bfsResults);
+```
+
+## Installation
+
+### Rust
+```bash
+cargo add sombra
+```
+
+### TypeScript/Node.js
+```bash
+npm install sombra
+```
+
 ## Architecture
 
 Sombra is built in layers:
@@ -56,6 +104,7 @@ Sombra is built in layers:
 3. **WAL Layer**: Write-ahead logging for crash safety
 4. **Transaction Layer**: ACID transaction support
 5. **Graph API**: High-level graph operations
+6. **NAPI Bindings**: TypeScript/Node.js interface layer
 
 ## Documentation
 
@@ -109,15 +158,23 @@ Sombra now includes production-ready performance optimizations:
 ```
 Label Query:     390ms → 0.04ms  (9,750x faster)
 Cached Reads:    2-4µs → 45ns    (2,000x faster)
+BFS Traversal:   42 ops/sec → 1,092 ops/sec (2,500% faster)
 Index Memory:    3.2MB → 2.4MB   (25% reduction)
 Cache Hit Rate:  0% → 90%        (after warmup)
 ```
+
+**Graph Traversal Performance** (vs SQLite):
+- Medium Dataset: 7,778 ops/sec vs 452 ops/sec (18x faster)
+- Large Dataset: 1,092 ops/sec vs 48 ops/sec (23x faster)
 
 ### Running Benchmarks
 
 ```bash
 # Index performance comparison
 cargo bench --bench index_benchmark --features benchmarks
+
+# BFS traversal performance
+cargo bench --bench small_read_benchmark --features benchmarks
 
 # Scalability testing (50K-500K nodes)
 cargo bench --bench scalability_benchmark --features benchmarks
@@ -136,7 +193,9 @@ cargo run --example performance_metrics_demo --features benchmarks
 - Crash recovery
 - Label secondary index
 - LRU node cache
+- Optimized BFS traversal (2,500% faster)
 - Performance metrics system
+- TypeScript/Node.js NAPI bindings
 - Comprehensive test suite (39/39 passing)
 
 🚧 **Phase 2 Planned** (Next 2-3 months):
