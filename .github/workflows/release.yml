@@ -61,9 +61,42 @@ jobs:
           path: "*.node"
           if-no-files-found: error
 
+  python-wheels:
+    name: Python Wheels
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - host: ubuntu-latest
+            python: '3.11'
+          - host: macos-latest
+            python: '3.11'
+          - host: windows-latest
+            python: '3.11'
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+      - name: Build Python wheel
+        run: python -m maturin build --release -F python --no-sdist
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-${{ matrix.host }}
+          path: target/wheels/*.whl
+          if-no-files-found: error
+
   publish:
     name: Publish
-    needs: build
+    needs:
+      - build
+      - python-wheels
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -83,19 +116,38 @@ jobs:
       - name: Move artifacts to root
         run: |
           find artifacts -name "*.node" -exec cp {} . \;
+      - name: Move Python wheels to root
+        run: |
+          find artifacts -name "*.whl" -exec cp {} . \;
       - name: Generate index.js
         run: npm run build
       - name: Verify package contents
         run: |
           ls -la index.js sombra.d.ts *.node
+      - name: Verify Python wheels
+        run: ls -la *.whl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install twine
+        run: python -m pip install --upgrade pip twine
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload --skip-existing *.whl
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: "*.node"
+          files: |
+            *.node
+            *.whl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: List available binaries
-        run: ls -la *.node
+        run: |
+          ls -la *.node
+          ls -la *.whl
       - name: Publish to npm
         run: npm publish --ignore-scripts
         env:

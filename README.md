@@ -22,6 +22,7 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 ### Language Support
 - **Rust API**: Core library with full feature support
 - **TypeScript/Node.js API**: Complete NAPI bindings for JavaScript/TypeScript
+- **Python API**: PyO3 bindings with native performance (build with `maturin -F python`)
 - **Cross-Platform**: Linux, macOS, and Windows support
 
 ### Testing & Quality
@@ -106,6 +107,34 @@ db.flush();
 db.checkpoint();
 ```
 
+### Python API
+
+```python
+from sombra import SombraDB
+
+db = SombraDB("./my_graph.db")
+
+alice = db.add_node(["Person"], {"name": "Alice", "age": 30})
+bob = db.add_node(["Person"], {"name": "Bob", "age": 25})
+
+db.add_edge(alice, bob, "KNOWS", {"since": 2020})
+
+node = db.get_node(alice)
+print(f"Alice -> {node.labels}, properties={node.properties}")
+
+neighbors = db.get_neighbors(alice)
+print(f"Alice has {len(neighbors)} connections")
+
+tx = db.begin_transaction()
+try:
+    charlie = tx.add_node(["Person"], {"name": "Charlie"})
+    tx.add_edge(alice, charlie, "KNOWS")
+    tx.commit()
+except Exception:
+    tx.rollback()
+    raise
+```
+
 ## Installation
 
 ### Rust
@@ -116,6 +145,12 @@ cargo add sombra
 ### TypeScript/Node.js
 ```bash
 npm install sombra
+```
+
+### Python
+```bash
+pip install maturin
+maturin develop --release -F python
 ```
 
 ## Architecture
@@ -135,6 +170,7 @@ Sombra is built in layers:
 - [Transactional Commit Layer](docs/transactional_commit_layer.md) - Complete user guide
 - [Optimization API Guide](docs/optimization_api_guide.md) - Performance best practices
 - [Performance Metrics](docs/performance_metrics.md) - Monitoring guide
+- [Python Usage](docs/python_usage.md) - Building and calling the PyO3 bindings
 
 ### Technical Specifications
 - [Transaction Design](docs/transactions.md) - Technical design specification
