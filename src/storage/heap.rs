@@ -133,7 +133,7 @@ impl<'a> RecordStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::record::{RecordKind, encode_record};
+    use crate::storage::record::{encode_record, RecordKind};
     use tempfile::NamedTempFile;
 
     fn build_record(payload: &[u8]) -> Vec<u8> {

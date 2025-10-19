@@ -1,9 +1,9 @@
 use std::convert::TryInto;
 
+use crate::db::TxId;
 use crate::error::{GraphError, Result};
 use crate::model::{EdgeId, NodeId};
 use crate::pager::PageId;
-use crate::db::TxId;
 
 const MAGIC: &[u8; 8] = b"GRPHITE\0";
 const HEADER_REGION_SIZE: usize = 80;
@@ -68,11 +68,16 @@ impl Header {
         let next_edge_id = u64::from_le_bytes(data[24..32].try_into().expect("slice is 8 bytes"));
         let free_page_head = u32::from_le_bytes([data[32], data[33], data[34], data[35]]);
         let last_record_page = u32::from_le_bytes([data[36], data[37], data[38], data[39]]);
-        let last_committed_tx_id = u64::from_le_bytes(data[40..48].try_into().expect("slice is 8 bytes"));
-        
+        let last_committed_tx_id =
+            u64::from_le_bytes(data[40..48].try_into().expect("slice is 8 bytes"));
+
         let btree_index_page = if data.len() >= 56 {
             let page = u32::from_le_bytes([data[48], data[49], data[50], data[51]]);
-            if page == 0 { None } else { Some(page) }
+            if page == 0 {
+                None
+            } else {
+                Some(page)
+            }
         } else {
             None
         };

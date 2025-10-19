@@ -817,4 +817,3 @@ impl Default for BenchmarkRunner {
         Self::new()
     }
 }
-

@@ -32,7 +32,11 @@ impl Wal {
         Self::open_with_config(db_path, page_size, true)
     }
 
-    pub(crate) fn open_with_config(db_path: &Path, page_size: usize, sync_enabled: bool) -> Result<Self> {
+    pub(crate) fn open_with_config(
+        db_path: &Path,
+        page_size: usize,
+        sync_enabled: bool,
+    ) -> Result<Self> {
         let path = wal_path(db_path);
         let file = OpenOptions::new()
             .read(true)

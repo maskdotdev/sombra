@@ -1,5 +1,5 @@
-use sombra::benchmark_suite::BenchmarkRunner;
 use clap::{Arg, Command};
+use sombra::benchmark_suite::BenchmarkRunner;
 
 fn main() {
     let matches = Command::new("Sombra Benchmark Suite")
@@ -8,7 +8,8 @@ fn main() {
         .arg(
             Arg::new("operation")
                 .help("Specific operation to benchmark")
-                .long_help("Run only specific benchmark operations:
+                .long_help(
+                    "Run only specific benchmark operations:
   all          - Run all benchmarks (default)
   inserts      - Node and edge insert performance
   queries      - Node and edge query performance  
@@ -16,12 +17,12 @@ fn main() {
   stress       - Stress testing
   small        - Small dataset only (100 nodes)
   medium       - Medium dataset only (1000 nodes)
-  large        - Large dataset only (10000 nodes)")
+  large        - Large dataset only (10000 nodes)",
+                )
                 .index(1)
                 .value_parser([
-                    "all", "inserts", "queries", "bulk", "stress", 
-                    "small", "medium", "large"
-                ])
+                    "all", "inserts", "queries", "bulk", "stress", "small", "medium", "large",
+                ]),
         )
         .arg(
             Arg::new("duration")
@@ -29,20 +30,22 @@ fn main() {
                 .long("duration")
                 .short('d')
                 .value_parser(clap::value_parser!(u64))
-                .default_value("30")
+                .default_value("30"),
         )
         .arg(
             Arg::new("output")
                 .help("Output CSV file")
                 .long("output")
                 .short('o')
-                .default_value("benchmark_results.csv")
+                .default_value("benchmark_results.csv"),
         )
         .get_matches();
 
     let mut runner = BenchmarkRunner::new();
     let default_op = "all".to_string();
-    let operation = matches.get_one::<String>("operation").unwrap_or(&default_op);
+    let operation = matches
+        .get_one::<String>("operation")
+        .unwrap_or(&default_op);
     let duration = *matches.get_one::<u64>("duration").unwrap();
     let output_file = matches.get_one::<String>("output").unwrap();
 
@@ -88,6 +91,6 @@ fn main() {
     if let Err(e) = runner.export_results(output_file) {
         eprintln!("Failed to export CSV: {}", e);
     }
-    
+
     println!("\nBenchmark completed! Results saved to {}", output_file);
 }

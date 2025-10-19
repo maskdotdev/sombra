@@ -41,7 +41,7 @@ fn delete_edge_updates_adjacency_lists() {
 
     let mut db = GraphDB::open(&path).expect("open db");
     let mut tx = db.begin_transaction().expect("begin transaction");
-    
+
     let a = tx.add_node(Node::new(0)).expect("add node A");
     let b = tx.add_node(Node::new(0)).expect("add node B");
     let c = tx.add_node(Node::new(0)).expect("add node C");
@@ -77,7 +77,7 @@ fn delete_node_cascades_edge_removal() {
 
     let mut db = GraphDB::open(&path).expect("open db");
     let mut tx = db.begin_transaction().expect("begin transaction");
-    
+
     let a = tx.add_node(Node::new(0)).expect("add node A");
     let b = tx.add_node(Node::new(0)).expect("add node B");
     let c = tx.add_node(Node::new(0)).expect("add node C");
@@ -171,45 +171,48 @@ fn rollback_restores_state() {
 #[test]
 fn rollback_prevents_eviction_corruption() {
     use crate::db::config::Config;
-    
+
     let tmp = NamedTempFile::new().expect("temp file");
     let path = tmp.path().to_path_buf();
-    
+
     let config = Config {
         page_cache_size: 3,
         ..Config::default()
     };
     let mut db = GraphDB::open_with_config(&path, config).expect("open db");
-    
+
     let initial_node_id = {
         let mut tx = db.begin_transaction().expect("begin tx");
         let node_id = tx.add_node(Node::new(0)).expect("add initial node");
         tx.commit().expect("commit initial node");
         node_id
     };
-    
+
     {
         let mut tx = db.begin_transaction().expect("begin tx");
         let node = tx.get_node(initial_node_id).expect("get initial node");
         assert_eq!(node.id, initial_node_id);
-        
+
         for i in 0..5 {
             let mut node = Node::new(0);
             node.labels.push(format!("Label{}", i));
             tx.add_node(node).expect("add node");
         }
-        
+
         tx.rollback().expect("rollback should succeed");
     }
-    
-    let node = db.get_node(initial_node_id).expect("initial node should still exist");
+
+    let node = db
+        .get_node(initial_node_id)
+        .expect("initial node should still exist");
     assert_eq!(node.id, initial_node_id);
-    
+
     for i in 0..5 {
         let result = db.get_node(initial_node_id + 1 + i as u64);
         assert!(
             matches!(result, Err(GraphError::NotFound("node"))),
-            "rolled back node {} should not exist", initial_node_id + 1 + i as u64
+            "rolled back node {} should not exist",
+            initial_node_id + 1 + i as u64
         );
     }
 }
@@ -284,7 +287,9 @@ fn get_nodes_by_label_returns_matching_nodes() {
     let company_nodes = db.get_nodes_by_label("Company").expect("get Company nodes");
     assert_eq!(company_nodes.len(), 1);
 
-    let nonexistent = db.get_nodes_by_label("NonExistent").expect("get nonexistent label");
+    let nonexistent = db
+        .get_nodes_by_label("NonExistent")
+        .expect("get nonexistent label");
     assert_eq!(nonexistent.len(), 0);
 }
 
@@ -294,7 +299,7 @@ fn get_nodes_by_label_works_across_transactions() {
     let path = tmp.path().to_path_buf();
 
     let mut db = GraphDB::open(&path).expect("open db");
-    
+
     {
         let mut tx = db.begin_transaction().expect("begin transaction");
         let mut user = Node::new(0);
@@ -330,10 +335,14 @@ fn count_edges_returns_correct_counts() {
     let c = tx.add_node(Node::new(0)).expect("add node C");
     let d = tx.add_node(Node::new(0)).expect("add node D");
 
-    tx.add_edge(Edge::new(0, a, b, "link")).expect("add edge a->b");
-    tx.add_edge(Edge::new(0, a, c, "link")).expect("add edge a->c");
-    tx.add_edge(Edge::new(0, a, d, "link")).expect("add edge a->d");
-    tx.add_edge(Edge::new(0, b, a, "link")).expect("add edge b->a");
+    tx.add_edge(Edge::new(0, a, b, "link"))
+        .expect("add edge a->b");
+    tx.add_edge(Edge::new(0, a, c, "link"))
+        .expect("add edge a->c");
+    tx.add_edge(Edge::new(0, a, d, "link"))
+        .expect("add edge a->d");
+    tx.add_edge(Edge::new(0, b, a, "link"))
+        .expect("add edge b->a");
 
     tx.commit().expect("commit");
     db.checkpoint().expect("checkpoint");
@@ -370,21 +379,29 @@ fn get_incoming_neighbors_returns_correct_nodes() {
     let n2 = tx.add_node(Node::new(0)).expect("add n2");
     let n3 = tx.add_node(Node::new(0)).expect("add n3");
 
-    tx.add_edge(Edge::new(0, n1, hub, "points_to")).expect("add edge n1->hub");
-    tx.add_edge(Edge::new(0, n2, hub, "points_to")).expect("add edge n2->hub");
-    tx.add_edge(Edge::new(0, n3, hub, "points_to")).expect("add edge n3->hub");
-    tx.add_edge(Edge::new(0, hub, n1, "points_to")).expect("add edge hub->n1");
+    tx.add_edge(Edge::new(0, n1, hub, "points_to"))
+        .expect("add edge n1->hub");
+    tx.add_edge(Edge::new(0, n2, hub, "points_to"))
+        .expect("add edge n2->hub");
+    tx.add_edge(Edge::new(0, n3, hub, "points_to"))
+        .expect("add edge n3->hub");
+    tx.add_edge(Edge::new(0, hub, n1, "points_to"))
+        .expect("add edge hub->n1");
 
     tx.commit().expect("commit");
     db.checkpoint().expect("checkpoint");
 
-    let mut incoming = db.get_incoming_neighbors(hub).expect("get incoming neighbors");
+    let mut incoming = db
+        .get_incoming_neighbors(hub)
+        .expect("get incoming neighbors");
     incoming.sort_unstable();
     let mut expected = vec![n1, n2, n3];
     expected.sort_unstable();
     assert_eq!(incoming, expected);
 
-    let incoming_n1 = db.get_incoming_neighbors(n1).expect("get incoming neighbors for n1");
+    let incoming_n1 = db
+        .get_incoming_neighbors(n1)
+        .expect("get incoming neighbors for n1");
     assert_eq!(incoming_n1.len(), 1);
     assert_eq!(incoming_n1[0], hub);
 }
@@ -403,31 +420,50 @@ fn bfs_traversal_explores_graph_by_depth() {
     let l2_a = tx.add_node(Node::new(0)).expect("add l2_a");
     let l2_b = tx.add_node(Node::new(0)).expect("add l2_b");
 
-    tx.add_edge(Edge::new(0, root, l1_a, "link")).expect("root->l1_a");
-    tx.add_edge(Edge::new(0, root, l1_b, "link")).expect("root->l1_b");
-    tx.add_edge(Edge::new(0, l1_a, l2_a, "link")).expect("l1_a->l2_a");
-    tx.add_edge(Edge::new(0, l1_b, l2_b, "link")).expect("l1_b->l2_b");
+    tx.add_edge(Edge::new(0, root, l1_a, "link"))
+        .expect("root->l1_a");
+    tx.add_edge(Edge::new(0, root, l1_b, "link"))
+        .expect("root->l1_b");
+    tx.add_edge(Edge::new(0, l1_a, l2_a, "link"))
+        .expect("l1_a->l2_a");
+    tx.add_edge(Edge::new(0, l1_b, l2_b, "link"))
+        .expect("l1_b->l2_b");
 
     tx.commit().expect("commit");
     db.checkpoint().expect("checkpoint");
 
     let results = db.bfs_traversal(root, 3).expect("bfs traversal");
-    
+
     assert_eq!(results.len(), 5);
-    
-    let root_result = results.iter().find(|(id, _)| *id == root).expect("find root");
+
+    let root_result = results
+        .iter()
+        .find(|(id, _)| *id == root)
+        .expect("find root");
     assert_eq!(root_result.1, 0);
-    
-    let l1_a_result = results.iter().find(|(id, _)| *id == l1_a).expect("find l1_a");
+
+    let l1_a_result = results
+        .iter()
+        .find(|(id, _)| *id == l1_a)
+        .expect("find l1_a");
     assert_eq!(l1_a_result.1, 1);
-    
-    let l1_b_result = results.iter().find(|(id, _)| *id == l1_b).expect("find l1_b");
+
+    let l1_b_result = results
+        .iter()
+        .find(|(id, _)| *id == l1_b)
+        .expect("find l1_b");
     assert_eq!(l1_b_result.1, 1);
-    
-    let l2_a_result = results.iter().find(|(id, _)| *id == l2_a).expect("find l2_a");
+
+    let l2_a_result = results
+        .iter()
+        .find(|(id, _)| *id == l2_a)
+        .expect("find l2_a");
     assert_eq!(l2_a_result.1, 2);
-    
-    let l2_b_result = results.iter().find(|(id, _)| *id == l2_b).expect("find l2_b");
+
+    let l2_b_result = results
+        .iter()
+        .find(|(id, _)| *id == l2_b)
+        .expect("find l2_b");
     assert_eq!(l2_b_result.1, 2);
 
     let shallow_results = db.bfs_traversal(root, 1).expect("shallow bfs");

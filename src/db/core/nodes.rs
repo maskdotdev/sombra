@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use super::graphdb::GraphDB;
 use crate::error::{GraphError, Result};
 use crate::model::{Node, NodeId, NULL_EDGE_ID};
 use crate::storage::record::{encode_record, RecordKind};
-use crate::storage::{serialize_node};
-use super::graphdb::GraphDB;
+use crate::storage::serialize_node;
+use std::collections::HashSet;
 
 impl GraphDB {
     pub fn add_node(&mut self, mut node: Node) -> Result<NodeId> {
@@ -12,10 +12,10 @@ impl GraphDB {
                 "add_node must be called through a transaction when in transaction context".into(),
             ));
         }
-        
+
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
-        
+
         let node_id = self.header.next_node_id;
         self.header.next_node_id += 1;
 
@@ -30,24 +30,24 @@ impl GraphDB {
         let pointer = self.insert_record(&record, preferred)?;
 
         self.node_index.insert(node_id, pointer);
-        
+
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
                 .or_default()
                 .insert(node_id);
         }
-        
+
         self.node_cache.put(node_id, node.clone());
-        
+
         self.header.last_record_page = Some(pointer.page_id);
         self.header.last_committed_tx_id = tx_id;
         self.write_header()?;
-        
+
         let dirty_pages = self.take_recent_dirty_pages();
         self.commit_to_wal(tx_id, &dirty_pages)?;
         self.stop_tracking();
-        
+
         Ok(node_id)
     }
 
@@ -66,16 +66,16 @@ impl GraphDB {
         let pointer = self.insert_record(&record, preferred)?;
 
         self.node_index.insert(node_id, pointer);
-        
+
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
                 .or_default()
                 .insert(node_id);
         }
-        
+
         self.node_cache.put(node_id, node.clone());
-        
+
         self.header.last_record_page = Some(pointer.page_id);
         Ok(node_id)
     }
@@ -99,14 +99,14 @@ impl GraphDB {
             let pointer = self.insert_record(&record, preferred)?;
 
             index_entries.push((node_id, pointer));
-            
+
             for label in &node.labels {
                 self.label_index
                     .entry(label.clone())
                     .or_default()
                     .insert(node_id);
             }
-            
+
             self.node_cache.put(node_id, node.clone());
             self.header.last_record_page = Some(pointer.page_id);
             node_ids.push(node_id);
@@ -120,7 +120,7 @@ impl GraphDB {
         for &node_id in node_ids {
             self.delete_node_internal(node_id)?;
         }
-        
+
         self.node_index.batch_remove(node_ids);
         Ok(())
     }
@@ -128,10 +128,11 @@ impl GraphDB {
     pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
         if self.is_in_transaction() {
             return Err(GraphError::InvalidArgument(
-                "delete_node must be called through a transaction when in transaction context".into(),
+                "delete_node must be called through a transaction when in transaction context"
+                    .into(),
             ));
         }
-        
+
         self.delete_node_internal(node_id)
     }
 
@@ -175,7 +176,7 @@ impl GraphDB {
                 }
             }
         }
-        
+
         self.node_cache.pop(&node_id);
 
         self.node_index.remove(&node_id);
@@ -185,14 +186,14 @@ impl GraphDB {
 
     pub fn get_node(&mut self, node_id: NodeId) -> Result<Node> {
         self.metrics.node_lookups += 1;
-        
+
         if let Some(node) = self.node_cache.get(&node_id) {
             self.metrics.cache_hits += 1;
             return Ok(node.clone());
         }
-        
+
         self.metrics.cache_misses += 1;
-        
+
         let pointer = *self
             .node_index
             .get(&node_id)
@@ -204,21 +205,34 @@ impl GraphDB {
 
     pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
         self.metrics.label_index_queries += 1;
-        Ok(self.label_index
+        Ok(self
+            .label_index
             .get(label)
             .map(|nodes| nodes.iter().cloned().collect())
             .unwrap_or_default())
     }
 
     pub fn get_nodes_in_range(&self, start: NodeId, end: NodeId) -> Vec<NodeId> {
-        self.node_index.range(start, end).into_iter().map(|(id, _)| *id).collect()
+        self.node_index
+            .range(start, end)
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     pub fn get_nodes_from(&self, start: NodeId) -> Vec<NodeId> {
-        self.node_index.range_from(start).into_iter().map(|(id, _)| *id).collect()
+        self.node_index
+            .range_from(start)
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     pub fn get_nodes_to(&self, end: NodeId) -> Vec<NodeId> {
-        self.node_index.range_to(end).into_iter().map(|(id, _)| *id).collect()
+        self.node_index
+            .range_to(end)
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect()
     }
 }

@@ -1,16 +1,16 @@
-use sombra::db::{GraphDB, Config};
-use sombra::model::{Node, Edge};
+use sombra::db::{Config, GraphDB};
+use sombra::model::{Edge, Node};
 use std::time::Instant;
 
 fn setup_database(path: &str, count: usize) -> (GraphDB, Vec<u64>) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(format!("{}.wal", path));
-    
+
     let mut db = GraphDB::open_with_config(path, Config::balanced()).unwrap();
-    
+
     println!("Inserting {} nodes...", count);
     let insert_start = Instant::now();
-    
+
     let mut node_ids = Vec::with_capacity(count);
     let mut tx = db.begin_transaction().unwrap();
     for i in 0..count {
@@ -18,34 +18,36 @@ fn setup_database(path: &str, count: usize) -> (GraphDB, Vec<u64>) {
         node.labels.push("User".to_string());
         let node_id = tx.add_node(node).unwrap();
         node_ids.push(node_id);
-        
+
         if i > 0 && i % 10 == 0 {
             let source = node_ids[i];
             let target = node_ids[i - 1];
-            tx.add_edge(Edge::new(0, source, target, "FOLLOWS")).unwrap();
+            tx.add_edge(Edge::new(0, source, target, "FOLLOWS"))
+                .unwrap();
         }
-        
+
         if i % 10000 == 0 && i > 0 {
             print!(".");
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
         }
     }
     tx.commit().unwrap();
-    
+
     let insert_duration = insert_start.elapsed();
-    println!("\nInserted {} nodes in {:.2}s ({:.0} ops/sec)", 
-        count, 
+    println!(
+        "\nInserted {} nodes in {:.2}s ({:.0} ops/sec)",
+        count,
         insert_duration.as_secs_f64(),
         count as f64 / insert_duration.as_secs_f64()
     );
-    
+
     (db, node_ids)
 }
 
 fn benchmark_sequential_reads(db: &mut GraphDB, node_ids: &[u64], iterations: usize) {
     println!("\n=== Sequential Read Benchmark ===");
     let mut total_duration = std::time::Duration::ZERO;
-    
+
     for iter in 0..iterations {
         let start = Instant::now();
         for &node_id in node_ids {
@@ -53,8 +55,9 @@ fn benchmark_sequential_reads(db: &mut GraphDB, node_ids: &[u64], iterations: us
         }
         let duration = start.elapsed();
         total_duration += duration;
-        
-        println!("Iteration {}: {} reads in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
+
+        println!(
+            "Iteration {}: {} reads in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
             iter + 1,
             node_ids.len(),
             duration.as_secs_f64(),
@@ -62,9 +65,10 @@ fn benchmark_sequential_reads(db: &mut GraphDB, node_ids: &[u64], iterations: us
             duration.as_micros() as f64 / node_ids.len() as f64
         );
     }
-    
+
     let avg_duration = total_duration / iterations as u32;
-    println!("\nAverage: {} reads in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
+    println!(
+        "\nAverage: {} reads in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
         node_ids.len(),
         avg_duration.as_secs_f64(),
         node_ids.len() as f64 / avg_duration.as_secs_f64(),
@@ -74,11 +78,11 @@ fn benchmark_sequential_reads(db: &mut GraphDB, node_ids: &[u64], iterations: us
 
 fn benchmark_random_reads(db: &mut GraphDB, node_ids: &[u64], reads: usize) {
     println!("\n=== Random Read Benchmark ===");
-    
+
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hash, Hasher};
     let hasher = RandomState::new();
-    
+
     let mut ids = Vec::new();
     for i in 0..reads {
         let mut h = hasher.build_hasher();
@@ -86,14 +90,15 @@ fn benchmark_random_reads(db: &mut GraphDB, node_ids: &[u64], reads: usize) {
         let idx = (h.finish() % node_ids.len() as u64) as usize;
         ids.push(node_ids[idx]);
     }
-    
+
     let start = Instant::now();
     for &id in &ids {
         let _node = db.get_node(id).unwrap();
     }
     let duration = start.elapsed();
-    
-    println!("{} random reads in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
+
+    println!(
+        "{} random reads in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
         reads,
         duration.as_secs_f64(),
         reads as f64 / duration.as_secs_f64(),
@@ -103,15 +108,16 @@ fn benchmark_random_reads(db: &mut GraphDB, node_ids: &[u64], reads: usize) {
 
 fn benchmark_neighbor_queries(db: &mut GraphDB, node_ids: &[u64], queries: usize) {
     println!("\n=== Neighbor Query Benchmark ===");
-    
+
     let query_count = queries.min(node_ids.len());
     let start = Instant::now();
     for i in 0..query_count {
         let _neighbors = db.get_neighbors(node_ids[i]).unwrap();
     }
     let duration = start.elapsed();
-    
-    println!("{} neighbor queries in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
+
+    println!(
+        "{} neighbor queries in {:.3}s ({:.0} ops/sec, {:.2}µs/op)",
         query_count,
         duration.as_secs_f64(),
         query_count as f64 / duration.as_secs_f64(),
@@ -121,33 +127,35 @@ fn benchmark_neighbor_queries(db: &mut GraphDB, node_ids: &[u64], queries: usize
 
 fn benchmark_cache_effectiveness(db: &mut GraphDB, node_ids: &[u64]) {
     println!("\n=== Cache Effectiveness Benchmark ===");
-    
+
     let hot_set_size = node_ids.len().min(1000);
-    
+
     println!("Cold reads (first time):");
     let start = Instant::now();
     for i in 0..hot_set_size {
         let _node = db.get_node(node_ids[i]).unwrap();
     }
     let cold_duration = start.elapsed();
-    println!("  {} reads in {:.3}s ({:.2}µs/op)",
+    println!(
+        "  {} reads in {:.3}s ({:.2}µs/op)",
         hot_set_size,
         cold_duration.as_secs_f64(),
         cold_duration.as_micros() as f64 / hot_set_size as f64
     );
-    
+
     println!("Hot reads (cached):");
     let start = Instant::now();
     for i in 0..hot_set_size {
         let _node = db.get_node(node_ids[i]).unwrap();
     }
     let hot_duration = start.elapsed();
-    println!("  {} reads in {:.3}s ({:.2}µs/op)",
+    println!(
+        "  {} reads in {:.3}s ({:.2}µs/op)",
         hot_set_size,
         hot_duration.as_secs_f64(),
         hot_duration.as_micros() as f64 / hot_set_size as f64
     );
-    
+
     let speedup = cold_duration.as_micros() as f64 / hot_duration.as_micros() as f64;
     println!("  Cache speedup: {:.2}x", speedup);
 }
@@ -164,26 +172,22 @@ fn print_metrics(db: &GraphDB) {
 }
 
 fn main() {
-    let sizes = vec![
-        (1_000, "1K"),
-        (10_000, "10K"),
-        (100_000, "100K"),
-    ];
-    
+    let sizes = vec![(1_000, "1K"), (10_000, "10K"), (100_000, "100K")];
+
     for (count, name) in sizes {
         println!("\n{}", "=".repeat(60));
         println!("BENCHMARK: {} nodes", name);
         println!("{}", "=".repeat(60));
-        
+
         let (mut db, node_ids) = setup_database("bench_temp.db", count);
-        
+
         benchmark_sequential_reads(&mut db, &node_ids, 3);
         benchmark_random_reads(&mut db, &node_ids, 1000);
         benchmark_neighbor_queries(&mut db, &node_ids, 1000);
         benchmark_cache_effectiveness(&mut db, &node_ids);
-        
+
         print_metrics(&db);
-        
+
         std::fs::remove_file("bench_temp.db").ok();
         std::fs::remove_file("bench_temp.db.wal").ok();
     }

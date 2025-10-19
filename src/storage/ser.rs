@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use crate::error::{GraphError, Result};
-use crate::model::{Edge, NULL_EDGE_ID, NULL_NODE_ID, Node, PropertyValue};
+use crate::model::{Edge, Node, PropertyValue, NULL_EDGE_ID, NULL_NODE_ID};
 
 const TAG_BOOL: u8 = 0x01;
 const TAG_INT: u8 = 0x02;

@@ -351,4 +351,3 @@ impl Default for BenchmarkSuite {
         Self::new()
     }
 }
-

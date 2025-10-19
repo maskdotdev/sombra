@@ -1,5 +1,5 @@
 use crate::error::{GraphError, Result};
-use crate::storage::record::{RECORD_HEADER_SIZE, RecordHeader, RecordKind};
+use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 
 const PAGE_HEADER_SIZE: usize = 16;
 const RECORD_COUNT_OFFSET: usize = 0;
@@ -303,7 +303,7 @@ fn required_space(record_len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::record::{RecordKind, encode_record};
+    use crate::storage::record::{encode_record, RecordKind};
 
     struct PageBuffer {
         data: Vec<u8>,

@@ -513,6 +513,7 @@ impl PySombraTransaction {
 
 #[pymodule]
 fn sombra(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<PySombraDB>()?;
     m.add_class::<PySombraTransaction>()?;
     m.add_class::<PySombraNode>()?;

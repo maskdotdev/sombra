@@ -1,9 +1,9 @@
+use super::graphdb::GraphDB;
+use super::pointer_kind::PointerKind;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, NodeId, NULL_EDGE_ID};
 use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_edge;
-use super::graphdb::GraphDB;
-use super::pointer_kind::PointerKind;
 
 impl GraphDB {
     pub fn add_edge(&mut self, mut edge: Edge) -> Result<EdgeId> {
@@ -12,10 +12,10 @@ impl GraphDB {
                 "add_edge must be called through a transaction when in transaction context".into(),
             ));
         }
-        
+
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
-        
+
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
@@ -44,7 +44,7 @@ impl GraphDB {
 
         self.update_node_pointer(source_ptr, PointerKind::Outgoing, edge_id)?;
         self.update_node_pointer(target_ptr, PointerKind::Incoming, edge_id)?;
-        
+
         self.outgoing_adjacency
             .entry(edge.source_node_id)
             .or_default()
@@ -53,17 +53,17 @@ impl GraphDB {
             .entry(edge.target_node_id)
             .or_default()
             .push(edge_id);
-        
+
         self.outgoing_neighbors_cache.remove(&edge.source_node_id);
         self.incoming_neighbors_cache.remove(&edge.target_node_id);
-        
+
         self.node_cache.pop(&edge.source_node_id);
         self.node_cache.pop(&edge.target_node_id);
         self.edge_cache.put(edge_id, edge);
-        
+
         self.header.last_committed_tx_id = tx_id;
         self.write_header()?;
-        
+
         let dirty_pages = self.take_recent_dirty_pages();
         self.commit_to_wal(tx_id, &dirty_pages)?;
         self.stop_tracking();
@@ -100,7 +100,7 @@ impl GraphDB {
 
         self.update_node_pointer(source_ptr, PointerKind::Outgoing, edge_id)?;
         self.update_node_pointer(target_ptr, PointerKind::Incoming, edge_id)?;
-        
+
         self.outgoing_adjacency
             .entry(edge.source_node_id)
             .or_default()
@@ -109,10 +109,10 @@ impl GraphDB {
             .entry(edge.target_node_id)
             .or_default()
             .push(edge_id);
-        
+
         self.outgoing_neighbors_cache.remove(&edge.source_node_id);
         self.incoming_neighbors_cache.remove(&edge.target_node_id);
-        
+
         self.node_cache.pop(&edge.source_node_id);
         self.node_cache.pop(&edge.target_node_id);
         self.edge_cache.put(edge_id, edge);
@@ -123,10 +123,11 @@ impl GraphDB {
     pub fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         if self.is_in_transaction() {
             return Err(GraphError::InvalidArgument(
-                "delete_edge must be called through a transaction when in transaction context".into(),
+                "delete_edge must be called through a transaction when in transaction context"
+                    .into(),
             ));
         }
-        
+
         self.delete_edge_internal(edge_id)
     }
 
@@ -165,7 +166,7 @@ impl GraphDB {
         if let Some(edges) = self.incoming_adjacency.get_mut(&edge.target_node_id) {
             edges.retain(|&e| e != edge_id);
         }
-        
+
         self.outgoing_neighbors_cache.remove(&edge.source_node_id);
         self.incoming_neighbors_cache.remove(&edge.target_node_id);
 
@@ -182,7 +183,7 @@ impl GraphDB {
         if let Some(edges) = self.outgoing_adjacency.get(&node_id) {
             return Ok(edges.len());
         }
-        
+
         let node = self.get_node(node_id)?;
         let mut count = 0;
         let mut edge_list = Vec::new();
@@ -201,7 +202,7 @@ impl GraphDB {
         if let Some(edges) = self.incoming_adjacency.get(&node_id) {
             return Ok(edges.len());
         }
-        
+
         let node = self.get_node(node_id)?;
         let mut count = 0;
         let mut edge_list = Vec::new();

@@ -1,11 +1,11 @@
-use std::mem;
-use std::sync::{Arc, Mutex, Condvar};
+use super::graphdb::GraphDB;
+use crate::db::config::SyncMode;
+use crate::db::group_commit::{CommitRequest, TxId};
 use crate::error::{GraphError, Result};
 use crate::pager::PageId;
 use crate::storage::header::Header;
-use crate::db::config::SyncMode;
-use crate::db::group_commit::{CommitRequest, TxId};
-use super::graphdb::GraphDB;
+use std::mem;
+use std::sync::{Arc, Condvar, Mutex};
 
 impl GraphDB {
     pub(crate) fn commit_to_wal(&mut self, tx_id: TxId, dirty_pages: &[PageId]) -> Result<()> {
@@ -13,7 +13,7 @@ impl GraphDB {
             self.pager.commit_shadow_transaction();
             return Ok(());
         }
-        
+
         let mut pages = dirty_pages.to_vec();
         pages.sort_unstable();
         pages.dedup();
@@ -23,7 +23,7 @@ impl GraphDB {
         }
 
         self.pager.append_commit_to_wal(tx_id)?;
-        
+
         self.transactions_since_sync += 1;
         self.transactions_since_checkpoint += 1;
 
@@ -36,16 +36,16 @@ impl GraphDB {
                         tx_id,
                         notifier: notifier.clone(),
                     };
-                    
+
                     let sender = {
                         let state_guard = state.lock().unwrap();
                         state_guard.sender.clone()
                     };
-                    
-                    sender.send(commit_req).map_err(|_| {
-                        GraphError::Corruption("group commit thread died".into())
-                    })?;
-                    
+
+                    sender
+                        .send(commit_req)
+                        .map_err(|_| GraphError::Corruption("group commit thread died".into()))?;
+
                     let (lock, cvar) = &*notifier;
                     let mut done = lock.lock().unwrap();
                     while !*done {
@@ -68,16 +68,16 @@ impl GraphDB {
             self.checkpoint()?;
             self.transactions_since_checkpoint = 0;
         }
-        
+
         self.pager.commit_shadow_transaction();
         Ok(())
     }
 
     pub(crate) fn rollback_transaction(&mut self, dirty_pages: &[PageId]) -> Result<()> {
         self.pager.rollback_shadow_transaction()?;
-        
+
         self.reload_header_state()?;
-        
+
         if !dirty_pages.is_empty() {
             self.rebuild_indexes()?;
         }

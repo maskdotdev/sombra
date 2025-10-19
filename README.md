@@ -149,8 +149,13 @@ npm install sombra
 
 ### Python
 ```bash
+# Install from PyPI (coming soon)
+pip install sombra
+
+# Or build from source
 pip install maturin
-maturin develop --release -F python
+maturin build --release -F python
+pip install target/wheels/sombra-*.whl
 ```
 
 ## Architecture

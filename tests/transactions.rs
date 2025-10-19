@@ -1,6 +1,6 @@
 use sombra::{GraphDB, Node, Result};
-use tempfile::NamedTempFile;
 use std::fs;
+use tempfile::NamedTempFile;
 
 #[test]
 fn transaction_commit_wal_only() -> Result<()> {
@@ -13,7 +13,7 @@ fn transaction_commit_wal_only() -> Result<()> {
         let mut tx = db.begin_transaction()?;
         node_id = tx.add_node(Node::new(0))?;
         tx.commit()?;
-        
+
         // After commit but before checkpoint, data should be in WAL but not main file
         let wal_path = path.with_extension("wal");
         assert!(wal_path.exists());
@@ -40,7 +40,7 @@ fn transaction_rollback_no_wal_traces() -> Result<()> {
         let mut tx = db.begin_transaction()?;
         tx.add_node(Node::new(0))?;
         tx.rollback()?;
-        
+
         // After rollback, WAL should be minimal (just header)
         let wal_path = path.with_extension("wal");
         assert!(wal_path.exists());
@@ -61,7 +61,7 @@ fn multi_transaction_isolation() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
 
-let tx1_node_id = {
+    let tx1_node_id = {
         let mut db = GraphDB::open(&path)?;
         let mut tx = db.begin_transaction()?;
         let node_id = tx.add_node(Node::new(0))?;
@@ -104,7 +104,7 @@ fn transaction_id_persistence() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
 
-{
+    {
         let mut db = GraphDB::open(&path)?;
         let mut tx = db.begin_transaction()?;
         tx.add_node(Node::new(0))?;
@@ -121,7 +121,7 @@ fn transaction_id_persistence() -> Result<()> {
         tx2_id = tx.id();
         tx.commit()?;
         drop(db);
-        
+
         // Transaction ID should be incremented from persisted value
         assert_eq!(tx2_id, 2);
     }
@@ -133,7 +133,7 @@ fn transaction_id_persistence() -> Result<()> {
         let tx3_id = tx.id();
         tx.commit()?;
         drop(db);
-        
+
         // Transaction ID should be incremented from persisted value
         assert_eq!(tx3_id, 3);
     }
@@ -148,20 +148,20 @@ fn nested_transactions_prevented() -> Result<()> {
 
     // Test that we can create sequential transactions
     let mut db = GraphDB::open(&path)?;
-    
+
     // First transaction
     let mut tx1 = db.begin_transaction()?;
     let node_id = tx1.add_node(Node::new(0))?;
     tx1.commit()?;
-    
+
     // Second transaction should work fine after first is committed
     let mut tx2 = db.begin_transaction()?;
     tx2.add_node(Node::new(0))?;
     tx2.commit()?;
-    
+
     // Verify both nodes exist
     assert!(db.get_node(node_id).is_ok());
-    
+
     Ok(())
 }
 
@@ -171,10 +171,10 @@ fn mutations_outside_transaction_prevented() -> Result<()> {
     let path = tmp.path().to_path_buf();
 
     let mut db = GraphDB::open(&path)?;
-    
+
     // When not in transaction context, mutations should work
     assert!(db.add_node(Node::new(0)).is_ok());
-    
+
     Ok(())
 }
 
@@ -183,13 +183,13 @@ fn crash_simulation_uncommitted_tx_lost() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
 
-let node_id;
+    let node_id;
     // Simulate a crash after creating data but before commit
     {
         let mut db = GraphDB::open(&path)?;
         let mut tx = db.begin_transaction()?;
         node_id = tx.add_node(Node::new(0))?;
-        
+
         // Rollback to simulate crash
         tx.rollback()?;
         drop(db);
@@ -218,14 +218,14 @@ fn large_transaction_dirty_page_tracking() -> Result<()> {
     {
         let mut db = GraphDB::open(&path)?;
         let mut tx = db.begin_transaction()?;
-        
+
         // Create many nodes to dirty multiple pages
         let mut node_ids = Vec::new();
         for _i in 0..50 {
             let node_id = tx.add_node(Node::new(0))?;
             node_ids.push(node_id);
         }
-        
+
         tx.commit()?;
         db.checkpoint()?;
     }

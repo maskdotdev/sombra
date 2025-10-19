@@ -1,19 +1,19 @@
-
-use std::convert::TryFrom;
+use super::graphdb::GraphDB;
 use crate::error::{GraphError, Result};
 use crate::index::BTreeIndex;
 use crate::pager::PageId;
 use crate::storage::page::RecordPage;
-use crate::storage::record::{RECORD_HEADER_SIZE, RecordHeader, RecordKind};
+use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::{deserialize_edge, deserialize_node, RecordPointer};
-use super::graphdb::GraphDB;
+use std::convert::TryFrom;
 
 impl GraphDB {
     pub(crate) fn load_btree_index(&mut self) -> Result<bool> {
-        let (index_page, index_size) = match (self.header.btree_index_page, self.header.btree_index_size) {
-            (Some(page), size) if size > 0 => (page, size as usize),
-            _ => return Ok(false),
-        };
+        let (index_page, index_size) =
+            match (self.header.btree_index_page, self.header.btree_index_size) {
+                (Some(page), size) if size > 0 => (page, size as usize),
+                _ => return Ok(false),
+            };
 
         let mut data = Vec::new();
         let page_size = self.pager.page_size();
@@ -35,7 +35,7 @@ impl GraphDB {
     pub(crate) fn persist_btree_index(&mut self) -> Result<()> {
         let data = self.node_index.serialize()?;
         let data_size = data.len();
-        
+
         if data_size == 0 {
             self.header.btree_index_page = None;
             self.header.btree_index_size = 0;
@@ -44,11 +44,11 @@ impl GraphDB {
 
         let page_size = self.pager.page_size();
         let pages_needed = data_size.div_ceil(page_size);
-        
+
         let start_page = if let Some(old_page) = self.header.btree_index_page {
             let old_size = self.header.btree_index_size as usize;
             let old_pages = old_size.div_ceil(page_size);
-            
+
             if pages_needed <= old_pages {
                 old_page
             } else {
@@ -68,7 +68,7 @@ impl GraphDB {
             } else {
                 self.pager.allocate_page()?
             };
-            
+
             let page = self.pager.fetch_page(page_id)?;
             let to_write = (data_size - offset).min(page_size);
             page.data[..to_write].copy_from_slice(&data[offset..offset + to_write]);
@@ -87,7 +87,10 @@ impl GraphDB {
 
     pub(crate) fn rebuild_indexes(&mut self) -> Result<()> {
         if let Some(index_page) = self.header.btree_index_page {
-            if self.try_load_btree_index(index_page, self.header.btree_index_size as usize).is_ok() {
+            if self
+                .try_load_btree_index(index_page, self.header.btree_index_size as usize)
+                .is_ok()
+            {
                 self.rebuild_remaining_indexes()?;
                 return Ok(());
             }
@@ -106,24 +109,25 @@ impl GraphDB {
         let mut max_node_id = 0;
         let mut max_edge_id = 0;
         let page_count = self.pager.page_count();
-        
-        let btree_pages: std::collections::HashSet<PageId> = if let Some(btree_start) = self.header.btree_index_page {
-            let btree_size = self.header.btree_index_size as usize;
-            let page_size = self.pager.page_size();
-            let btree_page_count = btree_size.div_ceil(page_size);
-            (btree_start..btree_start + btree_page_count as u32).collect()
-        } else {
-            std::collections::HashSet::new()
-        };
-        
+
+        let btree_pages: std::collections::HashSet<PageId> =
+            if let Some(btree_start) = self.header.btree_index_page {
+                let btree_size = self.header.btree_index_size as usize;
+                let page_size = self.pager.page_size();
+                let btree_page_count = btree_size.div_ceil(page_size);
+                (btree_start..btree_start + btree_page_count as u32).collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
-            
+
             if btree_pages.contains(&page_id) {
                 continue;
             }
-            
+
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
@@ -148,21 +152,21 @@ impl GraphDB {
                         let node = deserialize_node(payload)?;
                         max_node_id = max_node_id.max(node.id);
                         self.node_index.insert(node.id, pointer);
-                        
+
                         for label in &node.labels {
                             self.label_index
                                 .entry(label.clone())
                                 .or_default()
                                 .insert(node.id);
                         }
-                        
+
                         live_on_page += 1;
                     }
                     RecordKind::Edge => {
                         let edge = deserialize_edge(payload)?;
                         max_edge_id = max_edge_id.max(edge.id);
                         self.edge_index.insert(edge.id, pointer);
-                        
+
                         self.outgoing_adjacency
                             .entry(edge.source_node_id)
                             .or_default()
@@ -171,7 +175,7 @@ impl GraphDB {
                             .entry(edge.target_node_id)
                             .or_default()
                             .push(edge.id);
-                        
+
                         live_on_page += 1;
                     }
                 }
@@ -188,7 +192,7 @@ impl GraphDB {
             self.header.next_edge_id = max_edge_id + 1;
         }
         self.header.last_record_page = last_record_page;
-        
+
         self.populate_neighbors_cache()?;
         Ok(())
     }
@@ -197,14 +201,14 @@ impl GraphDB {
         let mut data = Vec::with_capacity(size);
         let page_size = self.pager.page_size();
         let pages_needed = size.div_ceil(page_size);
-        
+
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
             let page = self.pager.fetch_page(page_id)?;
             let bytes_to_copy = (size - data.len()).min(page_size);
             data.extend_from_slice(&page.data[..bytes_to_copy]);
         }
-        
+
         self.node_index = BTreeIndex::deserialize(&data)?;
         Ok(())
     }
@@ -221,24 +225,25 @@ impl GraphDB {
         let mut last_record_page: Option<PageId> = None;
         let mut max_edge_id = 0;
         let page_count = self.pager.page_count();
-        
-        let btree_pages: std::collections::HashSet<PageId> = if let Some(btree_start) = self.header.btree_index_page {
-            let btree_size = self.header.btree_index_size as usize;
-            let page_size = self.pager.page_size();
-            let btree_page_count = btree_size.div_ceil(page_size);
-            (btree_start..btree_start + btree_page_count as u32).collect()
-        } else {
-            std::collections::HashSet::new()
-        };
-        
+
+        let btree_pages: std::collections::HashSet<PageId> =
+            if let Some(btree_start) = self.header.btree_index_page {
+                let btree_size = self.header.btree_index_size as usize;
+                let page_size = self.pager.page_size();
+                let btree_page_count = btree_size.div_ceil(page_size);
+                (btree_start..btree_start + btree_page_count as u32).collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
-            
+
             if btree_pages.contains(&page_id) {
                 continue;
             }
-            
+
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
@@ -261,21 +266,21 @@ impl GraphDB {
                     RecordKind::Free => continue,
                     RecordKind::Node => {
                         let node = deserialize_node(payload)?;
-                        
+
                         for label in &node.labels {
                             self.label_index
                                 .entry(label.clone())
                                 .or_default()
                                 .insert(node.id);
                         }
-                        
+
                         live_on_page += 1;
                     }
                     RecordKind::Edge => {
                         let edge = deserialize_edge(payload)?;
                         max_edge_id = max_edge_id.max(edge.id);
                         self.edge_index.insert(edge.id, pointer);
-                        
+
                         self.outgoing_adjacency
                             .entry(edge.source_node_id)
                             .or_default()
@@ -284,7 +289,7 @@ impl GraphDB {
                             .entry(edge.target_node_id)
                             .or_default()
                             .push(edge.id);
-                        
+
                         live_on_page += 1;
                     }
                 }
@@ -298,11 +303,11 @@ impl GraphDB {
             self.header.next_edge_id = max_edge_id + 1;
         }
         self.header.last_record_page = last_record_page;
-        
+
         self.populate_neighbors_cache()?;
         Ok(())
     }
-    
+
     fn populate_neighbors_cache(&mut self) -> Result<()> {
         let outgoing_clone = self.outgoing_adjacency.clone();
         for (node_id, edge_ids) in outgoing_clone {
@@ -313,7 +318,7 @@ impl GraphDB {
             }
             self.outgoing_neighbors_cache.insert(node_id, neighbors);
         }
-        
+
         let incoming_clone = self.incoming_adjacency.clone();
         for (node_id, edge_ids) in incoming_clone {
             let mut neighbors = Vec::with_capacity(edge_ids.len());
@@ -323,7 +328,7 @@ impl GraphDB {
             }
             self.incoming_neighbors_cache.insert(node_id, neighbors);
         }
-        
+
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
+use crate::db::group_commit::TxId;
 use crate::error::Result;
 use crate::model::{EdgeId, NodeId};
 use crate::pager::PageId;
 use crate::storage::header::Header;
-use crate::db::group_commit::TxId;
 
 #[derive(Debug, Clone)]
 pub struct HeaderState {

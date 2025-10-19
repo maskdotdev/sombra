@@ -1,12 +1,14 @@
-use std::convert::TryFrom;
+use super::graphdb::GraphDB;
+use super::pointer_kind::{EdgePointerKind, PointerKind};
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, Node, NULL_EDGE_ID};
 use crate::pager::PageId;
-use crate::storage::{RecordPointer, RecordStore, deserialize_edge, deserialize_node, serialize_edge, serialize_node};
 use crate::storage::page::RecordPage;
-use crate::storage::record::{RECORD_HEADER_SIZE, RecordHeader, RecordKind};
-use super::graphdb::GraphDB;
-use super::pointer_kind::{EdgePointerKind, PointerKind};
+use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
+use crate::storage::{
+    deserialize_edge, deserialize_node, serialize_edge, serialize_node, RecordPointer, RecordStore,
+};
+use std::convert::TryFrom;
 
 impl GraphDB {
     pub fn load_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
@@ -30,17 +32,17 @@ impl GraphDB {
         let payload_len = header.payload_length as usize;
         let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
         let edge = deserialize_edge(payload)?;
-        
+
         self.edge_cache.put(edge_id, edge.clone());
         Ok(edge)
     }
 
     pub fn load_edges_batch(&mut self, edge_ids: &[EdgeId]) -> Result<Vec<Edge>> {
         use std::collections::HashMap;
-        
+
         let mut edges_to_load: HashMap<PageId, Vec<(EdgeId, RecordPointer)>> = HashMap::new();
         let mut loaded_edges: HashMap<EdgeId, Edge> = HashMap::new();
-        
+
         for &edge_id in edge_ids {
             if let Some(edge) = self.edge_cache.get(&edge_id) {
                 loaded_edges.insert(edge_id, edge.clone());
@@ -55,11 +57,11 @@ impl GraphDB {
                     .push((edge_id, pointer));
             }
         }
-        
+
         for (page_id, edges_on_page) in edges_to_load {
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
-            
+
             for (edge_id, pointer) in edges_on_page {
                 let record = record_page.record_slice(pointer.slot_index as usize)?;
                 let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
@@ -71,15 +73,17 @@ impl GraphDB {
                 let payload_len = header.payload_length as usize;
                 let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
                 let edge = deserialize_edge(payload)?;
-                
+
                 self.edge_cache.put(edge_id, edge.clone());
                 loaded_edges.insert(edge_id, edge);
             }
         }
-        
-        edge_ids.iter()
+
+        edge_ids
+            .iter()
             .map(|&edge_id| {
-                loaded_edges.get(&edge_id)
+                loaded_edges
+                    .get(&edge_id)
                     .cloned()
                     .ok_or(GraphError::NotFound("edge"))
             })

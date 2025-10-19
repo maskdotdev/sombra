@@ -1,8 +1,8 @@
+use lru::LruCache;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use lru::LruCache;
 
 use crate::error::{GraphError, Result};
 use crate::index::BTreeIndex;
@@ -11,11 +11,11 @@ use crate::pager::{PageId, Pager};
 use crate::storage::header::Header;
 use crate::storage::RecordPointer;
 
+use super::header::HeaderState;
 use crate::db::config::{Config, SyncMode};
 use crate::db::group_commit::{GroupCommitState, TxId};
 use crate::db::metrics::PerformanceMetrics;
 use crate::db::transaction::Transaction;
-use super::header::HeaderState;
 
 pub struct GraphDB {
     pub(crate) path: PathBuf,
@@ -51,7 +51,10 @@ impl std::fmt::Debug for GraphDB {
             .field("active_transaction", &self.active_transaction)
             .field("config", &self.config)
             .field("transactions_since_sync", &self.transactions_since_sync)
-            .field("transactions_since_checkpoint", &self.transactions_since_checkpoint)
+            .field(
+                "transactions_since_checkpoint",
+                &self.transactions_since_checkpoint,
+            )
             .finish()
     }
 }
@@ -66,7 +69,8 @@ impl GraphDB {
         let wal_sync_enabled = config.wal_sync_mode != SyncMode::Off;
         let use_mmap = config.use_mmap;
         let cache_size = config.page_cache_size;
-        let mut pager = Pager::open_with_full_config(path_ref, wal_sync_enabled, use_mmap, cache_size)?;
+        let mut pager =
+            Pager::open_with_full_config(path_ref, wal_sync_enabled, use_mmap, cache_size)?;
         let page_size = pager.page_size();
 
         if pager.page_count() == 0 {
@@ -94,7 +98,7 @@ impl GraphDB {
         };
 
         let next_tx_id = header.last_committed_tx_id + 1;
-        
+
         let group_commit_state = if config.wal_sync_mode == SyncMode::GroupCommit {
             Some(GroupCommitState::spawn(
                 path_ref.to_path_buf(),
@@ -103,10 +107,12 @@ impl GraphDB {
         } else {
             None
         };
-        
-        let cache_size = NonZeroUsize::new(config.page_cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
-        let edge_cache_size = NonZeroUsize::new(config.page_cache_size * 10).unwrap_or(NonZeroUsize::new(10000).unwrap());
-        
+
+        let cache_size =
+            NonZeroUsize::new(config.page_cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
+        let edge_cache_size = NonZeroUsize::new(config.page_cache_size * 10)
+            .unwrap_or(NonZeroUsize::new(10000).unwrap());
+
         let mut db = Self {
             path: path_ref.to_path_buf(),
             pager,
@@ -153,7 +159,9 @@ impl GraphDB {
         self.write_header()?;
         self.pager.checkpoint()?;
         if !self.load_btree_index()? {
-            return Err(GraphError::Corruption("failed to reload btree index after checkpoint".into()));
+            return Err(GraphError::Corruption(
+                "failed to reload btree index after checkpoint".into(),
+            ));
         }
         Ok(())
     }
@@ -167,4 +175,4 @@ impl GraphDB {
     }
 }
 
-use crate::model::{Node, Edge};
+use crate::model::{Edge, Node};

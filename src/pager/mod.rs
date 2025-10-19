@@ -1,12 +1,12 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
 use std::num::NonZeroUsize;
-use std::collections::HashMap;
+use std::path::Path;
 
+use crate::error::{GraphError, Result};
 use lru::LruCache;
 use memmap2::MmapMut;
-use crate::error::{GraphError, Result};
 
 mod wal;
 
@@ -55,7 +55,12 @@ impl Pager {
         Self::open_with_full_config(path, wal_sync_enabled, true, DEFAULT_CACHE_SIZE)
     }
 
-    pub fn open_with_full_config(path: &Path, wal_sync_enabled: bool, use_mmap: bool, cache_size: usize) -> Result<Self> {
+    pub fn open_with_full_config(
+        path: &Path,
+        wal_sync_enabled: bool,
+        use_mmap: bool,
+        cache_size: usize,
+    ) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -71,7 +76,8 @@ impl Pager {
             None
         };
 
-        let cache_size_nonzero = NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap());
+        let cache_size_nonzero =
+            NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap());
         let mut pager = Self {
             file,
             page_size: DEFAULT_PAGE_SIZE,
@@ -83,9 +89,9 @@ impl Pager {
             shadow_pages: HashMap::new(),
             shadow_file_len: None,
         };
-        
+
         pager.recover_wal()?;
-        
+
         if pager.page_count() > 0 {
             pager.fetch_page(0)?;
         }
@@ -108,7 +114,7 @@ impl Pager {
     pub fn ensure_shadow(&mut self, page_id: PageId) -> Result<()> {
         let in_transaction = self.shadow_file_len.is_some();
         let has_shadow = self.shadow_pages.contains_key(&page_id);
-        
+
         if in_transaction && !has_shadow {
             let page = self.cache.get(&page_id).ok_or_else(|| {
                 GraphError::InvalidArgument("page must be in cache before creating shadow".into())
@@ -134,7 +140,7 @@ impl Pager {
                 }
             }
         }
-        
+
         self.ensure_shadow(page_id)?;
         Ok(self.cache.get_mut(&page_id).expect("page must exist"))
     }
@@ -319,11 +325,12 @@ impl Pager {
                 page.dirty = false;
             }
         }
-        
+
         if let Some(original_len) = self.shadow_file_len.take() {
             if self.file_len > original_len {
                 let original_page_count = (original_len / self.page_size as u64) as u32;
-                let to_remove: Vec<PageId> = self.cache
+                let to_remove: Vec<PageId> = self
+                    .cache
                     .iter()
                     .filter_map(|(&id, _)| {
                         if id >= original_page_count {
@@ -333,15 +340,15 @@ impl Pager {
                         }
                     })
                     .collect();
-                
+
                 for id in to_remove {
                     self.cache.pop(&id);
                 }
-                
+
                 self.file_len = original_len;
             }
         }
-        
+
         Ok(())
     }
 
@@ -394,8 +401,9 @@ impl Pager {
             ((file_len - 1) / self.page_size as u64) + 1
         };
         self.file_len = max_pages * self.page_size as u64;
-        
-        let to_remove: Vec<PageId> = self.cache
+
+        let to_remove: Vec<PageId> = self
+            .cache
             .iter()
             .filter_map(|(&id, _)| {
                 if id != 0 && u64::from(id) >= max_pages {
@@ -405,7 +413,7 @@ impl Pager {
                 }
             })
             .collect();
-        
+
         for id in to_remove {
             self.cache.pop(&id);
         }
@@ -446,10 +454,10 @@ impl Pager {
     fn load_page_bytes(&mut self, page_id: PageId) -> Result<Vec<u8>> {
         let offset = page_offset(page_id, self.page_size)? as usize;
         let mut buf = vec![0u8; self.page_size];
-        
+
         if offset < self.file_len as usize {
             self.ensure_mmap()?;
-            
+
             if let Some(ref mmap) = self.mmap {
                 let end = (offset + self.page_size).min(mmap.len());
                 if offset < mmap.len() {
@@ -500,7 +508,7 @@ fn write_page_image(
 
 #[cfg(test)]
 mod tests {
-    use super::wal::{WAL_HEADER_SIZE, Wal};
+    use super::wal::{Wal, WAL_HEADER_SIZE};
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};

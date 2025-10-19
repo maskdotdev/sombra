@@ -1,8 +1,8 @@
+use super::core::GraphDB;
+use super::group_commit::TxId;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, Node, NodeId};
 use crate::pager::PageId;
-use super::core::GraphDB;
-use super::group_commit::TxId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxState {
@@ -84,7 +84,7 @@ impl<'db> Transaction<'db> {
     pub fn commit(mut self) -> Result<()> {
         self.ensure_active()?;
         self.capture_dirty_pages();
-        
+
         self.db.header.last_committed_tx_id = self.id;
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
