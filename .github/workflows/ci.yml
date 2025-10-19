@@ -16,7 +16,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 18
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
       - run: npm ci
+      - name: Build native module
+        run: npm run build
       - run: npm run test:all
 
   build:
@@ -41,8 +45,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
-      - name: Install cargo-capi
-        run: cargo install cargo-capi
       - run: npm ci
       - name: Build native module
         run: npm run build -- --target ${{ matrix.settings.target }}
