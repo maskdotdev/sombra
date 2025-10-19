@@ -1,20 +1,24 @@
-const { SombraDB } = require('../index');
-import type { SombraNode, SombraEdge, SombraPropertyValue } from '../sombra';
+import { SombraDB, SombraNode, SombraEdge, SombraPropertyValue } from '../index';
 
 const db = new SombraDB('./example-ts.db');
 
+const createProp = (type: 'string' | 'int' | 'float' | 'bool', value: any): SombraPropertyValue => ({
+  type,
+  value
+});
+
 const alice: number = db.addNode(['Person'], {
-  name: { type: 'string', value: 'Alice' } as SombraPropertyValue,
-  age: { type: 'int', value: 30 } as SombraPropertyValue
+  name: createProp('string', 'Alice'),
+  age: createProp('int', 30)
 });
 
 const bob: number = db.addNode(['Person'], {
-  name: { type: 'string', value: 'Bob' } as SombraPropertyValue,
-  age: { type: 'int', value: 25 } as SombraPropertyValue
+  name: createProp('string', 'Bob'),
+  age: createProp('int', 25)
 });
 
 const knows: number = db.addEdge(alice, bob, 'KNOWS', {
-  since: { type: 'int', value: 2020 } as SombraPropertyValue
+  since: createProp('int', 2020)
 });
 
 const aliceNode: SombraNode = db.getNode(alice);
@@ -26,17 +30,28 @@ console.log('Knows edge:', knowsEdge);
 const outgoing: number[] = db.getOutgoingEdges(alice);
 console.log('Outgoing edges:', outgoing);
 
+const neighbors: number[] = db.getNeighbors(alice);
+console.log('Neighbors:', neighbors);
+
+const bfsResults = db.bfsTraversal(alice, 2);
+console.log('BFS traversal:', bfsResults);
+
 const tx = db.beginTransaction();
 console.log('Transaction ID:', tx.id());
 
-const charlie: number = tx.addNode(['Person'], {
-  name: { type: 'string', value: 'Charlie' } as SombraPropertyValue
-});
+try {
+  const charlie: number = tx.addNode(['Person'], {
+    name: createProp('string', 'Charlie')
+  });
 
-tx.addEdge(alice, charlie, 'KNOWS');
-tx.commit();
-
-console.log('Charlie:', db.getNode(charlie));
+  tx.addEdge(alice, charlie, 'KNOWS');
+  tx.commit();
+  
+  console.log('Charlie:', db.getNode(charlie));
+} catch (error) {
+  console.error('Transaction failed:', error);
+  tx.rollback();
+}
 
 db.flush();
 db.checkpoint();

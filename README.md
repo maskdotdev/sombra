@@ -58,29 +58,52 @@ println!("User {} authored {} posts", user, neighbors.len());
 ### TypeScript/Node.js API
 
 ```typescript
-import { GraphDB } from 'sombra';
+import { SombraDB, SombraPropertyValue } from 'sombradb';
 
-// Open or create a database
-const db = new GraphDB('my_graph.db');
+const db = new SombraDB('./my_graph.db');
 
-// Use transactions for safe operations
-const tx = db.beginTransaction();
+const createProp = (type: 'string' | 'int' | 'float' | 'bool', value: any): SombraPropertyValue => ({
+  type,
+  value
+});
 
-// Add nodes and edges
-const user = tx.addNode({ label: 0 });
-const post = tx.addNode({ label: 1 });
-tx.addEdge(user, post, 'AUTHORED');
+const alice = db.addNode(['Person'], {
+  name: createProp('string', 'Alice'),
+  age: createProp('int', 30)
+});
 
-// Commit to make changes permanent
-tx.commit();
+const bob = db.addNode(['Person'], {
+  name: createProp('string', 'Bob'),
+  age: createProp('int', 25)
+});
 
-// Query the graph
-const neighbors = db.getNeighbors(user);
-console.log(`User ${user} authored ${neighbors.length} posts`);
+const knows = db.addEdge(alice, bob, 'KNOWS', {
+  since: createProp('int', 2020)
+});
 
-// Graph traversals
-const bfsResults = db.bfsTraversal(user, 3);
+const aliceNode = db.getNode(alice);
+console.log('Alice:', aliceNode);
+
+const neighbors = db.getNeighbors(alice);
+console.log(`Alice has ${neighbors.length} connections`);
+
+const bfsResults = db.bfsTraversal(alice, 3);
 console.log('BFS traversal:', bfsResults);
+
+const tx = db.beginTransaction();
+try {
+  const charlie = tx.addNode(['Person'], {
+    name: createProp('string', 'Charlie')
+  });
+  tx.addEdge(alice, charlie, 'KNOWS');
+  tx.commit();
+} catch (error) {
+  tx.rollback();
+  throw error;
+}
+
+db.flush();
+db.checkpoint();
 ```
 
 ## Installation

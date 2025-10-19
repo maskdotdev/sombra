@@ -81,6 +81,11 @@ jobs:
       - name: Move artifacts to root
         run: |
           find artifacts -name "*.node" -exec cp {} . \;
+      - name: Generate index.js
+        run: npm run prepublishOnly
+      - name: Verify package contents
+        run: |
+          ls -la index.js sombra.d.ts *.node
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
