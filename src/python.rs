@@ -16,14 +16,14 @@ pub struct PySombraNode {
     pub id: u64,
     #[pyo3(get)]
     pub labels: Vec<String>,
-    properties: Vec<(String, PyObject)>,
+    properties: Vec<(String, Py<PyAny>)>,
 }
 
 #[pymethods]
 impl PySombraNode {
     #[getter]
     fn properties(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         for (key, value) in &self.properties {
             dict.set_item(key, value.clone_ref(py))?;
         }
@@ -57,14 +57,14 @@ pub struct PySombraEdge {
     pub target_node_id: u64,
     #[pyo3(get)]
     pub type_name: String,
-    properties: Vec<(String, PyObject)>,
+    properties: Vec<(String, Py<PyAny>)>,
 }
 
 #[pymethods]
 impl PySombraEdge {
     #[getter]
     fn properties(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         for (key, value) in &self.properties {
             dict.set_item(key, value.clone_ref(py))?;
         }
@@ -551,7 +551,7 @@ fn py_any_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
     }
 
     if let Ok(py_byte_array) = value.downcast::<PyByteArray>() {
-        return Ok(PropertyValue::Bytes(py_byte_array.to_vec()));
+        return Ok(PropertyValue::Bytes(unsafe { py_byte_array.as_bytes() }.to_vec()));
     }
 
     if let Ok(string_val) = value.extract::<String>() {
@@ -571,13 +571,25 @@ fn py_any_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
     ))
 }
 
-fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> PyObject {
+fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> Py<PyAny> {
     match value {
-        PropertyValue::Bool(b) => b.into_py(py),
-        PropertyValue::Int(i) => i.into_py(py),
-        PropertyValue::Float(f) => f.into_py(py),
-        PropertyValue::String(s) => s.clone().into_py(py),
-        PropertyValue::Bytes(bytes) => PyBytes::new_bound(py, bytes).into_py(py),
+        PropertyValue::Bool(b) => {
+            let bound = b.into_pyobject(py).unwrap();
+            bound.as_any().clone().unbind()
+        }
+        PropertyValue::Int(i) => {
+            let bound = i.into_pyobject(py).unwrap();
+            bound.as_any().clone().unbind()
+        }
+        PropertyValue::Float(f) => {
+            let bound = f.into_pyobject(py).unwrap();
+            bound.as_any().clone().unbind()
+        }
+        PropertyValue::String(s) => {
+            let bound = s.into_pyobject(py).unwrap();
+            bound.as_any().clone().unbind()
+        }
+        PropertyValue::Bytes(bytes) => PyBytes::new(py, bytes).into_any().unbind(),
     }
 }
 

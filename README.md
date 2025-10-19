@@ -12,10 +12,10 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 - **Page-Based Storage**: Efficient memory-mapped I/O
 
 ### Performance Features ✨ NEW
-- **Label Index**: O(1) label-based queries (500-1000x faster)
-- **LRU Node Cache**: 2000x faster repeated reads with 90% hit rate
+- **Label Index**: Fast label-based queries with O(1) lookup
+- **LRU Node Cache**: 90% hit rate for repeated reads
 - **B-tree Primary Index**: 25-40% memory reduction, better cache locality
-- **Optimized BFS Traversal**: 2,500% faster graph traversals vs SQLite
+- **Optimized Graph Traversals**: 18-23x faster than SQLite for graph operations
 - **Performance Metrics**: Real-time monitoring of cache, queries, and traversals
 - **Scalability Testing**: Validated for 100K+ node graphs
 
@@ -213,18 +213,17 @@ Sombra now includes production-ready performance optimizations:
 
 | Optimization | Improvement | Status |
 |--------------|-------------|--------|
-| Label Index | 500-1000x faster queries | ✅ Complete |
-| Node Cache | 2000x faster repeated reads | ✅ Complete |
+| Label Index | Fast O(1) label queries | ✅ Complete |
+| Node Cache | 90% hit rate for repeated reads | ✅ Complete |
 | B-tree Index | 25-40% memory reduction | ✅ Complete |
 | Metrics System | Real-time monitoring | ✅ Complete |
 
 **Benchmark Results** (100K nodes):
 ```
-Label Query:     390ms → 0.04ms  (9,750x faster)
-Cached Reads:    2-4µs → 45ns    (2,000x faster)
-BFS Traversal:   42 ops/sec → 1,092 ops/sec (2,500% faster)
-Index Memory:    3.2MB → 2.4MB   (25% reduction)
-Cache Hit Rate:  0% → 90%        (after warmup)
+Node Lookups:    ~1.5M ops/sec
+Neighbor Queries: ~9.9M ops/sec  
+Index Memory:    25% reduction (3.2MB → 2.4MB)
+Cache Hit Rate:  90% after warmup
 ```
 
 **Graph Traversal Performance** (vs SQLite):
@@ -257,7 +256,7 @@ cargo run --example performance_metrics_demo --features benchmarks
 - Crash recovery
 - Label secondary index
 - LRU node cache
-- Optimized BFS traversal (2,500% faster)
+- Optimized graph traversals (18-23x faster than SQLite)
 - Performance metrics system
 - TypeScript/Node.js NAPI bindings
 - Comprehensive test suite (39/39 passing)
