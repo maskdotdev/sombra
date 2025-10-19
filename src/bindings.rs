@@ -27,6 +27,10 @@ impl SombraDB {
     #[napi]
     pub fn begin_transaction(&mut self) -> std::result::Result<SombraTransaction, Error> {
         let mut db = self.inner.lock().unwrap();
+        
+        db.checkpoint()
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to checkpoint before transaction: {}", e)))?;
+        
         let tx_id = db.allocate_tx_id()
             .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to allocate transaction ID: {}", e)))?;
         

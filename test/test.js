@@ -31,6 +31,8 @@ async function test() {
     const node3Id = db.addNode(['Company'], { 
       name: { type: 'string', value: 'TechCorp' } 
     });
+    db.flush();
+    db.checkpoint();
     console.log(`✓ Added nodes: ${node1Id}, ${node2Id}, ${node3Id}`);
     
     console.log('3. Adding edges...');
@@ -67,7 +69,72 @@ async function test() {
     rollbackTx.rollback();
     console.log('✓ Transaction rolled back');
     
-    console.log('8. Flushing and checkpointing...');
+    console.log('8. Testing getNodesByLabel...');
+    const personNodes = db.getNodesByLabel('Person');
+    console.log(`✓ Found ${personNodes.length} Person nodes: ${personNodes}`);
+    if (personNodes.length !== 2) {
+      throw new Error(`Expected 2 Person nodes, got ${personNodes.length}`);
+    }
+    if (!personNodes.includes(node1Id) || !personNodes.includes(node2Id)) {
+      throw new Error('Person nodes do not match expected IDs');
+    }
+    
+    const companyNodes = db.getNodesByLabel('Company');
+    console.log(`✓ Found ${companyNodes.length} Company nodes: ${companyNodes}`);
+    if (companyNodes.length !== 1 || companyNodes[0] !== node3Id) {
+      throw new Error('Company node does not match expected ID');
+    }
+    
+    const nonExistent = db.getNodesByLabel('NonExistent');
+    if (nonExistent.length !== 0) {
+      throw new Error('Expected 0 nodes for non-existent label');
+    }
+    console.log('✓ getNodesByLabel works correctly');
+    
+    console.log('9. Testing count edge methods...');
+    const outgoingCount = db.countOutgoingEdges(node1Id);
+    console.log(`✓ Alice has ${outgoingCount} outgoing edges`);
+    if (outgoingCount !== 2) {
+      throw new Error(`Expected 2 outgoing edges, got ${outgoingCount}`);
+    }
+    
+    const incomingCount = db.countIncomingEdges(node2Id);
+    console.log(`✓ Bob has ${incomingCount} incoming edges`);
+    if (incomingCount !== 1) {
+      throw new Error(`Expected 1 incoming edge, got ${incomingCount}`);
+    }
+    console.log('✓ Edge counting works correctly');
+    
+    console.log('10. Testing getIncomingNeighbors...');
+    const bobIncoming = db.getIncomingNeighbors(node2Id);
+    console.log(`✓ Bob's incoming neighbors: ${bobIncoming}`);
+    if (bobIncoming.length !== 1 || bobIncoming[0] !== node1Id) {
+      throw new Error('Incoming neighbors do not match expected');
+    }
+    console.log('✓ getIncomingNeighbors works correctly');
+    
+    console.log('11. Testing BFS traversal...');
+    const bfsResults = db.bfsTraversal(node1Id, 2);
+    console.log(`✓ BFS from Alice found ${bfsResults.length} nodes`);
+    const aliceResult = bfsResults.find(r => r.nodeId === node1Id);
+    if (!aliceResult || aliceResult.depth !== 0) {
+      throw new Error('Alice should be at depth 0');
+    }
+    const bobResult = bfsResults.find(r => r.nodeId === node2Id);
+    if (!bobResult || bobResult.depth !== 1) {
+      throw new Error('Bob should be at depth 1');
+    }
+    console.log('✓ BFS traversal works correctly');
+    
+    console.log('12. Testing multi-hop traversals...');
+    const twoHops = db.getNeighborsTwoHops(node1Id);
+    console.log(`✓ Two-hop neighbors from Alice: ${twoHops.length} nodes`);
+    
+    const threeHops = db.getNeighborsThreeHops(node1Id);
+    console.log(`✓ Three-hop neighbors from Alice: ${threeHops.length} nodes`);
+    console.log('✓ Multi-hop traversals work correctly');
+    
+    console.log('13. Flushing and checkpointing...');
     db.flush();
     db.checkpoint();
     console.log('✓ Database flushed and checkpointed');
