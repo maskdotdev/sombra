@@ -14,7 +14,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 18
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-capi
+        run: cargo install cargo-capi
       - run: npm ci
+      - name: Build native module
+        run: npm run build
       - run: npm run test:all
 
   build:
@@ -63,6 +69,8 @@ jobs:
     name: Publish
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -77,6 +85,15 @@ jobs:
       - name: Move artifacts to root
         run: |
           find artifacts -name "*.node" -exec cp {} . \;
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
       - name: Publish to npm
         run: npm publish
         env:
