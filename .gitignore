@@ -1,0 +1,60 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# NAPI build artifacts
+*.node
+index.js
+index.d.ts
+
+# Database files
+*.db
+*.db-*
+*.db-shm
+*.db-wal
+*.db-journal
+*.wal
+
+# SQLite specific
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# Test and benchmark artifacts
+*.csv
+test_*
+test_sqlite_*
+verify_checkpoint_theory.txt
+check_sqlite_behavior.txt
+trace_analysis.txt
+
+# Generated C files
+*.c
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
