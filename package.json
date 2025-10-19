@@ -61,7 +61,15 @@
   "engines": {
     "node": ">= 14"
   },
-  "dependencies": {
-    "sombradb": "file:sombradb-0.1.19.tgz"
+  "dependencies": {},
+  "optionalDependencies": {
+    "sombradb-win32-x64-msvc": "0.1.20",
+    "sombradb-darwin-x64": "0.1.20",
+    "sombradb-linux-x64-gnu": "0.1.20",
+    "sombradb-win32-ia32-msvc": "0.1.20",
+    "sombradb-darwin-arm64": "0.1.20",
+    "sombradb-linux-x64-musl": "0.1.20",
+    "sombradb-linux-arm64-gnu": "0.1.20",
+    "sombradb-linux-arm-gnueabihf": "0.1.20"
   }
 }
