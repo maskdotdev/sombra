@@ -62,13 +62,13 @@
     "node": ">= 14"
   },
   "optionalDependencies": {
-    "sombradb-win32-x64-msvc": "0.1.4",
-    "sombradb-darwin-x64": "0.1.4",
-    "sombradb-linux-x64-gnu": "0.1.4",
-    "sombradb-win32-ia32-msvc": "0.1.4",
-    "sombradb-darwin-arm64": "0.1.4",
-    "sombradb-linux-x64-musl": "0.1.4",
-    "sombradb-linux-arm64-gnu": "0.1.4",
-    "sombradb-linux-arm-gnueabihf": "0.1.4"
+    "sombradb-win32-x64-msvc": "0.1.5",
+    "sombradb-darwin-x64": "0.1.5",
+    "sombradb-linux-x64-gnu": "0.1.5",
+    "sombradb-win32-ia32-msvc": "0.1.5",
+    "sombradb-darwin-arm64": "0.1.5",
+    "sombradb-linux-x64-musl": "0.1.5",
+    "sombradb-linux-arm64-gnu": "0.1.5",
+    "sombradb-linux-arm-gnueabihf": "0.1.5"
   }
 }
