@@ -13,6 +13,9 @@ impl GraphDB {
             ));
         }
         
+        let tx_id = self.allocate_tx_id()?;
+        self.start_tracking();
+        
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
@@ -57,6 +60,13 @@ impl GraphDB {
         self.node_cache.pop(&edge.source_node_id);
         self.node_cache.pop(&edge.target_node_id);
         self.edge_cache.put(edge_id, edge);
+        
+        self.header.last_committed_tx_id = tx_id;
+        self.write_header()?;
+        
+        let dirty_pages = self.take_recent_dirty_pages();
+        self.commit_to_wal(tx_id, &dirty_pages)?;
+        self.stop_tracking();
 
         Ok(edge_id)
     }

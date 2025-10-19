@@ -88,6 +88,7 @@ impl<'db> Transaction<'db> {
         self.db.header.last_committed_tx_id = self.id;
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
+            let _ = self.db.rollback_transaction(&self.dirty_pages);
             self.db.stop_tracking();
             self.db.exit_transaction();
             self.state = TxState::RolledBack;
@@ -105,6 +106,7 @@ impl<'db> Transaction<'db> {
                 Ok(())
             }
             Err(err) => {
+                let _ = self.db.rollback_transaction(&pages);
                 self.db.stop_tracking();
                 self.db.exit_transaction();
                 self.state = TxState::RolledBack;
@@ -138,6 +140,7 @@ impl<'db> Drop for Transaction<'db> {
     fn drop(&mut self) {
         self.db.stop_tracking();
         if self.state == TxState::Active {
+            let _ = self.db.rollback_transaction(&self.dirty_pages);
             self.db.exit_transaction();
             if !std::thread::panicking() {
                 panic!("transaction {} dropped without commit or rollback", self.id);

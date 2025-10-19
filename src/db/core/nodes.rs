@@ -13,6 +13,9 @@ impl GraphDB {
             ));
         }
         
+        let tx_id = self.allocate_tx_id()?;
+        self.start_tracking();
+        
         let node_id = self.header.next_node_id;
         self.header.next_node_id += 1;
 
@@ -27,7 +30,24 @@ impl GraphDB {
         let pointer = self.insert_record(&record, preferred)?;
 
         self.node_index.insert(node_id, pointer);
+        
+        for label in &node.labels {
+            self.label_index
+                .entry(label.clone())
+                .or_default()
+                .insert(node_id);
+        }
+        
+        self.node_cache.put(node_id, node.clone());
+        
         self.header.last_record_page = Some(pointer.page_id);
+        self.header.last_committed_tx_id = tx_id;
+        self.write_header()?;
+        
+        let dirty_pages = self.take_recent_dirty_pages();
+        self.commit_to_wal(tx_id, &dirty_pages)?;
+        self.stop_tracking();
+        
         Ok(node_id)
     }
 

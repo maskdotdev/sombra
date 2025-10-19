@@ -10,6 +10,7 @@ use super::graphdb::GraphDB;
 impl GraphDB {
     pub(crate) fn commit_to_wal(&mut self, tx_id: TxId, dirty_pages: &[PageId]) -> Result<()> {
         if dirty_pages.is_empty() {
+            self.pager.commit_shadow_transaction();
             return Ok(());
         }
         
@@ -68,13 +69,12 @@ impl GraphDB {
             self.transactions_since_checkpoint = 0;
         }
         
+        self.pager.commit_shadow_transaction();
         Ok(())
     }
 
     pub(crate) fn rollback_transaction(&mut self, dirty_pages: &[PageId]) -> Result<()> {
-        if !dirty_pages.is_empty() {
-            self.pager.restore_pages(dirty_pages)?;
-        }
+        self.pager.rollback_shadow_transaction()?;
         
         self.reload_header_state()?;
         
@@ -135,6 +135,7 @@ impl GraphDB {
                 "nested transactions are not supported".into(),
             ));
         }
+        self.pager.begin_shadow_transaction();
         self.active_transaction = Some(tx_id);
         Ok(())
     }

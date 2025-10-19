@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::num::NonZeroUsize;
+use std::collections::HashMap;
 
 use lru::LruCache;
 use memmap2::MmapMut;
@@ -41,6 +42,8 @@ pub struct Pager {
     wal: Wal,
     mmap: Option<MmapMut>,
     use_mmap: bool,
+    shadow_pages: HashMap<PageId, Vec<u8>>,
+    shadow_file_len: Option<u64>,
 }
 
 impl Pager {
@@ -77,6 +80,8 @@ impl Pager {
             wal: Wal::open_with_config(path, DEFAULT_PAGE_SIZE, wal_sync_enabled)?,
             mmap,
             use_mmap,
+            shadow_pages: HashMap::new(),
+            shadow_file_len: None,
         };
         
         pager.recover_wal()?;
@@ -100,17 +105,37 @@ impl Pager {
         }
     }
 
+    pub fn ensure_shadow(&mut self, page_id: PageId) -> Result<()> {
+        let in_transaction = self.shadow_file_len.is_some();
+        let has_shadow = self.shadow_pages.contains_key(&page_id);
+        
+        if in_transaction && !has_shadow {
+            let page = self.cache.get(&page_id).ok_or_else(|| {
+                GraphError::InvalidArgument("page must be in cache before creating shadow".into())
+            })?;
+            self.shadow_pages.insert(page_id, page.data.clone());
+        }
+        Ok(())
+    }
+
     pub fn fetch_page(&mut self, page_id: PageId) -> Result<&mut Page> {
         if !self.cache.contains(&page_id) {
             let mut page = Page::new(page_id, self.page_size);
             self.read_page_from_disk(&mut page)?;
             if let Some((evicted_id, evicted_page)) = self.cache.push(page_id, page) {
                 if evicted_page.dirty {
+                    if self.shadow_pages.contains_key(&evicted_id) {
+                        return Err(GraphError::InvalidArgument(
+                            "cannot evict dirty page with shadow copy during transaction".into(),
+                        ));
+                    }
                     self.write_page_to_disk(evicted_id, &evicted_page.data)?;
                     self.invalidate_mmap();
                 }
             }
         }
+        
+        self.ensure_shadow(page_id)?;
         Ok(self.cache.get_mut(&page_id).expect("page must exist"))
     }
 
@@ -140,6 +165,11 @@ impl Pager {
         page.dirty = true;
         if let Some((evicted_id, evicted_page)) = self.cache.push(next_page_id, page) {
             if evicted_page.dirty {
+                if self.shadow_pages.contains_key(&evicted_id) {
+                    return Err(GraphError::InvalidArgument(
+                        "cannot evict dirty page with shadow copy during transaction".into(),
+                    ));
+                }
                 self.write_page_to_disk(evicted_id, &evicted_page.data)?;
                 self.invalidate_mmap();
             }
@@ -272,6 +302,49 @@ impl Pager {
         Ok(())
     }
 
+    pub fn begin_shadow_transaction(&mut self) {
+        self.shadow_pages.clear();
+        self.shadow_file_len = Some(self.file_len);
+    }
+
+    pub fn commit_shadow_transaction(&mut self) {
+        self.shadow_pages.clear();
+        self.shadow_file_len = None;
+    }
+
+    pub fn rollback_shadow_transaction(&mut self) -> Result<()> {
+        for (page_id, shadow_data) in self.shadow_pages.drain() {
+            if let Some(page) = self.cache.get_mut(&page_id) {
+                page.data = shadow_data;
+                page.dirty = false;
+            }
+        }
+        
+        if let Some(original_len) = self.shadow_file_len.take() {
+            if self.file_len > original_len {
+                let original_page_count = (original_len / self.page_size as u64) as u32;
+                let to_remove: Vec<PageId> = self.cache
+                    .iter()
+                    .filter_map(|(&id, _)| {
+                        if id >= original_page_count {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                
+                for id in to_remove {
+                    self.cache.pop(&id);
+                }
+                
+                self.file_len = original_len;
+            }
+        }
+        
+        Ok(())
+    }
+
     pub fn restore_pages(&mut self, page_ids: &[PageId]) -> Result<()> {
         if page_ids.is_empty() {
             return Ok(());
@@ -282,17 +355,33 @@ impl Pager {
         pages.dedup();
 
         for &page_id in &pages {
-            let data = self.load_page_bytes(page_id)?;
-            if let Some(page) = self.cache.get_mut(&page_id) {
-                page.data = data;
-                page.dirty = false;
+            if let Some(shadow_data) = self.shadow_pages.get(&page_id) {
+                if let Some(page) = self.cache.get_mut(&page_id) {
+                    page.data = shadow_data.clone();
+                    page.dirty = false;
+                } else {
+                    let mut page = Page::new(page_id, self.page_size);
+                    page.data = shadow_data.clone();
+                    page.dirty = false;
+                    if let Some((evicted_id, evicted_page)) = self.cache.push(page_id, page) {
+                        if evicted_page.dirty {
+                            self.write_page_to_disk(evicted_id, &evicted_page.data)?;
+                        }
+                    }
+                }
             } else {
-                let mut page = Page::new(page_id, self.page_size);
-                page.data = data;
-                page.dirty = false;
-                if let Some((evicted_id, evicted_page)) = self.cache.push(page_id, page) {
-                    if evicted_page.dirty {
-                        self.write_page_to_disk(evicted_id, &evicted_page.data)?;
+                let data = self.load_page_bytes(page_id)?;
+                if let Some(page) = self.cache.get_mut(&page_id) {
+                    page.data = data;
+                    page.dirty = false;
+                } else {
+                    let mut page = Page::new(page_id, self.page_size);
+                    page.data = data;
+                    page.dirty = false;
+                    if let Some((evicted_id, evicted_page)) = self.cache.push(page_id, page) {
+                        if evicted_page.dirty {
+                            self.write_page_to_disk(evicted_id, &evicted_page.data)?;
+                        }
                     }
                 }
             }
