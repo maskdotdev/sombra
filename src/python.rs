@@ -27,7 +27,7 @@ impl PySombraNode {
         for (key, value) in &self.properties {
             dict.set_item(key, value.clone_ref(py))?;
         }
-        Ok(dict.unbind())
+        Ok(dict.into())
     }
 }
 
@@ -68,7 +68,7 @@ impl PySombraEdge {
         for (key, value) in &self.properties {
             dict.set_item(key, value.clone_ref(py))?;
         }
-        Ok(dict.unbind())
+        Ok(dict.into())
     }
 }
 
@@ -546,11 +546,11 @@ fn py_any_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
         return Ok(PropertyValue::Bool(bool_val));
     }
 
-    if let Ok(py_bytes) = value.downcast::<PyBytes>() {
+    if let Ok(py_bytes) = value.cast::<PyBytes>() {
         return Ok(PropertyValue::Bytes(py_bytes.as_bytes().to_vec()));
     }
 
-    if let Ok(py_byte_array) = value.downcast::<PyByteArray>() {
+    if let Ok(py_byte_array) = value.cast::<PyByteArray>() {
         return Ok(PropertyValue::Bytes(unsafe { py_byte_array.as_bytes() }.to_vec()));
     }
 
