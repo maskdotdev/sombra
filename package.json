@@ -23,7 +23,7 @@
   "scripts": {
     "build": "napi build --platform --release --features napi && node scripts/fix-exports.js",
     "build:debug": "napi build --platform --features napi && node scripts/fix-exports.js",
-    "prepublishOnly": "napi prepublish -t npm && node scripts/fix-exports.js",
+    "prepublishOnly": "napi prepublish -t npm --skip-gh-release && node scripts/fix-exports.js",
     "test": "node test/test.js",
     "test:comprehensive": "node test/test-comprehensive.js",
     "test:all": "npm test && npm run test:comprehensive",
