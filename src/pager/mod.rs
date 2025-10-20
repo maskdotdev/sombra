@@ -525,8 +525,7 @@ impl Pager {
         if data.len() != self.page_size {
             error!(page_id, "Page size mismatch during checksum verification");
             return Err(GraphError::Corruption(format!(
-                "page {} size mismatch during checksum verification",
-                page_id
+                "page {page_id} size mismatch during checksum verification"
             )));
         }
         let (payload, checksum) = split_payload_checksum(data)?;
@@ -620,8 +619,7 @@ fn apply_page_checksum(
 ) -> Result<()> {
     if data.len() != page_size {
         return Err(GraphError::Corruption(format!(
-            "page {} size mismatch during checksum application",
-            page_id
+            "page {page_id} size mismatch during checksum application"
         )));
     }
     let (payload, checksum) = split_payload_checksum_mut(data)?;

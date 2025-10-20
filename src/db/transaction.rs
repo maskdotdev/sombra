@@ -116,8 +116,7 @@ impl<'db> Transaction<'db> {
                 "Transaction exceeded page limit"
             );
             return Err(GraphError::InvalidArgument(format!(
-                "Transaction exceeded maximum page limit of {}",
-                max_tx_pages
+                "Transaction exceeded maximum page limit of {max_tx_pages}"
             )));
         }
 
@@ -131,8 +130,7 @@ impl<'db> Transaction<'db> {
                     "Transaction timeout exceeded"
                 );
                 return Err(GraphError::InvalidArgument(format!(
-                    "Transaction timeout exceeded: {}ms > {}ms",
-                    elapsed, timeout_ms
+                    "Transaction timeout exceeded: {elapsed}ms > {timeout_ms}ms"
                 )));
             }
         }

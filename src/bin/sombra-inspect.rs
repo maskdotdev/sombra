@@ -36,7 +36,7 @@ fn format_bytes(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -60,7 +60,7 @@ fn print_section(title: &str) {
 }
 
 fn print_field(name: &str, value: impl std::fmt::Display) {
-    println!("  {:.<30} {}", name, value);
+    println!("  {name:.<30} {value}");
 }
 
 fn cmd_info(db_path: &str) -> Result<()> {
@@ -74,7 +74,7 @@ fn cmd_info(db_path: &str) -> Result<()> {
     print_section("General");
     print_field("Database Path", db_path);
     print_field("File Size", format_bytes(file_size));
-    print_field("Page Size", format!("{} bytes", DEFAULT_PAGE_SIZE));
+    print_field("Page Size", format!("{DEFAULT_PAGE_SIZE} bytes"));
 
     let header_state = &db.header;
 
@@ -130,7 +130,7 @@ fn cmd_stats(db_path: &str) -> Result<()> {
     let total_accesses = metrics.cache_hits + metrics.cache_misses;
     if total_accesses > 0 {
         let hit_rate = (metrics.cache_hits as f64 / total_accesses as f64) * 100.0;
-        print_field("Cache Hit Rate", format!("{:.2}%", hit_rate));
+        print_field("Cache Hit Rate", format!("{hit_rate:.2}%"));
     }
 
     print_field("Node Lookups", metrics.node_lookups);
@@ -186,9 +186,9 @@ fn cmd_verify(db_path: &str) -> Result<()> {
     if total_errors == 0 {
         println!("  ✓ No issues found - database is healthy!");
         println!();
-        println!("  Status: {}", "PASS".to_string());
+        println!("  Status: PASS");
     } else {
-        println!("  ✗ Found {} issue(s)", total_errors);
+        println!("  ✗ Found {total_errors} issue(s)");
 
         if !report.errors.is_empty() {
             print_section("Error Details");
@@ -198,7 +198,7 @@ fn cmd_verify(db_path: &str) -> Result<()> {
         }
 
         println!();
-        println!("  Status: {}", "FAIL".to_string());
+        println!("  Status: FAIL");
     }
 
     println!();
@@ -240,7 +240,7 @@ fn cmd_header(db_path: &str) -> Result<()> {
 fn cmd_wal_info(db_path: &str) -> Result<()> {
     print_header("WAL INFORMATION");
 
-    let wal_path = format!("{}-wal", db_path);
+    let wal_path = format!("{db_path}-wal");
 
     match std::fs::metadata(&wal_path) {
         Ok(metadata) => {
@@ -297,7 +297,7 @@ fn main() {
         "header" => cmd_header(db_path),
         "wal-info" => cmd_wal_info(db_path),
         _ => {
-            eprintln!("Error: Unknown command '{}'", command);
+            eprintln!("Error: Unknown command '{command}'");
             eprintln!();
             print_usage();
             process::exit(1);
@@ -310,7 +310,7 @@ fn main() {
         eprintln!("║                         ERROR                            ║");
         eprintln!("╚══════════════════════════════════════════════════════════╝");
         eprintln!();
-        eprintln!("  {}", e);
+        eprintln!("  {e}");
         eprintln!();
         process::exit(1);
     }

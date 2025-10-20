@@ -55,14 +55,14 @@ fn format_bytes(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
 fn cmd_checkpoint(db_path: &str) -> Result<()> {
     print_header("CHECKPOINT WAL");
 
-    let wal_path = format!("{}-wal", db_path);
+    let wal_path = format!("{db_path}-wal");
 
     let wal_size_before = match fs::metadata(&wal_path) {
         Ok(meta) => Some(meta.len()),
@@ -168,7 +168,7 @@ fn main() {
         eprintln!("║                         ERROR                            ║");
         eprintln!("╚══════════════════════════════════════════════════════════╝");
         eprintln!();
-        eprintln!("  Database file not found: {}", db_path);
+        eprintln!("  Database file not found: {db_path}");
         eprintln!();
         process::exit(1);
     }
@@ -196,7 +196,7 @@ fn main() {
         "vacuum" => cmd_vacuum(db_path),
         _ => {
             eprintln!();
-            eprintln!("Error: Unknown command '{}'", command);
+            eprintln!("Error: Unknown command '{command}'");
             eprintln!();
             print_usage();
             process::exit(1);
@@ -209,7 +209,7 @@ fn main() {
         eprintln!("║                         ERROR                            ║");
         eprintln!("╚══════════════════════════════════════════════════════════╝");
         eprintln!();
-        eprintln!("  {}", e);
+        eprintln!("  {e}");
         eprintln!();
         process::exit(1);
     }

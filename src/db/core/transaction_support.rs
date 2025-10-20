@@ -1,6 +1,6 @@
 use super::graphdb::GraphDB;
 use crate::db::config::SyncMode;
-use crate::db::group_commit::{CommitRequest, TxId};
+use crate::db::group_commit::{CommitRequest, ControlMessage, TxId};
 use crate::error::{acquire_lock, GraphError, Result};
 use crate::pager::PageId;
 use crate::storage::header::Header;
@@ -44,7 +44,7 @@ impl GraphDB {
                     };
 
                     sender
-                        .send(commit_req)
+                        .send(ControlMessage::Commit(commit_req))
                         .map_err(|_| GraphError::Corruption("group commit thread died".into()))?;
 
                     let (lock, cvar) = &*notifier;

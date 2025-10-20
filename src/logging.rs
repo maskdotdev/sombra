@@ -5,7 +5,7 @@ pub fn init_logging(level: &str) -> Result<()> {
     fmt()
         .with_env_filter(
             EnvFilter::try_new(level)
-                .map_err(|e| GraphError::InvalidArgument(format!("Invalid log level: {}", e)))?,
+                .map_err(|e| GraphError::InvalidArgument(format!("Invalid log level: {e}")))?,
         )
         .with_target(true)
         .with_thread_ids(true)
