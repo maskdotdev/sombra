@@ -119,6 +119,12 @@ pub struct Config {
 
     /// WAL size threshold for warning logs in megabytes.
     pub wal_size_warning_threshold_mb: u64,
+
+    /// Optional override for Rayon thread pool size used by parallel traversals.
+    pub rayon_thread_pool_size: Option<usize>,
+
+    /// Minimum workload size before enabling parallel traversal algorithms.
+    pub parallel_traversal_threshold: usize,
 }
 
 impl Default for Config {
@@ -137,6 +143,8 @@ impl Default for Config {
             transaction_timeout_ms: None,
             auto_checkpoint_interval_ms: Some(30000),
             wal_size_warning_threshold_mb: 80,
+            rayon_thread_pool_size: None,
+            parallel_traversal_threshold: 1024,
         }
     }
 }
@@ -167,6 +175,8 @@ impl Config {
             transaction_timeout_ms: Some(300000),
             auto_checkpoint_interval_ms: Some(30000),
             wal_size_warning_threshold_mb: 80,
+            rayon_thread_pool_size: None,
+            parallel_traversal_threshold: 2048,
         }
     }
 
@@ -195,6 +205,8 @@ impl Config {
             transaction_timeout_ms: Some(600000),
             auto_checkpoint_interval_ms: Some(60000),
             wal_size_warning_threshold_mb: 160,
+            rayon_thread_pool_size: None,
+            parallel_traversal_threshold: 2048,
         }
     }
 
@@ -226,6 +238,8 @@ impl Config {
             transaction_timeout_ms: None,
             auto_checkpoint_interval_ms: None,
             wal_size_warning_threshold_mb: 400,
+            rayon_thread_pool_size: None,
+            parallel_traversal_threshold: 512,
         }
     }
 
@@ -257,6 +271,8 @@ impl Config {
             transaction_timeout_ms: Some(300000),
             auto_checkpoint_interval_ms: Some(30000),
             wal_size_warning_threshold_mb: 80,
+            rayon_thread_pool_size: None,
+            parallel_traversal_threshold: 2048,
         }
     }
 }

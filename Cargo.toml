@@ -21,8 +21,10 @@ rusqlite = { version = "0.31", optional = true }
 base64 = { version = "0.22", optional = true }
 lru = "0.12"
 memmap2 = "0.9"
+parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rayon = "1.7"
 
 [features]
 napi = ["dep:napi", "dep:napi-derive"]
@@ -65,6 +67,11 @@ harness = false
 [[bench]]
 name = "small_read_benchmark"
 harness = false
+
+[[bench]]
+name = "traversal_benchmark"
+harness = false
+required-features = ["benchmarks"]
 
 [dev-dependencies]
 sombra = { path = ".", features = ["benchmarks"] }
