@@ -1,0 +1,38 @@
+[package]
+name = "sombra-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sombra]
+path = ".."
+
+[[bin]]
+name = "deserialize_node"
+path = "fuzz_targets/deserialize_node.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "deserialize_edge"
+path = "fuzz_targets/deserialize_edge.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wal_recovery"
+path = "fuzz_targets/wal_recovery.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "btree_operations"
+path = "fuzz_targets/btree_operations.rs"
+test = false
+doc = false

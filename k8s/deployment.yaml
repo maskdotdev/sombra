@@ -1,0 +1,254 @@
+# Sombra Kubernetes Deployment
+# StatefulSet for persistent storage and stable network identity
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sombra
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sombra-config
+  namespace: sombra
+data:
+  # Application configuration
+  LOG_LEVEL: "info"
+  RUST_LOG: "sombra=info"
+  # Add your application-specific config here
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sombra-data
+  namespace: sombra
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd  # Adjust based on your cloud provider
+  # For AWS: gp3
+  # For GCP: pd-ssd
+  # For Azure: managed-premium
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sombra-app
+  namespace: sombra
+  labels:
+    app: sombra
+    version: "0.2.0"
+spec:
+  serviceName: sombra
+  replicas: 1  # Sombra is single-instance (no concurrent writers in v0.2.0)
+  selector:
+    matchLabels:
+      app: sombra
+  template:
+    metadata:
+      labels:
+        app: sombra
+        version: "0.2.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsNonRoot: true
+      
+      containers:
+      - name: sombra
+        image: sombra:0.2.0  # Build and push your application image
+        imagePullPolicy: IfNotPresent
+        
+        envFrom:
+        - configMapRef:
+            name: sombra-config
+        
+        # Your application command
+        # command: ["/usr/local/bin/your-app"]
+        # args: ["--database", "/data/sombra/graph.db"]
+        
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+        
+        # Liveness probe - checks if container is alive
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Readiness probe - checks if container is ready to serve traffic
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        
+        # Startup probe - for slow-starting containers
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30  # 5 minutes max startup time
+        
+        volumeMounts:
+        - name: data
+          mountPath: /data/sombra
+        
+        # Security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: sombra-data
+      
+      # Pod scheduling preferences
+      affinity:
+        # Prefer nodes with SSD storage
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - m5.large
+                - m5.xlarge
+                - c5.large
+      
+      # Tolerate taints for dedicated nodes
+      # tolerations:
+      # - key: "dedicated"
+      #   operator: "Equal"
+      #   value: "database"
+      #   effect: "NoSchedule"
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: sombra
+  namespace: sombra
+  labels:
+    app: sombra
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  - name: metrics
+    port: 9090
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: sombra
+
+---
+
+# Optional: Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sombra-ingress
+  namespace: sombra
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+  - hosts:
+    - sombra.example.com
+    secretName: sombra-tls
+  rules:
+  - host: sombra.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: sombra
+            port:
+              name: http
+
+---
+
+# ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sombra
+  namespace: sombra
+  labels:
+    app: sombra
+spec:
+  selector:
+    matchLabels:
+      app: sombra
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+
+# PodDisruptionBudget - ensure availability during cluster maintenance
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sombra-pdb
+  namespace: sombra
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sombra
