@@ -73,6 +73,11 @@ name = "traversal_benchmark"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "concurrency_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
 [dev-dependencies]
 sombra = { path = ".", features = ["benchmarks"] }
 
