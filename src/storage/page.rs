@@ -317,7 +317,7 @@ impl<'a> RecordPage<'a> {
         Ok((offset, end))
     }
 
-    fn record_header_at(&self, index: usize) -> Result<RecordHeader> {
+    pub fn record_header_at(&self, index: usize) -> Result<RecordHeader> {
         let offset = self.record_offset(index)? as usize;
         let limit = self.payload_limit()?;
         if offset + RECORD_HEADER_SIZE > limit {
