@@ -21,6 +21,8 @@ rusqlite = { version = "0.31", optional = true }
 base64 = { version = "0.22", optional = true }
 lru = "0.12"
 memmap2 = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [features]
 napi = ["dep:napi", "dep:napi-derive"]

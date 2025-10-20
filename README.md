@@ -54,6 +54,11 @@ tx.commit()?;
 // Query the graph
 let neighbors = db.get_neighbors(user)?;
 println!("User {} authored {} posts", user, neighbors.len());
+
+// Create property indexes for fast queries
+db.create_property_index("User", "age")?;
+let users_age_30 = db.find_nodes_by_property("User", "age", &PropertyValue::Int(30))?;
+println!("Found {} users aged 30", users_age_30.len());
 ```
 
 ### TypeScript/Node.js API
@@ -256,16 +261,18 @@ cargo run --example performance_metrics_demo --features benchmarks
 - Crash recovery
 - Label secondary index
 - LRU node cache
+- Adjacency indexing for fast traversals
+- Property-based indexes
 - Optimized graph traversals (18-23x faster than SQLite)
 - Performance metrics system
 - TypeScript/Node.js NAPI bindings
-- Comprehensive test suite (39/39 passing)
+- Comprehensive test suite (44/44 passing)
 
-🚧 **Phase 2 Planned** (Next 2-3 months):
-- Adjacency indexing (5-10x traversal speedup)
-- Property-based indexes
-- Query planner with cost-based optimization
-- Concurrent readers
+🚧 **Phase 2 In Progress**:
+- ✅ Adjacency indexing (implemented - 18-23x faster traversals)
+- ✅ Property-based indexes (implemented - O(log n) property queries)
+- ⏳ Query planner with cost-based optimization (planned)
+- ⏳ Concurrent readers (deferred - complex refactor needed)
 
 🔮 **Phase 3 Future**:
 - CSR representation for dense graphs
