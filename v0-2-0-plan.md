@@ -64,7 +64,7 @@ Sombra Production Readiness Plan v0.2.0
   Estimated Effort: 2 days
 
   ---
-  1.3 Add Data Integrity Verification ⏸️ DEFERRED TO v2
+  1.3 Add Data Integrity Verification 
 
   Priority: 🔴 CRITICALFiles: src/storage/page.rs, src/pager/mod.rs, src/storage/header.rs
 
@@ -96,7 +96,7 @@ Sombra Production Readiness Plan v0.2.0
   Estimated Effort: 1 day
 
   ---
-  📊 Phase 2: Observability & Operations (3-4 days) ⏸️ DEFERRED TO v2
+  📊 Phase 2: Observability & Operations (3-4 days) 
 
   Essential for production monitoring and debugging
 
@@ -263,7 +263,7 @@ Sombra Production Readiness Plan v0.2.0
   Estimated Effort: 1 day
 
   ---
-  📚 Phase 3: Documentation & Developer Experience (3-4 days) ⏸️ DEFERRED TO v2
+  📚 Phase 3: Documentation & Developer Experience (3-4 days) 
 
   Essential for adoption and maintenance
 
@@ -401,7 +401,7 @@ Acceptance Criteria:
 Estimated Effort: 1 day
 
   ---
-  🧪 Phase 4: Testing & Validation (3-4 days) ⏸️ DEFERRED TO v2
+  🧪 Phase 4: Testing & Validation (3-4 days) 
 
   Ensure production-grade reliability
 
@@ -524,7 +524,7 @@ Estimated Effort: 1 day
   Estimated Effort: 1 day
 
   ---
-  🚀 Phase 5: Release Preparation (2-3 days) ⏸️ DEFERRED TO v2
+  🚀 Phase 5: Release Preparation (2-3 days) 
 
   Final polish and release artifacts
 
