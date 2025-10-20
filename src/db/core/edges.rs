@@ -19,11 +19,11 @@ impl GraphDB {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
-        let source_ptr = *self
+        let source_ptr = self
             .node_index
             .get(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = *self
+        let target_ptr = self
             .node_index
             .get(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;
@@ -36,7 +36,7 @@ impl GraphDB {
         edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
 
         let payload = serialize_edge(&edge)?;
-        let record = encode_record(RecordKind::Edge, &payload);
+        let record = encode_record(RecordKind::Edge, &payload)?;
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
         self.edge_index.insert(edge_id, pointer);
@@ -75,11 +75,11 @@ impl GraphDB {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
-        let source_ptr = *self
+        let source_ptr = self
             .node_index
             .get(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = *self
+        let target_ptr = self
             .node_index
             .get(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;
@@ -92,7 +92,7 @@ impl GraphDB {
         edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
 
         let payload = serialize_edge(&edge)?;
-        let record = encode_record(RecordKind::Edge, &payload);
+        let record = encode_record(RecordKind::Edge, &payload)?;
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
         self.edge_index.insert(edge_id, pointer);
@@ -138,11 +138,11 @@ impl GraphDB {
             .ok_or(GraphError::NotFound("edge"))?;
         let edge = self.load_edge(edge_id)?;
 
-        let source_ptr = *self
+        let source_ptr = self
             .node_index
             .get(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = *self
+        let target_ptr = self
             .node_index
             .get(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;

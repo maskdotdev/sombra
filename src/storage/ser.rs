@@ -287,19 +287,20 @@ impl<'a> Cursor<'a> {
         Ok(&self.data[start..start + len])
     }
 
-    fn read_u32(&mut self) -> Result<u32> {
-        let bytes: [u8; 4] = self
-            .read_exact(4)?
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let slice = self.read_exact(N)?;
+        slice
             .try_into()
-            .expect("slice has exactly 4 bytes");
+            .map_err(|_| GraphError::Corruption("failed to read fixed-size field".into()))
+    }
+
+    fn read_u32(&mut self) -> Result<u32> {
+        let bytes: [u8; 4] = self.read_array()?;
         Ok(u32::from_le_bytes(bytes))
     }
 
     fn read_u64(&mut self) -> Result<u64> {
-        let bytes: [u8; 8] = self
-            .read_exact(8)?
-            .try_into()
-            .expect("slice has exactly 8 bytes");
+        let bytes: [u8; 8] = self.read_array()?;
         Ok(u64::from_le_bytes(bytes))
     }
 
@@ -330,17 +331,11 @@ impl<'a> Cursor<'a> {
                 }
             }
             TAG_INT => {
-                let bytes: [u8; 8] = self
-                    .read_exact(8)?
-                    .try_into()
-                    .expect("slice has exactly 8 bytes");
+                let bytes: [u8; 8] = self.read_array()?;
                 Ok(PropertyValue::Int(i64::from_le_bytes(bytes)))
             }
             TAG_FLOAT => {
-                let bytes: [u8; 8] = self
-                    .read_exact(8)?
-                    .try_into()
-                    .expect("slice has exactly 8 bytes");
+                let bytes: [u8; 8] = self.read_array()?;
                 Ok(PropertyValue::Float(f64::from_le_bytes(bytes)))
             }
             TAG_STRING => Ok(PropertyValue::String(self.read_string()?)),

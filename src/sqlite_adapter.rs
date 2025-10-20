@@ -1,6 +1,6 @@
 use crate::{Edge, Node, PropertyValue};
 use base64::Engine;
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{params, Connection, Error as SqliteError, Result as SqliteResult};
 
 pub struct SqliteGraphDB {
     conn: Connection,
@@ -57,8 +57,9 @@ impl SqliteGraphDB {
     }
 
     pub fn add_node(&mut self, node: Node) -> SqliteResult<u64> {
-        let labels_json = serde_json::to_string(&node.labels).unwrap();
-        let properties_json = self.properties_to_json(&node.properties);
+        let labels_json = serde_json::to_string(&node.labels)
+            .map_err(|err| SqliteError::ToSqlConversionFailure(err.into()))?;
+        let properties_json = self.properties_to_json(&node.properties)?;
 
         self.conn.execute(
             "INSERT INTO nodes (id, labels, properties) VALUES (?1, ?2, ?3)",
@@ -69,7 +70,7 @@ impl SqliteGraphDB {
     }
 
     pub fn add_edge(&mut self, edge: Edge) -> SqliteResult<u64> {
-        let properties_json = self.properties_to_json(&edge.properties);
+        let properties_json = self.properties_to_json(&edge.properties)?;
 
         self.conn.execute(
             "INSERT INTO edges (id, source_id, target_id, type_name, properties) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -277,7 +278,8 @@ impl SqliteGraphDB {
         let tx = self.conn.transaction()?;
 
         for node in nodes {
-            let labels_json = serde_json::to_string(&node.labels).unwrap();
+            let labels_json = serde_json::to_string(&node.labels)
+                .map_err(|err| SqliteError::ToSqlConversionFailure(err.into()))?;
             let properties_json = {
                 // Convert properties to JSON without borrowing self
                 let mut map = serde_json::Map::new();
@@ -365,12 +367,12 @@ impl SqliteGraphDB {
     fn properties_to_json(
         &self,
         properties: &std::collections::BTreeMap<String, PropertyValue>,
-    ) -> String {
+    ) -> SqliteResult<String> {
         let mut map = serde_json::Map::new();
         for (key, value) in properties {
             map.insert(key.clone(), self.property_value_to_json(value));
         }
-        serde_json::to_string(&map).unwrap_or_default()
+        serde_json::to_string(&map).map_err(|err| SqliteError::ToSqlConversionFailure(err.into()))
     }
 
     fn property_value_to_json(&self, value: &PropertyValue) -> serde_json::Value {

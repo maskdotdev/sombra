@@ -56,8 +56,25 @@ impl Wal {
         if len == 0 {
             wal.write_header()?;
         } else {
-            wal.validate_header()?;
-            wal.next_frame_number = wal.scan_frame_count()? + 1;
+            match wal.validate_header() {
+                Ok(()) => {
+                    match wal.scan_frame_count() {
+                        Ok(count) => {
+                            wal.next_frame_number = count + 1;
+                        }
+                        Err(_) => {
+                            wal.file.set_len(0)?;
+                            wal.write_header()?;
+                            wal.next_frame_number = 1;
+                        }
+                    }
+                }
+                Err(_) => {
+                    wal.file.set_len(0)?;
+                    wal.write_header()?;
+                    wal.next_frame_number = 1;
+                }
+            }
         }
 
         Ok(wal)
@@ -126,7 +143,12 @@ impl Wal {
         Ok(())
     }
 
+    pub(crate) fn size(&self) -> Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
     /// Replays frames into the provided closure. Returns the number of frames applied.
+    /// If the WAL is corrupted, it returns Ok(0) and truncates the WAL.
     pub(crate) fn replay<F>(&mut self, mut apply: F) -> Result<u32>
     where
         F: FnMut(PageId, &[u8]) -> Result<()>,
@@ -146,11 +168,17 @@ impl Wal {
             }
 
             let (page_id, frame_number, checksum, tx_id, flags) =
-                Self::decode_frame_header(&header_buf)?;
+                match Self::decode_frame_header(&header_buf) {
+                    Ok(header) => header,
+                    Err(_) => {
+                        self.reset()?;
+                        return Ok(0);
+                    }
+                };
+            
             if frame_number != expected_frame {
-                return Err(GraphError::Corruption(
-                    "WAL frame numbers out of sequence during recovery".into(),
-                ));
+                self.reset()?;
+                return Ok(0);
             }
 
             expected_frame = expected_frame
@@ -158,13 +186,14 @@ impl Wal {
                 .ok_or_else(|| GraphError::Corruption("WAL frame number overflow".into()))?;
 
             if !self.read_exact_or_eof(&mut page_buf)? {
-                return Err(GraphError::Corruption(
-                    "WAL contains partial frame payload".into(),
-                ));
+                self.reset()?;
+                return Ok(0);
             }
+            
             let computed = checksum_for(&page_buf);
             if computed != checksum {
-                return Err(GraphError::Corruption("WAL frame checksum mismatch".into()));
+                self.reset()?;
+                return Ok(0);
             }
 
             if (flags & FRAME_FLAG_COMMIT) != 0 {
@@ -287,11 +316,11 @@ impl Wal {
     fn decode_frame_header(
         buf: &[u8; WAL_FRAME_HEADER_SIZE],
     ) -> Result<(PageId, u32, u32, u64, u32)> {
-        let page_id = u32::from_le_bytes(buf[0..4].try_into().expect("slice is 4 bytes"));
-        let frame_number = u32::from_le_bytes(buf[4..8].try_into().expect("slice is 4 bytes"));
-        let checksum = u32::from_le_bytes(buf[8..12].try_into().expect("slice is 4 bytes"));
-        let tx_id = u64::from_le_bytes(buf[12..20].try_into().expect("slice is 8 bytes"));
-        let flags = u32::from_le_bytes(buf[20..24].try_into().expect("slice is 4 bytes"));
+        let page_id = Self::read_u32_le(buf, 0)?;
+        let frame_number = Self::read_u32_le(buf, 4)?;
+        let checksum = Self::read_u32_le(buf, 8)?;
+        let tx_id = Self::read_u64_le(buf, 12)?;
+        let flags = Self::read_u32_le(buf, 20)?;
         Ok((page_id, frame_number, checksum, tx_id, flags))
     }
 
@@ -310,6 +339,34 @@ impl Wal {
             read += bytes;
         }
         Ok(true)
+    }
+}
+
+impl Wal {
+    fn read_u32_le(buf: &[u8], offset: usize) -> Result<u32> {
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| GraphError::Corruption("u32 read offset overflow".into()))?;
+        let slice = buf.get(offset..end).ok_or_else(|| {
+            GraphError::Corruption(format!("Invalid u32 at WAL header offset {offset}"))
+        })?;
+        let bytes: [u8; 4] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to copy u32 bytes from WAL header".into())
+        })?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64_le(buf: &[u8], offset: usize) -> Result<u64> {
+        let end = offset
+            .checked_add(8)
+            .ok_or_else(|| GraphError::Corruption("u64 read offset overflow".into()))?;
+        let slice = buf.get(offset..end).ok_or_else(|| {
+            GraphError::Corruption(format!("Invalid u64 at WAL header offset {offset}"))
+        })?;
+        let bytes: [u8; 8] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to copy u64 bytes from WAL header".into())
+        })?;
+        Ok(u64::from_le_bytes(bytes))
     }
 }
 

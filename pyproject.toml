@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sombra"
-version = "0.1.28"
+version = "0.2.0"
 description = "A high-performance graph database with ACID transactions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,6 +31,9 @@ classifiers = [
 Homepage = "https://github.com/maskdotdev/sombra"
 Repository = "https://github.com/maskdotdev/sombra"
 Issues = "https://github.com/maskdotdev/sombra/issues"
+
+[project.scripts]
+sombra = "sombra._cli:main"
 
 [tool.maturin]
 features = ["python"]

@@ -99,6 +99,7 @@ impl GraphDB {
         self.node_index.clear();
         self.edge_index.clear();
         self.label_index.clear();
+        self.property_indexes.clear();
         self.node_cache.clear();
         self.outgoing_adjacency.clear();
         self.incoming_adjacency.clear();
@@ -216,6 +217,7 @@ impl GraphDB {
     fn rebuild_remaining_indexes(&mut self) -> Result<()> {
         self.edge_index.clear();
         self.label_index.clear();
+        self.property_indexes.clear();
         self.node_cache.clear();
         self.outgoing_adjacency.clear();
         self.incoming_adjacency.clear();

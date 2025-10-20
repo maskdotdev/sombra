@@ -8,7 +8,7 @@ use crate::pager::PageId;
 const MAGIC: &[u8; 8] = b"GRPHITE\0";
 const HEADER_REGION_SIZE: usize = 80;
 const VERSION_MAJOR: u16 = 1;
-const VERSION_MINOR: u16 = 0;
+const VERSION_MINOR: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -64,12 +64,11 @@ impl Header {
         }
 
         let page_size = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-        let next_node_id = u64::from_le_bytes(data[16..24].try_into().expect("slice is 8 bytes"));
-        let next_edge_id = u64::from_le_bytes(data[24..32].try_into().expect("slice is 8 bytes"));
+        let next_node_id = Self::read_u64(data, 16, 24)?;
+        let next_edge_id = Self::read_u64(data, 24, 32)?;
         let free_page_head = u32::from_le_bytes([data[32], data[33], data[34], data[35]]);
         let last_record_page = u32::from_le_bytes([data[36], data[37], data[38], data[39]]);
-        let last_committed_tx_id =
-            u64::from_le_bytes(data[40..48].try_into().expect("slice is 8 bytes"));
+        let last_committed_tx_id = Self::read_u64(data, 40, 48)?;
 
         let btree_index_page = if data.len() >= 56 {
             let page = u32::from_le_bytes([data[48], data[49], data[50], data[51]]);
@@ -127,5 +126,15 @@ impl Header {
         data[48..52].copy_from_slice(&self.btree_index_page.unwrap_or(0).to_le_bytes());
         data[52..56].copy_from_slice(&self.btree_index_size.to_le_bytes());
         Ok(())
+    }
+
+    fn read_u64(data: &[u8], start: usize, end: usize) -> Result<u64> {
+        let slice = data
+            .get(start..end)
+            .ok_or_else(|| GraphError::Corruption("header u64 field truncated".into()))?;
+        let bytes: [u8; 8] = slice
+            .try_into()
+            .map_err(|_| GraphError::Corruption("failed to parse u64 from header".into()))?;
+        Ok(u64::from_le_bytes(bytes))
     }
 }

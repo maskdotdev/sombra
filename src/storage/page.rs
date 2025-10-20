@@ -1,5 +1,7 @@
 use crate::error::{GraphError, Result};
+use crate::pager::PAGE_CHECKSUM_SIZE;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
+use std::convert::TryInto;
 
 const PAGE_HEADER_SIZE: usize = 16;
 const RECORD_COUNT_OFFSET: usize = 0;
@@ -13,12 +15,25 @@ pub struct RecordPage<'a> {
 
 impl<'a> RecordPage<'a> {
     pub fn from_bytes(data: &'a mut [u8]) -> Result<Self> {
-        if data.len() < PAGE_HEADER_SIZE {
+        if data.len() < PAGE_CHECKSUM_SIZE {
+            return Err(GraphError::Corruption(
+                "page smaller than checksum metadata region".into(),
+            ));
+        }
+        let payload_len = data.len() - PAGE_CHECKSUM_SIZE;
+        if payload_len < PAGE_HEADER_SIZE {
             return Err(GraphError::Corruption(
                 "page smaller than header size".into(),
             ));
         }
         Ok(Self { data })
+    }
+
+    fn payload_limit(&self) -> Result<usize> {
+        self.data
+            .len()
+            .checked_sub(PAGE_CHECKSUM_SIZE)
+            .ok_or_else(|| GraphError::Corruption("page smaller than checksum metadata".into()))
     }
 
     pub fn initialize(&mut self) -> Result<()> {
@@ -30,7 +45,7 @@ impl<'a> RecordPage<'a> {
     }
 
     pub fn page_size(&self) -> Result<u16> {
-        let len = self.data.len();
+        let len = self.payload_limit()?;
         if len > u16::MAX as usize {
             return Err(GraphError::InvalidArgument(
                 "page size exceeds u16::MAX".into(),
@@ -40,11 +55,7 @@ impl<'a> RecordPage<'a> {
     }
 
     pub fn record_count(&self) -> Result<u16> {
-        Ok(u16::from_le_bytes(
-            self.data[RECORD_COUNT_OFFSET..RECORD_COUNT_OFFSET + 2]
-                .try_into()
-                .expect("slice has exactly 2 bytes"),
-        ))
+        self.read_u16_at(RECORD_COUNT_OFFSET)
     }
 
     fn set_record_count(&mut self, value: u16) {
@@ -53,15 +64,12 @@ impl<'a> RecordPage<'a> {
     }
 
     pub fn free_space_offset(&self) -> Result<u16> {
-        Ok(u16::from_le_bytes(
-            self.data[FREE_SPACE_OFFSET_OFFSET..FREE_SPACE_OFFSET_OFFSET + 2]
-                .try_into()
-                .expect("slice has exactly 2 bytes"),
-        ))
+        self.read_u16_at(FREE_SPACE_OFFSET_OFFSET)
     }
 
     fn set_free_space_offset(&mut self, value: u16) -> Result<()> {
-        if value as usize > self.data.len() {
+        let limit = self.payload_limit()?;
+        if value as usize > limit {
             return Err(GraphError::InvalidArgument(
                 "free space offset beyond page size".into(),
             ));
@@ -72,11 +80,7 @@ impl<'a> RecordPage<'a> {
     }
 
     pub fn free_list_next(&self) -> Result<u32> {
-        Ok(u32::from_le_bytes(
-            self.data[FREE_LIST_NEXT_OFFSET..FREE_LIST_NEXT_OFFSET + 4]
-                .try_into()
-                .expect("slice has exactly 4 bytes"),
-        ))
+        self.read_u32_at(FREE_LIST_NEXT_OFFSET)
     }
 
     pub fn set_free_list_next(&mut self, page_id: u32) {
@@ -100,9 +104,15 @@ impl<'a> RecordPage<'a> {
     pub fn available_space(&self) -> Result<usize> {
         let free_offset = self.free_space_offset()? as usize;
         let dir_end = self.directory_end()?;
+        let limit = self.payload_limit()?;
         if free_offset < dir_end {
             return Err(GraphError::Corruption(
                 "free space offset precedes directory".into(),
+            ));
+        }
+        if free_offset > limit {
+            return Err(GraphError::Corruption(
+                "free space offset beyond payload region".into(),
             ));
         }
         Ok(free_offset - dir_end)
@@ -116,11 +126,7 @@ impl<'a> RecordPage<'a> {
             ));
         }
         let dir_pos = Self::directory_start() + index * 2;
-        Ok(u16::from_le_bytes(
-            self.data[dir_pos..dir_pos + 2]
-                .try_into()
-                .expect("slice has exactly 2 bytes"),
-        ))
+        self.read_u16_at(dir_pos)
     }
 
     fn set_record_offset(&mut self, index: usize, offset: u16) -> Result<()> {
@@ -131,13 +137,48 @@ impl<'a> RecordPage<'a> {
             ));
         }
         let dir_pos = Self::directory_start() + index * 2;
-        if dir_pos + 2 > self.data.len() {
+        let limit = self.payload_limit()?;
+        if dir_pos + 2 > limit {
             return Err(GraphError::InvalidArgument(
                 "directory position outside page".into(),
             ));
         }
         self.data[dir_pos..dir_pos + 2].copy_from_slice(&offset.to_le_bytes());
         Ok(())
+    }
+
+    fn read_u16_at(&self, offset: usize) -> Result<u16> {
+        let end = offset
+            .checked_add(2)
+            .ok_or_else(|| GraphError::Corruption("u16 read offset overflow".into()))?;
+        let limit = self.payload_limit()?;
+        if end > limit {
+            return Err(GraphError::Corruption(
+                "record page short read for u16".into(),
+            ));
+        }
+        let slice = &self.data[offset..end];
+        let bytes: [u8; 2] = slice
+            .try_into()
+            .map_err(|_| GraphError::Corruption("failed to read u16 from record page".into()))?;
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn read_u32_at(&self, offset: usize) -> Result<u32> {
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| GraphError::Corruption("u32 read offset overflow".into()))?;
+        let limit = self.payload_limit()?;
+        if end > limit {
+            return Err(GraphError::Corruption(
+                "record page short read for u32".into(),
+            ));
+        }
+        let slice = &self.data[offset..end];
+        let bytes: [u8; 4] = slice
+            .try_into()
+            .map_err(|_| GraphError::Corruption("failed to read u32 from record page".into()))?;
+        Ok(u32::from_le_bytes(bytes))
     }
 
     pub fn append_record(&mut self, record: &[u8]) -> Result<u16> {
@@ -255,20 +296,20 @@ impl<'a> RecordPage<'a> {
     }
 
     fn record_bounds(&self, offset: usize) -> Result<(usize, usize)> {
-        if offset >= self.data.len() {
+        let limit = self.payload_limit()?;
+        if offset >= limit {
             return Err(GraphError::Corruption("record offset outside page".into()));
         }
-        if offset + RECORD_HEADER_SIZE > self.data.len() {
+        if offset + RECORD_HEADER_SIZE > limit {
             return Err(GraphError::Corruption("record header truncated".into()));
         }
-        let payload_len_bytes: [u8; 4] = self.data[offset + 4..offset + RECORD_HEADER_SIZE]
-            .try_into()
-            .expect("slice has exactly 4 bytes");
-        let payload_len = u32::from_le_bytes(payload_len_bytes) as usize;
+        let header_slice = &self.data[offset..offset + RECORD_HEADER_SIZE];
+        let header = RecordHeader::from_bytes(header_slice)?;
+        let payload_len = header.payload_length as usize;
         let record_len = RECORD_HEADER_SIZE + payload_len;
         let padded_len = align_to_eight(record_len);
         let end = offset + padded_len;
-        if end > self.data.len() {
+        if end > limit {
             return Err(GraphError::Corruption(
                 "record extends past end of page".into(),
             ));
@@ -276,9 +317,10 @@ impl<'a> RecordPage<'a> {
         Ok((offset, end))
     }
 
-    fn record_header_at(&self, index: usize) -> Result<RecordHeader> {
+    pub fn record_header_at(&self, index: usize) -> Result<RecordHeader> {
         let offset = self.record_offset(index)? as usize;
-        if offset + RECORD_HEADER_SIZE > self.data.len() {
+        let limit = self.payload_limit()?;
+        if offset + RECORD_HEADER_SIZE > limit {
             return Err(GraphError::Corruption(
                 "record header extends beyond page".into(),
             ));
@@ -326,7 +368,7 @@ mod tests {
     }
 
     fn build_record(payload: &[u8]) -> Vec<u8> {
-        encode_record(RecordKind::Node, payload)
+        encode_record(RecordKind::Node, payload).expect("encode record")
     }
 
     #[test]
@@ -334,7 +376,8 @@ mod tests {
         let mut buf = PageBuffer::new(256);
         buf.with_page(|page| {
             page.initialize().expect("initialize");
-            assert_eq!(page.free_space_offset().unwrap(), 256);
+            let expected_offset = (256 - PAGE_CHECKSUM_SIZE) as u16;
+            assert_eq!(page.free_space_offset().unwrap(), expected_offset);
             assert_eq!(page.record_count().unwrap(), 0);
         });
     }

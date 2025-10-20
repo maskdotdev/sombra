@@ -24,7 +24,7 @@ impl GraphDB {
         node.first_incoming_edge_id = NULL_EDGE_ID;
 
         let payload = serialize_node(&node)?;
-        let record = encode_record(RecordKind::Node, &payload);
+        let record = encode_record(RecordKind::Node, &payload)?;
 
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
@@ -37,6 +37,8 @@ impl GraphDB {
                 .or_default()
                 .insert(node_id);
         }
+
+        self.update_property_indexes_on_node_add(node_id)?;
 
         self.node_cache.put(node_id, node.clone());
 
@@ -60,7 +62,7 @@ impl GraphDB {
         node.first_incoming_edge_id = NULL_EDGE_ID;
 
         let payload = serialize_node(&node)?;
-        let record = encode_record(RecordKind::Node, &payload);
+        let record = encode_record(RecordKind::Node, &payload)?;
 
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
@@ -73,6 +75,8 @@ impl GraphDB {
                 .or_default()
                 .insert(node_id);
         }
+
+        self.update_property_indexes_on_node_add(node_id)?;
 
         self.node_cache.put(node_id, node.clone());
 
@@ -93,7 +97,7 @@ impl GraphDB {
             node.first_incoming_edge_id = NULL_EDGE_ID;
 
             let payload = serialize_node(&node)?;
-            let record = encode_record(RecordKind::Node, &payload);
+            let record = encode_record(RecordKind::Node, &payload)?;
 
             let preferred = self.header.last_record_page;
             let pointer = self.insert_record(&record, preferred)?;
@@ -106,6 +110,8 @@ impl GraphDB {
                     .or_default()
                     .insert(node_id);
             }
+
+            self.update_property_indexes_on_node_add(node_id)?;
 
             self.node_cache.put(node_id, node.clone());
             self.header.last_record_page = Some(pointer.page_id);
@@ -137,7 +143,7 @@ impl GraphDB {
     }
 
     pub(crate) fn delete_node_internal(&mut self, node_id: NodeId) -> Result<()> {
-        let pointer = *self
+        let pointer = self
             .node_index
             .get(&node_id)
             .ok_or(GraphError::NotFound("node"))?;
@@ -177,6 +183,8 @@ impl GraphDB {
             }
         }
 
+        self.update_property_indexes_on_node_delete(node_id)?;
+
         self.node_cache.pop(&node_id);
 
         self.node_index.remove(&node_id);
@@ -194,7 +202,7 @@ impl GraphDB {
 
         self.metrics.cache_misses += 1;
 
-        let pointer = *self
+        let pointer = self
             .node_index
             .get(&node_id)
             .ok_or(GraphError::NotFound("node"))?;
@@ -216,7 +224,7 @@ impl GraphDB {
         self.node_index
             .range(start, end)
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -224,7 +232,7 @@ impl GraphDB {
         self.node_index
             .range_from(start)
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -232,7 +240,7 @@ impl GraphDB {
         self.node_index
             .range_to(end)
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect()
     }
 }

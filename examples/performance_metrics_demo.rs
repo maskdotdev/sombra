@@ -1,4 +1,4 @@
-use sombra::{data_generator::DataGenerator, Edge, GraphDB, Node};
+use sombra::{data_generator::DataGenerator, GraphDB};
 use tempfile::TempDir;
 
 fn main() {
