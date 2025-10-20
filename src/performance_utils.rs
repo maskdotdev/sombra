@@ -168,7 +168,12 @@ impl BenchmarkSuite {
         }
     }
 
-    pub fn run_benchmark<F, R>(&mut self, operation: String, count: u64, f: F) -> &BenchmarkResult
+    pub fn run_benchmark<F, R>(
+        &mut self,
+        operation: String,
+        count: u64,
+        f: F,
+    ) -> Option<&BenchmarkResult>
     where
         F: FnOnce() -> R,
     {
@@ -178,7 +183,7 @@ impl BenchmarkSuite {
         benchmark_result.memory_usage_mb = self.memory_tracker.current_usage_mb();
 
         self.results.push(benchmark_result);
-        self.results.last().unwrap()
+        self.results.last()
     }
 
     pub fn run_latency_benchmark<F, R>(
@@ -186,7 +191,7 @@ impl BenchmarkSuite {
         operation: String,
         count: u64,
         mut f: F,
-    ) -> &BenchmarkResult
+    ) -> Option<&BenchmarkResult>
     where
         F: FnMut() -> R,
     {
@@ -207,7 +212,7 @@ impl BenchmarkSuite {
             .with_memory(self.memory_tracker.current_usage_mb());
 
         self.results.push(benchmark_result);
-        self.results.last().unwrap()
+        self.results.last()
     }
 
     pub fn run_timed_benchmark<F, R>(
@@ -215,7 +220,7 @@ impl BenchmarkSuite {
         operation: String,
         duration_secs: u64,
         f: F,
-    ) -> &BenchmarkResult
+    ) -> Option<&BenchmarkResult>
     where
         F: Fn() -> R,
     {
@@ -232,7 +237,7 @@ impl BenchmarkSuite {
         benchmark_result.memory_usage_mb = self.memory_tracker.current_usage_mb();
 
         self.results.push(benchmark_result);
-        self.results.last().unwrap()
+        self.results.last()
     }
 
     pub fn results(&self) -> &[BenchmarkResult] {
