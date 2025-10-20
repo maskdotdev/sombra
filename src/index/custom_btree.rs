@@ -1,6 +1,7 @@
-use crate::error::Result;
+use crate::error::{GraphError, Result};
 use crate::model::NodeId;
 use crate::storage::RecordPointer;
+use std::convert::TryInto;
 
 const NODE_SIZE: usize = 256;
 const MIN_KEYS: usize = NODE_SIZE / 2;
@@ -206,15 +207,41 @@ impl BTreeNode {
     }
 
     fn borrow_from_left(&mut self, idx: usize) {
-        let parent_key = self.keys[idx - 1];
-        let parent_value = self.values[idx - 1];
+        if idx == 0 {
+            return;
+        }
+
+        let parent_key = match self.keys.get(idx - 1).copied() {
+            Some(key) => key,
+            None => return,
+        };
+        let parent_value = match self.values.get(idx - 1).copied() {
+            Some(value) => value,
+            None => return,
+        };
 
         let (left_part, right_part) = self.children.split_at_mut(idx);
-        let left_sibling = &mut left_part[idx - 1];
-        let child = &mut right_part[0];
+        let left_sibling = match left_part.get_mut(idx - 1) {
+            Some(node) => node,
+            None => return,
+        };
+        let child = match right_part.get_mut(0) {
+            Some(node) => node,
+            None => return,
+        };
 
-        let borrowed_key = left_sibling.keys.pop().unwrap();
-        let borrowed_value = left_sibling.values.pop().unwrap();
+        if left_sibling.keys.is_empty() || left_sibling.values.is_empty() {
+            return;
+        }
+
+        let borrowed_key = match left_sibling.keys.pop() {
+            Some(key) => key,
+            None => return,
+        };
+        let borrowed_value = match left_sibling.values.pop() {
+            Some(value) => value,
+            None => return,
+        };
         let borrowed_child = if !child.is_leaf {
             left_sibling.children.pop()
         } else {
@@ -224,8 +251,12 @@ impl BTreeNode {
         child.keys.insert(0, parent_key);
         child.values.insert(0, parent_value);
 
-        self.keys[idx - 1] = borrowed_key;
-        self.values[idx - 1] = borrowed_value;
+        if let Some(parent_key_slot) = self.keys.get_mut(idx - 1) {
+            *parent_key_slot = borrowed_key;
+        }
+        if let Some(parent_value_slot) = self.values.get_mut(idx - 1) {
+            *parent_value_slot = borrowed_value;
+        }
 
         if let Some(borrowed_child) = borrowed_child {
             child.children.insert(0, borrowed_child);
@@ -233,16 +264,36 @@ impl BTreeNode {
     }
 
     fn borrow_from_right(&mut self, idx: usize) {
-        let parent_key = self.keys[idx];
-        let parent_value = self.values[idx];
+        if idx >= self.keys.len() {
+            return;
+        }
+
+        let parent_key = match self.keys.get(idx).copied() {
+            Some(key) => key,
+            None => return,
+        };
+        let parent_value = match self.values.get(idx).copied() {
+            Some(value) => value,
+            None => return,
+        };
 
         let (left_part, right_part) = self.children.split_at_mut(idx + 1);
-        let child = &mut left_part[idx];
-        let right_sibling = &mut right_part[0];
+        let child = match left_part.get_mut(idx) {
+            Some(node) => node,
+            None => return,
+        };
+        let right_sibling = match right_part.get_mut(0) {
+            Some(node) => node,
+            None => return,
+        };
+
+        if right_sibling.keys.is_empty() || right_sibling.values.is_empty() {
+            return;
+        }
 
         let borrowed_key = right_sibling.keys.remove(0);
         let borrowed_value = right_sibling.values.remove(0);
-        let borrowed_child = if !child.is_leaf {
+        let borrowed_child = if !child.is_leaf && !right_sibling.children.is_empty() {
             Some(right_sibling.children.remove(0))
         } else {
             None
@@ -251,8 +302,12 @@ impl BTreeNode {
         child.keys.push(parent_key);
         child.values.push(parent_value);
 
-        self.keys[idx] = borrowed_key;
-        self.values[idx] = borrowed_value;
+        if let Some(parent_key_slot) = self.keys.get_mut(idx) {
+            *parent_key_slot = borrowed_key;
+        }
+        if let Some(parent_value_slot) = self.values.get_mut(idx) {
+            *parent_value_slot = borrowed_value;
+        }
 
         if let Some(borrowed_child) = borrowed_child {
             child.children.push(borrowed_child);
@@ -287,19 +342,26 @@ impl CustomBTree {
     }
 
     pub fn insert(&mut self, key: NodeId, value: RecordPointer) {
-        if let Some(root) = &mut self.root {
-            if root.is_full() {
+        let root_is_full = self.root.as_ref().is_some_and(|root| root.is_full());
+
+        if root_is_full {
+            if let Some(old_root) = self.root.take() {
                 let mut new_root = BTreeNode::new(false);
-                let old_root = self.root.take().unwrap();
                 new_root.children.push(old_root);
                 new_root.split_child(0);
                 new_root.insert_non_full(key, value);
                 self.root = Some(Box::new(new_root));
             } else {
-                root.insert_non_full(key, value);
+                self.root = Some(Box::new(BTreeNode::new(true)));
+                if let Some(root) = self.root.as_mut() {
+                    root.insert_non_full(key, value);
+                }
             }
-            self.size += 1;
+        } else if let Some(root) = self.root.as_mut() {
+            root.insert_non_full(key, value);
         }
+
+        self.size = self.size.saturating_add(1);
     }
 
     pub fn get(&self, key: &NodeId) -> Option<&RecordPointer> {
@@ -360,19 +422,26 @@ impl CustomBTree {
             return Ok(Self::new());
         }
 
-        let len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-        let mut tree = Self::new();
+        let len = Self::read_u64(data, 0)? as usize;
         let entry_size = 8 + 4 + 2;
+        let required = len
+            .checked_mul(entry_size)
+            .ok_or_else(|| GraphError::Corruption("CustomBTree entry overflow".into()))?;
+        if data.len() < 8 + required {
+            return Err(GraphError::Corruption("CustomBTree data truncated".into()));
+        }
+
+        let mut tree = Self::new();
 
         for i in 0..len {
             let offset = 8 + i * entry_size;
-            if offset + entry_size > data.len() {
-                break;
-            }
+            let entry = data
+                .get(offset..offset + entry_size)
+                .ok_or_else(|| GraphError::Corruption("CustomBTree entry exceeds buffer".into()))?;
 
-            let node_id = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-            let page_id = u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap());
-            let slot_index = u16::from_le_bytes(data[offset + 12..offset + 14].try_into().unwrap());
+            let node_id = Self::read_u64(entry, 0)?;
+            let page_id = Self::read_u32(entry, 8)?;
+            let slot_index = Self::read_u16(entry, 12)?;
 
             tree.insert(
                 node_id,
@@ -384,7 +453,6 @@ impl CustomBTree {
             );
         }
 
-        tree.size = len;
         Ok(tree)
     }
 
@@ -418,6 +486,47 @@ impl CustomBTree {
             }
         }
         removed
+    }
+}
+
+impl CustomBTree {
+    fn read_u16(buf: &[u8], offset: usize) -> Result<u16> {
+        let end = offset
+            .checked_add(2)
+            .ok_or_else(|| GraphError::Corruption("u16 offset overflow".into()))?;
+        let slice = buf
+            .get(offset..end)
+            .ok_or_else(|| GraphError::Corruption("Invalid u16 in CustomBTree data".into()))?;
+        let bytes: [u8; 2] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to read u16 from CustomBTree data".into())
+        })?;
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn read_u32(buf: &[u8], offset: usize) -> Result<u32> {
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| GraphError::Corruption("u32 offset overflow".into()))?;
+        let slice = buf
+            .get(offset..end)
+            .ok_or_else(|| GraphError::Corruption("Invalid u32 in CustomBTree data".into()))?;
+        let bytes: [u8; 4] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to read u32 from CustomBTree data".into())
+        })?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64(buf: &[u8], offset: usize) -> Result<u64> {
+        let end = offset
+            .checked_add(8)
+            .ok_or_else(|| GraphError::Corruption("u64 offset overflow".into()))?;
+        let slice = buf
+            .get(offset..end)
+            .ok_or_else(|| GraphError::Corruption("Invalid u64 in CustomBTree data".into()))?;
+        let bytes: [u8; 8] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to read u64 from CustomBTree data".into())
+        })?;
+        Ok(u64::from_le_bytes(bytes))
     }
 }
 

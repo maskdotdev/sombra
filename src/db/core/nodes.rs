@@ -24,7 +24,7 @@ impl GraphDB {
         node.first_incoming_edge_id = NULL_EDGE_ID;
 
         let payload = serialize_node(&node)?;
-        let record = encode_record(RecordKind::Node, &payload);
+        let record = encode_record(RecordKind::Node, &payload)?;
 
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
@@ -37,6 +37,8 @@ impl GraphDB {
                 .or_default()
                 .insert(node_id);
         }
+
+        self.update_property_indexes_on_node_add(node_id)?;
 
         self.node_cache.put(node_id, node.clone());
 
@@ -60,7 +62,7 @@ impl GraphDB {
         node.first_incoming_edge_id = NULL_EDGE_ID;
 
         let payload = serialize_node(&node)?;
-        let record = encode_record(RecordKind::Node, &payload);
+        let record = encode_record(RecordKind::Node, &payload)?;
 
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
@@ -73,6 +75,8 @@ impl GraphDB {
                 .or_default()
                 .insert(node_id);
         }
+
+        self.update_property_indexes_on_node_add(node_id)?;
 
         self.node_cache.put(node_id, node.clone());
 
@@ -93,7 +97,7 @@ impl GraphDB {
             node.first_incoming_edge_id = NULL_EDGE_ID;
 
             let payload = serialize_node(&node)?;
-            let record = encode_record(RecordKind::Node, &payload);
+            let record = encode_record(RecordKind::Node, &payload)?;
 
             let preferred = self.header.last_record_page;
             let pointer = self.insert_record(&record, preferred)?;
@@ -106,6 +110,8 @@ impl GraphDB {
                     .or_default()
                     .insert(node_id);
             }
+
+            self.update_property_indexes_on_node_add(node_id)?;
 
             self.node_cache.put(node_id, node.clone());
             self.header.last_record_page = Some(pointer.page_id);
@@ -176,6 +182,8 @@ impl GraphDB {
                 }
             }
         }
+
+        self.update_property_indexes_on_node_delete(node_id)?;
 
         self.node_cache.pop(&node_id);
 

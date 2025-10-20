@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 pub type NodeId = u64;
@@ -13,6 +14,19 @@ pub enum PropertyValue {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
+}
+
+impl PropertyValue {
+    pub fn partial_cmp_value(&self, other: &PropertyValue) -> Option<Ordering> {
+        match (self, other) {
+            (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a.partial_cmp(b),
+            (PropertyValue::Int(a), PropertyValue::Int(b)) => a.partial_cmp(b),
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => a.partial_cmp(b),
+            (PropertyValue::String(a), PropertyValue::String(b)) => a.partial_cmp(b),
+            (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => a.partial_cmp(b),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

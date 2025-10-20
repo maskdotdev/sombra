@@ -1,7 +1,13 @@
-use crate::error::Result;
+use crate::error::{GraphError, Result};
 use crate::model::NodeId;
 use crate::storage::RecordPointer;
 use std::collections::HashMap;
+use std::convert::{TryFrom, TryInto};
+
+const BTREE_MAGIC: &[u8; 4] = b"BIDX";
+const BTREE_VERSION: u16 = 1;
+const BTREE_HEADER_SIZE: usize = 8; // magic (4) + version (2) + reserved (2)
+const ENTRY_SIZE: usize = 8 + 4 + 2 + 2;
 
 #[derive(Debug, Clone)]
 pub struct BTreeIndex {
@@ -82,8 +88,13 @@ impl BTreeIndex {
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        let len = self.root.len() as u64;
+        let len = u64::try_from(self.root.len()).map_err(|_| {
+            GraphError::Corruption("Too many entries to serialize BTree index".into())
+        })?;
+        let mut buf = Vec::with_capacity(BTREE_HEADER_SIZE + 8 + (ENTRY_SIZE * self.root.len()));
+        buf.extend_from_slice(BTREE_MAGIC);
+        buf.extend_from_slice(&BTREE_VERSION.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
         buf.extend_from_slice(&len.to_le_bytes());
 
         for (&node_id, &pointer) in &self.root {
@@ -97,45 +108,54 @@ impl BTreeIndex {
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        if data.len() < 8 {
+        if data.is_empty() {
             return Ok(Self::new());
         }
 
-        let len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+        if data.len() < BTREE_HEADER_SIZE + 8 || &data[..BTREE_MAGIC.len()] != BTREE_MAGIC {
+            return Err(GraphError::Corruption(
+                "BTree index missing magic header".into(),
+            ));
+        }
+
+        let version = Self::read_u16_le(data, 4)?;
+        if version != BTREE_VERSION {
+            return Err(GraphError::Corruption(format!(
+                "Unsupported BTree index format version {version}"
+            )));
+        }
+
+        let mut cursor = BTREE_HEADER_SIZE;
+        let len_u64 = Self::read_u64_le(data, cursor)?;
+        let len: usize = usize::try_from(len_u64).map_err(|_| {
+            GraphError::Corruption("BTree index length exceeds platform limits".into())
+        })?;
+        cursor += 8;
+
+        let remaining = data.len().saturating_sub(cursor);
+        let required = len
+            .checked_mul(ENTRY_SIZE)
+            .ok_or_else(|| GraphError::Corruption("BTree index entry size overflow".into()))?;
+        if remaining < required {
+            return Err(GraphError::Corruption("BTree index data truncated".into()));
+        }
+
         let mut root = HashMap::with_capacity(len);
-        let entry_size = 8 + 4 + 2 + 2;
-        let old_entry_size = 8 + 4 + 2;
 
         for i in 0..len {
-            let offset = 8 + i * entry_size;
-            if offset + entry_size > data.len() {
-                let old_offset = 8 + i * old_entry_size;
-                if old_offset + old_entry_size <= data.len() {
-                    let node_id =
-                        u64::from_le_bytes(data[old_offset..old_offset + 8].try_into().unwrap());
-                    let page_id = u32::from_le_bytes(
-                        data[old_offset + 8..old_offset + 12].try_into().unwrap(),
-                    );
-                    let slot_index = u16::from_le_bytes(
-                        data[old_offset + 12..old_offset + 14].try_into().unwrap(),
-                    );
-                    root.insert(
-                        node_id,
-                        RecordPointer {
-                            page_id,
-                            slot_index,
-                            byte_offset: 0,
-                        },
-                    );
-                }
-                break;
+            let offset = cursor
+                .checked_add(i.saturating_mul(ENTRY_SIZE))
+                .ok_or_else(|| GraphError::Corruption("BTree index offset overflow".into()))?;
+            if offset + ENTRY_SIZE > data.len() {
+                return Err(GraphError::Corruption(
+                    "BTree index entry extends beyond buffer".into(),
+                ));
             }
 
-            let node_id = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-            let page_id = u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap());
-            let slot_index = u16::from_le_bytes(data[offset + 12..offset + 14].try_into().unwrap());
-            let byte_offset =
-                u16::from_le_bytes(data[offset + 14..offset + 16].try_into().unwrap());
+            let node_id = Self::read_u64_le(data, offset)?;
+            let page_id = Self::read_u32_le(data, offset + 8)?;
+            let slot_index = Self::read_u16_le(data, offset + 12)?;
+            let byte_offset = Self::read_u16_le(data, offset + 14)?;
 
             root.insert(
                 node_id,
@@ -148,6 +168,45 @@ impl BTreeIndex {
         }
 
         Ok(Self { root })
+    }
+
+    fn read_u16_le(buf: &[u8], offset: usize) -> Result<u16> {
+        let end = offset
+            .checked_add(2)
+            .ok_or_else(|| GraphError::Corruption("u16 read offset overflow".into()))?;
+        let slice = buf.get(offset..end).ok_or_else(|| {
+            GraphError::Corruption(format!("Invalid u16 at BTree offset {offset}"))
+        })?;
+        let bytes: [u8; 2] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to copy u16 bytes from BTree data".into())
+        })?;
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn read_u32_le(buf: &[u8], offset: usize) -> Result<u32> {
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| GraphError::Corruption("u32 read offset overflow".into()))?;
+        let slice = buf.get(offset..end).ok_or_else(|| {
+            GraphError::Corruption(format!("Invalid u32 at BTree offset {offset}"))
+        })?;
+        let bytes: [u8; 4] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to copy u32 bytes from BTree data".into())
+        })?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64_le(buf: &[u8], offset: usize) -> Result<u64> {
+        let end = offset
+            .checked_add(8)
+            .ok_or_else(|| GraphError::Corruption("u64 read offset overflow".into()))?;
+        let slice = buf.get(offset..end).ok_or_else(|| {
+            GraphError::Corruption(format!("Invalid u64 at BTree offset {offset}"))
+        })?;
+        let bytes: [u8; 8] = slice.try_into().map_err(|_| {
+            GraphError::Corruption("Failed to copy u64 bytes from BTree data".into())
+        })?;
+        Ok(u64::from_le_bytes(bytes))
     }
 }
 
@@ -354,6 +413,47 @@ mod tests {
         assert_eq!(deserialized.len(), 1000);
         for i in 0..1000 {
             assert_eq!(deserialized.get(&i), index.get(&i));
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_version() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(BTREE_MAGIC);
+        bytes.extend_from_slice(&(BTREE_VERSION + 1).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+
+        let err = BTreeIndex::deserialize(&bytes).expect_err("unsupported version should error");
+        match err {
+            GraphError::Corruption(message) => {
+                assert!(
+                    message.contains("Unsupported BTree index format version"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected corruption error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_detects_truncated_payload() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(BTREE_MAGIC);
+        bytes.extend_from_slice(&BTREE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // Only partial entry (8 bytes)
+
+        let err = BTreeIndex::deserialize(&bytes).expect_err("truncated data should error");
+        match err {
+            GraphError::Corruption(message) => {
+                assert!(
+                    message.contains("truncated") || message.contains("extends beyond"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected corruption error, got {other:?}"),
         }
     }
 }

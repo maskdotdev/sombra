@@ -36,7 +36,7 @@ impl GraphDB {
         edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
 
         let payload = serialize_edge(&edge)?;
-        let record = encode_record(RecordKind::Edge, &payload);
+        let record = encode_record(RecordKind::Edge, &payload)?;
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
         self.edge_index.insert(edge_id, pointer);
@@ -92,7 +92,7 @@ impl GraphDB {
         edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
 
         let payload = serialize_edge(&edge)?;
-        let record = encode_record(RecordKind::Edge, &payload);
+        let record = encode_record(RecordKind::Edge, &payload)?;
         let preferred = self.header.last_record_page;
         let pointer = self.insert_record(&record, preferred)?;
         self.edge_index.insert(edge_id, pointer);

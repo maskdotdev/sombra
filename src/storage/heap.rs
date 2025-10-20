@@ -1,5 +1,5 @@
 use crate::error::{GraphError, Result};
-use crate::pager::{PageId, Pager};
+use crate::pager::{PageId, Pager, PAGE_CHECKSUM_SIZE};
 use crate::storage::page::RecordPage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,7 +54,17 @@ impl<'a> RecordStore<'a> {
     {
         let page = self.pager.fetch_page(pointer.page_id)?;
         let offset = pointer.byte_offset as usize;
-        let slice = &page.data[offset..];
+        let payload_end = page
+            .data
+            .len()
+            .checked_sub(PAGE_CHECKSUM_SIZE)
+            .ok_or_else(|| GraphError::Corruption("page too small for checksum".into()))?;
+        if offset >= payload_end {
+            return Err(GraphError::Corruption(
+                "record offset beyond payload".into(),
+            ));
+        }
+        let slice = &page.data[offset..payload_end];
         if slice.len() < 8 {
             return Err(GraphError::Corruption("record header truncated".into()));
         }
@@ -72,16 +82,26 @@ impl<'a> RecordStore<'a> {
     {
         let page = self.pager.fetch_page(pointer.page_id)?;
         let offset = pointer.byte_offset as usize;
-        let slice = &page.data[offset..];
+        let payload_end = page
+            .data
+            .len()
+            .checked_sub(PAGE_CHECKSUM_SIZE)
+            .ok_or_else(|| GraphError::Corruption("page too small for checksum".into()))?;
+        if offset >= payload_end {
+            return Err(GraphError::Corruption(
+                "record offset beyond payload".into(),
+            ));
+        }
+        let slice = &mut page.data[offset..payload_end];
         if slice.len() < 8 {
             return Err(GraphError::Corruption("record header truncated".into()));
         }
         let payload_len = u32::from_le_bytes([slice[4], slice[5], slice[6], slice[7]]) as usize;
         let record_len = 8 + payload_len;
-        if page.data.len() < offset + record_len {
+        if record_len > slice.len() {
             return Err(GraphError::Corruption("record extends past page".into()));
         }
-        let result = f(&mut page.data[offset..offset + record_len])?;
+        let result = f(&mut slice[..record_len])?;
         page.dirty = true;
         Ok(result)
     }
@@ -137,7 +157,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn build_record(payload: &[u8]) -> Vec<u8> {
-        encode_record(RecordKind::Node, payload)
+        encode_record(RecordKind::Node, payload).expect("encode record")
     }
 
     #[test]
