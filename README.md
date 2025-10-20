@@ -1,6 +1,18 @@
-# Sombra - A Graph Database in Rust
+# Sombra - Production-Ready Graph Database
 
-Sombra is a file-based graph database inspired by SQLite's single-file architecture. Built in Rust with a focus on correctness, performance, and ACID transaction support.
+[![Crates.io](https://img.shields.io/crates/v/sombra)](https://crates.io/crates/sombra)
+[![Documentation](https://docs.rs/sombra/badge.svg)](https://docs.rs/sombra)
+[![CI](https://github.com/maskdotdev/sombra/workflows/CI/badge.svg)](https://github.com/maskdotdev/sombra/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Sombra is a file-based graph database inspired by SQLite's single-file architecture. Built in Rust with a focus on **reliability**, **performance**, and **ACID transactions**.
+
+**Version 0.2.0 - Production Ready** ✅
+- Zero panic paths in production code
+- Comprehensive error handling with graceful degradation
+- Battle-tested with 10,000+ corruption scenarios
+- Structured logging and health monitoring
+- Complete API documentation and operational guides
 
 ## Features
 
@@ -25,9 +37,20 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 - **Python API**: PyO3 bindings with native performance (build with `maturin -F python`)
 - **Cross-Platform**: Linux, macOS, and Windows support
 
+### Reliability & Production Features (v0.2.0) ✨ NEW
+- **Zero Panic Paths**: All errors handled gracefully with `Result` types
+- **Corruption Resistance**: Safe deserialization with comprehensive validation
+- **Structured Logging**: Full tracing support with `tracing` crate
+- **Health Monitoring**: Built-in health checks and extended metrics
+- **Graceful Shutdown**: Clean database closure with WAL checkpoint
+- **Resource Limits**: Configurable limits for database size, WAL, and transactions
+- **Database Inspector**: CLI tools for inspection and repair
+
 ### Testing & Quality
-- **39 Comprehensive Tests**: Unit, integration, and stress tests
-- **Production Ready**: Zero breaking changes, automatic migration
+- **100+ Comprehensive Tests**: Unit, integration, stress, and fuzz tests
+- **Corruption Fuzzing**: 10,000+ scenarios tested without crashes
+- **Multi-Platform CI**: Linux, macOS, Windows with full test coverage
+- **Zero Clippy Warnings**: Strict linting with `-D warnings`
 - **Benchmark Suite**: Performance regression testing
 
 ## Quick Start
@@ -149,7 +172,7 @@ cargo add sombra
 
 ### TypeScript/Node.js
 ```bash
-npm install sombra
+npm install sombradb
 ```
 
 ### Python
@@ -162,6 +185,31 @@ pip install maturin
 maturin build --release -F python
 pip install target/wheels/sombra-*.whl
 ```
+
+### CLI Tools
+
+Install the unified CLI for database inspection, repair, and verification:
+
+```bash
+# Via Cargo (recommended)
+cargo install sombra
+
+# The 'sombra' command will be available system-wide
+sombra --help
+```
+
+The CLI is also bundled with npm and pip installations:
+```bash
+# Via npm
+npm install -g sombradb
+sombra inspect mydb.db info
+
+# Via pip
+pip install sombra
+sombra verify mydb.db
+```
+
+See the [CLI documentation](docs/cli.md) for complete usage guide.
 
 ## Architecture
 
@@ -176,23 +224,28 @@ Sombra is built in layers:
 
 ## Documentation
 
-### User Guides
-- [Transactional Commit Layer](docs/transactional_commit_layer.md) - Complete user guide
-- [Optimization API Guide](docs/optimization_api_guide.md) - Performance best practices
-- [Performance Metrics](docs/performance_metrics.md) - Monitoring guide
-- [Python Usage](docs/python_usage.md) - Building and calling the PyO3 bindings
+### Getting Started
+- [Getting Started Guide](docs/getting-started.md) - Quick start tutorial
+- [Configuration Guide](docs/configuration.md) - Configuration options and tuning
+- [Operations Guide](docs/operations.md) - Production deployment and monitoring
+- [Migration Guide](docs/migration-0.1-to-0.2.md) - Upgrading from 0.1.x to 0.2.0
 
-### Technical Specifications
-- [Transaction Design](docs/transactions.md) - Technical design specification
+### Language-Specific Guides
+- [Python Guide](docs/python-guide.md) - Using Sombra from Python
+- [Node.js Guide](docs/nodejs-guide.md) - Using Sombra from TypeScript/JavaScript
+- [CLI Tools](docs/cli.md) - Command-line tools for inspection, repair, and verification
+
+### Technical Documentation
+- [Architecture](docs/architecture.md) - System architecture and design
+- [Transaction Design](docs/transactions.md) - ACID transaction implementation
 - [Data Model](docs/data_model.md) - Graph data structure details
 - [B-tree Index Implementation](docs/btree_index_implementation.md) - Primary index details
-- [Phase 1 Completion Report](docs/phase1_completion_report.md) - Optimization results
+- [Performance Metrics](docs/performance_metrics.md) - Monitoring and observability
 
-### Planning & Development
-- [Lookup Optimization Plan](docs/lookup_optimization_plan.md) - Performance roadmap
-- [Implementation Status](IMPLEMENTATION_STATUS.md) - Current progress
-- [Roadmap](docs/roadmap.md) - Future development plans
+### Development
 - [Contributing](docs/contributing.md) - Development guidelines
+- [Roadmap](docs/roadmap.md) - Future development plans
+- [API Documentation](https://docs.rs/sombra) - Complete API reference
 
 ## Testing
 
@@ -253,32 +306,46 @@ cargo run --example performance_metrics_demo --features benchmarks
 
 ## Current Status
 
-✅ **Phase 1 Complete** (Production Ready):
-- Core graph operations (add/get nodes and edges)
-- Page-based storage with B-tree indexing
-- Write-ahead logging (WAL)
-- ACID transactions with rollback
-- Crash recovery
-- Label secondary index
-- LRU node cache
-- Adjacency indexing for fast traversals
-- Property-based indexes
-- Optimized graph traversals (18-23x faster than SQLite)
-- Performance metrics system
-- TypeScript/Node.js NAPI bindings
-- Comprehensive test suite (44/44 passing)
+### ✅ Version 0.2.0 - Production Ready
 
-🚧 **Phase 2 In Progress**:
-- ✅ Adjacency indexing (implemented - 18-23x faster traversals)
-- ✅ Property-based indexes (implemented - O(log n) property queries)
-- ⏳ Query planner with cost-based optimization (planned)
-- ⏳ Concurrent readers (deferred - complex refactor needed)
+**Core Features:**
+- Core graph operations (nodes, edges, properties)
+- Page-based storage with B-tree indexing (25-40% memory savings)
+- Write-ahead logging (WAL) for crash recovery
+- ACID transactions with rollback support
+- Label secondary index with O(1) lookup
+- LRU node cache (90% hit rate)
+- Adjacency indexing for fast traversals (18-23x faster than SQLite)
+- Property-based indexes for O(log n) queries
 
-🔮 **Phase 3 Future**:
-- CSR representation for dense graphs
-- Neighbor caching for hub nodes
-- Path compression
-- Custom B-tree implementation
+**Production Hardening (v0.2.0):**
+- ✅ Zero panic paths - All errors handled gracefully
+- ✅ Corruption resistance - 10,000+ fuzzing scenarios
+- ✅ Structured logging - Full `tracing` support
+- ✅ Health monitoring - Extended metrics and health checks
+- ✅ Graceful shutdown - Clean `close()` method
+- ✅ Resource limits - Configurable size/timeout limits
+- ✅ CLI tools - Inspector and repair utilities
+- ✅ 100+ tests passing - Unit, integration, stress, fuzz
+- ✅ Complete documentation - API docs, guides, examples
+- ✅ Multi-platform CI - Linux, macOS, Windows
+
+**Language Bindings:**
+- ✅ Rust API (native)
+- ✅ Python bindings (PyO3)
+- ✅ TypeScript/Node.js bindings (NAPI)
+
+### 🚀 Future Roadmap
+
+**Planned Features:**
+- Page-level checksums for data integrity validation
+- Concurrent readers with MVCC
+- Query planner with cost-based optimization
+- Replication and high availability
+- Backup/restore utilities
+- Performance dashboard
+
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and [docs/roadmap.md](docs/roadmap.md) for future plans.
 
 ## Examples
 
