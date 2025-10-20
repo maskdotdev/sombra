@@ -39,6 +39,14 @@ impl PerformanceMetrics {
         }
     }
 
+    pub fn inc_cache_hits(&mut self) {
+        self.cache_hits += 1;
+    }
+
+    pub fn inc_cache_misses(&mut self) {
+        self.cache_misses += 1;
+    }
+
     pub fn cache_hit_rate(&self) -> f64 {
         let total = self.cache_hits + self.cache_misses;
         if total == 0 {

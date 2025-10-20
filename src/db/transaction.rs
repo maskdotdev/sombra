@@ -256,6 +256,14 @@ impl<'db> Transaction<'db> {
         self.db.get_node(node_id)
     }
 
+    pub fn get_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
+        self.db.load_edge(edge_id)
+    }
+
+    pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
+        self.db.get_nodes_by_label(label)
+    }
+
     /// Retrieves all neighboring nodes for a given node.
     ///
     /// Returns both incoming and outgoing neighbors. The result includes

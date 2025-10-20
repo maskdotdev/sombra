@@ -56,8 +56,25 @@ impl Wal {
         if len == 0 {
             wal.write_header()?;
         } else {
-            wal.validate_header()?;
-            wal.next_frame_number = wal.scan_frame_count()? + 1;
+            match wal.validate_header() {
+                Ok(()) => {
+                    match wal.scan_frame_count() {
+                        Ok(count) => {
+                            wal.next_frame_number = count + 1;
+                        }
+                        Err(_) => {
+                            wal.file.set_len(0)?;
+                            wal.write_header()?;
+                            wal.next_frame_number = 1;
+                        }
+                    }
+                }
+                Err(_) => {
+                    wal.file.set_len(0)?;
+                    wal.write_header()?;
+                    wal.next_frame_number = 1;
+                }
+            }
         }
 
         Ok(wal)
@@ -131,6 +148,7 @@ impl Wal {
     }
 
     /// Replays frames into the provided closure. Returns the number of frames applied.
+    /// If the WAL is corrupted, it returns Ok(0) and truncates the WAL.
     pub(crate) fn replay<F>(&mut self, mut apply: F) -> Result<u32>
     where
         F: FnMut(PageId, &[u8]) -> Result<()>,
@@ -150,11 +168,17 @@ impl Wal {
             }
 
             let (page_id, frame_number, checksum, tx_id, flags) =
-                Self::decode_frame_header(&header_buf)?;
+                match Self::decode_frame_header(&header_buf) {
+                    Ok(header) => header,
+                    Err(_) => {
+                        self.reset()?;
+                        return Ok(0);
+                    }
+                };
+            
             if frame_number != expected_frame {
-                return Err(GraphError::Corruption(
-                    "WAL frame numbers out of sequence during recovery".into(),
-                ));
+                self.reset()?;
+                return Ok(0);
             }
 
             expected_frame = expected_frame
@@ -162,13 +186,14 @@ impl Wal {
                 .ok_or_else(|| GraphError::Corruption("WAL frame number overflow".into()))?;
 
             if !self.read_exact_or_eof(&mut page_buf)? {
-                return Err(GraphError::Corruption(
-                    "WAL contains partial frame payload".into(),
-                ));
+                self.reset()?;
+                return Ok(0);
             }
+            
             let computed = checksum_for(&page_buf);
             if computed != checksum {
-                return Err(GraphError::Corruption("WAL frame checksum mismatch".into()));
+                self.reset()?;
+                return Ok(0);
             }
 
             if (flags & FRAME_FLAG_COMMIT) != 0 {

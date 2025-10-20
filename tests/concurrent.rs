@@ -1,5 +1,6 @@
 use sombra::{Edge, GraphDB, Node, Result};
-use std::sync::{Arc, Barrier, Mutex};
+use parking_lot::Mutex;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -12,24 +13,26 @@ const CONCURRENT_NODES: usize = NUM_THREADS * OPERATIONS_PER_THREAD;
 fn concurrent_node_insertion() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    let path = Arc::new(path);
+    
+    // Open database once and share it across threads with proper synchronization
+    let db = GraphDB::open(&path)?;
+    let db = Arc::new(Mutex::new(db));
 
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
 
     for thread_id in 0..NUM_THREADS {
-        let path_clone = Arc::clone(&path);
+        let db_clone = Arc::clone(&db);
         let barrier_clone = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || -> Result<Vec<u64>> {
             barrier_clone.wait();
 
-            let mut db = GraphDB::open(&*path_clone)?;
             let mut node_ids = Vec::new();
 
             for i in 0..OPERATIONS_PER_THREAD {
                 let node = Node::new((thread_id * OPERATIONS_PER_THREAD + i) as u64);
-                let node_id = db.add_node(node)?;
+                let node_id = db_clone.lock().add_node(node)?;
                 node_ids.push(node_id);
             }
 
@@ -46,12 +49,11 @@ fn concurrent_node_insertion() -> Result<()> {
     }
 
     // Verify all nodes were created
-    let mut db = GraphDB::open(&*path)?;
     assert_eq!(all_node_ids.len(), CONCURRENT_NODES);
 
     // Verify each node exists and has correct data
     for &node_id in &all_node_ids {
-        let node = db.get_node(node_id)?;
+        let _node = db.lock().get_node(node_id)?;
         assert!(node_id <= CONCURRENT_NODES as u64);
     }
 
@@ -62,34 +64,30 @@ fn concurrent_node_insertion() -> Result<()> {
 fn concurrent_edge_creation() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    let path = Arc::new(path);
 
     // Create a central hub node first
-    let hub_id;
-    {
-        let mut db = GraphDB::open(&*path)?;
-        hub_id = db.add_node(Node::new(9999))?;
-    }
-
+    let mut db = GraphDB::open(&path)?;
+    let hub_id = db.add_node(Node::new(9999))?;
+    
+    let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
 
     for thread_id in 0..NUM_THREADS {
-        let path_clone = Arc::clone(&path);
+        let db_clone = Arc::clone(&db);
         let barrier_clone = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || -> Result<Vec<u64>> {
             barrier_clone.wait();
 
-            let mut db = GraphDB::open(&*path_clone)?;
             let mut edge_ids = Vec::new();
 
             for i in 0..OPERATIONS_PER_THREAD {
                 let node = Node::new((thread_id * OPERATIONS_PER_THREAD + i) as u64);
-                let node_id = db.add_node(node)?;
+                let node_id = db_clone.lock().add_node(node)?;
 
                 let edge = Edge::new(0, hub_id, node_id, "connect");
-                let edge_id = db.add_edge(edge)?;
+                let edge_id = db_clone.lock().add_edge(edge)?;
                 edge_ids.push(edge_id);
             }
 
@@ -106,11 +104,10 @@ fn concurrent_edge_creation() -> Result<()> {
     }
 
     // Verify all edges were created
-    let mut db = GraphDB::open(&*path)?;
     assert_eq!(all_edge_ids.len(), CONCURRENT_NODES);
 
     // Verify hub node has all neighbors
-    let neighbors = db.get_neighbors(hub_id)?;
+    let neighbors = db.lock().get_neighbors(hub_id)?;
     assert_eq!(neighbors.len(), CONCURRENT_NODES);
 
     Ok(())
@@ -120,43 +117,40 @@ fn concurrent_edge_creation() -> Result<()> {
 fn concurrent_read_write_operations() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    let path = Arc::new(path);
 
     // Pre-populate with some data
     let initial_node_count = 50;
-    {
-        let mut db = GraphDB::open(&*path)?;
-        for i in 0..initial_node_count {
-            db.add_node(Node::new(i as u64))?;
-        }
+    let mut db = GraphDB::open(&path)?;
+    for i in 0..initial_node_count {
+        db.add_node(Node::new(i as u64))?;
     }
-
+    
+    let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
 
     // Half threads write, half read
     for thread_id in 0..NUM_THREADS {
-        let path_clone = Arc::clone(&path);
+        let db_clone = Arc::clone(&db);
         let barrier_clone = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || -> Result<usize> {
             barrier_clone.wait();
 
-            let mut db = GraphDB::open(&*path_clone)?;
             let mut operations = 0;
 
             if thread_id < NUM_THREADS / 2 {
                 // Writer threads
                 for i in 0..OPERATIONS_PER_THREAD {
                     let node = Node::new((thread_id * OPERATIONS_PER_THREAD + i + 1000) as u64);
-                    db.add_node(node)?;
+                    db_clone.lock().add_node(node)?;
                     operations += 1;
                 }
             } else {
                 // Reader threads
                 for i in 0..OPERATIONS_PER_THREAD {
                     let node_id = (i % initial_node_count + 1) as u64;
-                    if db.get_node(node_id).is_ok() {
+                    if db_clone.lock().get_node(node_id).is_ok() {
                         operations += 1;
                     }
                 }
@@ -168,20 +162,19 @@ fn concurrent_read_write_operations() -> Result<()> {
         handles.push(handle);
     }
 
-    let mut total_operations = 0;
+    let mut _total_operations = 0;
     for handle in handles {
         let operations = handle.join().unwrap()?;
-        total_operations += operations;
+        _total_operations += operations;
     }
 
     // Verify final state
-    let mut db = GraphDB::open(&*path)?;
-    let expected_total = initial_node_count + (NUM_THREADS / 2) * OPERATIONS_PER_THREAD;
+    let _expected_total = initial_node_count + (NUM_THREADS / 2) * OPERATIONS_PER_THREAD;
 
     // Count actual nodes
     let mut actual_count = 0;
     let mut node_id = 1;
-    while db.get_node(node_id).is_ok() {
+    while db.lock().get_node(node_id).is_ok() {
         actual_count += 1;
         node_id += 1;
     }
@@ -195,25 +188,26 @@ fn concurrent_read_write_operations() -> Result<()> {
 fn concurrent_transaction_operations() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    let path = Arc::new(path);
 
+    let db = GraphDB::open(&path)?;
+    let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
 
     for thread_id in 0..NUM_THREADS {
-        let path_clone = Arc::clone(&path);
+        let db_clone = Arc::clone(&db);
         let barrier_clone = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || -> Result<Vec<u64>> {
             barrier_clone.wait();
 
-            let mut db = GraphDB::open(&*path_clone)?;
             let mut node_ids = Vec::new();
 
             for i in 0..OPERATIONS_PER_THREAD {
-                let mut tx = db.begin_transaction()?;
-
                 // Add multiple nodes in a single transaction
+                let mut db_guard = db_clone.lock();
+                let mut tx = db_guard.begin_transaction()?;
+                
                 for j in 0..5 {
                     let node =
                         Node::new((thread_id * OPERATIONS_PER_THREAD * 5 + i * 5 + j) as u64);
@@ -224,6 +218,7 @@ fn concurrent_transaction_operations() -> Result<()> {
                 }
 
                 tx.commit()?;
+                drop(db_guard);
             }
 
             Ok(node_ids)
@@ -239,11 +234,10 @@ fn concurrent_transaction_operations() -> Result<()> {
     }
 
     // Verify all transactions committed successfully
-    let mut db = GraphDB::open(&*path)?;
-    db.checkpoint()?;
+    db.lock().checkpoint()?;
 
     for &node_id in &all_node_ids {
-        assert!(db.get_node(node_id).is_ok());
+        assert!(db.lock().get_node(node_id).is_ok());
     }
 
     Ok(())
@@ -253,20 +247,20 @@ fn concurrent_transaction_operations() -> Result<()> {
 fn concurrent_stress_test() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    let path = Arc::new(path);
 
+    let db = GraphDB::open(&path)?;
+    let db = Arc::new(Mutex::new(db));
     let start_time = Instant::now();
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
 
     for thread_id in 0..NUM_THREADS {
-        let path_clone = Arc::clone(&path);
+        let db_clone = Arc::clone(&db);
         let barrier_clone = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || -> Result<(usize, usize, usize)> {
             barrier_clone.wait();
 
-            let mut db = GraphDB::open(&*path_clone)?;
             let mut nodes_created = 0;
             let mut edges_created = 0;
             let mut reads_performed = 0;
@@ -276,7 +270,7 @@ fn concurrent_stress_test() -> Result<()> {
                     0 | 1 => {
                         // Create nodes
                         let node = Node::new((thread_id * OPERATIONS_PER_THREAD + i) as u64);
-                        db.add_node(node)?;
+                        db_clone.lock().add_node(node)?;
                         nodes_created += 1;
                     }
                     2 => {
@@ -287,9 +281,9 @@ fn concurrent_stress_test() -> Result<()> {
                             let to_id = ((thread_id * OPERATIONS_PER_THREAD + i) % 100 + 1) as u64;
 
                             // Only create edge if both nodes exist
-                            if db.get_node(from_id).is_ok() && db.get_node(to_id).is_ok() {
+                            if db_clone.lock().get_node(from_id).is_ok() && db_clone.lock().get_node(to_id).is_ok() {
                                 let edge = Edge::new(0, from_id, to_id, "stress_test");
-                                if db.add_edge(edge).is_ok() {
+                                if db_clone.lock().add_edge(edge).is_ok() {
                                     edges_created += 1;
                                 }
                             }
@@ -298,7 +292,7 @@ fn concurrent_stress_test() -> Result<()> {
                     3 => {
                         // Read operations
                         let node_id = ((i * 7) % 50 + 1) as u64;
-                        if db.get_node(node_id).is_ok() {
+                        if db_clone.lock().get_node(node_id).is_ok() {
                             reads_performed += 1;
                         }
                     }
@@ -336,8 +330,7 @@ fn concurrent_stress_test() -> Result<()> {
     );
 
     // Verify database integrity
-    let mut db = GraphDB::open(&*path)?;
-    db.checkpoint()?;
+    db.lock().checkpoint()?;
 
     // The test passes if we completed without panics or corruption
     assert!(total_nodes > 0);
@@ -349,25 +342,23 @@ fn concurrent_stress_test() -> Result<()> {
 fn concurrent_database_open_close() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    let path = Arc::new(path);
 
+    let db = GraphDB::open(&path)?;
+    let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
 
     for thread_id in 0..NUM_THREADS {
-        let path_clone = Arc::clone(&path);
+        let db_clone = Arc::clone(&db);
         let barrier_clone = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || -> Result<()> {
             for iteration in 0..10 {
                 barrier_clone.wait();
 
-                // Open database, perform operation, close
-                {
-                    let mut db = GraphDB::open(&*path_clone)?;
-                    let node = Node::new((thread_id * 10 + iteration) as u64);
-                    db.add_node(node)?;
-                } // db is dropped here
+                // Perform operation
+                let node = Node::new((thread_id * 10 + iteration) as u64);
+                db_clone.lock().add_node(node)?;
 
                 // Small delay to simulate real usage
                 thread::sleep(Duration::from_millis(1));
@@ -384,11 +375,10 @@ fn concurrent_database_open_close() -> Result<()> {
     }
 
     // Verify all data persisted
-    let mut db = GraphDB::open(&*path)?;
     let mut found_nodes = 0;
 
     for i in 0..(NUM_THREADS * 10) {
-        if db.get_node((i + 1) as u64).is_ok() {
+        if db.lock().get_node((i + 1) as u64).is_ok() {
             found_nodes += 1;
         }
     }
