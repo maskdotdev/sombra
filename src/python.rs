@@ -7,7 +7,7 @@ use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyModule};
 use pyo3::Bound;
 
 use crate::db::{GraphDB, TxId};
-use crate::error::GraphError;
+use crate::error::{acquire_lock, GraphError};
 use crate::model::{Edge, Node, PropertyValue, NULL_EDGE_ID};
 
 #[pyclass(module = "sombra", name = "SombraNode")]
@@ -32,18 +32,18 @@ impl PySombraNode {
 }
 
 impl PySombraNode {
-    fn from_node(py: Python<'_>, node: Node) -> Self {
+    fn from_node(py: Python<'_>, node: Node) -> PyResult<Self> {
         let properties = node
             .properties
             .into_iter()
-            .map(|(key, value)| (key, property_value_to_py(py, &value)))
-            .collect();
+            .map(|(key, value)| property_value_to_py(py, &value).map(|py_value| (key, py_value)))
+            .collect::<PyResult<Vec<_>>>()?;
 
-        Self {
+        Ok(Self {
             id: node.id,
             labels: node.labels,
             properties,
-        }
+        })
     }
 }
 
@@ -73,20 +73,20 @@ impl PySombraEdge {
 }
 
 impl PySombraEdge {
-    fn from_edge(py: Python<'_>, edge: Edge) -> Self {
+    fn from_edge(py: Python<'_>, edge: Edge) -> PyResult<Self> {
         let properties = edge
             .properties
             .into_iter()
-            .map(|(key, value)| (key, property_value_to_py(py, &value)))
-            .collect();
+            .map(|(key, value)| property_value_to_py(py, &value).map(|py_value| (key, py_value)))
+            .collect::<PyResult<Vec<_>>>()?;
 
-        Self {
+        Ok(Self {
             id: edge.id,
             source_node_id: edge.source_node_id,
             target_node_id: edge.target_node_id,
             type_name: edge.type_name,
             properties,
-        }
+        })
     }
 }
 
@@ -121,7 +121,7 @@ impl PySombraDB {
 
     fn begin_transaction(&self) -> PyResult<PySombraTransaction> {
         let tx_id = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             let tx_id = db.allocate_tx_id().map_err(graph_error_to_py)?;
             db.enter_transaction(tx_id).map_err(graph_error_to_py)?;
             db.start_tracking();
@@ -138,7 +138,7 @@ impl PySombraDB {
     ) -> PyResult<u64> {
         let props = extract_properties(properties)?;
         let node_id = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             let mut node = Node::new(0);
             node.labels = labels;
             node.properties = props;
@@ -156,7 +156,7 @@ impl PySombraDB {
     ) -> PyResult<u64> {
         let props = extract_properties(properties)?;
         let edge_id = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             let mut edge = Edge::new(0, source_node_id, target_node_id, &label);
             edge.properties = props;
             db.add_edge(edge).map_err(graph_error_to_py)?
@@ -166,14 +166,14 @@ impl PySombraDB {
 
     fn get_edge(&self, py: Python<'_>, edge_id: u64) -> PyResult<PySombraEdge> {
         let edge = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.load_edge(edge_id).map_err(graph_error_to_py)?
         };
-        Ok(PySombraEdge::from_edge(py, edge))
+        PySombraEdge::from_edge(py, edge)
     }
 
     fn get_outgoing_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         let node = db.get_node(node_id).map_err(graph_error_to_py)?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -186,7 +186,7 @@ impl PySombraDB {
     }
 
     fn get_incoming_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         let node = db.get_node(node_id).map_err(graph_error_to_py)?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
@@ -200,43 +200,43 @@ impl PySombraDB {
 
     fn get_node(&self, py: Python<'_>, node_id: u64) -> PyResult<PySombraNode> {
         let node = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.get_node(node_id).map_err(graph_error_to_py)?
         };
-        Ok(PySombraNode::from_node(py, node))
+        PySombraNode::from_node(py, node)
     }
 
     fn get_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.get_neighbors(node_id).map_err(graph_error_to_py)?
         };
         Ok(neighbors)
     }
 
     fn delete_node(&self, node_id: u64) -> PyResult<()> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         db.delete_node(node_id).map_err(graph_error_to_py)
     }
 
     fn delete_edge(&self, edge_id: u64) -> PyResult<()> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         db.delete_edge(edge_id).map_err(graph_error_to_py)
     }
 
     fn flush(&self) -> PyResult<()> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         db.flush().map_err(graph_error_to_py)
     }
 
     fn checkpoint(&self) -> PyResult<()> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         db.checkpoint().map_err(graph_error_to_py)
     }
 
     fn get_incoming_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.get_incoming_neighbors(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -245,7 +245,7 @@ impl PySombraDB {
 
     fn get_neighbors_two_hops(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.get_neighbors_two_hops(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -254,7 +254,7 @@ impl PySombraDB {
 
     fn get_neighbors_three_hops(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.get_neighbors_three_hops(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -263,7 +263,7 @@ impl PySombraDB {
 
     fn bfs_traversal(&self, start_node_id: u64, max_depth: usize) -> PyResult<Vec<PyBfsResult>> {
         let results = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.bfs_traversal(start_node_id, max_depth)
                 .map_err(graph_error_to_py)?
         };
@@ -275,19 +275,19 @@ impl PySombraDB {
 
     fn get_nodes_by_label(&self, label: &str) -> PyResult<Vec<u64>> {
         let node_ids = {
-            let mut db = self.inner.lock().unwrap();
+            let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
             db.get_nodes_by_label(label).map_err(graph_error_to_py)?
         };
         Ok(node_ids)
     }
 
     fn count_outgoing_edges(&self, node_id: u64) -> PyResult<usize> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         db.count_outgoing_edges(node_id).map_err(graph_error_to_py)
     }
 
     fn count_incoming_edges(&self, node_id: u64) -> PyResult<usize> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = acquire_lock(self.inner.as_ref()).map_err(graph_error_to_py)?;
         db.count_incoming_edges(node_id).map_err(graph_error_to_py)
     }
 }
@@ -312,7 +312,7 @@ impl PySombraTransaction {
     ) -> PyResult<u64> {
         let props = extract_properties(properties)?;
         let node_id = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             let mut node = Node::new(0);
             node.labels = labels;
             node.properties = props;
@@ -330,7 +330,7 @@ impl PySombraTransaction {
     ) -> PyResult<u64> {
         let props = extract_properties(properties)?;
         let edge_id = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             let mut edge = Edge::new(0, source_node_id, target_node_id, &label);
             edge.properties = props;
             db.add_edge_internal(edge).map_err(graph_error_to_py)?
@@ -340,14 +340,14 @@ impl PySombraTransaction {
 
     fn get_edge(&self, py: Python<'_>, edge_id: u64) -> PyResult<PySombraEdge> {
         let edge = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.load_edge(edge_id).map_err(graph_error_to_py)?
         };
-        Ok(PySombraEdge::from_edge(py, edge))
+        PySombraEdge::from_edge(py, edge)
     }
 
     fn get_outgoing_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         let node = db.get_node(node_id).map_err(graph_error_to_py)?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -360,7 +360,7 @@ impl PySombraTransaction {
     }
 
     fn get_incoming_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         let node = db.get_node(node_id).map_err(graph_error_to_py)?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
@@ -374,27 +374,27 @@ impl PySombraTransaction {
 
     fn get_node(&self, py: Python<'_>, node_id: u64) -> PyResult<PySombraNode> {
         let node = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.get_node(node_id).map_err(graph_error_to_py)?
         };
-        Ok(PySombraNode::from_node(py, node))
+        PySombraNode::from_node(py, node)
     }
 
     fn get_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.get_neighbors(node_id).map_err(graph_error_to_py)?
         };
         Ok(neighbors)
     }
 
     fn delete_node(&self, node_id: u64) -> PyResult<()> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         db.delete_node_internal(node_id).map_err(graph_error_to_py)
     }
 
     fn delete_edge(&self, edge_id: u64) -> PyResult<()> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         db.delete_edge_internal(edge_id).map_err(graph_error_to_py)
     }
 
@@ -405,7 +405,7 @@ impl PySombraTransaction {
             ));
         }
 
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         let dirty_pages = db.take_recent_dirty_pages();
         db.header.last_committed_tx_id = self.tx_id;
         db.write_header().map_err(graph_error_to_py)?;
@@ -432,7 +432,7 @@ impl PySombraTransaction {
             ));
         }
 
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         let dirty_pages = db.take_recent_dirty_pages();
         db.rollback_transaction(&dirty_pages)
             .map_err(graph_error_to_py)?;
@@ -445,7 +445,7 @@ impl PySombraTransaction {
 
     fn get_incoming_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.get_incoming_neighbors(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -454,7 +454,7 @@ impl PySombraTransaction {
 
     fn get_neighbors_two_hops(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.get_neighbors_two_hops(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -463,7 +463,7 @@ impl PySombraTransaction {
 
     fn get_neighbors_three_hops(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.get_neighbors_three_hops(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -472,7 +472,7 @@ impl PySombraTransaction {
 
     fn bfs_traversal(&self, start_node_id: u64, max_depth: usize) -> PyResult<Vec<PyBfsResult>> {
         let results = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.bfs_traversal(start_node_id, max_depth)
                 .map_err(graph_error_to_py)?
         };
@@ -484,19 +484,19 @@ impl PySombraTransaction {
 
     fn get_nodes_by_label(&self, label: &str) -> PyResult<Vec<u64>> {
         let node_ids = {
-            let mut db = self.db.lock().unwrap();
+            let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
             db.get_nodes_by_label(label).map_err(graph_error_to_py)?
         };
         Ok(node_ids)
     }
 
     fn count_outgoing_edges(&self, node_id: u64) -> PyResult<usize> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         db.count_outgoing_edges(node_id).map_err(graph_error_to_py)
     }
 
     fn count_incoming_edges(&self, node_id: u64) -> PyResult<usize> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = acquire_lock(self.db.as_ref()).map_err(graph_error_to_py)?;
         db.count_incoming_edges(node_id).map_err(graph_error_to_py)
     }
 }
@@ -551,7 +551,9 @@ fn py_any_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
     }
 
     if let Ok(py_byte_array) = value.cast::<PyByteArray>() {
-        return Ok(PropertyValue::Bytes(unsafe { py_byte_array.as_bytes() }.to_vec()));
+        return Ok(PropertyValue::Bytes(
+            unsafe { py_byte_array.as_bytes() }.to_vec(),
+        ));
     }
 
     if let Ok(string_val) = value.extract::<String>() {
@@ -571,26 +573,15 @@ fn py_any_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
     ))
 }
 
-fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> Py<PyAny> {
-    match value {
-        PropertyValue::Bool(b) => {
-            let bound = b.into_pyobject(py).unwrap();
-            bound.as_any().clone().unbind()
-        }
-        PropertyValue::Int(i) => {
-            let bound = i.into_pyobject(py).unwrap();
-            bound.as_any().clone().unbind()
-        }
-        PropertyValue::Float(f) => {
-            let bound = f.into_pyobject(py).unwrap();
-            bound.as_any().clone().unbind()
-        }
-        PropertyValue::String(s) => {
-            let bound = s.into_pyobject(py).unwrap();
-            bound.as_any().clone().unbind()
-        }
+fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> PyResult<Py<PyAny>> {
+    let any = match value {
+        PropertyValue::Bool(b) => b.into_pyobject(py)?.as_any().clone().unbind(),
+        PropertyValue::Int(i) => i.into_pyobject(py)?.as_any().clone().unbind(),
+        PropertyValue::Float(f) => f.into_pyobject(py)?.as_any().clone().unbind(),
+        PropertyValue::String(s) => s.into_pyobject(py)?.as_any().clone().unbind(),
         PropertyValue::Bytes(bytes) => PyBytes::new(py, bytes).into_any().unbind(),
-    }
+    };
+    Ok(any)
 }
 
 fn graph_error_to_py(err: GraphError) -> PyErr {

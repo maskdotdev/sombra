@@ -2,14 +2,26 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::db::{GraphDB, TxId};
+use crate::error::acquire_lock;
 use crate::model::{Edge, Node, PropertyValue};
 
 #[napi(js_name = "SombraDB")]
 pub struct SombraDB {
     inner: Arc<Mutex<GraphDB>>,
+}
+
+fn lock_db<'a>(
+    mutex: &'a Arc<Mutex<GraphDB>>,
+) -> std::result::Result<MutexGuard<'a, GraphDB>, Error> {
+    acquire_lock(mutex.as_ref()).map_err(|e| {
+        Error::new(
+            Status::GenericFailure,
+            format!("Database lock poisoned: {}", e),
+        )
+    })
 }
 
 #[napi]
@@ -30,7 +42,7 @@ impl SombraDB {
 
     #[napi]
     pub fn begin_transaction(&mut self) -> std::result::Result<SombraTransaction, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let tx_id = db.allocate_tx_id().map_err(|e| {
             Error::new(
@@ -61,7 +73,7 @@ impl SombraDB {
         labels: Vec<String>,
         properties: Option<HashMap<String, SombraPropertyValue>>,
     ) -> std::result::Result<f64, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let mut node = Node::new(0);
         node.labels = labels;
@@ -88,7 +100,7 @@ impl SombraDB {
         label: String,
         properties: Option<HashMap<String, SombraPropertyValue>>,
     ) -> std::result::Result<f64, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let mut edge = Edge::new(0, source_node_id as u64, target_node_id as u64, &label);
 
@@ -108,7 +120,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_edge(&mut self, edge_id: f64) -> std::result::Result<SombraEdge, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let edge = db.load_edge(edge_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get edge: {}", e))
@@ -119,7 +131,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
@@ -144,7 +156,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_incoming_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
@@ -169,7 +181,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_node(&mut self, node_id: f64) -> std::result::Result<SombraNode, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
@@ -180,7 +192,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_neighbors(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let neighbors = db.get_neighbors(node_id as u64).map_err(|e| {
             Error::new(
@@ -194,7 +206,7 @@ impl SombraDB {
 
     #[napi]
     pub fn delete_node(&mut self, node_id: f64) -> std::result::Result<(), Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         db.delete_node(node_id as u64).map_err(|e| {
             Error::new(
@@ -208,7 +220,7 @@ impl SombraDB {
 
     #[napi]
     pub fn delete_edge(&mut self, edge_id: f64) -> std::result::Result<(), Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         db.delete_edge(edge_id as u64).map_err(|e| {
             Error::new(
@@ -222,7 +234,7 @@ impl SombraDB {
 
     #[napi]
     pub fn flush(&mut self) -> std::result::Result<(), Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         db.flush()
             .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to flush: {}", e)))?;
@@ -232,7 +244,7 @@ impl SombraDB {
 
     #[napi]
     pub fn checkpoint(&mut self) -> std::result::Result<(), Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         db.checkpoint().map_err(|e| {
             Error::new(
@@ -246,7 +258,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_incoming_neighbors(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let neighbors = db.get_incoming_neighbors(node_id as u64).map_err(|e| {
             Error::new(
@@ -260,7 +272,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_neighbors_two_hops(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let neighbors = db.get_neighbors_two_hops(node_id as u64).map_err(|e| {
             Error::new(
@@ -277,7 +289,7 @@ impl SombraDB {
         &mut self,
         node_id: f64,
     ) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let neighbors = db.get_neighbors_three_hops(node_id as u64).map_err(|e| {
             Error::new(
@@ -295,7 +307,7 @@ impl SombraDB {
         start_node_id: f64,
         max_depth: f64,
     ) -> std::result::Result<Vec<BfsResult>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let results = db
             .bfs_traversal(start_node_id as u64, max_depth as usize)
@@ -317,7 +329,7 @@ impl SombraDB {
 
     #[napi]
     pub fn get_nodes_by_label(&mut self, label: String) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let node_ids = db.get_nodes_by_label(&label).map_err(|e| {
             Error::new(
@@ -331,7 +343,7 @@ impl SombraDB {
 
     #[napi]
     pub fn count_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let count = db.count_outgoing_edges(node_id as u64).map_err(|e| {
             Error::new(
@@ -345,7 +357,7 @@ impl SombraDB {
 
     #[napi]
     pub fn count_incoming_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
-        let mut db = self.inner.lock().unwrap();
+        let mut db = lock_db(&self.inner)?;
 
         let count = db.count_incoming_edges(node_id as u64).map_err(|e| {
             Error::new(
@@ -378,7 +390,7 @@ impl SombraTransaction {
         labels: Vec<String>,
         properties: Option<HashMap<String, SombraPropertyValue>>,
     ) -> std::result::Result<f64, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let mut node = Node::new(0);
         node.labels = labels;
@@ -408,7 +420,7 @@ impl SombraTransaction {
         label: String,
         properties: Option<HashMap<String, SombraPropertyValue>>,
     ) -> std::result::Result<f64, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let mut edge = Edge::new(0, source_node_id as u64, target_node_id as u64, &label);
 
@@ -431,7 +443,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_edge(&mut self, edge_id: f64) -> std::result::Result<SombraEdge, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let edge = db.load_edge(edge_id as u64).map_err(|e| {
             Error::new(
@@ -445,7 +457,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(
@@ -473,7 +485,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_incoming_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(
@@ -501,7 +513,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_node(&mut self, node_id: f64) -> std::result::Result<SombraNode, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(
@@ -515,7 +527,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_neighbors(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let neighbors = db.get_neighbors(node_id as u64).map_err(|e| {
             Error::new(
@@ -529,7 +541,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn delete_node(&mut self, node_id: f64) -> std::result::Result<(), Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         db.delete_node_internal(node_id as u64).map_err(|e| {
             Error::new(
@@ -543,7 +555,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn delete_edge(&mut self, edge_id: f64) -> std::result::Result<(), Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         db.delete_edge_internal(edge_id as u64).map_err(|e| {
             Error::new(
@@ -564,7 +576,7 @@ impl SombraTransaction {
             ));
         }
 
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let dirty_pages = db.take_recent_dirty_pages();
 
@@ -604,7 +616,7 @@ impl SombraTransaction {
             ));
         }
 
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let dirty_pages = db.take_recent_dirty_pages();
 
@@ -621,7 +633,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_incoming_neighbors(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let neighbors = db.get_incoming_neighbors(node_id as u64).map_err(|e| {
             Error::new(
@@ -635,7 +647,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_neighbors_two_hops(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let neighbors = db.get_neighbors_two_hops(node_id as u64).map_err(|e| {
             Error::new(
@@ -652,7 +664,7 @@ impl SombraTransaction {
         &mut self,
         node_id: f64,
     ) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let neighbors = db.get_neighbors_three_hops(node_id as u64).map_err(|e| {
             Error::new(
@@ -670,7 +682,7 @@ impl SombraTransaction {
         start_node_id: f64,
         max_depth: f64,
     ) -> std::result::Result<Vec<BfsResult>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let results = db
             .bfs_traversal(start_node_id as u64, max_depth as usize)
@@ -692,7 +704,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn get_nodes_by_label(&mut self, label: String) -> std::result::Result<Vec<f64>, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let node_ids = db.get_nodes_by_label(&label).map_err(|e| {
             Error::new(
@@ -706,7 +718,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn count_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let count = db.count_outgoing_edges(node_id as u64).map_err(|e| {
             Error::new(
@@ -720,7 +732,7 @@ impl SombraTransaction {
 
     #[napi]
     pub fn count_incoming_edges(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
-        let mut db = self.db.lock().unwrap();
+        let mut db = lock_db(&self.db)?;
 
         let count = db.count_incoming_edges(node_id as u64).map_err(|e| {
             Error::new(
