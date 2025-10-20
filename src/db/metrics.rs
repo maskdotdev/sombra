@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const MAX_LATENCY_SAMPLES: usize = 10000;
 const MAX_COMMIT_LATENCY_SAMPLES: usize = 1000;
@@ -20,6 +21,9 @@ pub struct PerformanceMetrics {
     pub checkpoints_performed: u64,
     pub page_evictions: u64,
     pub corruption_errors: u64,
+    pub compactions_performed: u64,
+    pub pages_compacted: u64,
+    pub bytes_reclaimed: u64,
     #[serde(skip)]
     commit_latencies_ms: VecDeque<u64>,
     #[serde(skip)]
@@ -141,23 +145,26 @@ impl PerformanceMetrics {
         println!("Checkpoints Performed:     {}", self.checkpoints_performed);
         println!("Page Evictions:            {}", self.page_evictions);
         println!("Corruption Errors:         {}", self.corruption_errors);
+        println!("Compactions Performed:     {}", self.compactions_performed);
+        println!("Pages Compacted:           {}", self.pages_compacted);
+        println!("Bytes Reclaimed:           {}", self.bytes_reclaimed);
         if let Some(p50) = self.p50_commit_latency() {
-            println!("P50 Commit Latency:        {}ms", p50);
+            println!("P50 Commit Latency:        {p50}ms");
         }
         if let Some(p95) = self.p95_commit_latency() {
-            println!("P95 Commit Latency:        {}ms", p95);
+            println!("P95 Commit Latency:        {p95}ms");
         }
         if let Some(p99) = self.p99_commit_latency() {
-            println!("P99 Commit Latency:        {}ms", p99);
+            println!("P99 Commit Latency:        {p99}ms");
         }
         if let Some(p50) = self.p50_read_latency() {
-            println!("P50 Read Latency:          {}μs", p50);
+            println!("P50 Read Latency:          {p50}μs");
         }
         if let Some(p95) = self.p95_read_latency() {
-            println!("P95 Read Latency:          {}μs", p95);
+            println!("P95 Read Latency:          {p95}μs");
         }
         if let Some(p99) = self.p99_read_latency() {
-            println!("P99 Read Latency:          {}μs", p99);
+            println!("P99 Read Latency:          {p99}μs");
         }
     }
 
@@ -258,12 +265,27 @@ impl PerformanceMetrics {
             self.corruption_errors
         ));
 
+        output.push_str("# HELP sombra_compactions_performed Total compactions performed\n");
+        output.push_str("# TYPE sombra_compactions_performed counter\n");
+        output.push_str(&format!(
+            "sombra_compactions_performed {}\n",
+            self.compactions_performed
+        ));
+
+        output.push_str("# HELP sombra_pages_compacted Total pages compacted\n");
+        output.push_str("# TYPE sombra_pages_compacted counter\n");
+        output.push_str(&format!("sombra_pages_compacted {}\n", self.pages_compacted));
+
+        output.push_str("# HELP sombra_bytes_reclaimed Total bytes reclaimed by compaction\n");
+        output.push_str("# TYPE sombra_bytes_reclaimed counter\n");
+        output.push_str(&format!("sombra_bytes_reclaimed {}\n", self.bytes_reclaimed));
+
         if let Some(p50) = self.p50_commit_latency() {
             output.push_str(
                 "# HELP sombra_commit_latency_p50_ms P50 commit latency in milliseconds\n",
             );
             output.push_str("# TYPE sombra_commit_latency_p50_ms gauge\n");
-            output.push_str(&format!("sombra_commit_latency_p50_ms {}\n", p50));
+            output.push_str(&format!("sombra_commit_latency_p50_ms {p50}\n"));
         }
 
         if let Some(p95) = self.p95_commit_latency() {
@@ -271,7 +293,7 @@ impl PerformanceMetrics {
                 "# HELP sombra_commit_latency_p95_ms P95 commit latency in milliseconds\n",
             );
             output.push_str("# TYPE sombra_commit_latency_p95_ms gauge\n");
-            output.push_str(&format!("sombra_commit_latency_p95_ms {}\n", p95));
+            output.push_str(&format!("sombra_commit_latency_p95_ms {p95}\n"));
         }
 
         if let Some(p99) = self.p99_commit_latency() {
@@ -279,7 +301,7 @@ impl PerformanceMetrics {
                 "# HELP sombra_commit_latency_p99_ms P99 commit latency in milliseconds\n",
             );
             output.push_str("# TYPE sombra_commit_latency_p99_ms gauge\n");
-            output.push_str(&format!("sombra_commit_latency_p99_ms {}\n", p99));
+            output.push_str(&format!("sombra_commit_latency_p99_ms {p99}\n"));
         }
 
         output
@@ -337,17 +359,186 @@ impl PerformanceMetrics {
             "{}.corruption_errors:{}|c",
             prefix, self.corruption_errors
         ));
+        metrics.push(format!(
+            "{}.compactions_performed:{}|c",
+            prefix, self.compactions_performed
+        ));
+        metrics.push(format!(
+            "{}.pages_compacted:{}|c",
+            prefix, self.pages_compacted
+        ));
+        metrics.push(format!(
+            "{}.bytes_reclaimed:{}|c",
+            prefix, self.bytes_reclaimed
+        ));
 
         if let Some(p50) = self.p50_commit_latency() {
-            metrics.push(format!("{}.commit_latency_p50_ms:{}|g", prefix, p50));
+            metrics.push(format!("{prefix}.commit_latency_p50_ms:{p50}|g"));
         }
         if let Some(p95) = self.p95_commit_latency() {
-            metrics.push(format!("{}.commit_latency_p95_ms:{}|g", prefix, p95));
+            metrics.push(format!("{prefix}.commit_latency_p95_ms:{p95}|g"));
         }
         if let Some(p99) = self.p99_commit_latency() {
-            metrics.push(format!("{}.commit_latency_p99_ms:{}|g", prefix, p99));
+            metrics.push(format!("{prefix}.commit_latency_p99_ms:{p99}|g"));
         }
 
         metrics
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ConcurrencyMetrics {
+    pub concurrent_readers: AtomicUsize,
+    pub concurrent_writers: AtomicUsize,
+    pub reader_wait_time_ns: AtomicU64,
+    pub writer_wait_time_ns: AtomicU64,
+    pub parallel_traversal_count: AtomicU64,
+    pub parallel_traversal_speedup: AtomicU64,
+    pub read_lock_acquisitions: AtomicU64,
+    pub write_lock_acquisitions: AtomicU64,
+}
+
+impl ConcurrencyMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn increment_readers(&self) {
+        self.concurrent_readers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn decrement_readers(&self) {
+        self.concurrent_readers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_writers(&self) {
+        self.concurrent_writers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn decrement_writers(&self) {
+        self.concurrent_writers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_reader_wait(&self, nanos: u64) {
+        self.reader_wait_time_ns.fetch_add(nanos, Ordering::Relaxed);
+        self.read_lock_acquisitions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_writer_wait(&self, nanos: u64) {
+        self.writer_wait_time_ns.fetch_add(nanos, Ordering::Relaxed);
+        self.write_lock_acquisitions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_parallel_traversal(&self, speedup_ratio: u64) {
+        self.parallel_traversal_count.fetch_add(1, Ordering::Relaxed);
+        self.parallel_traversal_speedup.fetch_add(speedup_ratio, Ordering::Relaxed);
+    }
+
+    pub fn get_concurrent_readers(&self) -> usize {
+        self.concurrent_readers.load(Ordering::Relaxed)
+    }
+
+    pub fn get_concurrent_writers(&self) -> usize {
+        self.concurrent_writers.load(Ordering::Relaxed)
+    }
+
+    pub fn get_total_reader_wait_ns(&self) -> u64 {
+        self.reader_wait_time_ns.load(Ordering::Relaxed)
+    }
+
+    pub fn get_total_writer_wait_ns(&self) -> u64 {
+        self.writer_wait_time_ns.load(Ordering::Relaxed)
+    }
+
+    pub fn get_parallel_traversal_count(&self) -> u64 {
+        self.parallel_traversal_count.load(Ordering::Relaxed)
+    }
+
+    pub fn get_average_speedup(&self) -> f64 {
+        let count = self.parallel_traversal_count.load(Ordering::Relaxed);
+        if count == 0 {
+            0.0
+        } else {
+            self.parallel_traversal_speedup.load(Ordering::Relaxed) as f64 / count as f64
+        }
+    }
+
+    pub fn get_avg_reader_wait_us(&self) -> f64 {
+        let acquisitions = self.read_lock_acquisitions.load(Ordering::Relaxed);
+        if acquisitions == 0 {
+            0.0
+        } else {
+            self.reader_wait_time_ns.load(Ordering::Relaxed) as f64 / acquisitions as f64 / 1000.0
+        }
+    }
+
+    pub fn get_avg_writer_wait_us(&self) -> f64 {
+        let acquisitions = self.write_lock_acquisitions.load(Ordering::Relaxed);
+        if acquisitions == 0 {
+            0.0
+        } else {
+            self.writer_wait_time_ns.load(Ordering::Relaxed) as f64 / acquisitions as f64 / 1000.0
+        }
+    }
+
+    pub fn reset(&self) {
+        self.concurrent_readers.store(0, Ordering::Relaxed);
+        self.concurrent_writers.store(0, Ordering::Relaxed);
+        self.reader_wait_time_ns.store(0, Ordering::Relaxed);
+        self.writer_wait_time_ns.store(0, Ordering::Relaxed);
+        self.parallel_traversal_count.store(0, Ordering::Relaxed);
+        self.parallel_traversal_speedup.store(0, Ordering::Relaxed);
+        self.read_lock_acquisitions.store(0, Ordering::Relaxed);
+        self.write_lock_acquisitions.store(0, Ordering::Relaxed);
+    }
+
+    pub fn print_report(&self) {
+        println!("\n=== Concurrency Metrics ===");
+        println!("Concurrent Readers:           {}", self.get_concurrent_readers());
+        println!("Concurrent Writers:           {}", self.get_concurrent_writers());
+        println!("Read Lock Acquisitions:       {}", self.read_lock_acquisitions.load(Ordering::Relaxed));
+        println!("Write Lock Acquisitions:      {}", self.write_lock_acquisitions.load(Ordering::Relaxed));
+        println!("Avg Reader Wait Time:         {:.2}μs", self.get_avg_reader_wait_us());
+        println!("Avg Writer Wait Time:         {:.2}μs", self.get_avg_writer_wait_us());
+        println!("Parallel Traversals:          {}", self.get_parallel_traversal_count());
+        println!("Avg Parallel Speedup:         {:.2}x", self.get_average_speedup());
+    }
+
+    pub fn to_prometheus_format(&self) -> String {
+        let mut output = String::new();
+
+        output.push_str("# HELP sombra_concurrent_readers Current number of concurrent readers\n");
+        output.push_str("# TYPE sombra_concurrent_readers gauge\n");
+        output.push_str(&format!("sombra_concurrent_readers {}\n", self.get_concurrent_readers()));
+
+        output.push_str("# HELP sombra_concurrent_writers Current number of concurrent writers\n");
+        output.push_str("# TYPE sombra_concurrent_writers gauge\n");
+        output.push_str(&format!("sombra_concurrent_writers {}\n", self.get_concurrent_writers()));
+
+        output.push_str("# HELP sombra_read_lock_acquisitions Total read lock acquisitions\n");
+        output.push_str("# TYPE sombra_read_lock_acquisitions counter\n");
+        output.push_str(&format!("sombra_read_lock_acquisitions {}\n", self.read_lock_acquisitions.load(Ordering::Relaxed)));
+
+        output.push_str("# HELP sombra_write_lock_acquisitions Total write lock acquisitions\n");
+        output.push_str("# TYPE sombra_write_lock_acquisitions counter\n");
+        output.push_str(&format!("sombra_write_lock_acquisitions {}\n", self.write_lock_acquisitions.load(Ordering::Relaxed)));
+
+        output.push_str("# HELP sombra_avg_reader_wait_us Average reader wait time in microseconds\n");
+        output.push_str("# TYPE sombra_avg_reader_wait_us gauge\n");
+        output.push_str(&format!("sombra_avg_reader_wait_us {:.2}\n", self.get_avg_reader_wait_us()));
+
+        output.push_str("# HELP sombra_avg_writer_wait_us Average writer wait time in microseconds\n");
+        output.push_str("# TYPE sombra_avg_writer_wait_us gauge\n");
+        output.push_str(&format!("sombra_avg_writer_wait_us {:.2}\n", self.get_avg_writer_wait_us()));
+
+        output.push_str("# HELP sombra_parallel_traversals Total parallel traversals executed\n");
+        output.push_str("# TYPE sombra_parallel_traversals counter\n");
+        output.push_str(&format!("sombra_parallel_traversals {}\n", self.get_parallel_traversal_count()));
+
+        output.push_str("# HELP sombra_avg_parallel_speedup Average speedup from parallel traversals\n");
+        output.push_str("# TYPE sombra_avg_parallel_speedup gauge\n");
+        output.push_str(&format!("sombra_avg_parallel_speedup {:.2}\n", self.get_average_speedup()));
+
+        output
     }
 }

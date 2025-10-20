@@ -21,7 +21,7 @@ use crate::storage::{deserialize_edge, deserialize_node};
 use super::header::HeaderState;
 use crate::db::config::{Config, SyncMode};
 use crate::db::group_commit::{GroupCommitState, TxId};
-use crate::db::metrics::PerformanceMetrics;
+use crate::db::metrics::{ConcurrencyMetrics, PerformanceMetrics};
 use crate::db::transaction::Transaction;
 
 /// Values that can be indexed for fast property-based lookups.
@@ -194,6 +194,7 @@ pub struct GraphDB {
     pub(crate) transactions_since_checkpoint: usize,
     pub(crate) group_commit_state: Option<Arc<Mutex<GroupCommitState>>>,
     pub metrics: PerformanceMetrics,
+    pub concurrency_metrics: Arc<ConcurrencyMetrics>,
 }
 
 impl std::fmt::Debug for GraphDB {
@@ -362,6 +363,7 @@ impl GraphDB {
             transactions_since_checkpoint: 0,
             group_commit_state,
             metrics: PerformanceMetrics::new(),
+            concurrency_metrics: Arc::new(ConcurrencyMetrics::new()),
         };
 
         if db.load_btree_index()? {
