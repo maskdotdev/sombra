@@ -11,7 +11,11 @@ fn main() {
 
     println!("Generating test data...");
     let (nodes, edges) = data_gen.generate_medium_dataset();
-    println!("Generated {} nodes and {} edges\n", nodes.len(), edges.len());
+    println!(
+        "Generated {} nodes and {} edges\n",
+        nodes.len(),
+        edges.len()
+    );
 
     const NUM_RUNS: usize = 3;
 
@@ -49,10 +53,8 @@ fn main() {
     let baseline_median = baseline_times[NUM_RUNS / 2];
     let checksum_median = checksum_times[NUM_RUNS / 2];
 
-    let baseline_ops_per_sec =
-        (nodes.len() + edges.len()) as f64 / baseline_median.as_secs_f64();
-    let checksum_ops_per_sec =
-        (nodes.len() + edges.len()) as f64 / checksum_median.as_secs_f64();
+    let baseline_ops_per_sec = (nodes.len() + edges.len()) as f64 / baseline_median.as_secs_f64();
+    let checksum_ops_per_sec = (nodes.len() + edges.len()) as f64 / checksum_median.as_secs_f64();
 
     println!(
         "Baseline (checksums OFF) - Median: {:.2}ms ({:.0} ops/sec)",
@@ -89,7 +91,11 @@ fn main() {
     );
 }
 
-fn run_throughput_test(nodes: &[Node], edges: &[Edge], checksum_enabled: bool) -> std::time::Duration {
+fn run_throughput_test(
+    nodes: &[Node],
+    edges: &[Edge],
+    checksum_enabled: bool,
+) -> std::time::Duration {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("throughput_test.db");
 

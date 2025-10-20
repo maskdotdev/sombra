@@ -76,7 +76,7 @@ impl GraphDB {
         let wal_size_mb = wal_size_bytes / (1024 * 1024);
         let max_wal_mb = self.config.max_wal_size_mb;
         let warning_threshold_mb = self.config.wal_size_warning_threshold_mb;
-        
+
         if wal_size_mb >= warning_threshold_mb && wal_size_mb < max_wal_mb {
             warn!(
                 wal_size_mb,
@@ -84,12 +84,11 @@ impl GraphDB {
                 "WAL size approaching limit"
             );
         }
-        
+
         if wal_size_mb >= max_wal_mb {
             warn!(
                 wal_size_mb,
-                max_wal_mb,
-                "WAL size exceeded limit, forcing checkpoint"
+                max_wal_mb, "WAL size exceeded limit, forcing checkpoint"
             );
             self.checkpoint()?;
             self.transactions_since_checkpoint = 0;

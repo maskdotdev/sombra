@@ -22,18 +22,33 @@ use crate::db::group_commit::{GroupCommitState, TxId};
 use crate::db::metrics::PerformanceMetrics;
 use crate::db::transaction::Transaction;
 
+/// Values that can be indexed for fast property-based lookups.
+///
+/// Only certain property types are indexable. Float and Bytes values
+/// cannot be indexed due to their nature.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IndexableValue {
+    /// Boolean value
     Bool(bool),
+    /// 64-bit integer value
     Int(i64),
+    /// String value
     String(String),
 }
 
+/// Options for database integrity verification.
+///
+/// Controls the scope and depth of integrity checks performed by
+/// [`GraphDB::verify_integrity`].
 #[derive(Debug, Clone)]
 pub struct IntegrityOptions {
+    /// Only verify page checksums, skip record validation
     pub checksum_only: bool,
+    /// Maximum number of errors to collect before stopping
     pub max_errors: usize,
+    /// Verify that indexes match the actual data
     pub verify_indexes: bool,
+    /// Verify that edge references point to valid nodes
     pub verify_adjacency: bool,
 }
 
@@ -48,13 +63,23 @@ impl Default for IntegrityOptions {
     }
 }
 
+/// Report from database integrity verification.
+///
+/// Contains counts of different types of integrity issues found
+/// during verification, plus detailed error messages.
 #[derive(Debug)]
 pub struct IntegrityReport {
+    /// Number of pages that were checked
     pub checked_pages: usize,
+    /// Number of pages with checksum mismatches
     pub checksum_failures: usize,
+    /// Number of malformed records found
     pub record_errors: usize,
+    /// Number of index inconsistencies found
     pub index_errors: usize,
+    /// Number of broken adjacency references found
     pub adjacency_errors: usize,
+    /// Detailed error messages (up to max_errors)
     pub errors: Vec<String>,
     max_errors: usize,
 }
@@ -98,6 +123,27 @@ impl From<&PropertyValue> for Option<IndexableValue> {
     }
 }
 
+/// Main graph database interface.
+///
+/// GraphDB provides ACID transactions, WAL-based durability, and
+/// comprehensive indexing for graph data operations.
+///
+/// # Thread Safety
+///
+/// GraphDB is not thread-safe. Use external synchronization (`Arc<Mutex>`)
+/// for concurrent access from multiple threads.
+///
+/// # Examples
+///
+/// ```rust
+/// use sombra::{GraphDB, Node, Edge};
+///
+/// let mut db = GraphDB::open("example.db")?;
+/// let mut tx = db.begin_transaction()?;
+/// let node = tx.add_node(Node::new(1))?;
+/// tx.commit()?;
+/// # Ok::<(), sombra::GraphError>(())
+/// ```
 pub struct GraphDB {
     pub(crate) path: PathBuf,
     pub(crate) pager: Pager,
@@ -143,10 +189,57 @@ impl std::fmt::Debug for GraphDB {
 }
 
 impl GraphDB {
+    /// Opens a graph database at the specified path with default configuration.
+    ///
+    /// Creates a new database if it doesn't exist. Performs WAL recovery
+    /// if the database was not cleanly closed.
+    ///
+    /// # Arguments
+    /// * `path` - Filesystem path to the database file
+    ///
+    /// # Returns
+    /// A new `GraphDB` instance with default configuration.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Cannot create/open file
+    /// * `GraphError::Corruption` - Database file is corrupted
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::GraphDB;
+    ///
+    /// let db = GraphDB::open("my_graph.db")?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    ///
+    /// # Safety
+    /// Only one process should access the database at a time.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_config(path, Config::default())
     }
 
+    /// Opens a graph database with custom configuration.
+    ///
+    /// # Arguments
+    /// * `path` - Filesystem path to the database file
+    /// * `config` - Database configuration options
+    ///
+    /// # Returns
+    /// A new `GraphDB` instance with the specified configuration.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Cannot create/open file
+    /// * `GraphError::Corruption` - Database file is corrupted
+    /// * `GraphError::InvalidArgument` - Invalid configuration
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::{GraphDB, Config};
+    ///
+    /// let config = Config::production();
+    /// let db = GraphDB::open_with_config("my_graph.db", config)?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
     pub fn open_with_config(path: impl AsRef<Path>, config: Config) -> Result<Self> {
         let path_ref = path.as_ref();
         info!(
@@ -252,21 +345,70 @@ impl GraphDB {
         Ok(db)
     }
 
+    /// Begins a new transaction for atomic operations.
+    ///
+    /// Only one transaction can be active at a time. The transaction
+    /// must be either committed or rolled back before another can begin.
+    ///
+    /// # Returns
+    /// A new `Transaction` instance for performing atomic operations.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - A transaction is already active
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::{GraphDB, Node};
+    ///
+    /// let mut db = GraphDB::open("test.db")?;
+    /// let mut tx = db.begin_transaction()?;
+    /// let node_id = tx.add_node(Node::new(1))?;
+    /// tx.commit()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
     pub fn begin_transaction(&mut self) -> Result<Transaction<'_>> {
         let tx_id = self.allocate_tx_id()?;
         Transaction::new(self, tx_id)
     }
 
+    /// Flushes dirty pages to disk without checkpointing the WAL.
+    ///
+    /// This is a lightweight operation that writes dirty pages but
+    /// keeps the WAL intact for crash recovery. For full durability,
+    /// use `checkpoint()` instead.
+    ///
+    /// # Returns
+    /// Ok(()) on success, error on failure.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Disk I/O error
     pub fn flush(&mut self) -> Result<()> {
         self.write_header()?;
         self.pager.checkpoint()
     }
 
+    /// Checkpoints the database by flushing dirty pages and truncating the WAL.
+    ///
+    /// This is a full durability operation that:
+    /// 1. Persists the B-tree index
+    /// 2. Writes the database header
+    /// 3. Flushes all dirty pages to disk
+    /// 4. Truncates the WAL file
+    ///
+    /// After a successful checkpoint, the database can recover without
+    /// replaying any WAL frames.
+    ///
+    /// # Returns
+    /// Ok(()) on success, error on failure.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Disk I/O error
+    /// * `GraphError::Corruption` - Index corruption detected
     pub fn checkpoint(&mut self) -> Result<()> {
         let start = std::time::Instant::now();
         let pages_flushed = self.pager.dirty_page_count();
         info!("Starting checkpoint");
-        
+
         self.persist_btree_index()?;
         self.write_header()?;
         self.pager.checkpoint()?;
@@ -275,7 +417,7 @@ impl GraphDB {
                 "failed to reload btree index after checkpoint".into(),
             ));
         }
-        
+
         let duration = start.elapsed();
         info!(
             pages_flushed,
@@ -285,14 +427,54 @@ impl GraphDB {
         Ok(())
     }
 
+    /// Returns the database page size in bytes.
+    ///
+    /// The page size is determined when the database is created and
+    /// cannot be changed afterwards. Typical values are 4096 or 8192.
+    ///
+    /// # Returns
+    /// The page size in bytes.
     pub fn page_size(&self) -> usize {
         self.pager.page_size()
     }
 
+    /// Returns the filesystem path of the database.
+    ///
+    /// # Returns
+    /// A reference to the database file path.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Verifies the integrity of the database.
+    ///
+    /// Performs comprehensive checks including:
+    /// - Page checksum validation
+    /// - Record format validation
+    /// - Index consistency checks
+    /// - Adjacency reference validation
+    ///
+    /// # Arguments
+    /// * `options` - Configuration for what to verify and error limits
+    ///
+    /// # Returns
+    /// An `IntegrityReport` detailing any issues found.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Disk I/O error during verification
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::{GraphDB, IntegrityOptions};
+    ///
+    /// let mut db = GraphDB::open("test.db")?;
+    /// let options = IntegrityOptions::default();
+    /// let report = db.verify_integrity(options)?;
+    /// if !report.is_clean() {
+    ///     println!("Database has integrity issues: {:?}", report.errors);
+    /// }
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
     pub fn verify_integrity(&mut self, mut options: IntegrityOptions) -> Result<IntegrityReport> {
         if options.max_errors == 0 {
             options.max_errors = usize::MAX;
@@ -585,11 +767,25 @@ impl GraphDB {
         Ok(report)
     }
 
+    /// Performs a health check on the database.
+    ///
+    /// Checks various operational metrics to determine if the database
+    /// is operating within normal parameters:
+    /// - Cache hit rate
+    /// - WAL size
+    /// - Corruption error count
+    /// - Time since last checkpoint
+    ///
+    /// # Returns
+    /// A `HealthCheck` result with status and individual check results.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Error checking WAL size
     pub fn health_check(&self) -> Result<crate::db::health::HealthCheck> {
         use crate::db::health::{Check, HealthCheck};
-        
+
         let mut health = HealthCheck::new();
-        
+
         let cache_hit_rate = self.metrics.cache_hit_rate();
         let cache_threshold = 0.7;
         health.add_check(Check::CacheHitRate {
@@ -597,7 +793,7 @@ impl GraphDB {
             threshold: cache_threshold,
             healthy: cache_hit_rate >= cache_threshold,
         });
-        
+
         let wal_size = self.pager.wal_size()?;
         let wal_threshold = 100 * 1024 * 1024;
         health.add_check(Check::WalSize {
@@ -605,13 +801,13 @@ impl GraphDB {
             threshold: wal_threshold,
             healthy: wal_size < wal_threshold,
         });
-        
+
         let corruption_count = self.metrics.corruption_errors;
         health.add_check(Check::CorruptionErrors {
             count: corruption_count,
             healthy: corruption_count == 0,
         });
-        
+
         let checkpoints_performed = self.metrics.checkpoints_performed;
         let seconds_since_checkpoint = if checkpoints_performed == 0 {
             u64::MAX
@@ -624,23 +820,49 @@ impl GraphDB {
             threshold: checkpoint_threshold,
             healthy: seconds_since_checkpoint < checkpoint_threshold || checkpoints_performed == 0,
         });
-        
+
         Ok(health)
     }
 
+    /// Closes the database gracefully.
+    ///
+    /// Performs a clean shutdown by:
+    /// 1. Rolling back any active transaction
+    /// 2. Persisting the B-tree index
+    /// 3. Writing the database header
+    /// 4. Checkpointing the WAL
+    ///
+    /// After successful close, the database can be reopened without
+    /// requiring WAL recovery.
+    ///
+    /// # Returns
+    /// Ok(()) on successful close.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Disk I/O error during close
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::GraphDB;
+    ///
+    /// let db = GraphDB::open("test.db")?;
+    /// // ... use database ...
+    /// db.close()?; // Clean shutdown
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
     pub fn close(mut self) -> Result<()> {
         info!("Closing database gracefully");
-        
+
         if self.is_in_transaction() {
             warn!("Active transaction detected during close, rolling back");
             self.exit_transaction();
         }
-        
+
         self.persist_btree_index()?;
         self.write_header()?;
-        
+
         self.pager.checkpoint()?;
-        
+
         info!("Database closed successfully");
         Ok(())
     }

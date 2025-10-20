@@ -20,7 +20,12 @@ fn run_benchmark_suite(name: &str, dataset: (Vec<Node>, Vec<Edge>), num_runs: us
 
     println!("\n============================================================");
     println!("=== {} Dataset Benchmark ===", name);
-    println!("Total operations: {} nodes + {} edges = {}", nodes.len(), edges.len(), total_ops);
+    println!(
+        "Total operations: {} nodes + {} edges = {}",
+        nodes.len(),
+        edges.len(),
+        total_ops
+    );
     println!("============================================================");
 
     println!("\n--- Checksums DISABLED (baseline) ---");
@@ -63,10 +68,16 @@ fn run_benchmark_suite(name: &str, dataset: (Vec<Node>, Vec<Edge>), num_runs: us
         * 100.0;
 
     println!("\n📊 Results for {} Dataset:", name);
-    println!("  Baseline (OFF): {:.2}ms ({:.0} ops/sec)",
-        baseline_median.as_secs_f64() * 1000.0, baseline_ops_per_sec);
-    println!("  Checksums (ON): {:.2}ms ({:.0} ops/sec)",
-        checksum_median.as_secs_f64() * 1000.0, checksum_ops_per_sec);
+    println!(
+        "  Baseline (OFF): {:.2}ms ({:.0} ops/sec)",
+        baseline_median.as_secs_f64() * 1000.0,
+        baseline_ops_per_sec
+    );
+    println!(
+        "  Checksums (ON): {:.2}ms ({:.0} ops/sec)",
+        checksum_median.as_secs_f64() * 1000.0,
+        checksum_ops_per_sec
+    );
     println!("  Overhead: {:.2}%", overhead_pct);
 
     if overhead_pct < 3.0 {
@@ -76,7 +87,11 @@ fn run_benchmark_suite(name: &str, dataset: (Vec<Node>, Vec<Edge>), num_runs: us
     }
 }
 
-fn run_throughput_test(nodes: &[Node], edges: &[Edge], checksum_enabled: bool) -> std::time::Duration {
+fn run_throughput_test(
+    nodes: &[Node],
+    edges: &[Edge],
+    checksum_enabled: bool,
+) -> std::time::Duration {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("throughput_test.db");
 

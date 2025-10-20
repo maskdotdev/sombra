@@ -68,7 +68,14 @@ impl Pager {
         cache_size: usize,
         checksum_enabled: bool,
     ) -> Result<Self> {
-        Self::open_with_all_config(path, wal_sync_enabled, use_mmap, cache_size, checksum_enabled, None)
+        Self::open_with_all_config(
+            path,
+            wal_sync_enabled,
+            use_mmap,
+            cache_size,
+            checksum_enabled,
+            None,
+        )
     }
 
     pub fn open_with_all_config(
@@ -199,13 +206,12 @@ impl Pager {
 
         let next_page_id = (self.file_len / self.page_size as u64) as PageId;
         let new_size = (u64::from(next_page_id) + 1) * self.page_size as u64;
-        
+
         if let Some(max_size) = self.max_size_bytes {
             if new_size > max_size {
                 warn!(
                     current_size = self.file_len,
-                    max_size,
-                    "Database size limit exceeded"
+                    max_size, "Database size limit exceeded"
                 );
                 return Err(GraphError::InvalidArgument(
                     "Database size limit exceeded".into(),
