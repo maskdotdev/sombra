@@ -143,7 +143,7 @@ impl GraphDB {
     }
 
     pub(crate) fn delete_node_internal(&mut self, node_id: NodeId) -> Result<()> {
-        let pointer = *self
+        let pointer = self
             .node_index
             .get(&node_id)
             .ok_or(GraphError::NotFound("node"))?;
@@ -202,7 +202,7 @@ impl GraphDB {
 
         self.metrics.cache_misses += 1;
 
-        let pointer = *self
+        let pointer = self
             .node_index
             .get(&node_id)
             .ok_or(GraphError::NotFound("node"))?;
@@ -224,7 +224,7 @@ impl GraphDB {
         self.node_index
             .range(start, end)
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -232,7 +232,7 @@ impl GraphDB {
         self.node_index
             .range_from(start)
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -240,7 +240,7 @@ impl GraphDB {
         self.node_index
             .range_to(end)
             .into_iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect()
     }
 }

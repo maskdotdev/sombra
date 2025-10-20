@@ -56,6 +56,7 @@ pub enum TxState {
 pub struct Transaction<'db> {
     db: &'db mut GraphDB,
     id: TxId,
+    epoch: u64,
     state: TxState,
     pub dirty_pages: Vec<PageId>,
     start_time: std::time::Instant,
@@ -65,10 +66,12 @@ impl<'db> Transaction<'db> {
     pub(crate) fn new(db: &'db mut GraphDB, id: TxId) -> Result<Self> {
         db.enter_transaction(id)?;
         db.start_tracking();
-        debug!(tx_id = id, "Transaction started");
+        let epoch = db.increment_epoch();
+        debug!(tx_id = id, epoch = epoch, "Transaction started");
         Ok(Self {
             db,
             id,
+            epoch,
             state: TxState::Active,
             dirty_pages: Vec::new(),
             start_time: std::time::Instant::now(),
@@ -81,6 +84,10 @@ impl<'db> Transaction<'db> {
     /// The transaction ID.
     pub fn id(&self) -> TxId {
         self.id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Returns the current state of the transaction.

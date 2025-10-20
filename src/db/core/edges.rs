@@ -19,11 +19,11 @@ impl GraphDB {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
-        let source_ptr = *self
+        let source_ptr = self
             .node_index
             .get(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = *self
+        let target_ptr = self
             .node_index
             .get(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;
@@ -75,11 +75,11 @@ impl GraphDB {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
-        let source_ptr = *self
+        let source_ptr = self
             .node_index
             .get(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = *self
+        let target_ptr = self
             .node_index
             .get(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;
@@ -138,11 +138,11 @@ impl GraphDB {
             .ok_or(GraphError::NotFound("edge"))?;
         let edge = self.load_edge(edge_id)?;
 
-        let source_ptr = *self
+        let source_ptr = self
             .node_index
             .get(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = *self
+        let target_ptr = self
             .node_index
             .get(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;

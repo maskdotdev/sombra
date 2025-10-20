@@ -1,9 +1,11 @@
 use crc32fast::hash;
 use lru::LruCache;
+use rayon::ThreadPoolBuilder;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{info, warn};
 
 use crate::error::{GraphError, Result};
@@ -112,6 +114,29 @@ impl IntegrityReport {
     }
 }
 
+static RAYON_THREAD_POOL: OnceLock<()> = OnceLock::new();
+
+fn configure_rayon_thread_pool(config: &Config) {
+    let desired = config.rayon_thread_pool_size;
+    let _ = RAYON_THREAD_POOL.get_or_init(|| {
+        let mut builder = ThreadPoolBuilder::new();
+        if let Some(num_threads) = desired {
+            builder = builder.num_threads(num_threads);
+        }
+        if let Err(err) = builder.build_global() {
+            if let Some(num_threads) = desired {
+                warn!(
+                    threads = num_threads,
+                    error = %err,
+                    "Failed to configure Rayon global thread pool"
+                );
+            } else {
+                warn!(error = %err, "Failed to configure Rayon global thread pool");
+            }
+        }
+    });
+}
+
 impl From<&PropertyValue> for Option<IndexableValue> {
     fn from(value: &PropertyValue) -> Self {
         match value {
@@ -148,6 +173,7 @@ pub struct GraphDB {
     pub(crate) path: PathBuf,
     pub(crate) pager: Pager,
     pub header: HeaderState,
+    pub(crate) epoch: AtomicU64,
     pub(crate) node_index: BTreeIndex,
     pub(crate) edge_index: HashMap<EdgeId, RecordPointer>,
     pub(crate) label_index: HashMap<String, BTreeSet<NodeId>>,
@@ -175,6 +201,7 @@ impl std::fmt::Debug for GraphDB {
         f.debug_struct("GraphDB")
             .field("path", &self.path)
             .field("header", &self.header)
+            .field("epoch", &self.epoch.load(Ordering::Relaxed))
             .field("next_tx_id", &self.next_tx_id)
             .field("tracking_enabled", &self.tracking_enabled)
             .field("active_transaction", &self.active_transaction)
@@ -249,6 +276,7 @@ impl GraphDB {
             checksum_enabled = config.checksum_enabled,
             "Opening database"
         );
+        configure_rayon_thread_pool(&config);
         let wal_sync_enabled = config.wal_sync_mode != SyncMode::Off;
         let use_mmap = config.use_mmap;
         let cache_size = config.page_cache_size;
@@ -314,6 +342,7 @@ impl GraphDB {
             path: path_ref.to_path_buf(),
             pager,
             header: HeaderState::from(header),
+            epoch: AtomicU64::new(0),
             node_index: BTreeIndex::new(),
             edge_index: HashMap::new(),
             label_index: HashMap::new(),
@@ -369,6 +398,14 @@ impl GraphDB {
     pub fn begin_transaction(&mut self) -> Result<Transaction<'_>> {
         let tx_id = self.allocate_tx_id()?;
         Transaction::new(self, tx_id)
+    }
+
+    pub fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub fn increment_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Flushes dirty pages to disk without checkpointing the WAL.
@@ -689,7 +726,7 @@ impl GraphDB {
             for (node_id, pointer) in self.node_index.iter() {
                 let key = (pointer.page_id, pointer.slot_index);
                 match node_slots.get(&key) {
-                    Some(found_id) if found_id == node_id => {}
+                    Some(found_id) if found_id == &node_id => {}
                     Some(found_id) => {
                         report.index_errors += 1;
                         report.push_error(format!(

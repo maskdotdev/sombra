@@ -1,8 +1,10 @@
 use crate::error::{GraphError, Result};
 use crate::model::NodeId;
 use crate::storage::RecordPointer;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
+use std::sync::Arc;
 
 const BTREE_MAGIC: &[u8; 4] = b"BIDX";
 const BTREE_VERSION: u16 = 1;
@@ -11,76 +13,89 @@ const ENTRY_SIZE: usize = 8 + 4 + 2 + 2;
 
 #[derive(Debug, Clone)]
 pub struct BTreeIndex {
-    root: HashMap<NodeId, RecordPointer>,
+    root: Arc<RwLock<HashMap<NodeId, RecordPointer>>>,
 }
 
 impl BTreeIndex {
     pub fn new() -> Self {
         Self {
-            root: HashMap::new(),
+            root: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn insert(&mut self, key: NodeId, value: RecordPointer) {
-        self.root.insert(key, value);
+        self.root.write().insert(key, value);
     }
 
-    pub fn get(&self, key: &NodeId) -> Option<&RecordPointer> {
-        self.root.get(key)
+    pub fn get(&self, key: &NodeId) -> Option<RecordPointer> {
+        self.root.read().get(key).copied()
     }
 
     pub fn remove(&mut self, key: &NodeId) -> Option<RecordPointer> {
-        self.root.remove(key)
+        self.root.write().remove(key)
     }
 
     pub fn clear(&mut self) {
-        self.root.clear();
+        self.root.write().clear();
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&NodeId, &RecordPointer)> {
-        self.root.iter()
+    pub fn iter(&self) -> Vec<(NodeId, RecordPointer)> {
+        self.root.read().iter().map(|(&k, &v)| (k, v)).collect()
     }
 
     pub fn len(&self) -> usize {
-        self.root.len()
+        self.root.read().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.root.is_empty()
+        self.root.read().is_empty()
     }
 
-    pub fn range(&self, start: NodeId, end: NodeId) -> Vec<(&NodeId, &RecordPointer)> {
-        let mut items: Vec<_> = self
-            .root
+    pub fn range(&self, start: NodeId, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
+        let root = self.root.read();
+        let mut items: Vec<_> = root
             .iter()
             .filter(|(&k, _)| k >= start && k <= end)
+            .map(|(&k, &v)| (k, v))
             .collect();
         items.sort_by_key(|(k, _)| *k);
         items
     }
 
-    pub fn range_from(&self, start: NodeId) -> Vec<(&NodeId, &RecordPointer)> {
-        let mut items: Vec<_> = self.root.iter().filter(|(&k, _)| k >= start).collect();
+    pub fn range_from(&self, start: NodeId) -> Vec<(NodeId, RecordPointer)> {
+        let root = self.root.read();
+        let mut items: Vec<_> = root
+            .iter()
+            .filter(|(&k, _)| k >= start)
+            .map(|(&k, &v)| (k, v))
+            .collect();
         items.sort_by_key(|(k, _)| *k);
         items
     }
 
-    pub fn range_to(&self, end: NodeId) -> Vec<(&NodeId, &RecordPointer)> {
-        let mut items: Vec<_> = self.root.iter().filter(|(&k, _)| k <= end).collect();
+    pub fn range_to(&self, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
+        let root = self.root.read();
+        let mut items: Vec<_> = root
+            .iter()
+            .filter(|(&k, _)| k <= end)
+            .map(|(&k, &v)| (k, v))
+            .collect();
         items.sort_by_key(|(k, _)| *k);
         items
     }
 
     pub fn batch_insert(&mut self, entries: Vec<(NodeId, RecordPointer)>) {
+        let mut root = self.root.write();
         for (key, value) in entries {
-            self.root.insert(key, value);
+            root.insert(key, value);
         }
     }
 
     pub fn batch_remove(&mut self, keys: &[NodeId]) -> Vec<(NodeId, RecordPointer)> {
+        let mut root = self.root.write();
         let mut removed = Vec::with_capacity(keys.len());
         for key in keys {
-            if let Some(value) = self.root.remove(key) {
+            if let Some(value) = root.remove(key) {
                 removed.push((*key, value));
             }
         }
@@ -88,16 +103,17 @@ impl BTreeIndex {
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let len = u64::try_from(self.root.len()).map_err(|_| {
+        let root = self.root.read();
+        let len = u64::try_from(root.len()).map_err(|_| {
             GraphError::Corruption("Too many entries to serialize BTree index".into())
         })?;
-        let mut buf = Vec::with_capacity(BTREE_HEADER_SIZE + 8 + (ENTRY_SIZE * self.root.len()));
+        let mut buf = Vec::with_capacity(BTREE_HEADER_SIZE + 8 + (ENTRY_SIZE * root.len()));
         buf.extend_from_slice(BTREE_MAGIC);
         buf.extend_from_slice(&BTREE_VERSION.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
         buf.extend_from_slice(&len.to_le_bytes());
 
-        for (&node_id, &pointer) in &self.root {
+        for (&node_id, &pointer) in root.iter() {
             buf.extend_from_slice(&node_id.to_le_bytes());
             buf.extend_from_slice(&pointer.page_id.to_le_bytes());
             buf.extend_from_slice(&pointer.slot_index.to_le_bytes());
@@ -167,7 +183,9 @@ impl BTreeIndex {
             );
         }
 
-        Ok(Self { root })
+        Ok(Self {
+            root: Arc::new(RwLock::new(root)),
+        })
     }
 
     fn read_u16_le(buf: &[u8], offset: usize) -> Result<u16> {
@@ -238,8 +256,8 @@ mod tests {
         index.insert(1, ptr1);
         index.insert(2, ptr2);
 
-        assert_eq!(index.get(&1), Some(&ptr1));
-        assert_eq!(index.get(&2), Some(&ptr2));
+        assert_eq!(index.get(&1), Some(ptr1));
+        assert_eq!(index.get(&2), Some(ptr2));
         assert_eq!(index.get(&3), None);
 
         assert_eq!(index.len(), 2);
@@ -343,7 +361,7 @@ mod tests {
             },
         );
 
-        let mut keys: Vec<NodeId> = index.iter().map(|(k, _)| *k).collect();
+        let mut keys: Vec<NodeId> = index.iter().into_iter().map(|(k, _)| k).collect();
         keys.sort();
         assert_eq!(keys, vec![1, 2, 3]);
     }
