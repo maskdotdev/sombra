@@ -1,9 +1,12 @@
 {
   "name": "sombradb",
-  "version": "0.1.28",
+  "version": "0.2.0",
   "description": "A high-performance graph database with ACID transactions",
   "main": "index.js",
   "types": "sombra.d.ts",
+  "bin": {
+    "sombra": "./bin/sombra.js"
+  },
   "napi": {
     "name": "sombradb",
     "triples": {
@@ -56,6 +59,7 @@
     "index-napi.js",
     "sombra.d.ts",
     "index.js",
+    "bin/sombra.js",
     "*.node"
   ],
   "engines": {
@@ -63,13 +67,13 @@
   },
   "dependencies": {},
   "optionalDependencies": {
-    "sombradb-win32-x64-msvc": "0.1.28",
-    "sombradb-darwin-x64": "0.1.28",
-    "sombradb-linux-x64-gnu": "0.1.28",
-    "sombradb-win32-ia32-msvc": "0.1.28",
-    "sombradb-darwin-arm64": "0.1.28",
-    "sombradb-linux-x64-musl": "0.1.28",
-    "sombradb-linux-arm64-gnu": "0.1.28",
-    "sombradb-linux-arm-gnueabihf": "0.1.28"
+    "sombradb-win32-x64-msvc": "0.2.0",
+    "sombradb-darwin-x64": "0.2.0",
+    "sombradb-linux-x64-gnu": "0.2.0",
+    "sombradb-win32-ia32-msvc": "0.2.0",
+    "sombradb-darwin-arm64": "0.2.0",
+    "sombradb-linux-x64-musl": "0.2.0",
+    "sombradb-linux-arm64-gnu": "0.2.0",
+    "sombradb-linux-arm-gnueabihf": "0.2.0"
   }
 }

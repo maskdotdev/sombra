@@ -1,6 +1,6 @@
 [package]
 name = "sombra"
-version = "0.1.29"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -19,6 +19,8 @@ rand = { version = "0.8", optional = true }
 clap = { version = "4.0", optional = true }
 rusqlite = { version = "0.31", optional = true }
 base64 = { version = "0.22", optional = true }
+tokio = { version = "1.0", features = ["full"], optional = true }
+chrono = "0.4"
 lru = "0.12"
 memmap2 = "0.9"
 parking_lot = "0.12"
@@ -29,7 +31,19 @@ rayon = "1.7"
 [features]
 napi = ["dep:napi", "dep:napi-derive"]
 python = ["dep:pyo3"]
-benchmarks = ["dep:tempfile", "dep:rand", "dep:rusqlite", "dep:base64", "dep:clap"]
+benchmarks = ["dep:tempfile", "dep:rand", "dep:rusqlite", "dep:base64", "dep:clap", "dep:tokio"]
+
+[[bin]]
+name = "sombra"
+path = "src/bin/sombra.rs"
+
+[[bin]]
+name = "sombra-inspect"
+required-features = ["benchmarks"]
+
+[[bin]]
+name = "sombra-repair"
+required-features = ["benchmarks"]
 
 [[bench]]
 name = "benchmark_main"
@@ -80,6 +94,7 @@ required-features = ["benchmarks"]
 
 [dev-dependencies]
 sombra = { path = ".", features = ["benchmarks"] }
+proptest = "1.0"
 
 [build-dependencies]
 napi-build = "2"
