@@ -1,5 +1,5 @@
 use sombra::pager::DEFAULT_PAGE_SIZE;
-use sombra::{Config, GraphDB, IntegrityOptions, Result};
+use sombra::{Config, GraphDB, GraphError, IntegrityOptions, Result};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -464,7 +464,7 @@ fn cmd_verify(args: Vec<String>) -> Result<()> {
         }
         if let Some(value) = arg.strip_prefix("--max-errors=") {
             max_errors = Some(value.parse().map_err(|_| {
-                sombra::Error::Corruption("Invalid max-errors value".to_string())
+                GraphError::Corruption("Invalid max-errors value".to_string())
             })?);
             continue;
         }
@@ -529,7 +529,7 @@ fn cmd_verify(args: Vec<String>) -> Result<()> {
         println!();
         println!("  Status: FAIL");
         println!();
-        Err(sombra::Error::Corruption(
+        Err(GraphError::Corruption(
             "integrity violations detected".to_string(),
         ))
     }
