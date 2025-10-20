@@ -173,8 +173,8 @@ impl DataGenerator {
         let mut edges = Vec::new();
         let mut edge_id_counter = 1u64;
 
-        let entity_types = vec!["Person", "Organization", "Location", "Event", "Concept"];
-        let relationship_types = vec![
+        let entity_types = ["Person", "Organization", "Location", "Event", "Concept"];
+        let relationship_types = [
             "WORKS_FOR",
             "LOCATED_IN",
             "PARTICIPATES_IN",

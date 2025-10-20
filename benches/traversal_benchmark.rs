@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 fn setup_chain_graph(path: &str, chain_length: usize) -> GraphDB {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(format!("{}.wal", path));
+    let _ = std::fs::remove_file(format!("{path}.wal"));
 
     let mut db = GraphDB::open_with_config(path, Config::balanced()).unwrap();
 
@@ -22,14 +22,15 @@ fn setup_chain_graph(path: &str, chain_length: usize) -> GraphDB {
 
 fn setup_star_graph(path: &str, neighbor_count: usize) -> (GraphDB, u64) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(format!("{}.wal", path));
+    let _ = std::fs::remove_file(format!("{path}.wal"));
 
     let mut db = GraphDB::open_with_config(path, Config::balanced()).unwrap();
 
     let center = db.add_node(Node::new(9999)).unwrap();
     for i in 0..neighbor_count {
         let node_id = db.add_node(Node::new(i as u64)).unwrap();
-        db.add_edge(Edge::new(0, center, node_id, "connected")).unwrap();
+        db.add_edge(Edge::new(0, center, node_id, "connected"))
+            .unwrap();
     }
 
     db.checkpoint().unwrap();
@@ -38,7 +39,7 @@ fn setup_star_graph(path: &str, neighbor_count: usize) -> (GraphDB, u64) {
 
 fn setup_social_graph(path: &str, user_count: usize, avg_friends: usize) -> (GraphDB, Vec<u64>) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(format!("{}.wal", path));
+    let _ = std::fs::remove_file(format!("{path}.wal"));
 
     let mut db = GraphDB::open_with_config(path, Config::balanced()).unwrap();
 
@@ -67,7 +68,7 @@ fn setup_social_graph(path: &str, user_count: usize, avg_friends: usize) -> (Gra
 
 fn bench_get_neighbors() {
     println!("\n=== get_neighbors Benchmark ===");
-    
+
     for neighbor_count in [10, 100, 1000] {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
@@ -91,7 +92,7 @@ fn bench_get_neighbors() {
 
 fn bench_get_neighbors_cache() {
     println!("\n=== get_neighbors Cache Hit Benchmark ===");
-    
+
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("bench.db");
     let (mut db, center) = setup_star_graph(path.to_str().unwrap(), 1000);
@@ -114,7 +115,7 @@ fn bench_get_neighbors_cache() {
 
 fn bench_two_hop() {
     println!("\n=== Two-Hop Traversal Benchmark ===");
-    
+
     for neighbor_count in [10, 50, 100] {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
@@ -138,7 +139,7 @@ fn bench_two_hop() {
 
 fn bench_three_hop() {
     println!("\n=== Three-Hop Traversal Benchmark ===");
-    
+
     for neighbor_count in [5, 10, 20] {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
@@ -162,7 +163,7 @@ fn bench_three_hop() {
 
 fn bench_bfs() {
     println!("\n=== BFS Traversal Benchmark ===");
-    
+
     for depth in [2, 4, 6] {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
@@ -186,7 +187,7 @@ fn bench_bfs() {
 
 fn bench_parallel_bfs() {
     println!("\n=== Parallel BFS Benchmark ===");
-    
+
     for depth in [2, 4, 6] {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
@@ -210,7 +211,7 @@ fn bench_parallel_bfs() {
 
 fn bench_parallel_multi_hop() {
     println!("\n=== Parallel Multi-Hop Benchmark ===");
-    
+
     for batch_size in [10, 50, 100] {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
@@ -235,7 +236,7 @@ fn bench_parallel_multi_hop() {
 
 fn bench_chain_traversal() {
     println!("\n=== Chain Traversal Benchmark ===");
-    
+
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("bench.db");
     let mut db = setup_chain_graph(path.to_str().unwrap(), 100);

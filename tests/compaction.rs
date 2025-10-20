@@ -6,15 +6,15 @@ use tempfile::NamedTempFile;
 fn compaction_state_can_be_created() {
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
-    
+
     let config = CompactionConfig {
         enabled: false,
         ..Default::default()
     };
-    
+
     let metrics = Arc::new(Mutex::new(PerformanceMetrics::new()));
     let state = CompactionState::spawn(path, config, metrics).expect("spawn compaction state");
-    
+
     drop(state);
 }
 
@@ -22,14 +22,14 @@ fn compaction_state_can_be_created() {
 fn compaction_config_respects_enabled_flag() {
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
-    
+
     let config = CompactionConfig {
         enabled: false,
         interval_secs: Some(1),
         threshold_percent: 50,
         batch_size: 100,
     };
-    
+
     let metrics = Arc::new(Mutex::new(PerformanceMetrics::new()));
     let _state = CompactionState::spawn(path, config, metrics).expect("spawn compaction state");
 }
@@ -68,6 +68,6 @@ fn graphdb_can_open_with_compaction_config() {
     let tmp = NamedTempFile::new().expect("create temp file");
     let mut config = Config::production();
     config.enable_background_compaction = false;
-    
+
     let _db = GraphDB::open_with_config(tmp.path(), config).expect("open database");
 }

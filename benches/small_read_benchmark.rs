@@ -13,7 +13,7 @@ fn main() {
     runner.suite.print_detailed();
 
     if let Err(e) = runner.suite.export_csv("read_benchmark_results.csv") {
-        eprintln!("Failed to export CSV: {}", e);
+        eprintln!("Failed to export CSV: {e}");
     }
 
     println!("\n✓ Read benchmark completed! Results saved to read_benchmark_results.csv");

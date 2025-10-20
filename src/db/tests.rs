@@ -204,7 +204,7 @@ fn rollback_prevents_eviction_corruption() {
 
         for i in 0..5 {
             let mut node = Node::new(0);
-            node.labels.push(format!("Label{}", i));
+            node.labels.push(format!("Label{i}"));
             tx.add_node(node).expect("add node");
         }
 

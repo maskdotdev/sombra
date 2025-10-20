@@ -1,5 +1,5 @@
-use sombra::{Edge, GraphDB, Node, Result};
 use parking_lot::Mutex;
+use sombra::{Edge, GraphDB, Node, Result};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,7 +13,7 @@ const CONCURRENT_NODES: usize = NUM_THREADS * OPERATIONS_PER_THREAD;
 fn concurrent_node_insertion() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    
+
     // Open database once and share it across threads with proper synchronization
     let db = GraphDB::open(&path)?;
     let db = Arc::new(Mutex::new(db));
@@ -68,7 +68,7 @@ fn concurrent_edge_creation() -> Result<()> {
     // Create a central hub node first
     let mut db = GraphDB::open(&path)?;
     let hub_id = db.add_node(Node::new(9999))?;
-    
+
     let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
@@ -124,7 +124,7 @@ fn concurrent_read_write_operations() -> Result<()> {
     for i in 0..initial_node_count {
         db.add_node(Node::new(i as u64))?;
     }
-    
+
     let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
@@ -207,7 +207,7 @@ fn concurrent_transaction_operations() -> Result<()> {
                 // Add multiple nodes in a single transaction
                 let mut db_guard = db_clone.lock();
                 let mut tx = db_guard.begin_transaction()?;
-                
+
                 for j in 0..5 {
                     let node =
                         Node::new((thread_id * OPERATIONS_PER_THREAD * 5 + i * 5 + j) as u64);
@@ -281,7 +281,9 @@ fn concurrent_stress_test() -> Result<()> {
                             let to_id = ((thread_id * OPERATIONS_PER_THREAD + i) % 100 + 1) as u64;
 
                             // Only create edge if both nodes exist
-                            if db_clone.lock().get_node(from_id).is_ok() && db_clone.lock().get_node(to_id).is_ok() {
+                            if db_clone.lock().get_node(from_id).is_ok()
+                                && db_clone.lock().get_node(to_id).is_ok()
+                            {
                                 let edge = Edge::new(0, from_id, to_id, "stress_test");
                                 if db_clone.lock().add_edge(edge).is_ok() {
                                     edges_created += 1;
@@ -319,11 +321,8 @@ fn concurrent_stress_test() -> Result<()> {
 
     let elapsed = start_time.elapsed();
 
-    println!("Concurrent stress test completed in {:?}", elapsed);
-    println!(
-        "Total operations: {} nodes, {} edges, {} reads",
-        total_nodes, total_edges, total_reads
-    );
+    println!("Concurrent stress test completed in {elapsed:?}");
+    println!("Total operations: {total_nodes} nodes, {total_edges} edges, {total_reads} reads");
     println!(
         "Operations per second: {:.2}",
         (total_nodes + total_edges + total_reads) as f64 / elapsed.as_secs_f64()

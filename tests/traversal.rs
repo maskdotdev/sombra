@@ -12,7 +12,8 @@ fn setup_star_graph(neighbor_count: usize) -> (GraphDB, u64, Vec<u64>) {
     let mut neighbors = Vec::new();
     for i in 0..neighbor_count {
         let node_id = db.add_node(Node::new(i as u64)).unwrap();
-        db.add_edge(Edge::new(0, center, node_id, "connected")).unwrap();
+        db.add_edge(Edge::new(0, center, node_id, "connected"))
+            .unwrap();
         neighbors.push(node_id);
     }
 
@@ -240,6 +241,7 @@ fn test_bfs_traversal_star() -> Result<()> {
     let expected_set: HashSet<_> = neighbors.iter().copied().collect();
     assert_eq!(depth1_set, expected_set);
 
+    #[allow(clippy::needless_range_loop)]
     for i in 1..11 {
         assert_eq!(result[i].1, 1);
     }
@@ -318,9 +320,9 @@ fn test_parallel_multi_hop_batch() -> Result<()> {
     for i in 0..10 {
         let spoke = db.add_node(Node::new(i))?;
         db.add_edge(Edge::new(0, center, spoke, "edge"))?;
-        
+
         for j in 0..5 {
-            let leaf = db.add_node(Node::new((i * 100 + j) as u64))?;
+            let leaf = db.add_node(Node::new(i * 100 + j))?;
             db.add_edge(Edge::new(0, spoke, leaf, "edge"))?;
         }
         spokes.push(spoke);
@@ -332,7 +334,10 @@ fn test_parallel_multi_hop_batch() -> Result<()> {
     for &node_id in &spokes {
         assert!(result.contains_key(&node_id));
         let neighbors = &result[&node_id];
-        assert!(!neighbors.is_empty(), "Expected neighbors for node {}", node_id);
+        assert!(
+            !neighbors.is_empty(),
+            "Expected neighbors for node {node_id}"
+        );
     }
 
     Ok(())

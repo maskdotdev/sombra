@@ -1,13 +1,24 @@
 use proptest::prelude::*;
-use sombra::{GraphDB, PropertyValue, Node, Edge};
+use sombra::{Edge, GraphDB, Node, PropertyValue};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 enum Operation {
-    CreateNode { labels: Vec<String>, props: BTreeMap<String, PropertyValue> },
-    GetNode { node_id: u64 },
-    CreateEdge { from: u64, to: u64, rel_type: String },
-    GetNeighbors { node_id: u64 },
+    CreateNode {
+        labels: Vec<String>,
+        props: BTreeMap<String, PropertyValue>,
+    },
+    GetNode {
+        node_id: u64,
+    },
+    CreateEdge {
+        from: u64,
+        to: u64,
+        rel_type: String,
+    },
+    GetNeighbors {
+        node_id: u64,
+    },
 }
 
 fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
@@ -24,11 +35,11 @@ fn arb_operation() -> impl Strategy<Value = Operation> {
         (
             prop::collection::vec("[A-Z][a-z]{2,8}", 1..=3),
             prop::collection::btree_map("[a-z]{1,8}", arb_property_value(), 0..=3)
-        ).prop_map(|(labels, props)| Operation::CreateNode { labels, props }),
+        )
+            .prop_map(|(labels, props)| Operation::CreateNode { labels, props }),
         (1u64..=100).prop_map(|node_id| Operation::GetNode { node_id }),
-        (1u64..=50, 1u64..=50, "[A-Z]{3,10}").prop_map(|(from, to, rel_type)| {
-            Operation::CreateEdge { from, to, rel_type }
-        }),
+        (1u64..=50, 1u64..=50, "[A-Z]{3,10}")
+            .prop_map(|(from, to, rel_type)| { Operation::CreateEdge { from, to, rel_type } }),
         (1u64..=50).prop_map(|node_id| Operation::GetNeighbors { node_id }),
     ]
 }
@@ -120,11 +131,11 @@ proptest! {
             for value in &committed {
                 let mut props = BTreeMap::new();
                 props.insert("value".to_string(), PropertyValue::Int(*value));
-                
+
                 let mut node = Node::new(0);
                 node.labels.push("Committed".to_string());
                 node.properties = props;
-                
+
                 let node_id = tx.add_node(node).unwrap();
                 committed_ids.push(node_id);
             }
@@ -137,11 +148,11 @@ proptest! {
             for value in &rolled_back {
                 let mut props = BTreeMap::new();
                 props.insert("value".to_string(), PropertyValue::Int(*value));
-                
+
                 let mut node = Node::new(0);
                 node.labels.push("RolledBack".to_string());
                 node.properties = props;
-                
+
                 let node_id = tx.add_node(node).unwrap();
                 rolled_back_ids.push(node_id);
             }
@@ -150,17 +161,17 @@ proptest! {
 
         {
             let mut tx = db.begin_transaction().unwrap();
-            
+
             for node_id in &committed_ids {
                 let node = tx.get_node(*node_id).unwrap();
                 prop_assert!(node.id > 0, "Committed node {} should exist", node_id);
             }
-            
+
             for node_id in &rolled_back_ids {
                 let result = tx.get_node(*node_id);
                 prop_assert!(result.is_err(), "Rolled back node {} should not exist", node_id);
             }
-            
+
             tx.commit().unwrap();
         }
     }
@@ -174,16 +185,16 @@ proptest! {
         let mut db = GraphDB::open(temp.path()).unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        
+
         let mut node_ids = Vec::new();
         for value in &nodes {
             let mut props = BTreeMap::new();
             props.insert("value".to_string(), PropertyValue::Int(*value));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Node".to_string());
             node.properties = props;
-            
+
             let node_id = tx.add_node(node).unwrap();
             node_ids.push(node_id);
         }
@@ -226,11 +237,11 @@ proptest! {
         let mut tx = db.begin_transaction().unwrap();
         let retrieved_node = tx.get_node(node_id).unwrap();
         prop_assert!(retrieved_node.id > 0);
-        
+
         for (key, value) in &props {
             prop_assert_eq!(retrieved_node.properties.get(key), Some(value));
         }
-        
+
         tx.commit().unwrap();
     }
 }
@@ -242,7 +253,8 @@ fn property_test_idempotent_reads() {
 
     let mut node = Node::new(0);
     node.labels.push("Test".to_string());
-    node.properties.insert("test".to_string(), PropertyValue::Int(42));
+    node.properties
+        .insert("test".to_string(), PropertyValue::Int(42));
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
@@ -252,7 +264,7 @@ fn property_test_idempotent_reads() {
         let mut tx = db.begin_transaction().unwrap();
         let node1 = tx.get_node(node_id).unwrap();
         let node2 = tx.get_node(node_id).unwrap();
-        
+
         assert_eq!(node1, node2);
         tx.commit().unwrap();
     }
@@ -262,26 +274,22 @@ fn property_test_idempotent_reads() {
 fn property_test_commutative_node_creation() {
     let temp1 = tempfile::NamedTempFile::new().unwrap();
     let temp2 = tempfile::NamedTempFile::new().unwrap();
-    
+
     let mut db1 = GraphDB::open(temp1.path()).unwrap();
     let mut db2 = GraphDB::open(temp2.path()).unwrap();
 
-    let nodes = vec![
-        ("A", 1i64),
-        ("B", 2i64),
-        ("C", 3i64),
-    ];
+    let nodes = vec![("A", 1i64), ("B", 2i64), ("C", 3i64)];
 
     {
         let mut tx = db1.begin_transaction().unwrap();
         for (label, value) in &nodes {
             let mut props = BTreeMap::new();
             props.insert("value".to_string(), PropertyValue::Int(*value));
-            
+
             let mut node = Node::new(0);
             node.labels.push(label.to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -292,11 +300,11 @@ fn property_test_commutative_node_creation() {
         for (label, value) in nodes.iter().rev() {
             let mut props = BTreeMap::new();
             props.insert("value".to_string(), PropertyValue::Int(*value));
-            
+
             let mut node = Node::new(0);
             node.labels.push(label.to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -304,10 +312,10 @@ fn property_test_commutative_node_creation() {
 
     let mut tx1 = db1.begin_transaction().unwrap();
     let mut tx2 = db2.begin_transaction().unwrap();
-    
+
     let mut count1 = 0;
     let mut count2 = 0;
-    
+
     for i in 1..=10 {
         if tx1.get_node(i).is_ok() {
             count1 += 1;
@@ -316,9 +324,9 @@ fn property_test_commutative_node_creation() {
             count2 += 1;
         }
     }
-    
+
     assert_eq!(count1, count2);
-    
+
     tx1.commit().unwrap();
     tx2.commit().unwrap();
 }

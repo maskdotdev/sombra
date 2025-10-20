@@ -11,6 +11,7 @@ fn benchmark_persistence(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: (i % 1000) as u16,
+                byte_offset: 0,
             },
         );
     }
@@ -23,9 +24,9 @@ fn benchmark_persistence(count: usize) {
     let _deserialized = BTreeIndex::deserialize(&serialized).unwrap();
     let deserialize_time = start.elapsed();
 
-    println!("BTreeIndex Persistence (n={})", count);
-    println!("  Serialize:   {:?}", serialize_time);
-    println!("  Deserialize: {:?}", deserialize_time);
+    println!("BTreeIndex Persistence (n={count})");
+    println!("  Serialize:   {serialize_time:?}");
+    println!("  Deserialize: {deserialize_time:?}");
     println!("  Data size:   {} bytes", serialized.len());
 }
 
@@ -38,6 +39,7 @@ fn benchmark_range_queries(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -45,18 +47,19 @@ fn benchmark_range_queries(count: usize) {
     let start = Instant::now();
     let results: Vec<_> = btree
         .range(count as u64 / 4, count as u64 * 3 / 4)
+        .into_iter()
         .collect();
     let range_time = start.elapsed();
 
     let start = Instant::now();
-    let from_results: Vec<_> = btree.range_from(count as u64 / 2).collect();
+    let from_results: Vec<_> = btree.range_from(count as u64 / 2).into_iter().collect();
     let range_from_time = start.elapsed();
 
     let start = Instant::now();
-    let to_results: Vec<_> = btree.range_to(count as u64 / 2).collect();
+    let to_results: Vec<_> = btree.range_to(count as u64 / 2).into_iter().collect();
     let range_to_time = start.elapsed();
 
-    println!("BTreeIndex Range Queries (n={})", count);
+    println!("BTreeIndex Range Queries (n={count})");
     println!(
         "  range(25%, 75%): {:?} ({} results)",
         range_time,
@@ -82,6 +85,7 @@ fn benchmark_bulk_operations(count: usize) {
                 RecordPointer {
                     page_id: i as u32,
                     slot_index: 0,
+                    byte_offset: 0,
                 },
             )
         })
@@ -99,8 +103,8 @@ fn benchmark_bulk_operations(count: usize) {
     let removed = btree.batch_remove(&keys_to_remove);
     let remove_time = start.elapsed();
 
-    println!("BTreeIndex Bulk Operations (n={})", count);
-    println!("  batch_insert: {:?}", insert_time);
+    println!("BTreeIndex Bulk Operations (n={count})");
+    println!("  batch_insert: {insert_time:?}");
     println!(
         "  batch_remove: {:?} ({} removed)",
         remove_time,
@@ -118,6 +122,7 @@ fn benchmark_custom_btree(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -133,10 +138,10 @@ fn benchmark_custom_btree(count: usize) {
     let _: Vec<_> = custom.iter().collect();
     let iter_time = start.elapsed();
 
-    println!("CustomBTree (256-ary) Performance (n={})", count);
-    println!("  insert: {:?}", insert_time);
-    println!("  lookup: {:?}", lookup_time);
-    println!("  iter:   {:?}", iter_time);
+    println!("CustomBTree (256-ary) Performance (n={count})");
+    println!("  insert: {insert_time:?}");
+    println!("  lookup: {lookup_time:?}");
+    println!("  iter:   {iter_time:?}");
 }
 
 fn compare_btree_implementations(count: usize) {
@@ -150,6 +155,7 @@ fn compare_btree_implementations(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -162,6 +168,7 @@ fn compare_btree_implementations(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -179,10 +186,10 @@ fn compare_btree_implementations(count: usize) {
     }
     let custom_lookup = start.elapsed();
 
-    println!("BTree Implementation Comparison (n={})", count);
+    println!("BTree Implementation Comparison (n={count})");
     println!("  Standard BTreeMap:");
-    println!("    insert: {:?}", std_insert);
-    println!("    lookup: {:?}", std_lookup);
+    println!("    insert: {std_insert:?}");
+    println!("    lookup: {std_lookup:?}");
     println!("  Custom 256-ary BTree:");
     println!(
         "    insert: {:?} ({:.2}x)",

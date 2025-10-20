@@ -33,7 +33,8 @@ pub(crate) struct GroupCommitState {
 
 impl GroupCommitState {
     pub fn spawn(db_path: PathBuf, timeout_ms: u64) -> Result<Arc<Mutex<Self>>> {
-        let (sender, receiver): (Sender<ControlMessage>, Receiver<ControlMessage>) = mpsc::channel();
+        let (sender, receiver): (Sender<ControlMessage>, Receiver<ControlMessage>) =
+            mpsc::channel();
 
         let committer_thread = thread::spawn(move || {
             Self::group_commit_loop(db_path, receiver, timeout_ms);

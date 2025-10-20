@@ -95,7 +95,7 @@ fn benchmark_btree_iteration(count: usize) -> u128 {
     }
 
     let start = Instant::now();
-    let _: Vec<_> = index.iter().collect();
+    let _: Vec<_> = index.iter().into_iter().collect();
     start.elapsed().as_micros()
 }
 
@@ -132,10 +132,7 @@ fn main() {
         let btree_time = benchmark_btree_insert(size);
         let hashmap_time = benchmark_hashmap_insert(size);
         let ratio = btree_time as f64 / hashmap_time as f64;
-        println!(
-            "{:<10} {:<15} {:<15} {:<15.2}x",
-            size, btree_time, hashmap_time, ratio
-        );
+        println!("{size:<10} {btree_time:<15} {hashmap_time:<15} {ratio:<15.2}x");
     }
 
     println!("\n## Lookup Performance (10K lookups)");
@@ -148,10 +145,7 @@ fn main() {
         let btree_time = benchmark_btree_lookup(size, 10000);
         let hashmap_time = benchmark_hashmap_lookup(size, 10000);
         let ratio = btree_time as f64 / hashmap_time as f64;
-        println!(
-            "{:<10} {:<15} {:<15} {:<15.2}x",
-            size, btree_time, hashmap_time, ratio
-        );
+        println!("{size:<10} {btree_time:<15} {hashmap_time:<15} {ratio:<15.2}x");
     }
 
     println!("\n## Iteration Performance");
@@ -164,10 +158,7 @@ fn main() {
         let btree_time = benchmark_btree_iteration(size);
         let hashmap_time = benchmark_hashmap_iteration(size);
         let ratio = btree_time as f64 / hashmap_time as f64;
-        println!(
-            "{:<10} {:<15} {:<15} {:<15.2}x",
-            size, btree_time, hashmap_time, ratio
-        );
+        println!("{size:<10} {btree_time:<15} {hashmap_time:<15} {ratio:<15.2}x");
     }
 
     println!("\n## Memory Characteristics");

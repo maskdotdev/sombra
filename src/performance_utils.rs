@@ -103,6 +103,12 @@ pub struct MemoryTracker {
     initial_memory: usize,
 }
 
+impl Default for MemoryTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryTracker {
     pub fn new() -> Self {
         Self {
@@ -136,7 +142,7 @@ impl MemoryTracker {
     fn get_memory_usage() -> usize {
         use std::process::Command;
         if let Ok(output) = Command::new("ps")
-            .args(&["-o", "rss=", "-p"])
+            .args(["-o", "rss=", "-p"])
             .arg(std::process::id().to_string())
             .output()
         {
@@ -298,7 +304,7 @@ impl BenchmarkSuite {
             if !result.metadata.is_empty() {
                 println!("  Metadata:");
                 for (key, value) in &result.metadata {
-                    println!("    {}: {}", key, value);
+                    println!("    {key}: {value}");
                 }
             }
         }

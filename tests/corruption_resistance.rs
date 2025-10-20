@@ -3,7 +3,7 @@ use sombra::model::{Edge, Node, PropertyValue};
 use sombra::GraphDB;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 const ITERATIONS: usize = 10_000;
@@ -30,7 +30,7 @@ fn corruption_fuzzing_handles_errors_gracefully() {
             fs::write(&wal_path, []).expect("truncate wal file");
         }
 
-        if base_db.len() > 0 && (next_random(&mut rng_state) & 1) == 0 {
+        if !base_db.is_empty() && (next_random(&mut rng_state) & 1) == 0 {
             let mut corrupted = base_db.clone();
             let idx = (next_random(&mut rng_state) as usize) % corrupted.len();
             let bit = 1 << (next_random(&mut rng_state) as u8 & 7);
@@ -63,7 +63,7 @@ fn corruption_fuzzing_handles_errors_gracefully() {
     }
 }
 
-fn seed_database(db_path: &PathBuf) {
+fn seed_database(db_path: &Path) {
     let mut db = GraphDB::open(
         db_path
             .to_str()
@@ -94,7 +94,7 @@ fn seed_database(db_path: &PathBuf) {
     db.flush().expect("flush base database");
 }
 
-fn wal_path_for(db_path: &PathBuf) -> PathBuf {
+fn wal_path_for(db_path: &Path) -> PathBuf {
     let mut os_string = db_path.as_os_str().to_owned();
     os_string.push(".wal");
     PathBuf::from(os_string)

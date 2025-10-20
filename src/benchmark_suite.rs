@@ -48,7 +48,7 @@ impl BenchmarkRunner {
 
         // Export to CSV
         if let Err(e) = self.suite.export_csv("benchmark_results.csv") {
-            eprintln!("Failed to export CSV: {}", e);
+            eprintln!("Failed to export CSV: {e}");
         }
     }
 
@@ -128,7 +128,7 @@ impl BenchmarkRunner {
         self.suite.print_detailed();
 
         if let Err(e) = self.suite.export_csv("scalability_benchmark_results.csv") {
-            eprintln!("Failed to export CSV: {}", e);
+            eprintln!("Failed to export CSV: {e}");
         }
     }
 
@@ -152,7 +152,7 @@ impl BenchmarkRunner {
 
         println!("--- Phase 1: Bulk Insert ---");
         let _result = self.suite.run_benchmark(
-            format!("sombra_{}_bulk_insert_nodes", size),
+            format!("sombra_{size}_bulk_insert_nodes"),
             nodes.len() as u64,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -165,12 +165,12 @@ impl BenchmarkRunner {
                     let _ = log_or_return!(tx.add_node(node.clone()));
                 }
 
-                let _ = log_or_return!(tx.commit());
+                log_or_return!(tx.commit());
             },
         );
 
         let _result = self.suite.run_benchmark(
-            format!("sombra_{}_bulk_insert_edges", size),
+            format!("sombra_{size}_bulk_insert_edges"),
             edges.len() as u64,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -183,7 +183,7 @@ impl BenchmarkRunner {
                     let _ = log_or_return!(tx.add_edge(edge.clone()));
                 }
 
-                let _ = log_or_return!(tx.commit());
+                log_or_return!(tx.commit());
             },
         );
 
@@ -195,7 +195,7 @@ impl BenchmarkRunner {
             .collect();
 
         let _result = self.suite.run_latency_benchmark(
-            format!("sombra_{}_random_node_reads", size),
+            format!("sombra_{size}_random_node_reads"),
             sample_ids.len() as u64,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -209,7 +209,7 @@ impl BenchmarkRunner {
         );
 
         let _result = self.suite.run_latency_benchmark(
-            format!("sombra_{}_repeated_node_reads", size),
+            format!("sombra_{size}_repeated_node_reads"),
             sample_ids.len() as u64 * 10,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -228,7 +228,7 @@ impl BenchmarkRunner {
 
         let _result =
             self.suite
-                .run_latency_benchmark(format!("sombra_{}_label_queries", size), 10, || {
+                .run_latency_benchmark(format!("sombra_{size}_label_queries"), 10, || {
                     let mut db = log_or_return!(GraphDB::open_with_config(
                         &db_path,
                         crate::db::Config::benchmark()
@@ -241,7 +241,7 @@ impl BenchmarkRunner {
         println!("\n--- Phase 4: Graph Traversal Performance ---");
 
         let _result = self.suite.run_latency_benchmark(
-            format!("sombra_{}_neighbor_traversal", size),
+            format!("sombra_{size}_neighbor_traversal"),
             sample_ids.len().min(100) as u64,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -255,7 +255,7 @@ impl BenchmarkRunner {
         );
 
         let _result = self.suite.run_latency_benchmark(
-            format!("sombra_{}_two_hop_traversal", size),
+            format!("sombra_{size}_two_hop_traversal"),
             sample_ids.len().min(10) as u64,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -290,33 +290,31 @@ impl BenchmarkRunner {
         let temp_dir = log_or_return!(TempDir::new());
         let db_path = temp_dir.path().join("sombra_test.db");
 
-        let _result =
-            self.suite
-                .run_benchmark(format!("{}_nodes", name), nodes.len() as u64, || {
-                    let mut db =
-                        log_or_return!(GraphDB::open_with_config(&db_path, config.clone()));
-                    let mut tx = log_or_return!(db.begin_transaction());
+        let _result = self
+            .suite
+            .run_benchmark(format!("{name}_nodes"), nodes.len() as u64, || {
+                let mut db = log_or_return!(GraphDB::open_with_config(&db_path, config.clone()));
+                let mut tx = log_or_return!(db.begin_transaction());
 
-                    for node in nodes {
-                        let _ = log_or_return!(tx.add_node(node.clone()));
-                    }
+                for node in nodes {
+                    let _ = log_or_return!(tx.add_node(node.clone()));
+                }
 
-                    let _ = log_or_return!(tx.commit());
-                });
+                log_or_return!(tx.commit());
+            });
 
-        let _result =
-            self.suite
-                .run_benchmark(format!("{}_edges", name), edges.len() as u64, || {
-                    let mut db =
-                        log_or_return!(GraphDB::open_with_config(&db_path, config.clone()));
-                    let mut tx = log_or_return!(db.begin_transaction());
+        let _result = self
+            .suite
+            .run_benchmark(format!("{name}_edges"), edges.len() as u64, || {
+                let mut db = log_or_return!(GraphDB::open_with_config(&db_path, config.clone()));
+                let mut tx = log_or_return!(db.begin_transaction());
 
-                    for edge in edges {
-                        let _ = log_or_return!(tx.add_edge(edge.clone()));
-                    }
+                for edge in edges {
+                    let _ = log_or_return!(tx.add_edge(edge.clone()));
+                }
 
-                    let _ = log_or_return!(tx.commit());
-                });
+                log_or_return!(tx.commit());
+            });
     }
 
     fn benchmark_sombra_query(&mut self, name: &str, nodes: &[Node], _edges: &[Edge]) {
@@ -332,14 +330,14 @@ impl BenchmarkRunner {
                 let _ = log_or_return!(tx.add_node(node.clone()));
             }
 
-            let _ = log_or_return!(tx.commit());
+            log_or_return!(tx.commit());
         }
 
         // Now benchmark queries
         let sample_node_ids: Vec<u64> = (1..=nodes.len().min(100)).map(|i| i as u64).collect();
 
         let _result = self.suite.run_benchmark(
-            format!("{}_get_node", name),
+            format!("{name}_get_node"),
             sample_node_ids.len() as u64 * 10, // 10 iterations per node
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -355,7 +353,7 @@ impl BenchmarkRunner {
         );
 
         let _result = self.suite.run_benchmark(
-            format!("{}_get_neighbors", name),
+            format!("{name}_get_neighbors"),
             sample_node_ids.len() as u64 * 10,
             || {
                 let mut db = log_or_return!(GraphDB::open_with_config(
@@ -375,25 +373,25 @@ impl BenchmarkRunner {
         let temp_dir = log_or_return!(TempDir::new());
         let db_path = temp_dir.path().join("sqlite_test.db");
 
-        let _result =
-            self.suite
-                .run_benchmark(format!("{}_nodes", name), nodes.len() as u64, || {
-                    let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
-                        Some(db) => db,
-                        None => return,
-                    };
-                    let _ = log_or_return!(db.bulk_insert_nodes(nodes));
-                });
+        let _result = self
+            .suite
+            .run_benchmark(format!("{name}_nodes"), nodes.len() as u64, || {
+                let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
+                    Some(db) => db,
+                    None => return,
+                };
+                log_or_return!(db.bulk_insert_nodes(nodes));
+            });
 
-        let _result =
-            self.suite
-                .run_benchmark(format!("{}_edges", name), edges.len() as u64, || {
-                    let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
-                        Some(db) => db,
-                        None => return,
-                    };
-                    let _ = log_or_return!(db.bulk_insert_edges(edges));
-                });
+        let _result = self
+            .suite
+            .run_benchmark(format!("{name}_edges"), edges.len() as u64, || {
+                let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
+                    Some(db) => db,
+                    None => return,
+                };
+                log_or_return!(db.bulk_insert_edges(edges));
+            });
     }
 
     fn benchmark_sqlite_query(&mut self, name: &str, nodes: &[Node], _edges: &[Edge]) {
@@ -406,14 +404,14 @@ impl BenchmarkRunner {
                 Some(db) => db,
                 None => return,
             };
-            let _ = log_or_return!(db.bulk_insert_nodes(nodes));
+            log_or_return!(db.bulk_insert_nodes(nodes));
         }
 
         // Now benchmark queries
         let sample_node_ids: Vec<u64> = (1..=nodes.len().min(100)).map(|i| i as u64).collect();
 
         let _result = self.suite.run_benchmark(
-            format!("{}_get_node", name),
+            format!("{name}_get_node"),
             sample_node_ids.len() as u64 * 10,
             || {
                 let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
@@ -429,7 +427,7 @@ impl BenchmarkRunner {
         );
 
         let _result = self.suite.run_benchmark(
-            format!("{}_get_neighbors", name),
+            format!("{name}_get_neighbors"),
             sample_node_ids.len() as u64 * 10,
             || {
                 let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
@@ -446,7 +444,7 @@ impl BenchmarkRunner {
     }
 
     pub fn run_stress_test(&mut self, duration_secs: u64) {
-        println!("\n=== Stress Test ({} seconds) ===", duration_secs);
+        println!("\n=== Stress Test ({duration_secs} seconds) ===");
 
         let temp_dir = log_or_return!(TempDir::new());
 
@@ -473,7 +471,7 @@ impl BenchmarkRunner {
                     .insert("timestamp".to_string(), PropertyValue::Int(timestamp));
 
                 let _ = log_or_return!(tx.add_node(node));
-                let _ = log_or_return!(tx.commit());
+                log_or_return!(tx.commit());
             });
 
         // Test 2: SQLite with fully durable settings (default)
@@ -498,7 +496,7 @@ impl BenchmarkRunner {
                 node.properties
                     .insert("timestamp".to_string(), PropertyValue::Int(timestamp));
 
-                let _ = log_or_return!(db.add_node(node));
+                log_or_return!(db.add_node(node));
             });
 
         // Test 3: Sombra with benchmark settings (for comparison)
@@ -509,7 +507,7 @@ impl BenchmarkRunner {
         let db2 = match GraphDB::open_with_config(&db_path2, config_benchmark) {
             Ok(db) => RefCell::new(db),
             Err(err) => {
-                eprintln!("GraphDB::open_with_config failed: {}", err);
+                eprintln!("GraphDB::open_with_config failed: {err}");
                 return;
             }
         };
@@ -530,7 +528,7 @@ impl BenchmarkRunner {
                     .insert("timestamp".to_string(), PropertyValue::Int(timestamp));
 
                 let _ = log_or_return!(tx.add_node(node));
-                let _ = log_or_return!(tx.commit());
+                log_or_return!(tx.commit());
             });
 
         // Print results after stress test
@@ -542,7 +540,7 @@ impl BenchmarkRunner {
         let db_path = temp_dir.path().join("test_sombra.db");
 
         let _result = self.suite.run_benchmark(
-            format!("{}_bulk_insert", name),
+            format!("{name}_bulk_insert"),
             (nodes.len() + edges.len()) as u64,
             || {
                 let mut db = match open_graphdb_default(&db_path, "Failed to open Sombra database")
@@ -562,7 +560,7 @@ impl BenchmarkRunner {
                     let _ = log_or_return!(tx.add_edge(edge.clone()));
                 }
 
-                let _ = log_or_return!(tx.commit());
+                log_or_return!(tx.commit());
             },
         );
     }
@@ -572,15 +570,15 @@ impl BenchmarkRunner {
         let db_path = temp_dir.path().join("test_sqlite.db");
 
         let _result = self.suite.run_benchmark(
-            format!("{}_bulk_insert", name),
+            format!("{name}_bulk_insert"),
             (nodes.len() + edges.len()) as u64,
             || {
                 let mut db = match open_sqlite_db(&db_path, "Failed to open SQLite database") {
                     Some(db) => db,
                     None => return,
                 };
-                let _ = log_or_return!(db.bulk_insert_nodes(nodes));
-                let _ = log_or_return!(db.bulk_insert_edges(edges));
+                log_or_return!(db.bulk_insert_nodes(nodes));
+                log_or_return!(db.bulk_insert_edges(edges));
             },
         );
     }
@@ -614,7 +612,7 @@ impl BenchmarkRunner {
         self.suite.print_detailed();
 
         if let Err(e) = self.suite.export_csv("read_benchmark_results.csv") {
-            eprintln!("Failed to export CSV: {}", e);
+            eprintln!("Failed to export CSV: {e}");
         }
     }
 
@@ -665,7 +663,7 @@ impl BenchmarkRunner {
             for edge in edges {
                 let _ = log_or_return!(tx.add_edge(edge.clone()));
             }
-            let _ = log_or_return!(tx.commit());
+            log_or_return!(tx.commit());
         }
 
         let sample_ids: Vec<u64> = (1..=nodes.len().min(1000))
@@ -679,7 +677,7 @@ impl BenchmarkRunner {
         )));
 
         let _result = self.suite.run_benchmark(
-            format!("sombra_{}_get_node", size),
+            format!("sombra_{size}_get_node"),
             sample_ids.len() as u64,
             || {
                 let mut db_ref = db.borrow_mut();
@@ -690,7 +688,7 @@ impl BenchmarkRunner {
         );
 
         let _result = self.suite.run_benchmark(
-            format!("sombra_{}_get_neighbors", size),
+            format!("sombra_{size}_get_neighbors"),
             sample_ids.len() as u64,
             || {
                 let mut db_ref = db.borrow_mut();
@@ -702,7 +700,7 @@ impl BenchmarkRunner {
 
         let _result =
             self.suite
-                .run_benchmark(format!("sombra_{}_two_hop_neighbors", size), 10, || {
+                .run_benchmark(format!("sombra_{size}_two_hop_neighbors"), 10, || {
                     let mut db_ref = db.borrow_mut();
                     for &node_id in sample_ids.iter().take(10) {
                         let _neighbors = log_or_return!(db_ref.get_neighbors_two_hops(node_id));
@@ -711,7 +709,7 @@ impl BenchmarkRunner {
 
         let _result =
             self.suite
-                .run_benchmark(format!("sombra_{}_bfs_traversal_depth3", size), 10, || {
+                .run_benchmark(format!("sombra_{size}_bfs_traversal_depth3"), 10, || {
                     let mut db_ref = db.borrow_mut();
                     for &node_id in sample_ids.iter().take(10) {
                         let _ = log_or_return!(db_ref.bfs_traversal(node_id, 3));
@@ -730,8 +728,8 @@ impl BenchmarkRunner {
                 Some(db) => db,
                 None => return,
             };
-            let _ = log_or_return!(db.bulk_insert_nodes(nodes));
-            let _ = log_or_return!(db.bulk_insert_edges(edges));
+            log_or_return!(db.bulk_insert_nodes(nodes));
+            log_or_return!(db.bulk_insert_edges(edges));
         }
 
         let sample_ids: Vec<u64> = (1..=nodes.len().min(1000))
@@ -745,7 +743,7 @@ impl BenchmarkRunner {
         };
 
         let _result = self.suite.run_benchmark(
-            format!("sqlite_{}_get_node", size),
+            format!("sqlite_{size}_get_node"),
             sample_ids.len() as u64,
             || {
                 let mut db_ref = db.borrow_mut();
@@ -756,7 +754,7 @@ impl BenchmarkRunner {
         );
 
         let _result = self.suite.run_benchmark(
-            format!("sqlite_{}_get_neighbors", size),
+            format!("sqlite_{size}_get_neighbors"),
             sample_ids.len() as u64,
             || {
                 let mut db_ref = db.borrow_mut();
@@ -768,7 +766,7 @@ impl BenchmarkRunner {
 
         let _result =
             self.suite
-                .run_benchmark(format!("sqlite_{}_two_hop_neighbors", size), 10, || {
+                .run_benchmark(format!("sqlite_{size}_two_hop_neighbors"), 10, || {
                     let mut db_ref = db.borrow_mut();
                     for &node_id in sample_ids.iter().take(10) {
                         let _neighbors = log_or_return!(db_ref.get_neighbors_two_hops(node_id));
@@ -777,7 +775,7 @@ impl BenchmarkRunner {
 
         let _result =
             self.suite
-                .run_benchmark(format!("sqlite_{}_bfs_traversal_depth3", size), 10, || {
+                .run_benchmark(format!("sqlite_{size}_bfs_traversal_depth3"), 10, || {
                     let mut db_ref = db.borrow_mut();
                     for &node_id in sample_ids.iter().take(10) {
                         let _ = log_or_return!(db_ref.bfs_traversal(node_id, 3));
@@ -881,7 +879,7 @@ fn path_to_string(path: &std::path::Path) -> Option<String> {
     match path.to_str() {
         Some(s) => Some(s.to_owned()),
         None => {
-            eprintln!("Path contains invalid UTF-8: {:?}", path);
+            eprintln!("Path contains invalid UTF-8: {path:?}");
             None
         }
     }
@@ -892,7 +890,7 @@ fn open_sqlite_db(path: &std::path::Path, context: &str) -> Option<SqliteGraphDB
     match SqliteGraphDB::new(&path_string) {
         Ok(db) => Some(db),
         Err(err) => {
-            eprintln!("{}: {}", context, err);
+            eprintln!("{context}: {err}");
             None
         }
     }
@@ -903,7 +901,7 @@ fn open_graphdb_default(path: &std::path::Path, context: &str) -> Option<GraphDB
     match GraphDB::open(&path_string) {
         Ok(db) => Some(db),
         Err(err) => {
-            eprintln!("{}: {}", context, err);
+            eprintln!("{context}: {err}");
             None
         }
     }
@@ -913,7 +911,7 @@ fn current_timestamp() -> Option<i64> {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => Some(duration.as_secs() as i64),
         Err(err) => {
-            eprintln!("Failed to get system time: {}", err);
+            eprintln!("Failed to get system time: {err}");
             None
         }
     }

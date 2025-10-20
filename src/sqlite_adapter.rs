@@ -91,7 +91,7 @@ impl SqliteGraphDB {
             .conn
             .prepare("SELECT id, labels, properties FROM nodes WHERE id = ?1")?;
 
-        let node_iter = stmt.query_map([node_id as i64], |row| {
+        let mut node_iter = stmt.query_map([node_id as i64], |row| {
             let id: i64 = row.get(0)?;
             let labels_json: String = row.get(1)?;
             let properties_json: String = row.get(2)?;
@@ -108,7 +108,7 @@ impl SqliteGraphDB {
             })
         })?;
 
-        for node in node_iter {
+        if let Some(node) = node_iter.next() {
             return Ok(Some(node?));
         }
 
@@ -229,7 +229,7 @@ impl SqliteGraphDB {
             .conn
             .prepare("SELECT id FROM nodes WHERE labels LIKE ?")?;
 
-        let search_pattern = format!("%\"{}\"", label);
+        let search_pattern = format!("%\"{label}\"");
         let node_iter = stmt.query_map([search_pattern], |row| {
             let id: i64 = row.get(0)?;
             Ok(id as u64)
@@ -392,11 +392,10 @@ impl SqliteGraphDB {
     fn json_to_properties(&self, json: &str) -> std::collections::BTreeMap<String, PropertyValue> {
         let mut properties = std::collections::BTreeMap::new();
 
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) {
-            if let serde_json::Value::Object(map) = parsed {
-                for (key, value) in map {
-                    properties.insert(key, self.json_to_property_value(&value));
-                }
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json)
+        {
+            for (key, value) in map {
+                properties.insert(key, self.json_to_property_value(&value));
             }
         }
 

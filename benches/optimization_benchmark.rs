@@ -5,8 +5,10 @@ fn benchmark_read_with_mmap(enable_mmap: bool, node_count: usize) -> u128 {
     let tmp = NamedTempFile::new().expect("temp file");
     let path = tmp.path().to_path_buf();
 
-    let mut config = sombra::db::Config::default();
-    config.use_mmap = enable_mmap;
+    let config = sombra::db::Config {
+        use_mmap: enable_mmap,
+        ..Default::default()
+    };
 
     let mut db = sombra::db::GraphDB::open_with_config(&path, config).expect("open db");
     let mut node_ids = Vec::new();
@@ -20,7 +22,7 @@ fn benchmark_read_with_mmap(enable_mmap: bool, node_count: usize) -> u128 {
         );
         node.properties.insert(
             "name".to_string(),
-            sombra::model::PropertyValue::String(format!("node_{}", i)),
+            sombra::model::PropertyValue::String(format!("node_{i}")),
         );
         let id = db.add_node(node).expect("add node");
         node_ids.push(id);
@@ -45,7 +47,7 @@ fn main() {
     println!("3. Memory-mapped I/O for read operations\n");
 
     for &count in &node_counts {
-        println!("Testing with {} nodes:", count);
+        println!("Testing with {count} nodes:");
 
         let read_without = benchmark_read_with_mmap(false, count);
         println!(
@@ -63,7 +65,7 @@ fn main() {
 
         let read_speedup = read_without as f64 / read_with as f64;
 
-        println!("  Read speedup: {:.2}x\n", read_speedup);
+        println!("  Read speedup: {read_speedup:.2}x\n");
     }
 
     println!("Summary:");

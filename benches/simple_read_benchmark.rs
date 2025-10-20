@@ -4,11 +4,11 @@ use std::time::Instant;
 
 fn setup_database(path: &str, count: usize) -> (GraphDB, Vec<u64>) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(format!("{}.wal", path));
+    let _ = std::fs::remove_file(format!("{path}.wal"));
 
     let mut db = GraphDB::open_with_config(path, Config::balanced()).unwrap();
 
-    println!("Inserting {} nodes...", count);
+    println!("Inserting {count} nodes...");
     let insert_start = Instant::now();
 
     let mut node_ids = Vec::with_capacity(count);
@@ -80,14 +80,12 @@ fn benchmark_random_reads(db: &mut GraphDB, node_ids: &[u64], reads: usize) {
     println!("\n=== Random Read Benchmark ===");
 
     use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::BuildHasher;
     let hasher = RandomState::new();
 
     let mut ids = Vec::new();
     for i in 0..reads {
-        let mut h = hasher.build_hasher();
-        i.hash(&mut h);
-        let idx = (h.finish() % node_ids.len() as u64) as usize;
+        let idx = (hasher.hash_one(i) % node_ids.len() as u64) as usize;
         ids.push(node_ids[idx]);
     }
 
@@ -111,8 +109,8 @@ fn benchmark_neighbor_queries(db: &mut GraphDB, node_ids: &[u64], queries: usize
 
     let query_count = queries.min(node_ids.len());
     let start = Instant::now();
-    for i in 0..query_count {
-        let _neighbors = db.get_neighbors(node_ids[i]).unwrap();
+    for &node_id in node_ids.iter().take(query_count) {
+        let _neighbors = db.get_neighbors(node_id).unwrap();
     }
     let duration = start.elapsed();
 
@@ -132,8 +130,8 @@ fn benchmark_cache_effectiveness(db: &mut GraphDB, node_ids: &[u64]) {
 
     println!("Cold reads (first time):");
     let start = Instant::now();
-    for i in 0..hot_set_size {
-        let _node = db.get_node(node_ids[i]).unwrap();
+    for &node_id in node_ids.iter().take(hot_set_size) {
+        let _node = db.get_node(node_id).unwrap();
     }
     let cold_duration = start.elapsed();
     println!(
@@ -145,8 +143,8 @@ fn benchmark_cache_effectiveness(db: &mut GraphDB, node_ids: &[u64]) {
 
     println!("Hot reads (cached):");
     let start = Instant::now();
-    for i in 0..hot_set_size {
-        let _node = db.get_node(node_ids[i]).unwrap();
+    for &node_id in node_ids.iter().take(hot_set_size) {
+        let _node = db.get_node(node_id).unwrap();
     }
     let hot_duration = start.elapsed();
     println!(
@@ -157,7 +155,7 @@ fn benchmark_cache_effectiveness(db: &mut GraphDB, node_ids: &[u64]) {
     );
 
     let speedup = cold_duration.as_micros() as f64 / hot_duration.as_micros() as f64;
-    println!("  Cache speedup: {:.2}x", speedup);
+    println!("  Cache speedup: {speedup:.2}x");
 }
 
 fn print_metrics(db: &GraphDB) {
@@ -167,7 +165,7 @@ fn print_metrics(db: &GraphDB) {
     println!("Cache misses: {}", db.metrics.cache_misses);
     if db.metrics.node_lookups > 0 {
         let hit_rate = (db.metrics.cache_hits as f64 / db.metrics.node_lookups as f64) * 100.0;
-        println!("Cache hit rate: {:.1}%", hit_rate);
+        println!("Cache hit rate: {hit_rate:.1}%");
     }
 }
 
@@ -176,7 +174,7 @@ fn main() {
 
     for (count, name) in sizes {
         println!("\n{}", "=".repeat(60));
-        println!("BENCHMARK: {} nodes", name);
+        println!("BENCHMARK: {name} nodes");
         println!("{}", "=".repeat(60));
 
         let (mut db, node_ids) = setup_database("bench_temp.db", count);

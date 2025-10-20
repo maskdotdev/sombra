@@ -10,7 +10,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn print_main_usage() {
     eprintln!("┌─────────────────────────────────────────────┐");
     eprintln!("│            Sombra Database CLI              │");
-    eprintln!("│               Version {VERSION:<23} │", VERSION = VERSION);
+    eprintln!("│               Version {VERSION:<23} │");
     eprintln!("└─────────────────────────────────────────────┘");
     eprintln!();
     eprintln!("USAGE:");
@@ -463,9 +463,11 @@ fn cmd_verify(args: Vec<String>) -> Result<()> {
             continue;
         }
         if let Some(value) = arg.strip_prefix("--max-errors=") {
-            max_errors = Some(value.parse().map_err(|_| {
-                GraphError::Corruption("Invalid max-errors value".to_string())
-            })?);
+            max_errors = Some(
+                value
+                    .parse()
+                    .map_err(|_| GraphError::Corruption("Invalid max-errors value".to_string()))?,
+            );
             continue;
         }
         if path.is_none() {

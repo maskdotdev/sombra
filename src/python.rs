@@ -303,7 +303,7 @@ pub struct PySombraTransaction {
 #[pymethods]
 impl PySombraTransaction {
     fn id(&self) -> u64 {
-        self.tx_id as u64
+        self.tx_id
     }
 
     fn add_node(

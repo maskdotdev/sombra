@@ -57,18 +57,16 @@ impl Wal {
             wal.write_header()?;
         } else {
             match wal.validate_header() {
-                Ok(()) => {
-                    match wal.scan_frame_count() {
-                        Ok(count) => {
-                            wal.next_frame_number = count + 1;
-                        }
-                        Err(_) => {
-                            wal.file.set_len(0)?;
-                            wal.write_header()?;
-                            wal.next_frame_number = 1;
-                        }
+                Ok(()) => match wal.scan_frame_count() {
+                    Ok(count) => {
+                        wal.next_frame_number = count + 1;
                     }
-                }
+                    Err(_) => {
+                        wal.file.set_len(0)?;
+                        wal.write_header()?;
+                        wal.next_frame_number = 1;
+                    }
+                },
                 Err(_) => {
                     wal.file.set_len(0)?;
                     wal.write_header()?;
@@ -175,7 +173,7 @@ impl Wal {
                         return Ok(0);
                     }
                 };
-            
+
             if frame_number != expected_frame {
                 self.reset()?;
                 return Ok(0);
@@ -189,7 +187,7 @@ impl Wal {
                 self.reset()?;
                 return Ok(0);
             }
-            
+
             let computed = checksum_for(&page_buf);
             if computed != checksum {
                 self.reset()?;

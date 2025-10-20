@@ -152,32 +152,33 @@ impl<'a> RecordStore<'a> {
     pub fn get_page_fragmentation(&mut self, page_id: PageId) -> Result<f64> {
         let page = self.pager.fetch_page(page_id)?;
         let record_page = RecordPage::from_bytes(&mut page.data)?;
-        
+
         let record_count = record_page.record_count()? as usize;
         if record_count == 0 {
             return Ok(0.0);
         }
-        
+
         let mut free_records = 0;
         let mut total_wasted_space = 0;
-        
+
         for idx in 0..record_count {
             let header = record_page.record_header_at(idx)?;
             if header.kind == crate::storage::record::RecordKind::Free {
                 free_records += 1;
                 // Wasted space includes the header and payload
-                total_wasted_space += crate::storage::record::RECORD_HEADER_SIZE + header.payload_length as usize;
+                total_wasted_space +=
+                    crate::storage::record::RECORD_HEADER_SIZE + header.payload_length as usize;
             }
         }
-        
+
         if free_records == 0 {
             return Ok(0.0);
         }
-        
+
         // Calculate fragmentation as percentage of wasted space vs page capacity
         let page_size = record_page.page_size()? as usize;
         let fragmentation = (total_wasted_space as f64 / page_size as f64) * 100.0;
-        
+
         Ok(fragmentation)
     }
 
@@ -187,7 +188,7 @@ impl<'a> RecordStore<'a> {
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
-            
+
             let mut records = Vec::new();
             for idx in 0..record_count {
                 let header = record_page.record_header_at(idx)?;
@@ -198,7 +199,7 @@ impl<'a> RecordStore<'a> {
             }
             records
         };
-        
+
         // If no live records, the page can be cleared
         if live_records.is_empty() {
             let page = self.pager.fetch_page(page_id)?;
@@ -210,21 +211,21 @@ impl<'a> RecordStore<'a> {
             let bytes_after = record_page.available_space()?;
             return Ok(bytes_after.saturating_sub(bytes_before));
         }
-        
+
         // Calculate space before compaction
         let bytes_before = {
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             record_page.available_space()?
         };
-        
+
         // Clear the page and rewrite all live records
         {
             let page = self.pager.fetch_page(page_id)?;
             let mut record_page = RecordPage::from_bytes(&mut page.data)?;
             record_page.clear()?;
             record_page.initialize()?;
-            
+
             for record in &live_records {
                 if !record_page.can_fit(record.len())? {
                     return Err(GraphError::Corruption(
@@ -233,17 +234,17 @@ impl<'a> RecordStore<'a> {
                 }
                 record_page.append_record(record)?;
             }
-            
+
             page.dirty = true;
         }
-        
+
         // Calculate space after compaction
         let bytes_after = {
             let page = self.pager.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             record_page.available_space()?
         };
-        
+
         Ok(bytes_after.saturating_sub(bytes_before))
     }
 
@@ -254,19 +255,19 @@ impl<'a> RecordStore<'a> {
     ) -> Result<Vec<PageId>> {
         let mut candidates = Vec::new();
         let page_count = self.pager.page_count();
-        
+
         // Start from page 1 (skip header page 0)
         for page_id in 1..page_count as u32 {
             if candidates.len() >= max_candidates {
                 break;
             }
-            
+
             let fragmentation = self.get_page_fragmentation(page_id)?;
             if fragmentation >= threshold_percent as f64 {
                 candidates.push(page_id);
             }
         }
-        
+
         Ok(candidates)
     }
 }
@@ -314,7 +315,9 @@ mod tests {
         let page_id = pager.allocate_page().expect("allocate page");
         let mut store = RecordStore::new(&mut pager);
 
-        let fragmentation = store.get_page_fragmentation(page_id).expect("get fragmentation");
+        let fragmentation = store
+            .get_page_fragmentation(page_id)
+            .expect("get fragmentation");
         assert_eq!(fragmentation, 0.0);
     }
 
@@ -327,13 +330,17 @@ mod tests {
         let (page_id, _pointer1, _pointer2) = {
             let mut pager = Pager::open(&path).expect("open pager");
             let mut store = RecordStore::new(&mut pager);
-            
+
             let pointer1 = store.insert(&record, None).expect("insert 1");
-            let pointer2 = store.insert(&record, Some(pointer1.page_id)).expect("insert 2");
-            let pointer3 = store.insert(&record, Some(pointer1.page_id)).expect("insert 3");
-            
+            let pointer2 = store
+                .insert(&record, Some(pointer1.page_id))
+                .expect("insert 2");
+            let pointer3 = store
+                .insert(&record, Some(pointer1.page_id))
+                .expect("insert 3");
+
             store.mark_free(pointer2).expect("mark free");
-            
+
             pager.flush().expect("flush");
             (pointer1.page_id, pointer1, pointer3)
         };
@@ -341,7 +348,9 @@ mod tests {
         let mut pager = Pager::open(&path).expect("reopen pager");
         let mut store = RecordStore::new(&mut pager);
 
-        let fragmentation = store.get_page_fragmentation(page_id).expect("get fragmentation");
+        let fragmentation = store
+            .get_page_fragmentation(page_id)
+            .expect("get fragmentation");
         assert!(fragmentation > 0.0);
     }
 
@@ -354,15 +363,15 @@ mod tests {
         let page_id = {
             let mut pager = Pager::open(&path).expect("open pager");
             let mut store = RecordStore::new(&mut pager);
-            
+
             let p1 = store.insert(&record, None).expect("insert 1");
             let p2 = store.insert(&record, Some(p1.page_id)).expect("insert 2");
             let _p3 = store.insert(&record, Some(p1.page_id)).expect("insert 3");
             let p4 = store.insert(&record, Some(p1.page_id)).expect("insert 4");
-            
+
             store.mark_free(p2).expect("mark p2 free");
             store.mark_free(p4).expect("mark p4 free");
-            
+
             pager.flush().expect("flush");
             p1.page_id
         };
@@ -373,7 +382,9 @@ mod tests {
         let bytes_reclaimed = store.compact_page(page_id).expect("compact page");
         assert!(bytes_reclaimed > 0);
 
-        let fragmentation = store.get_page_fragmentation(page_id).expect("get fragmentation");
+        let fragmentation = store
+            .get_page_fragmentation(page_id)
+            .expect("get fragmentation");
         assert_eq!(fragmentation, 0.0);
     }
 
@@ -386,13 +397,13 @@ mod tests {
         let page_id = {
             let mut pager = Pager::open(&path).expect("open pager");
             let mut store = RecordStore::new(&mut pager);
-            
+
             let p1 = store.insert(&record, None).expect("insert 1");
             let p2 = store.insert(&record, Some(p1.page_id)).expect("insert 2");
-            
+
             store.mark_free(p1).expect("mark p1 free");
             store.mark_free(p2).expect("mark p2 free");
-            
+
             pager.flush().expect("flush");
             p1.page_id
         };
@@ -410,11 +421,11 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         // Use larger records to ensure they don't all fit on one page
-        let record = build_record(&vec![0u8; 200]);
+        let record = build_record(&[0u8; 200]);
         {
             let mut pager = Pager::open(&path).expect("open pager");
             let mut store = RecordStore::new(&mut pager);
-            
+
             // Create fragmentation on multiple pages by inserting and then freeing records
             for _ in 0..3 {
                 let p1 = store.insert(&record, None).expect("insert 1");
@@ -423,15 +434,22 @@ mod tests {
                 // Free the middle record to create fragmentation
                 store.mark_free(p2).expect("mark free");
             }
-            
+
             pager.flush().expect("flush");
         };
 
         let mut pager = Pager::open(&path).expect("reopen pager");
         let mut store = RecordStore::new(&mut pager);
 
-        let candidates = store.identify_compaction_candidates(1, 10).expect("identify candidates");
-        assert!(candidates.len() >= 2, "found {} candidates, page_count={}", candidates.len(), pager.page_count());
+        let candidates = store
+            .identify_compaction_candidates(1, 10)
+            .expect("identify candidates");
+        assert!(
+            candidates.len() >= 2,
+            "found {} candidates, page_count={}",
+            candidates.len(),
+            pager.page_count()
+        );
     }
 
     #[test]
@@ -440,18 +458,18 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         // Use larger records to ensure they span multiple pages
-        let record = build_record(&vec![0u8; 200]);
+        let record = build_record(&[0u8; 200]);
         {
             let mut pager = Pager::open(&path).expect("open pager");
             let mut store = RecordStore::new(&mut pager);
-            
+
             for _ in 0..5 {
                 let p1 = store.insert(&record, None).expect("insert");
                 let p2 = store.insert(&record, Some(p1.page_id)).expect("insert");
                 let _p3 = store.insert(&record, Some(p1.page_id)).expect("insert");
                 store.mark_free(p2).expect("mark free");
             }
-            
+
             pager.flush().expect("flush");
         };
 
@@ -459,11 +477,23 @@ mod tests {
         let mut store = RecordStore::new(&mut pager);
 
         // With max_candidates=2, we should get at most 2 candidates
-        let candidates = store.identify_compaction_candidates(1, 2).expect("identify candidates");
-        assert!(candidates.len() <= 2, "found {} candidates, expected <= 2", candidates.len());
-        
+        let candidates = store
+            .identify_compaction_candidates(1, 2)
+            .expect("identify candidates");
+        assert!(
+            candidates.len() <= 2,
+            "found {} candidates, expected <= 2",
+            candidates.len()
+        );
+
         // We should have at least some fragmented pages
-        let all_candidates = store.identify_compaction_candidates(1, 100).expect("identify all");
-        assert!(all_candidates.len() >= 2, "found {} total fragmented pages", all_candidates.len());
+        let all_candidates = store
+            .identify_compaction_candidates(1, 100)
+            .expect("identify all");
+        assert!(
+            all_candidates.len() >= 2,
+            "found {} total fragmented pages",
+            all_candidates.len()
+        );
     }
 }

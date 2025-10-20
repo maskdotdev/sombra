@@ -241,7 +241,7 @@ fn large_transaction_dirty_page_tracking() -> Result<()> {
                 assert_eq!(node.id, i as u64);
             }
         }
-        assert_eq!(found_nodes, 50, "Expected 50 nodes, found {}", found_nodes);
+        assert_eq!(found_nodes, 50, "Expected 50 nodes, found {found_nodes}");
     }
 
     Ok(())

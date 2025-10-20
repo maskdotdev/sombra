@@ -20,7 +20,7 @@ impl SombraDB {
         let db = GraphDB::open(&path).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to open database: {}", e),
+                format!("Failed to open database: {e}"),
             )
         })?;
 
@@ -36,14 +36,14 @@ impl SombraDB {
         let tx_id = db.allocate_tx_id().map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to allocate transaction ID: {}", e),
+                format!("Failed to allocate transaction ID: {e}"),
             )
         })?;
 
         db.enter_transaction(tx_id).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to enter transaction: {}", e),
+                format!("Failed to enter transaction: {e}"),
             )
         })?;
 
@@ -74,9 +74,9 @@ impl SombraDB {
             }
         }
 
-        let node_id = db.add_node(node).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to add node: {}", e))
-        })?;
+        let node_id = db
+            .add_node(node)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to add node: {e}")))?;
 
         Ok(node_id as f64)
     }
@@ -100,9 +100,9 @@ impl SombraDB {
             }
         }
 
-        let edge_id = db.add_edge(edge).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to add edge: {}", e))
-        })?;
+        let edge_id = db
+            .add_edge(edge)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to add edge: {e}")))?;
 
         Ok(edge_id as f64)
     }
@@ -111,9 +111,9 @@ impl SombraDB {
     pub fn get_edge(&mut self, edge_id: f64) -> std::result::Result<SombraEdge, Error> {
         let mut db = self.inner.write();
 
-        let edge = db.load_edge(edge_id as u64).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to get edge: {}", e))
-        })?;
+        let edge = db
+            .load_edge(edge_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get edge: {e}")))?;
 
         Ok(SombraEdge::from(edge))
     }
@@ -122,9 +122,9 @@ impl SombraDB {
     pub fn get_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
         let mut db = self.inner.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get node: {e}")))?;
 
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -132,10 +132,7 @@ impl SombraDB {
         while edge_id != crate::model::NULL_EDGE_ID {
             edges.push(edge_id as f64);
             let edge = db.load_edge(edge_id).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("Failed to load edge: {}", e),
-                )
+                Error::new(Status::GenericFailure, format!("Failed to load edge: {e}"))
             })?;
             edge_id = edge.next_outgoing_edge_id;
         }
@@ -147,9 +144,9 @@ impl SombraDB {
     pub fn get_incoming_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
         let mut db = self.inner.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get node: {e}")))?;
 
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
@@ -157,10 +154,7 @@ impl SombraDB {
         while edge_id != crate::model::NULL_EDGE_ID {
             edges.push(edge_id as f64);
             let edge = db.load_edge(edge_id).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("Failed to load edge: {}", e),
-                )
+                Error::new(Status::GenericFailure, format!("Failed to load edge: {e}"))
             })?;
             edge_id = edge.next_incoming_edge_id;
         }
@@ -172,9 +166,9 @@ impl SombraDB {
     pub fn get_node(&mut self, node_id: f64) -> std::result::Result<SombraNode, Error> {
         let mut db = self.inner.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get node: {e}")))?;
 
         Ok(SombraNode::from(node))
     }
@@ -186,7 +180,7 @@ impl SombraDB {
         let neighbors = db.get_neighbors(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get neighbors: {}", e),
+                format!("Failed to get neighbors: {e}"),
             )
         })?;
 
@@ -200,7 +194,7 @@ impl SombraDB {
         db.delete_node(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to delete node: {}", e),
+                format!("Failed to delete node: {e}"),
             )
         })?;
 
@@ -214,7 +208,7 @@ impl SombraDB {
         db.delete_edge(edge_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to delete edge: {}", e),
+                format!("Failed to delete edge: {e}"),
             )
         })?;
 
@@ -226,7 +220,7 @@ impl SombraDB {
         let mut db = self.inner.write();
 
         db.flush()
-            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to flush: {}", e)))?;
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to flush: {e}")))?;
 
         Ok(())
     }
@@ -236,10 +230,7 @@ impl SombraDB {
         let mut db = self.inner.write();
 
         db.checkpoint().map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to checkpoint: {}", e),
-            )
+            Error::new(Status::GenericFailure, format!("Failed to checkpoint: {e}"))
         })?;
 
         Ok(())
@@ -252,7 +243,7 @@ impl SombraDB {
         let neighbors = db.get_incoming_neighbors(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get incoming neighbors: {}", e),
+                format!("Failed to get incoming neighbors: {e}"),
             )
         })?;
 
@@ -266,7 +257,7 @@ impl SombraDB {
         let neighbors = db.get_neighbors_two_hops(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get two-hop neighbors: {}", e),
+                format!("Failed to get two-hop neighbors: {e}"),
             )
         })?;
 
@@ -283,7 +274,7 @@ impl SombraDB {
         let neighbors = db.get_neighbors_three_hops(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get three-hop neighbors: {}", e),
+                format!("Failed to get three-hop neighbors: {e}"),
             )
         })?;
 
@@ -303,7 +294,7 @@ impl SombraDB {
             .map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
-                    format!("Failed to perform BFS traversal: {}", e),
+                    format!("Failed to perform BFS traversal: {e}"),
                 )
             })?;
 
@@ -323,7 +314,7 @@ impl SombraDB {
         let node_ids = db.get_nodes_by_label(&label).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get nodes by label: {}", e),
+                format!("Failed to get nodes by label: {e}"),
             )
         })?;
 
@@ -337,7 +328,7 @@ impl SombraDB {
         let count = db.count_outgoing_edges(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to count outgoing edges: {}", e),
+                format!("Failed to count outgoing edges: {e}"),
             )
         })?;
 
@@ -351,7 +342,7 @@ impl SombraDB {
         let count = db.count_incoming_edges(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to count incoming edges: {}", e),
+                format!("Failed to count incoming edges: {e}"),
             )
         })?;
 
@@ -394,7 +385,7 @@ impl SombraTransaction {
         let node_id = db.add_node_internal(node).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to add node in transaction: {}", e),
+                format!("Failed to add node in transaction: {e}"),
             )
         })?;
 
@@ -423,7 +414,7 @@ impl SombraTransaction {
         let edge_id = db.add_edge_internal(edge).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to add edge in transaction: {}", e),
+                format!("Failed to add edge in transaction: {e}"),
             )
         })?;
 
@@ -437,7 +428,7 @@ impl SombraTransaction {
         let edge = db.load_edge(edge_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get edge in transaction: {}", e),
+                format!("Failed to get edge in transaction: {e}"),
             )
         })?;
 
@@ -451,7 +442,7 @@ impl SombraTransaction {
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get node in transaction: {}", e),
+                format!("Failed to get node in transaction: {e}"),
             )
         })?;
 
@@ -463,7 +454,7 @@ impl SombraTransaction {
             let edge = db.load_edge(edge_id).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
-                    format!("Failed to load edge in transaction: {}", e),
+                    format!("Failed to load edge in transaction: {e}"),
                 )
             })?;
             edge_id = edge.next_outgoing_edge_id;
@@ -479,7 +470,7 @@ impl SombraTransaction {
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get node in transaction: {}", e),
+                format!("Failed to get node in transaction: {e}"),
             )
         })?;
 
@@ -491,7 +482,7 @@ impl SombraTransaction {
             let edge = db.load_edge(edge_id).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
-                    format!("Failed to load edge in transaction: {}", e),
+                    format!("Failed to load edge in transaction: {e}"),
                 )
             })?;
             edge_id = edge.next_incoming_edge_id;
@@ -507,7 +498,7 @@ impl SombraTransaction {
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get node in transaction: {}", e),
+                format!("Failed to get node in transaction: {e}"),
             )
         })?;
 
@@ -521,7 +512,7 @@ impl SombraTransaction {
         let neighbors = db.get_neighbors(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get neighbors in transaction: {}", e),
+                format!("Failed to get neighbors in transaction: {e}"),
             )
         })?;
 
@@ -535,7 +526,7 @@ impl SombraTransaction {
         db.delete_node_internal(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to delete node in transaction: {}", e),
+                format!("Failed to delete node in transaction: {e}"),
             )
         })?;
 
@@ -549,7 +540,7 @@ impl SombraTransaction {
         db.delete_edge_internal(edge_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to delete edge in transaction: {}", e),
+                format!("Failed to delete edge in transaction: {e}"),
             )
         })?;
 
@@ -573,7 +564,7 @@ impl SombraTransaction {
         db.write_header().map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to write header: {}", e),
+                format!("Failed to write header: {e}"),
             )
         })?;
 
@@ -585,7 +576,7 @@ impl SombraTransaction {
         db.commit_to_wal(self.tx_id, &all_dirty).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to commit to WAL: {}", e),
+                format!("Failed to commit to WAL: {e}"),
             )
         })?;
 
@@ -609,9 +600,8 @@ impl SombraTransaction {
 
         let dirty_pages = db.take_recent_dirty_pages();
 
-        db.rollback_transaction(&dirty_pages).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to rollback: {}", e))
-        })?;
+        db.rollback_transaction(&dirty_pages)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to rollback: {e}")))?;
 
         db.stop_tracking();
         db.exit_transaction();
@@ -627,7 +617,7 @@ impl SombraTransaction {
         let neighbors = db.get_incoming_neighbors(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get incoming neighbors in transaction: {}", e),
+                format!("Failed to get incoming neighbors in transaction: {e}"),
             )
         })?;
 
@@ -641,7 +631,7 @@ impl SombraTransaction {
         let neighbors = db.get_neighbors_two_hops(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get two-hop neighbors in transaction: {}", e),
+                format!("Failed to get two-hop neighbors in transaction: {e}"),
             )
         })?;
 
@@ -658,7 +648,7 @@ impl SombraTransaction {
         let neighbors = db.get_neighbors_three_hops(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get three-hop neighbors in transaction: {}", e),
+                format!("Failed to get three-hop neighbors in transaction: {e}"),
             )
         })?;
 
@@ -678,7 +668,7 @@ impl SombraTransaction {
             .map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
-                    format!("Failed to perform BFS traversal in transaction: {}", e),
+                    format!("Failed to perform BFS traversal in transaction: {e}"),
                 )
             })?;
 
@@ -698,7 +688,7 @@ impl SombraTransaction {
         let node_ids = db.get_nodes_by_label(&label).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to get nodes by label in transaction: {}", e),
+                format!("Failed to get nodes by label in transaction: {e}"),
             )
         })?;
 
@@ -712,7 +702,7 @@ impl SombraTransaction {
         let count = db.count_outgoing_edges(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to count outgoing edges in transaction: {}", e),
+                format!("Failed to count outgoing edges in transaction: {e}"),
             )
         })?;
 
@@ -726,7 +716,7 @@ impl SombraTransaction {
         let count = db.count_incoming_edges(node_id as u64).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to count incoming edges in transaction: {}", e),
+                format!("Failed to count incoming edges in transaction: {e}"),
             )
         })?;
 
