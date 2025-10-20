@@ -4,7 +4,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::error::Result;
+use crate::error::{acquire_lock, Result};
 
 pub type TxId = u64;
 
@@ -67,9 +67,10 @@ impl GroupCommitState {
 
             for commit_req in pending_commits {
                 let (lock, cvar) = &*commit_req.notifier;
-                let mut done = lock.lock().unwrap();
-                *done = true;
-                cvar.notify_one();
+                if let Ok(mut done) = acquire_lock(lock) {
+                    *done = true;
+                    cvar.notify_one();
+                }
             }
         }
     }

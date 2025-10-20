@@ -1,7 +1,16 @@
 use super::*;
 use crate::error::GraphError;
-use crate::model::{Edge, Node};
+use crate::model::{Edge, Node, PropertyValue};
 use tempfile::NamedTempFile;
+
+fn create_temp_db(name: &str) -> std::path::PathBuf {
+    let tmp = tempfile::Builder::new()
+        .prefix(name)
+        .suffix(".db")
+        .tempfile()
+        .expect("create temp file");
+    tmp.path().to_path_buf()
+}
 
 #[test]
 fn graphdb_round_trip() {
@@ -468,4 +477,210 @@ fn bfs_traversal_explores_graph_by_depth() {
 
     let shallow_results = db.bfs_traversal(root, 1).expect("shallow bfs");
     assert_eq!(shallow_results.len(), 1);
+}
+
+#[test]
+fn property_index_basic_operations() {
+    let temp_file = create_temp_db("property_index_basic");
+    let mut db = GraphDB::open(&temp_file).expect("open db");
+
+    let mut alice = Node::new(0);
+    alice.labels.push("Person".to_string());
+    alice.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Alice".to_string()),
+    );
+    alice
+        .properties
+        .insert("age".to_string(), PropertyValue::Int(30));
+
+    let mut bob = Node::new(0);
+    bob.labels.push("Person".to_string());
+    bob.properties
+        .insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+    bob.properties
+        .insert("age".to_string(), PropertyValue::Int(25));
+
+    let mut charlie = Node::new(0);
+    charlie.labels.push("Person".to_string());
+    charlie.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Charlie".to_string()),
+    );
+    charlie
+        .properties
+        .insert("age".to_string(), PropertyValue::Int(30));
+
+    let alice_id = db.add_node(alice).expect("add alice");
+    let bob_id = db.add_node(bob).expect("add bob");
+    let charlie_id = db.add_node(charlie).expect("add charlie");
+
+    db.create_property_index("Person", "age")
+        .expect("create property index");
+
+    let age_30_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+        .expect("find nodes with age 30");
+
+    assert_eq!(age_30_nodes.len(), 2);
+    assert!(age_30_nodes.contains(&alice_id));
+    assert!(age_30_nodes.contains(&charlie_id));
+
+    let age_25_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(25))
+        .expect("find nodes with age 25");
+
+    assert_eq!(age_25_nodes.len(), 1);
+    assert_eq!(age_25_nodes[0], bob_id);
+
+    let age_40_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(40))
+        .expect("find nodes with age 40");
+
+    assert_eq!(age_40_nodes.len(), 0);
+}
+
+#[test]
+fn property_index_survives_reopen() {
+    let temp_file = create_temp_db("property_index_reopen");
+
+    let (alice_id, bob_id) = {
+        let mut db = GraphDB::open(&temp_file).expect("open db");
+
+        let mut alice = Node::new(0);
+        alice.labels.push("Person".to_string());
+        alice
+            .properties
+            .insert("age".to_string(), PropertyValue::Int(30));
+
+        let mut bob = Node::new(0);
+        bob.labels.push("Person".to_string());
+        bob.properties
+            .insert("age".to_string(), PropertyValue::Int(25));
+
+        let alice_id = db.add_node(alice).expect("add alice");
+        let bob_id = db.add_node(bob).expect("add bob");
+
+        db.create_property_index("Person", "age")
+            .expect("create property index");
+
+        db.checkpoint().expect("checkpoint");
+
+        (alice_id, bob_id)
+    };
+
+    let mut db = GraphDB::open(&temp_file).expect("reopen db");
+
+    db.create_property_index("Person", "age")
+        .expect("recreate property index");
+
+    let age_30_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+        .expect("find nodes with age 30");
+
+    assert_eq!(age_30_nodes.len(), 1);
+    assert_eq!(age_30_nodes[0], alice_id);
+
+    let age_25_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(25))
+        .expect("find nodes with age 25");
+
+    assert_eq!(age_25_nodes.len(), 1);
+    assert_eq!(age_25_nodes[0], bob_id);
+}
+
+#[test]
+fn property_index_with_string_values() {
+    let temp_file = create_temp_db("property_index_string");
+    let mut db = GraphDB::open(&temp_file).expect("open db");
+
+    let mut alice = Node::new(0);
+    alice.labels.push("Person".to_string());
+    alice
+        .properties
+        .insert("city".to_string(), PropertyValue::String("NYC".to_string()));
+
+    let mut bob = Node::new(0);
+    bob.labels.push("Person".to_string());
+    bob.properties
+        .insert("city".to_string(), PropertyValue::String("SF".to_string()));
+
+    let mut charlie = Node::new(0);
+    charlie.labels.push("Person".to_string());
+    charlie
+        .properties
+        .insert("city".to_string(), PropertyValue::String("NYC".to_string()));
+
+    let alice_id = db.add_node(alice).expect("add alice");
+    let _bob_id = db.add_node(bob).expect("add bob");
+    let charlie_id = db.add_node(charlie).expect("add charlie");
+
+    db.create_property_index("Person", "city")
+        .expect("create property index");
+
+    let nyc_nodes = db
+        .find_nodes_by_property("Person", "city", &PropertyValue::String("NYC".to_string()))
+        .expect("find nodes in NYC");
+
+    assert_eq!(nyc_nodes.len(), 2);
+    assert!(nyc_nodes.contains(&alice_id));
+    assert!(nyc_nodes.contains(&charlie_id));
+}
+
+#[test]
+fn property_index_updated_on_node_deletion() {
+    let temp_file = create_temp_db("property_index_deletion");
+    let mut db = GraphDB::open(&temp_file).expect("open db");
+
+    let mut alice = Node::new(0);
+    alice.labels.push("Person".to_string());
+    alice
+        .properties
+        .insert("age".to_string(), PropertyValue::Int(30));
+
+    let mut bob = Node::new(0);
+    bob.labels.push("Person".to_string());
+    bob.properties
+        .insert("age".to_string(), PropertyValue::Int(30));
+
+    let alice_id = db.add_node(alice).expect("add alice");
+    let bob_id = db.add_node(bob).expect("add bob");
+
+    db.create_property_index("Person", "age")
+        .expect("create property index");
+
+    let age_30_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+        .expect("find nodes with age 30");
+    assert_eq!(age_30_nodes.len(), 2);
+
+    db.delete_node(alice_id).expect("delete alice");
+
+    let age_30_nodes_after = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+        .expect("find nodes with age 30 after deletion");
+
+    assert_eq!(age_30_nodes_after.len(), 1);
+    assert_eq!(age_30_nodes_after[0], bob_id);
+}
+
+#[test]
+fn property_index_falls_back_to_scan_when_not_indexed() {
+    let temp_file = create_temp_db("property_index_fallback");
+    let mut db = GraphDB::open(&temp_file).expect("open db");
+
+    let mut alice = Node::new(0);
+    alice.labels.push("Person".to_string());
+    alice
+        .properties
+        .insert("age".to_string(), PropertyValue::Int(30));
+
+    let alice_id = db.add_node(alice).expect("add alice");
+
+    let age_30_nodes = db
+        .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+        .expect("find nodes with age 30 without index");
+
+    assert_eq!(age_30_nodes.len(), 1);
+    assert_eq!(age_30_nodes[0], alice_id);
 }

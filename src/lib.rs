@@ -1,6 +1,7 @@
 pub mod db;
 pub mod error;
 pub mod index;
+pub mod logging;
 pub mod model;
 pub mod pager;
 pub mod storage;
@@ -18,6 +19,8 @@ pub mod python;
 #[cfg(feature = "benchmarks")]
 pub mod sqlite_adapter;
 
-pub use crate::db::{Config, GraphDB, SyncMode, Transaction, TxId, TxState};
+pub use crate::db::{
+    Config, GraphDB, IntegrityOptions, IntegrityReport, SyncMode, Transaction, TxId, TxState,
+};
 pub use crate::error::{GraphError, Result};
 pub use crate::model::{Edge, EdgeId, Node, NodeId, PropertyValue};
