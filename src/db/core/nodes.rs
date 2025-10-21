@@ -243,4 +243,310 @@ impl GraphDB {
             .map(|(id, _)| id)
             .collect()
     }
+
+    pub fn get_first_node(&self) -> Option<NodeId> {
+        self.node_index.first().map(|(id, _)| id)
+    }
+
+    pub fn get_last_node(&self) -> Option<NodeId> {
+        self.node_index.last().map(|(id, _)| id)
+    }
+
+    pub fn get_first_n_nodes(&self, n: usize) -> Vec<NodeId> {
+        self.node_index
+            .first_n(n)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    pub fn get_last_n_nodes(&self, n: usize) -> Vec<NodeId> {
+        self.node_index
+            .last_n(n)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    pub fn get_all_node_ids_ordered(&self) -> Vec<NodeId> {
+        self.node_index.iter().into_iter().map(|(id, _)| id).collect()
+    }
+
+    pub fn set_node_property(
+        &mut self,
+        node_id: NodeId,
+        key: String,
+        value: crate::model::PropertyValue,
+    ) -> Result<()> {
+        if self.is_in_transaction() {
+            return Err(GraphError::InvalidArgument(
+                "set_node_property must be called through a transaction when in transaction context"
+                    .into(),
+            ));
+        }
+
+        let tx_id = self.allocate_tx_id()?;
+        self.start_tracking();
+
+        let pointer = self
+            .node_index
+            .get(&node_id)
+            .ok_or(GraphError::NotFound("node"))?;
+        let mut node = self.read_node_at(pointer)?;
+
+        let old_value = node.properties.get(&key).cloned();
+
+        node.properties.insert(key.clone(), value.clone());
+
+        let payload = crate::storage::serialize_node(&node)?;
+        let record = crate::storage::record::encode_record(
+            crate::storage::record::RecordKind::Node,
+            &payload,
+        )?;
+
+        let mut store = self.record_store();
+        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+            drop(store);
+            self.record_page_write(new_pointer.page_id);
+
+            if let Some(old_val) = old_value {
+                for label in &node.labels {
+                    self.update_property_index_on_remove(node_id, label, &key, &old_val);
+                }
+            }
+
+            for label in &node.labels {
+                self.update_property_index_on_add(node_id, label, &key, &value);
+            }
+
+            self.node_cache.put(node_id, node.clone());
+
+            self.header.last_committed_tx_id = tx_id;
+            self.write_header()?;
+
+            let dirty_pages = self.take_recent_dirty_pages();
+            self.commit_to_wal(tx_id, &dirty_pages)?;
+            self.stop_tracking();
+
+            Ok(())
+        } else {
+            drop(store);
+
+            self.free_record(pointer)?;
+
+            let preferred = self.header.last_record_page;
+            let new_pointer = self.insert_record(&record, preferred)?;
+
+            self.node_index.insert(node_id, new_pointer);
+
+            if let Some(old_val) = old_value {
+                for label in &node.labels {
+                    self.update_property_index_on_remove(node_id, label, &key, &old_val);
+                }
+            }
+
+            for label in &node.labels {
+                self.update_property_index_on_add(node_id, label, &key, &value);
+            }
+
+            self.node_cache.put(node_id, node.clone());
+
+            self.header.last_record_page = Some(new_pointer.page_id);
+            self.header.last_committed_tx_id = tx_id;
+            self.write_header()?;
+
+            let dirty_pages = self.take_recent_dirty_pages();
+            self.commit_to_wal(tx_id, &dirty_pages)?;
+            self.stop_tracking();
+
+            Ok(())
+        }
+    }
+
+    pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()> {
+        if self.is_in_transaction() {
+            return Err(GraphError::InvalidArgument(
+                "remove_node_property must be called through a transaction when in transaction context"
+                    .into(),
+            ));
+        }
+
+        let tx_id = self.allocate_tx_id()?;
+        self.start_tracking();
+
+        let pointer = self
+            .node_index
+            .get(&node_id)
+            .ok_or(GraphError::NotFound("node"))?;
+        let mut node = self.read_node_at(pointer)?;
+
+        let old_value = match node.properties.remove(key) {
+            Some(v) => v,
+            None => {
+                self.stop_tracking();
+                return Ok(());
+            }
+        };
+
+        let payload = crate::storage::serialize_node(&node)?;
+        let record = crate::storage::record::encode_record(
+            crate::storage::record::RecordKind::Node,
+            &payload,
+        )?;
+
+        let mut store = self.record_store();
+        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+            drop(store);
+            self.record_page_write(new_pointer.page_id);
+
+            for label in &node.labels {
+                self.update_property_index_on_remove(node_id, label, key, &old_value);
+            }
+
+            self.node_cache.put(node_id, node.clone());
+
+            self.header.last_committed_tx_id = tx_id;
+            self.write_header()?;
+
+            let dirty_pages = self.take_recent_dirty_pages();
+            self.commit_to_wal(tx_id, &dirty_pages)?;
+            self.stop_tracking();
+
+            Ok(())
+        } else {
+            drop(store);
+
+            self.free_record(pointer)?;
+
+            let preferred = self.header.last_record_page;
+            let new_pointer = self.insert_record(&record, preferred)?;
+
+            self.node_index.insert(node_id, new_pointer);
+
+            for label in &node.labels {
+                self.update_property_index_on_remove(node_id, label, key, &old_value);
+            }
+
+            self.node_cache.put(node_id, node.clone());
+
+            self.header.last_record_page = Some(new_pointer.page_id);
+            self.header.last_committed_tx_id = tx_id;
+            self.write_header()?;
+
+            let dirty_pages = self.take_recent_dirty_pages();
+            self.commit_to_wal(tx_id, &dirty_pages)?;
+            self.stop_tracking();
+
+            Ok(())
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_node_property_internal(
+        &mut self,
+        node_id: NodeId,
+        key: String,
+        value: crate::model::PropertyValue,
+    ) -> Result<()> {
+        if !self.is_in_transaction() {
+            return Err(GraphError::InvalidArgument(
+                "set_node_property_internal must be called within a transaction".into(),
+            ));
+        }
+
+        let pointer = self
+            .node_index
+            .get(&node_id)
+            .ok_or(GraphError::NotFound("node"))?;
+        let mut node = self.read_node_at(pointer)?;
+
+        let old_value = node.properties.get(&key).cloned();
+        node.properties.insert(key.clone(), value.clone());
+
+        let payload = crate::storage::serialize_node(&node)?;
+        let record = crate::storage::record::encode_record(
+            crate::storage::record::RecordKind::Node,
+            &payload,
+        )?;
+
+        let mut store = self.record_store();
+        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+            drop(store);
+            self.record_page_write(new_pointer.page_id);
+        } else {
+            drop(store);
+            self.free_record(pointer)?;
+
+            let preferred = self.header.last_record_page;
+            let new_pointer = self.insert_record(&record, preferred)?;
+            self.node_index.insert(node_id, new_pointer);
+            self.header.last_record_page = Some(new_pointer.page_id);
+        }
+
+        if let Some(old_val) = old_value {
+            for label in &node.labels {
+                self.update_property_index_on_remove(node_id, label, &key, &old_val);
+            }
+        }
+
+        for label in &node.labels {
+            self.update_property_index_on_add(node_id, label, &key, &value);
+        }
+
+        self.node_cache.put(node_id, node);
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remove_node_property_internal(
+        &mut self,
+        node_id: NodeId,
+        key: &str,
+    ) -> Result<()> {
+        if !self.is_in_transaction() {
+            return Err(GraphError::InvalidArgument(
+                "remove_node_property_internal must be called within a transaction".into(),
+            ));
+        }
+
+        let pointer = self
+            .node_index
+            .get(&node_id)
+            .ok_or(GraphError::NotFound("node"))?;
+        let mut node = self.read_node_at(pointer)?;
+
+        let old_value = match node.properties.remove(key) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let payload = crate::storage::serialize_node(&node)?;
+        let record = crate::storage::record::encode_record(
+            crate::storage::record::RecordKind::Node,
+            &payload,
+        )?;
+
+        let mut store = self.record_store();
+        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+            drop(store);
+            self.record_page_write(new_pointer.page_id);
+        } else {
+            drop(store);
+            self.free_record(pointer)?;
+
+            let preferred = self.header.last_record_page;
+            let new_pointer = self.insert_record(&record, preferred)?;
+            self.node_index.insert(node_id, new_pointer);
+            self.header.last_record_page = Some(new_pointer.page_id);
+        }
+
+        for label in &node.labels {
+            self.update_property_index_on_remove(node_id, label, key, &old_value);
+        }
+
+        self.node_cache.put(node_id, node);
+
+        Ok(())
+    }
 }
