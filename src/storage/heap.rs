@@ -149,6 +149,27 @@ impl<'a> RecordStore<'a> {
         Ok(live == 0)
     }
 
+    pub fn update_in_place(
+        &mut self,
+        pointer: RecordPointer,
+        new_record: &[u8],
+    ) -> Result<Option<RecordPointer>> {
+        let page = self.pager.fetch_page(pointer.page_id)?;
+        let mut record_page = RecordPage::from_bytes(&mut page.data)?;
+        
+        if record_page.try_update_slot(pointer.slot_index as usize, new_record)? {
+            page.dirty = true;
+            let byte_offset = record_page.record_offset(pointer.slot_index as usize)?;
+            Ok(Some(RecordPointer {
+                page_id: pointer.page_id,
+                slot_index: pointer.slot_index,
+                byte_offset,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_page_fragmentation(&mut self, page_id: PageId) -> Result<f64> {
         let page = self.pager.fetch_page(page_id)?;
         let record_page = RecordPage::from_bytes(&mut page.data)?;
@@ -465,5 +486,138 @@ mod tests {
         // We should have at least some fragmented pages
         let all_candidates = store.identify_compaction_candidates(1, 100).expect("identify all");
         assert!(all_candidates.len() >= 2, "found {} total fragmented pages", all_candidates.len());
+    }
+
+    #[test]
+    fn update_in_place_when_smaller_record() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+
+        let original_record = build_record(b"original data that is fairly long");
+        let smaller_record = build_record(b"shorter");
+
+        let pointer = {
+            let mut pager = Pager::open(&path).expect("open pager");
+            let mut store = RecordStore::new(&mut pager);
+            let pointer = store.insert(&original_record, None).expect("insert original");
+            pager.flush().expect("flush");
+            pointer
+        };
+
+        let mut pager = Pager::open(&path).expect("reopen pager");
+        let mut store = RecordStore::new(&mut pager);
+
+        let result = store.update_in_place(pointer, &smaller_record).expect("update in place");
+        assert!(result.is_some(), "smaller record should fit in place");
+
+        let updated_pointer = result.unwrap();
+        assert_eq!(updated_pointer.page_id, pointer.page_id);
+        assert_eq!(updated_pointer.slot_index, pointer.slot_index);
+
+        store.visit_record(updated_pointer, |slice| {
+            assert_eq!(&slice[..smaller_record.len()], &smaller_record[..]);
+            Ok(())
+        }).expect("read updated record");
+    }
+
+    #[test]
+    fn update_in_place_when_same_size_record() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+
+        let original_record = build_record(b"same size data");
+        let updated_record = build_record(b"updated values");
+
+        let pointer = {
+            let mut pager = Pager::open(&path).expect("open pager");
+            let mut store = RecordStore::new(&mut pager);
+            let pointer = store.insert(&original_record, None).expect("insert original");
+            pager.flush().expect("flush");
+            pointer
+        };
+
+        let mut pager = Pager::open(&path).expect("reopen pager");
+        let mut store = RecordStore::new(&mut pager);
+
+        let result = store.update_in_place(pointer, &updated_record).expect("update in place");
+        assert!(result.is_some(), "same size record should fit in place");
+
+        let updated_pointer = result.unwrap();
+        assert_eq!(updated_pointer.page_id, pointer.page_id);
+        assert_eq!(updated_pointer.slot_index, pointer.slot_index);
+
+        store.visit_record(updated_pointer, |slice| {
+            assert_eq!(&slice[..updated_record.len()], &updated_record[..]);
+            Ok(())
+        }).expect("read updated record");
+    }
+
+    #[test]
+    fn update_in_place_fails_when_larger_record() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+
+        let original_record = build_record(b"short");
+        let larger_record = build_record(b"this is a much longer record that won't fit in the same slot");
+
+        let pointer = {
+            let mut pager = Pager::open(&path).expect("open pager");
+            let mut store = RecordStore::new(&mut pager);
+            let pointer = store.insert(&original_record, None).expect("insert original");
+            pager.flush().expect("flush");
+            pointer
+        };
+
+        let mut pager = Pager::open(&path).expect("reopen pager");
+        let mut store = RecordStore::new(&mut pager);
+
+        let result = store.update_in_place(pointer, &larger_record).expect("update in place");
+        assert!(result.is_none(), "larger record should not fit in place and return None");
+
+        store.visit_record(pointer, |slice| {
+            assert_eq!(&slice[..original_record.len()], &original_record[..]);
+            Ok(())
+        }).expect("original record should still be intact");
+    }
+
+    #[test]
+    fn update_in_place_multiple_times() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+
+        let record1 = build_record(b"version 1 data content");
+        let record2 = build_record(b"version 2 modified");
+        let record3 = build_record(b"version 3 final");
+
+        let mut pointer = {
+            let mut pager = Pager::open(&path).expect("open pager");
+            let mut store = RecordStore::new(&mut pager);
+            let pointer = store.insert(&record1, None).expect("insert v1");
+            pager.flush().expect("flush");
+            pointer
+        };
+
+        {
+            let mut pager = Pager::open(&path).expect("reopen pager");
+            let mut store = RecordStore::new(&mut pager);
+
+            let result = store.update_in_place(pointer, &record2).expect("update to v2");
+            assert!(result.is_some());
+            pointer = result.unwrap();
+
+            let result = store.update_in_place(pointer, &record3).expect("update to v3");
+            assert!(result.is_some());
+            pointer = result.unwrap();
+
+            pager.flush().expect("flush");
+        }
+
+        let mut pager = Pager::open(&path).expect("reopen pager");
+        let mut store = RecordStore::new(&mut pager);
+
+        store.visit_record(pointer, |slice| {
+            assert_eq!(&slice[..record3.len()], &record3[..]);
+            Ok(())
+        }).expect("final version should be v3");
     }
 }

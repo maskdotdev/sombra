@@ -195,6 +195,7 @@ pub struct GraphDB {
     pub(crate) group_commit_state: Option<Arc<Mutex<GroupCommitState>>>,
     pub metrics: PerformanceMetrics,
     pub concurrency_metrics: Arc<ConcurrencyMetrics>,
+    pub(crate) pages_with_free_slots: BTreeSet<PageId>,
 }
 
 impl std::fmt::Debug for GraphDB {
@@ -364,6 +365,7 @@ impl GraphDB {
             group_commit_state,
             metrics: PerformanceMetrics::new(),
             concurrency_metrics: Arc::new(ConcurrencyMetrics::new()),
+            pages_with_free_slots: BTreeSet::new(),
         };
 
         if db.load_btree_index()? {

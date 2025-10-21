@@ -2,7 +2,7 @@ use crate::error::{GraphError, Result};
 use crate::model::NodeId;
 use crate::storage::RecordPointer;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 
@@ -13,13 +13,13 @@ const ENTRY_SIZE: usize = 8 + 4 + 2 + 2;
 
 #[derive(Debug, Clone)]
 pub struct BTreeIndex {
-    root: Arc<RwLock<HashMap<NodeId, RecordPointer>>>,
+    root: Arc<RwLock<BTreeMap<NodeId, RecordPointer>>>,
 }
 
 impl BTreeIndex {
     pub fn new() -> Self {
         Self {
-            root: Arc::new(RwLock::new(HashMap::new())),
+            root: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -52,36 +52,54 @@ impl BTreeIndex {
     }
 
     pub fn range(&self, start: NodeId, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
-        let root = self.root.read();
-        let mut items: Vec<_> = root
-            .iter()
-            .filter(|(&k, _)| k >= start && k <= end)
+        self.root
+            .read()
+            .range(start..=end)
             .map(|(&k, &v)| (k, v))
-            .collect();
-        items.sort_by_key(|(k, _)| *k);
-        items
+            .collect()
     }
 
     pub fn range_from(&self, start: NodeId) -> Vec<(NodeId, RecordPointer)> {
-        let root = self.root.read();
-        let mut items: Vec<_> = root
-            .iter()
-            .filter(|(&k, _)| k >= start)
+        self.root
+            .read()
+            .range(start..)
             .map(|(&k, &v)| (k, v))
-            .collect();
-        items.sort_by_key(|(k, _)| *k);
-        items
+            .collect()
     }
 
     pub fn range_to(&self, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
-        let root = self.root.read();
-        let mut items: Vec<_> = root
-            .iter()
-            .filter(|(&k, _)| k <= end)
+        self.root
+            .read()
+            .range(..=end)
             .map(|(&k, &v)| (k, v))
-            .collect();
-        items.sort_by_key(|(k, _)| *k);
-        items
+            .collect()
+    }
+
+    pub fn first(&self) -> Option<(NodeId, RecordPointer)> {
+        self.root.read().first_key_value().map(|(&k, &v)| (k, v))
+    }
+
+    pub fn last(&self) -> Option<(NodeId, RecordPointer)> {
+        self.root.read().last_key_value().map(|(&k, &v)| (k, v))
+    }
+
+    pub fn first_n(&self, n: usize) -> Vec<(NodeId, RecordPointer)> {
+        self.root
+            .read()
+            .iter()
+            .take(n)
+            .map(|(&k, &v)| (k, v))
+            .collect()
+    }
+
+    pub fn last_n(&self, n: usize) -> Vec<(NodeId, RecordPointer)> {
+        self.root
+            .read()
+            .iter()
+            .rev()
+            .take(n)
+            .map(|(&k, &v)| (k, v))
+            .collect()
     }
 
     pub fn batch_insert(&mut self, entries: Vec<(NodeId, RecordPointer)>) {
@@ -156,7 +174,7 @@ impl BTreeIndex {
             return Err(GraphError::Corruption("BTree index data truncated".into()));
         }
 
-        let mut root = HashMap::with_capacity(len);
+        let mut root = BTreeMap::new();
 
         for i in 0..len {
             let offset = cursor
@@ -473,5 +491,95 @@ mod tests {
             }
             other => panic!("expected corruption error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_range_queries() {
+        let mut index = BTreeIndex::new();
+
+        for i in 0..100 {
+            index.insert(
+                i,
+                RecordPointer {
+                    page_id: i as u32,
+                    slot_index: 0,
+                    byte_offset: 0,
+                },
+            );
+        }
+
+        let range_result = index.range(10, 20);
+        assert_eq!(range_result.len(), 11);
+        for (i, (id, _)) in range_result.iter().enumerate() {
+            assert_eq!(*id, 10 + i as u64);
+        }
+
+        let range_from_result = index.range_from(90);
+        assert_eq!(range_from_result.len(), 10);
+        assert_eq!(range_from_result[0].0, 90);
+        assert_eq!(range_from_result[9].0, 99);
+
+        let range_to_result = index.range_to(10);
+        assert_eq!(range_to_result.len(), 11);
+        assert_eq!(range_to_result[0].0, 0);
+        assert_eq!(range_to_result[10].0, 10);
+    }
+
+    #[test]
+    fn test_first_last_operations() {
+        let mut index = BTreeIndex::new();
+
+        assert_eq!(index.first(), None);
+        assert_eq!(index.last(), None);
+
+        for i in 0..100 {
+            index.insert(
+                i,
+                RecordPointer {
+                    page_id: i as u32,
+                    slot_index: 0,
+                    byte_offset: 0,
+                },
+            );
+        }
+
+        assert_eq!(index.first().map(|(id, _)| id), Some(0));
+        assert_eq!(index.last().map(|(id, _)| id), Some(99));
+
+        let first_10 = index.first_n(10);
+        assert_eq!(first_10.len(), 10);
+        assert_eq!(first_10[0].0, 0);
+        assert_eq!(first_10[9].0, 9);
+
+        let last_10 = index.last_n(10);
+        assert_eq!(last_10.len(), 10);
+        assert_eq!(last_10[0].0, 99);
+        assert_eq!(last_10[9].0, 90);
+    }
+
+    #[test]
+    fn test_ordered_iteration() {
+        let mut index = BTreeIndex::new();
+
+        let test_ids = vec![50, 10, 90, 30, 70, 20, 60, 40, 80, 100];
+        for id in test_ids {
+            index.insert(
+                id,
+                RecordPointer {
+                    page_id: id as u32,
+                    slot_index: 0,
+                    byte_offset: 0,
+                },
+            );
+        }
+
+        let all_items = index.iter();
+        assert_eq!(all_items.len(), 10);
+
+        let ids: Vec<_> = all_items.iter().map(|(id, _)| *id).collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+
+        assert_eq!(ids, sorted_ids);
     }
 }

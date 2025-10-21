@@ -122,6 +122,20 @@ impl GraphDB {
             }
         }
 
+        // Try to reuse slots from pages with free slots
+        for &page_id in self.pages_with_free_slots.clone().iter() {
+            let mut store = self.record_store();
+            if let Some(pointer) = store.try_insert_into_page(page_id, record)? {
+                self.record_page_write(pointer.page_id);
+                let page = self.pager.fetch_page(page_id)?;
+                let record_page = RecordPage::from_bytes(&mut page.data)?;
+                if !record_page.has_free_slots()? {
+                    self.pages_with_free_slots.remove(&page_id);
+                }
+                return Ok(pointer);
+            }
+        }
+
         if let Some(page_id) = self.take_free_page()? {
             {
                 let mut store = self.record_store();
@@ -157,14 +171,16 @@ impl GraphDB {
         let page_id = pointer.page_id;
         let mut store = self.record_store();
         let page_empty = store.mark_free(pointer)?;
-
-        self.record_page_write(page_id);
+        drop(store);
 
         if page_empty {
             self.push_free_page(page_id)?;
+            self.pages_with_free_slots.remove(&page_id);
             if self.header.last_record_page == Some(page_id) {
                 self.recompute_last_record_page()?;
             }
+        } else {
+            self.pages_with_free_slots.insert(page_id);
         }
         Ok(())
     }

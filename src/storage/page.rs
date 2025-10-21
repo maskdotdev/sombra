@@ -259,6 +259,29 @@ impl<'a> RecordPage<'a> {
         Ok(true)
     }
 
+    pub fn try_update_slot(&mut self, index: usize, record: &[u8]) -> Result<bool> {
+        if record.is_empty() {
+            return Err(GraphError::InvalidArgument(
+                "record payload cannot be empty".into(),
+            ));
+        }
+        let offset = self.record_offset(index)? as usize;
+        let (start, end) = self.record_bounds(offset)?;
+        let capacity = end - start;
+        let needed = align_to_eight(record.len());
+        if needed > capacity {
+            return Ok(false);
+        }
+        self.data[start..start + record.len()].copy_from_slice(record);
+        if needed > record.len() {
+            self.data[start + record.len()..start + needed].fill(0);
+        }
+        if capacity > needed {
+            self.data[start + needed..end].fill(0);
+        }
+        Ok(true)
+    }
+
     pub fn mark_slot_free(&mut self, index: usize) -> Result<()> {
         let offset = self.record_offset(index)? as usize;
         let (start, end) = self.record_bounds(offset)?;
@@ -326,6 +349,20 @@ impl<'a> RecordPage<'a> {
             ));
         }
         RecordHeader::from_bytes(&self.data[offset..offset + RECORD_HEADER_SIZE])
+    }
+
+    /// Returns true if this page has any free slots (either genuinely free or
+    /// slots marked as RecordKind::Free that can be reused).
+    pub fn has_free_slots(&self) -> Result<bool> {
+        let record_count = self.record_count()? as usize;
+        for slot in 0..record_count {
+            let record = self.record_slice(slot)?;
+            let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
+            if header.kind == RecordKind::Free {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
