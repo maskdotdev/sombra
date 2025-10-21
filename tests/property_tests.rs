@@ -322,3 +322,200 @@ fn property_test_commutative_node_creation() {
     tx1.commit().unwrap();
     tx2.commit().unwrap();
 }
+
+#[test]
+fn test_set_node_property_in_place() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("User".to_string());
+    node.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+    node.properties.insert("age".to_string(), PropertyValue::Int(30));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    db.set_node_property(node_id, "age".to_string(), PropertyValue::Int(31)).unwrap();
+
+    let mut tx = db.begin_transaction().unwrap();
+    let updated_node = tx.get_node(node_id).unwrap();
+    assert_eq!(updated_node.properties.get("age"), Some(&PropertyValue::Int(31)));
+    assert_eq!(updated_node.properties.get("name"), Some(&PropertyValue::String("Alice".to_string())));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_set_node_property_with_growth() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("User".to_string());
+    node.properties.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    let long_bio = "a".repeat(1000);
+    db.set_node_property(node_id, "bio".to_string(), PropertyValue::String(long_bio.clone())).unwrap();
+
+    let mut tx = db.begin_transaction().unwrap();
+    let updated_node = tx.get_node(node_id).unwrap();
+    assert_eq!(updated_node.properties.get("bio"), Some(&PropertyValue::String(long_bio)));
+    assert_eq!(updated_node.properties.get("name"), Some(&PropertyValue::String("Bob".to_string())));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_remove_node_property() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("User".to_string());
+    node.properties.insert("name".to_string(), PropertyValue::String("Charlie".to_string()));
+    node.properties.insert("age".to_string(), PropertyValue::Int(25));
+    node.properties.insert("email".to_string(), PropertyValue::String("charlie@example.com".to_string()));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    db.remove_node_property(node_id, "email").unwrap();
+
+    let mut tx = db.begin_transaction().unwrap();
+    let updated_node = tx.get_node(node_id).unwrap();
+    assert_eq!(updated_node.properties.get("email"), None);
+    assert_eq!(updated_node.properties.get("name"), Some(&PropertyValue::String("Charlie".to_string())));
+    assert_eq!(updated_node.properties.get("age"), Some(&PropertyValue::Int(25)));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_remove_nonexistent_property() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("User".to_string());
+    node.properties.insert("name".to_string(), PropertyValue::String("Dave".to_string()));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    db.remove_node_property(node_id, "nonexistent").unwrap();
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node = tx.get_node(node_id).unwrap();
+    assert_eq!(node.properties.get("name"), Some(&PropertyValue::String("Dave".to_string())));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_property_update_persistence() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let path = temp.path().to_path_buf();
+    
+    let node_id = {
+        let mut db = GraphDB::open(&path).unwrap();
+        let mut node = Node::new(0);
+        node.labels.push("User".to_string());
+        node.properties.insert("count".to_string(), PropertyValue::Int(0));
+
+        let mut tx = db.begin_transaction().unwrap();
+        let node_id = tx.add_node(node).unwrap();
+        tx.commit().unwrap();
+
+        db.set_node_property(node_id, "count".to_string(), PropertyValue::Int(42)).unwrap();
+        node_id
+    };
+
+    {
+        let mut db = GraphDB::open(&path).unwrap();
+        let mut tx = db.begin_transaction().unwrap();
+        let node = tx.get_node(node_id).unwrap();
+        assert_eq!(node.properties.get("count"), Some(&PropertyValue::Int(42)));
+        tx.commit().unwrap();
+    }
+}
+
+#[test]
+fn test_property_update_multiple_times() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("Counter".to_string());
+    node.properties.insert("value".to_string(), PropertyValue::Int(0));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    for i in 1..=10 {
+        db.set_node_property(node_id, "value".to_string(), PropertyValue::Int(i)).unwrap();
+    }
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node = tx.get_node(node_id).unwrap();
+    assert_eq!(node.properties.get("value"), Some(&PropertyValue::Int(10)));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_property_update_index_consistency() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("User".to_string());
+    node.properties.insert("age".to_string(), PropertyValue::Int(25));
+    node.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    db.set_node_property(node_id, "age".to_string(), PropertyValue::Int(30)).unwrap();
+
+    let mut tx = db.begin_transaction().unwrap();
+    let results = tx.find_nodes_by_property("User", "age", &PropertyValue::Int(30)).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], node_id);
+
+    let old_results = tx.find_nodes_by_property("User", "age", &PropertyValue::Int(25)).unwrap();
+    assert_eq!(old_results.len(), 0);
+    
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_property_removal_updates_index() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    let mut node = Node::new(0);
+    node.labels.push("Product".to_string());
+    node.properties.insert("price".to_string(), PropertyValue::Int(100));
+    node.properties.insert("name".to_string(), PropertyValue::String("Widget".to_string()));
+
+    let mut tx = db.begin_transaction().unwrap();
+    let node_id = tx.add_node(node).unwrap();
+    tx.commit().unwrap();
+
+    db.remove_node_property(node_id, "price").unwrap();
+
+    let mut tx = db.begin_transaction().unwrap();
+    let results = tx.find_nodes_by_property("Product", "price", &PropertyValue::Int(100)).unwrap();
+    assert_eq!(results.len(), 0);
+
+    let node = tx.get_node(node_id).unwrap();
+    assert_eq!(node.properties.get("name"), Some(&PropertyValue::String("Widget".to_string())));
+    assert_eq!(node.properties.get("price"), None);
+    
+    tx.commit().unwrap();
+}

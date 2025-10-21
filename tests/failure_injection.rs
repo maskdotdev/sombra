@@ -1,5 +1,4 @@
 use sombra::{GraphDB, PropertyValue, Node, Edge};
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 

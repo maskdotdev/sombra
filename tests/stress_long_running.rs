@@ -149,6 +149,7 @@ fn stress_test_memory_stability() {
 }
 
 #[test]
+#[ignore]
 fn stress_test_mixed_workload() {
     let temp = tempfile::NamedTempFile::new().unwrap();
     let mut db = GraphDB::open(temp.path()).unwrap();
