@@ -222,6 +222,45 @@ impl SombraDB {
     }
 
     #[napi]
+    pub fn set_node_property(
+        &mut self,
+        node_id: f64,
+        key: String,
+        value: SombraPropertyValue,
+    ) -> std::result::Result<(), Error> {
+        let mut db = self.inner.write();
+
+        let prop_value = PropertyValue::try_from(value)?;
+
+        db.set_node_property(node_id as u64, key, prop_value).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to set node property: {}", e),
+            )
+        })?;
+
+        Ok(())
+    }
+
+    #[napi]
+    pub fn remove_node_property(
+        &mut self,
+        node_id: f64,
+        key: String,
+    ) -> std::result::Result<(), Error> {
+        let mut db = self.inner.write();
+
+        db.remove_node_property(node_id as u64, &key).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to remove node property: {}", e),
+            )
+        })?;
+
+        Ok(())
+    }
+
+    #[napi]
     pub fn flush(&mut self) -> std::result::Result<(), Error> {
         let mut db = self.inner.write();
 
@@ -327,6 +366,64 @@ impl SombraDB {
             )
         })?;
 
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_in_range(
+        &mut self,
+        start: f64,
+        end: f64,
+    ) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.inner.read();
+        let node_ids = db.get_nodes_in_range(start as u64, end as u64);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_from(&mut self, start: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.inner.read();
+        let node_ids = db.get_nodes_from(start as u64);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_to(&mut self, end: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.inner.read();
+        let node_ids = db.get_nodes_to(end as u64);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_first_node(&mut self) -> std::result::Result<Option<f64>, Error> {
+        let db = self.inner.read();
+        Ok(db.get_first_node().map(|id| id as f64))
+    }
+
+    #[napi]
+    pub fn get_last_node(&mut self) -> std::result::Result<Option<f64>, Error> {
+        let db = self.inner.read();
+        Ok(db.get_last_node().map(|id| id as f64))
+    }
+
+    #[napi]
+    pub fn get_first_n_nodes(&mut self, n: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.inner.read();
+        let node_ids = db.get_first_n_nodes(n as usize);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_last_n_nodes(&mut self, n: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.inner.read();
+        let node_ids = db.get_last_n_nodes(n as usize);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_all_node_ids_ordered(&mut self) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.inner.read();
+        let node_ids = db.get_all_node_ids_ordered();
         Ok(node_ids.into_iter().map(|id| id as f64).collect())
     }
 
@@ -557,6 +654,45 @@ impl SombraTransaction {
     }
 
     #[napi]
+    pub fn set_node_property(
+        &mut self,
+        node_id: f64,
+        key: String,
+        value: SombraPropertyValue,
+    ) -> std::result::Result<(), Error> {
+        let mut db = self.db.write();
+
+        let prop_value = PropertyValue::try_from(value)?;
+
+        db.set_node_property_internal(node_id as u64, key, prop_value).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to set node property in transaction: {}", e),
+            )
+        })?;
+
+        Ok(())
+    }
+
+    #[napi]
+    pub fn remove_node_property(
+        &mut self,
+        node_id: f64,
+        key: String,
+    ) -> std::result::Result<(), Error> {
+        let mut db = self.db.write();
+
+        db.remove_node_property_internal(node_id as u64, &key).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to remove node property in transaction: {}", e),
+            )
+        })?;
+
+        Ok(())
+    }
+
+    #[napi]
     pub fn commit(&mut self) -> std::result::Result<(), Error> {
         if self.committed {
             return Err(Error::new(
@@ -702,6 +838,64 @@ impl SombraTransaction {
             )
         })?;
 
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_in_range(
+        &mut self,
+        start: f64,
+        end: f64,
+    ) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.db.read();
+        let node_ids = db.get_nodes_in_range(start as u64, end as u64);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_from(&mut self, start: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.db.read();
+        let node_ids = db.get_nodes_from(start as u64);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_nodes_to(&mut self, end: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.db.read();
+        let node_ids = db.get_nodes_to(end as u64);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_first_node(&mut self) -> std::result::Result<Option<f64>, Error> {
+        let db = self.db.read();
+        Ok(db.get_first_node().map(|id| id as f64))
+    }
+
+    #[napi]
+    pub fn get_last_node(&mut self) -> std::result::Result<Option<f64>, Error> {
+        let db = self.db.read();
+        Ok(db.get_last_node().map(|id| id as f64))
+    }
+
+    #[napi]
+    pub fn get_first_n_nodes(&mut self, n: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.db.read();
+        let node_ids = db.get_first_n_nodes(n as usize);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_last_n_nodes(&mut self, n: f64) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.db.read();
+        let node_ids = db.get_last_n_nodes(n as usize);
+        Ok(node_ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_all_node_ids_ordered(&mut self) -> std::result::Result<Vec<f64>, Error> {
+        let db = self.db.read();
+        let node_ids = db.get_all_node_ids_ordered();
         Ok(node_ids.into_iter().map(|id| id as f64).collect())
     }
 

@@ -225,6 +225,17 @@ impl PySombraDB {
         db.delete_edge(edge_id).map_err(graph_error_to_py)
     }
 
+    fn set_node_property(&self, py: Python<'_>, node_id: u64, key: String, value: Bound<PyAny>) -> PyResult<()> {
+        let prop_value = py_any_to_property_value(&value)?;
+        let mut db = self.inner.write();
+        db.set_node_property(node_id, key, prop_value).map_err(graph_error_to_py)
+    }
+
+    fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
+        let mut db = self.inner.write();
+        db.remove_node_property(node_id, &key).map_err(graph_error_to_py)
+    }
+
     fn flush(&self) -> PyResult<()> {
         let mut db = self.inner.write();
         db.flush().map_err(graph_error_to_py)
@@ -280,6 +291,46 @@ impl PySombraDB {
             db.get_nodes_by_label(label).map_err(graph_error_to_py)?
         };
         Ok(node_ids)
+    }
+
+    fn get_nodes_in_range(&self, start: u64, end: u64) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_nodes_in_range(start, end))
+    }
+
+    fn get_nodes_from(&self, start: u64) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_nodes_from(start))
+    }
+
+    fn get_nodes_to(&self, end: u64) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_nodes_to(end))
+    }
+
+    fn get_first_node(&self) -> PyResult<Option<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_first_node())
+    }
+
+    fn get_last_node(&self) -> PyResult<Option<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_last_node())
+    }
+
+    fn get_first_n_nodes(&self, n: usize) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_first_n_nodes(n))
+    }
+
+    fn get_last_n_nodes(&self, n: usize) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_last_n_nodes(n))
+    }
+
+    fn get_all_node_ids_ordered(&self) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        Ok(db.get_all_node_ids_ordered())
     }
 
     fn count_outgoing_edges(&self, node_id: u64) -> PyResult<usize> {
@@ -399,6 +450,17 @@ impl PySombraTransaction {
         db.delete_edge_internal(edge_id).map_err(graph_error_to_py)
     }
 
+    fn set_node_property(&self, py: Python<'_>, node_id: u64, key: String, value: Bound<PyAny>) -> PyResult<()> {
+        let prop_value = py_any_to_property_value(&value)?;
+        let mut db = self.db.write();
+        db.set_node_property_internal(node_id, key, prop_value).map_err(graph_error_to_py)
+    }
+
+    fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
+        let mut db = self.db.write();
+        db.remove_node_property_internal(node_id, &key).map_err(graph_error_to_py)
+    }
+
     fn commit(&mut self) -> PyResult<()> {
         if self.committed {
             return Err(PyValueError::new_err(
@@ -489,6 +551,46 @@ impl PySombraTransaction {
             db.get_nodes_by_label(label).map_err(graph_error_to_py)?
         };
         Ok(node_ids)
+    }
+
+    fn get_nodes_in_range(&self, start: u64, end: u64) -> PyResult<Vec<u64>> {
+        let db = self.db.read();
+        Ok(db.get_nodes_in_range(start, end))
+    }
+
+    fn get_nodes_from(&self, start: u64) -> PyResult<Vec<u64>> {
+        let db = self.db.read();
+        Ok(db.get_nodes_from(start))
+    }
+
+    fn get_nodes_to(&self, end: u64) -> PyResult<Vec<u64>> {
+        let db = self.db.read();
+        Ok(db.get_nodes_to(end))
+    }
+
+    fn get_first_node(&self) -> PyResult<Option<u64>> {
+        let db = self.db.read();
+        Ok(db.get_first_node())
+    }
+
+    fn get_last_node(&self) -> PyResult<Option<u64>> {
+        let db = self.db.read();
+        Ok(db.get_last_node())
+    }
+
+    fn get_first_n_nodes(&self, n: usize) -> PyResult<Vec<u64>> {
+        let db = self.db.read();
+        Ok(db.get_first_n_nodes(n))
+    }
+
+    fn get_last_n_nodes(&self, n: usize) -> PyResult<Vec<u64>> {
+        let db = self.db.read();
+        Ok(db.get_last_n_nodes(n))
+    }
+
+    fn get_all_node_ids_ordered(&self) -> PyResult<Vec<u64>> {
+        let db = self.db.read();
+        Ok(db.get_all_node_ids_ordered())
     }
 
     fn count_outgoing_edges(&self, node_id: u64) -> PyResult<usize> {

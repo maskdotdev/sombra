@@ -47,6 +47,22 @@ export declare class SombraDB {
   
   getNodesByLabel(label: string): number[];
   
+  getNodesInRange(start: number, end: number): number[];
+  
+  getNodesFrom(start: number): number[];
+  
+  getNodesTo(end: number): number[];
+  
+  getFirstNode(): number | null;
+  
+  getLastNode(): number | null;
+  
+  getFirstNNodes(n: number): number[];
+  
+  getLastNNodes(n: number): number[];
+  
+  getAllNodeIdsOrdered(): number[];
+  
   countOutgoingEdges(nodeId: number): number;
   
   countIncomingEdges(nodeId: number): number;
@@ -58,6 +74,10 @@ export declare class SombraDB {
   deleteNode(nodeId: number): void;
   
   deleteEdge(edgeId: number): void;
+  
+  setNodeProperty(nodeId: number, key: string, value: SombraPropertyValue): void;
+  
+  removeNodeProperty(nodeId: number, key: string): void;
   
   flush(): void;
   
@@ -87,6 +107,22 @@ export declare class SombraTransaction {
   
   getNodesByLabel(label: string): number[];
   
+  getNodesInRange(start: number, end: number): number[];
+  
+  getNodesFrom(start: number): number[];
+  
+  getNodesTo(end: number): number[];
+  
+  getFirstNode(): number | null;
+  
+  getLastNode(): number | null;
+  
+  getFirstNNodes(n: number): number[];
+  
+  getLastNNodes(n: number): number[];
+  
+  getAllNodeIdsOrdered(): number[];
+  
   countOutgoingEdges(nodeId: number): number;
   
   countIncomingEdges(nodeId: number): number;
@@ -98,6 +134,10 @@ export declare class SombraTransaction {
   deleteNode(nodeId: number): void;
   
   deleteEdge(edgeId: number): void;
+  
+  setNodeProperty(nodeId: number, key: string, value: SombraPropertyValue): void;
+  
+  removeNodeProperty(nodeId: number, key: string): void;
   
   commit(): void;
   
