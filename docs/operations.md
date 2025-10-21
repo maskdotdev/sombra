@@ -651,6 +651,199 @@ if __name__ == '__main__':
     main()
 ```
 
+## Range Queries and Ordered Access
+
+### Node Range Queries
+
+Sombra provides efficient range queries using the BTreeMap-based node index:
+
+```rust
+use sombra::GraphDB;
+
+let mut db = GraphDB::open("production.db")?;
+
+// Get all nodes in a specific ID range
+let node_ids = db.get_nodes_in_range(100, 200);
+println!("Found {} nodes between IDs 100 and 200", node_ids.len());
+
+// Get all nodes from a starting ID onwards
+let node_ids = db.get_nodes_from(1000);
+println!("Found {} nodes with ID >= 1000", node_ids.len());
+
+// Get all nodes up to an ending ID
+let node_ids = db.get_nodes_to(500);
+println!("Found {} nodes with ID <= 500", node_ids.len());
+```
+
+### Ordered Node Access
+
+Access nodes in sorted order by their IDs:
+
+```rust
+// Get the first node (lowest ID)
+if let Some(first_id) = db.get_first_node() {
+    let node = db.get_node(first_id)?;
+    println!("First node: {:?}", node);
+}
+
+// Get the last node (highest ID)
+if let Some(last_id) = db.get_last_node() {
+    let node = db.get_node(last_id)?;
+    println!("Last node: {:?}", node);
+}
+
+// Get first N nodes (for pagination)
+let first_100 = db.get_first_n_nodes(100);
+println!("First 100 node IDs: {:?}", first_100);
+
+// Get last N nodes (recent items)
+let last_100 = db.get_last_n_nodes(100);
+println!("Last 100 node IDs: {:?}", last_100);
+
+// Get all node IDs in sorted order
+let all_ids = db.get_all_node_ids_ordered();
+println!("Total nodes: {}", all_ids.len());
+```
+
+### Use Cases for Range Queries
+
+**Pagination:**
+```rust
+// Page through nodes in ID order
+let page_size = 100;
+let page_number = 5;
+
+let all_ids = db.get_all_node_ids_ordered();
+let start = page_number * page_size;
+let page_ids = &all_ids[start..std::cmp::min(start + page_size, all_ids.len())];
+
+for &node_id in page_ids {
+    let node = db.get_node(node_id)?;
+    println!("{:?}", node);
+}
+```
+
+**Timeline Views:**
+```rust
+// Get most recent nodes (assuming IDs are sequential)
+let recent_ids = db.get_last_n_nodes(50);
+for &node_id in &recent_ids {
+    let node = db.get_node(node_id)?;
+    println!("Recent: {:?}", node);
+}
+```
+
+**Batch Processing:**
+```rust
+// Process nodes in chunks
+let chunk_size = 1000;
+let all_ids = db.get_all_node_ids_ordered();
+
+for chunk in all_ids.chunks(chunk_size) {
+    // Process batch
+    for &node_id in chunk {
+        let node = db.get_node(node_id)?;
+        // ... process node
+    }
+    
+    // Checkpoint after each batch
+    db.checkpoint()?;
+}
+```
+
+### Range Queries in Transactions
+
+Range queries work seamlessly in transactions:
+
+```rust
+let mut tx = db.begin_transaction()?;
+
+// Query nodes in range
+let node_ids = tx.get_nodes_in_range(100, 200);
+
+// Modify nodes found in range
+for &node_id in &node_ids {
+    tx.set_node_property(
+        node_id,
+        "batch_processed".to_string(),
+        PropertyValue::Bool(true)
+    )?;
+}
+
+tx.commit()?;
+```
+
+### Performance Characteristics
+
+Range queries leverage the BTreeMap index for optimal performance:
+
+- **Point lookup**: O(log n) - ~440ns for 10K nodes
+- **Range scan**: O(log n + k) - where k is result size
+- **Full iteration**: O(n) - ~2.6ns per node (very fast)
+- **First/Last N**: O(log n + k) - < 1µs for N=100
+
+**Key Advantages:**
+- Native ordering (no sorting needed)
+- Efficient range queries (much faster than HashMap)
+- Better cache locality for sequential access
+- Predictable performance
+
+## Property Updates
+
+### Updating Node Properties
+
+Modify node properties efficiently using `set_node_property`:
+
+```rust
+use sombra::{GraphDB, PropertyValue};
+
+let mut db = GraphDB::open("production.db")?;
+
+// Update a single property
+db.set_node_property(node_id, "status".to_string(), PropertyValue::String("active".to_string()))?;
+
+// Update multiple properties
+db.set_node_property(node_id, "last_login".to_string(), PropertyValue::Int(1234567890))?;
+db.set_node_property(node_id, "verified".to_string(), PropertyValue::Bool(true))?;
+```
+
+### Removing Node Properties
+
+Remove properties from nodes:
+
+```rust
+// Remove a property
+db.remove_node_property(node_id, "temporary_flag")?;
+
+// Check if property exists before removing
+let node = db.get_node(node_id)?;
+if node.properties.contains_key("deprecated_field") {
+    db.remove_node_property(node_id, "deprecated_field")?;
+}
+```
+
+### Property Updates in Transactions
+
+Property updates within transactions:
+
+```rust
+let mut tx = db.begin_transaction()?;
+
+// Update properties within transaction
+tx.set_node_property(node_id, "counter".to_string(), PropertyValue::Int(42))?;
+tx.remove_node_property(node_id, "old_field")?;
+
+// Commit all changes atomically
+tx.commit()?;
+```
+
+### Performance Characteristics
+
+Property updates use **update-in-place** optimization when possible:
+- **In-place update**: When the new record fits in the existing space, only one page write occurs
+- **Fallback to reinsert**: When the record grows beyond available space, the system automatically falls back to delete+reinsert
+- **Automatic index updates**: Property indexes are updated atomically with the property change
+
 ## Next Steps
 
 - Read the [Production Deployment Guide](production.md) for deployment specifics

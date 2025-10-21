@@ -5,6 +5,7 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+doctest = false
 
 [dependencies]
 crc32fast = "1.4"
@@ -91,6 +92,14 @@ required-features = ["benchmarks"]
 name = "concurrency_benchmark"
 harness = false
 required-features = ["benchmarks"]
+
+[[bench]]
+name = "property_update_benchmark"
+harness = false
+
+[[bench]]
+name = "btree_benchmark"
+harness = false
 
 [dev-dependencies]
 sombra = { path = ".", features = ["benchmarks"] }

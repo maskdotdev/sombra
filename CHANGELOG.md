@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Index Infrastructure
+- **BTreeMap-based node index** - Replaced HashMap with BTreeMap for proper ordered iteration and efficient range queries
+- **Range query APIs** - `get_nodes_in_range()`, `get_nodes_from()`, `get_nodes_to()` for querying nodes by ID ranges
+- **Ordered node access** - `get_first_node()`, `get_last_node()`, `get_first_n_nodes()`, `get_last_n_nodes()` for accessing nodes in sorted order
+- **Full ordered iteration** - `get_all_node_ids_ordered()` returns all node IDs in sorted order
+- **Cross-language support** - Range query methods available in Rust core, Node.js, and Python bindings
+- **Transaction-aware range queries** - All range query methods work within transactions
+
 #### Reliability & Safety
 - **Safe locking helper** (`acquire_lock`) in `src/error.rs` that replaces panic-prone `.lock().unwrap()` patterns across FFI layers
 - **Graceful lock poisoning recovery** - All mutex poisoning cases now return `GraphError::LockPoisoned` instead of panicking
@@ -25,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Graceful shutdown** (`GraphDB::close()`) with clean checkpoint and WAL truncation
 - **Transaction timeout support** to prevent runaway long-running transactions
 - **Auto-checkpoint** when WAL exceeds configurable size threshold
+
+#### Performance Optimizations
+- **Update-in-place property modifications** - `set_node_property()` and `remove_node_property()` now update records in-place when possible, avoiding delete+reinsert overhead
+- **Reduced WAL pressure** - In-place updates generate fewer WAL frames for property modifications
+- **Property index synchronization** - Automatic index updates when node properties change
 
 #### Documentation
 - **Comprehensive API documentation** with examples for all public functions
