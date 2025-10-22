@@ -520,8 +520,10 @@ fn test_property_index_stress_100k_entries() {
                     "age".to_string(),
                     PropertyValue::Int((node_idx % 100) as i64),
                 );
-                node.properties
-                    .insert("active".to_string(), PropertyValue::Bool(node_idx.is_multiple_of(3)));
+                node.properties.insert(
+                    "active".to_string(),
+                    PropertyValue::Bool(node_idx.is_multiple_of(3)),
+                );
                 tx.add_node(node).expect("add node");
             }
 
