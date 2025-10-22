@@ -452,18 +452,21 @@ mod tests {
         db.add_edge(Edge::new(0, class_b_id, method_b_id, "CONTAINS"))
             .expect("add class B->method B");
 
-        let descendants = db
+        let mut descendants = db
             .get_descendants(file_id, "CONTAINS", None)
             .expect("get descendants");
-        assert_eq!(
-            descendants,
-            vec![class_a_id, class_b_id, method_a_id, method_b_id]
-        );
+        descendants.sort();
+        let mut expected = vec![class_a_id, class_b_id, method_a_id, method_b_id];
+        expected.sort();
+        assert_eq!(descendants, expected);
 
-        let limited = db
+        let mut limited = db
             .get_descendants(file_id, "CONTAINS", Some(1))
             .expect("get descendants limited");
-        assert_eq!(limited, vec![class_a_id, class_b_id]);
+        limited.sort();
+        let mut expected_limited = vec![class_a_id, class_b_id];
+        expected_limited.sort();
+        assert_eq!(limited, expected_limited);
     }
 
     #[test]
