@@ -59,3 +59,18 @@ Thumbs.db
 # Logs
 *.log
 .venv/
+
+# Fuzz testing artifacts
+fuzz/target/
+fuzz/corpus/
+
+# Session reports and completion summaries
+*_SESSION*.md
+*_COMPLETION*.md
+SESSION_SUMMARY.md
+CHECKSUM_*.md
+SECURITY_HARDENING_REPORT.md
+code_review_integration_plan.md
+
+# Temporary memory files
+:memory:
