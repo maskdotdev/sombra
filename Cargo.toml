@@ -105,6 +105,15 @@ harness = false
 name = "performance_metrics_demo"
 required-features = ["benchmarks"]
 
+[[example]]
+name = "social_graph"
+
+[[example]]
+name = "code_analysis"
+
+[[example]]
+name = "transaction_handling"
+
 [dev-dependencies]
 proptest = "1.0"
 tempfile = "3.10"
