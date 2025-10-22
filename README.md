@@ -301,7 +301,7 @@ cargo run --example performance_metrics_demo --features benchmarks
 
 ## Current Status
 
-### Version 0.3.0 - Alpha
+### Version 0.3.2 - Alpha
 
 **Core Features:**
 - Core graph operations (nodes, edges, properties)
