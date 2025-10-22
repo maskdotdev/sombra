@@ -10,7 +10,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # NAPI build artifacts
-*.node
+/*.node
+npm/**/*.node
 index.js
 index.d.ts
 

@@ -1,0 +1,37 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "sombradb",
+      "dependencies": {
+        "sombradb": "^0.3.2",
+      },
+      "devDependencies": {
+        "@napi-rs/cli": "^2.18.0",
+        "@types/node": "^24.8.1",
+        "typescript": "^5.0.0",
+      },
+      "optionalDependencies": {
+        "sombradb-darwin-arm64": "0.3.3",
+        "sombradb-darwin-x64": "0.3.3",
+        "sombradb-linux-arm-gnueabihf": "0.3.3",
+        "sombradb-linux-arm64-gnu": "0.3.3",
+        "sombradb-linux-x64-gnu": "0.3.3",
+        "sombradb-linux-x64-musl": "0.3.3",
+        "sombradb-win32-ia32-msvc": "0.3.3",
+        "sombradb-win32-x64-msvc": "0.3.3",
+      },
+    },
+  },
+  "packages": {
+    "@napi-rs/cli": ["@napi-rs/cli@2.18.4", "", { "bin": { "napi": "scripts/index.js" } }, "sha512-SgJeA4df9DE2iAEpr3M2H0OKl/yjtg1BnRI5/JyowS71tUWhrfSu2LT0V3vlHET+g1hBVlrO60PmEXwUEKp8Mg=="],
+
+    "@types/node": ["@types/node@24.8.1", "", { "dependencies": { "undici-types": "~7.14.0" } }, "sha512-alv65KGRadQVfVcG69MuB4IzdYVpRwMG/mq8KWOaoOdyY617P5ivaDiMCGOFDWD2sAn5Q0mR3mRtUOgm99hL9Q=="],
+
+    "sombradb": ["sombradb@0.3.2", "", { "optionalDependencies": { "sombradb-darwin-arm64": "0.3.2", "sombradb-darwin-x64": "0.3.2", "sombradb-linux-arm-gnueabihf": "0.3.2", "sombradb-linux-arm64-gnu": "0.3.2", "sombradb-linux-x64-gnu": "0.3.2", "sombradb-linux-x64-musl": "0.3.2", "sombradb-win32-ia32-msvc": "0.3.2", "sombradb-win32-x64-msvc": "0.3.2" }, "bin": { "sombra": "bin/sombra.js" } }, "sha512-IaSTe4LrRHfgr91n1fM4tVOlVcJ9e8XZ9MgpAxdbbARHpbs+1B1fVFgOA+Nix58M+Cyjcw1e+XHqXDXlXMdXEw=="],
+
+    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "undici-types": ["undici-types@7.14.0", "", {}, "sha512-QQiYxHuyZ9gQUIrmPo3IA+hUl4KYk8uSA7cHrcKd/l3p1OTpZcM0Tbp9x7FAtXdAYhlasd60ncPpgu6ihG6TOA=="],
+  }
+}

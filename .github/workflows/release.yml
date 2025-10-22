@@ -119,19 +119,24 @@ jobs:
         with:
           path: artifacts
           pattern: bindings-*
-      - name: Move artifacts to root for napi prepublish
+      - name: List artifacts
         run: |
-          # napi prepublish expects *.node files in root, then creates npm/ structure
-          find artifacts -name "*.node" -exec cp {} . \;
-          ls -la *.node
+          ls -la artifacts/
+          find artifacts -name "*.node" -ls
+      - name: Copy artifacts to npm platform packages
+        run: npx napi artifacts -d artifacts
+      - name: List npm packages
+        run: find npm -name "*.node" -ls
       - name: Publish platform packages and main package
-        run: npm run prepublishOnly
+        run: |
+          echo "//registry.npmjs.org/:_authToken=$NODE_AUTH_TOKEN" >> ~/.npmrc
+          npm run prepublishOnly
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: "*.node"
+          files: "npm/*/*.node"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
