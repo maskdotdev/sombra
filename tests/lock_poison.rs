@@ -1,3 +1,6 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
 use sombra::error::{acquire_lock, GraphError};
 use std::sync::{Arc, Mutex};
 use std::thread;

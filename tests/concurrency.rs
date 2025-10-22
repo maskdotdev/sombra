@@ -1,4 +1,7 @@
-use sombra::{GraphDB, PropertyValue, Node, Edge};
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
+use sombra::{Edge, GraphDB, Node, PropertyValue};
 use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
@@ -13,11 +16,11 @@ fn sequential_transactions() {
         for i in 1..=100 {
             let mut props = BTreeMap::new();
             props.insert("id".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Test".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -25,12 +28,12 @@ fn sequential_transactions() {
 
     for _ in 0..10 {
         let mut tx = db.begin_transaction().unwrap();
-        
+
         for node_id in 1..=100 {
             let node = tx.get_node(node_id).unwrap();
             assert!(node.id > 0);
         }
-        
+
         tx.commit().unwrap();
         thread::sleep(Duration::from_millis(1));
     }
@@ -53,24 +56,24 @@ fn sequential_write_transactions() {
 
     for batch_id in 0..batches {
         let mut tx = db.begin_transaction().unwrap();
-        
+
         for i in 0..ops_per_batch {
             let mut props = BTreeMap::new();
             props.insert("batch".to_string(), PropertyValue::Int(batch_id));
             props.insert("iteration".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push(format!("Batch{}", batch_id));
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
-        
+
         tx.commit().unwrap();
     }
 
     let mut tx = db.begin_transaction().unwrap();
-    
+
     let mut total_nodes = 0;
     for node_id in 1..=(batches * ops_per_batch + 100) {
         if let Ok(node) = tx.get_node(node_id as u64) {
@@ -79,7 +82,7 @@ fn sequential_write_transactions() {
             }
         }
     }
-    
+
     assert_eq!(total_nodes, batches * ops_per_batch);
     tx.commit().unwrap();
 }
@@ -94,11 +97,11 @@ fn sequential_edge_creation() {
         for i in 1..=100 {
             let mut props = BTreeMap::new();
             props.insert("id".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Node".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -107,24 +110,24 @@ fn sequential_edge_creation() {
     for i in 0..50 {
         let from = (i % 100 + 1) as u64;
         let to = ((i + 1) % 100 + 1) as u64;
-        
+
         let mut tx = db.begin_transaction().unwrap();
-        
+
         let edge = Edge::new(0, from, to, "CONNECTS");
         tx.add_edge(edge).unwrap();
-        
+
         tx.commit().unwrap();
     }
 
     let mut tx = db.begin_transaction().unwrap();
-    
+
     let mut total_edges = 0;
     for node_id in 1..=100 {
         if let Ok(neighbors) = tx.get_neighbors(node_id) {
             total_edges += neighbors.len();
         }
     }
-    
+
     assert_eq!(total_edges, 50);
     tx.commit().unwrap();
 }
@@ -136,16 +139,16 @@ fn rollback_safety() {
 
     for i in 0..25 {
         let mut tx = db.begin_transaction().unwrap();
-        
+
         let mut props = BTreeMap::new();
         props.insert("value".to_string(), PropertyValue::Int(i));
-        
+
         let mut node = Node::new(0);
         node.labels.push("Temp".to_string());
         node.properties = props;
-        
+
         tx.add_node(node).unwrap();
-        
+
         if i % 2 == 0 {
             tx.commit().unwrap();
         } else {
@@ -154,7 +157,7 @@ fn rollback_safety() {
     }
 
     let mut tx = db.begin_transaction().unwrap();
-    
+
     let mut committed_nodes = 0;
     for node_id in 1..=1000 {
         if let Ok(node) = tx.get_node(node_id) {
@@ -163,7 +166,7 @@ fn rollback_safety() {
             }
         }
     }
-    
+
     assert_eq!(committed_nodes, 13);
     tx.commit().unwrap();
 }
@@ -178,11 +181,11 @@ fn mixed_operations() {
         for i in 1..=50 {
             let mut props = BTreeMap::new();
             props.insert("initial".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Initial".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -190,16 +193,16 @@ fn mixed_operations() {
 
     for i in 0..25 {
         let mut tx = db.begin_transaction().unwrap();
-        
+
         match i % 3 {
             0 => {
                 let mut props = BTreeMap::new();
                 props.insert("iteration".to_string(), PropertyValue::Int(i));
-                
+
                 let mut node = Node::new(0);
                 node.labels.push("New".to_string());
                 node.properties = props;
-                
+
                 tx.add_node(node).unwrap();
             }
             1 => {
@@ -214,7 +217,7 @@ fn mixed_operations() {
             }
             _ => unreachable!(),
         }
-        
+
         tx.commit().unwrap();
     }
 

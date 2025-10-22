@@ -1,3 +1,6 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::field_reassign_with_default)]
+
 use std::time::Instant;
 use tempfile::NamedTempFile;
 

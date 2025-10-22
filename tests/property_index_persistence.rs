@@ -1,3 +1,6 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
 use sombra::{GraphDB, Node, PropertyValue};
 use tempfile::NamedTempFile;
 

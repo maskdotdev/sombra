@@ -1,3 +1,6 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
 use sombra::pager::DEFAULT_PAGE_SIZE;
 use sombra::{Config, GraphDB, IntegrityOptions, Node};
 use std::fs::OpenOptions;

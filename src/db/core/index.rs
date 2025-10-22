@@ -62,9 +62,9 @@ impl GraphDB {
                     let expected_page = start + i as u32;
                     let allocated = self.pager.allocate_page()?;
                     if allocated != expected_page {
-                        return Err(GraphError::Corruption(
-                            format!("Expected contiguous page allocation: got {}, expected {}", allocated, expected_page)
-                        ));
+                        return Err(GraphError::Corruption(format!(
+                            "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
+                        )));
                     }
                 }
                 start
@@ -75,9 +75,9 @@ impl GraphDB {
                 let expected_page = new_page + i as u32;
                 let allocated = self.pager.allocate_page()?;
                 if allocated != expected_page {
-                    return Err(GraphError::Corruption(
-                        format!("Expected contiguous page allocation: got {}, expected {}", allocated, expected_page)
-                    ));
+                    return Err(GraphError::Corruption(format!(
+                        "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
+                    )));
                 }
             }
             new_page
@@ -105,7 +105,8 @@ impl GraphDB {
 
     pub(crate) fn persist_property_indexes(&mut self) -> Result<()> {
         let mut serializer = PropertyIndexSerializer::new(&mut self.pager);
-        let (root_page, count, written_pages) = serializer.serialize_indexes(&self.property_indexes)?;
+        let (root_page, count, written_pages) =
+            serializer.serialize_indexes(&self.property_indexes)?;
 
         if root_page == 0 {
             self.header.property_index_root_page = None;
@@ -128,11 +129,7 @@ impl GraphDB {
         self.header.property_index_count = count;
         self.header.property_index_version = 1;
 
-        info!(
-            root_page,
-            count,
-            "Persisted property indexes"
-        );
+        info!(root_page, count, "Persisted property indexes");
 
         Ok(())
     }

@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use std::time::Instant;
 use tempfile::NamedTempFile;
 
@@ -18,14 +20,10 @@ fn benchmark_single_property_update(node_count: usize, updates_per_node: usize) 
             "name".to_string(),
             sombra::model::PropertyValue::String(format!("User_{}", i)),
         );
-        node.properties.insert(
-            "age".to_string(),
-            sombra::model::PropertyValue::Int(25),
-        );
-        node.properties.insert(
-            "score".to_string(),
-            sombra::model::PropertyValue::Int(100),
-        );
+        node.properties
+            .insert("age".to_string(), sombra::model::PropertyValue::Int(25));
+        node.properties
+            .insert("score".to_string(), sombra::model::PropertyValue::Int(100));
         let id = db.add_node(node).expect("add node");
         node_ids.push(id);
     }
@@ -33,8 +31,12 @@ fn benchmark_single_property_update(node_count: usize, updates_per_node: usize) 
     let update_start = Instant::now();
     for _ in 0..updates_per_node {
         for &node_id in &node_ids {
-            let current_age = if let Some(sombra::model::PropertyValue::Int(age)) = 
-                db.get_node(node_id).expect("get node").properties.get("age") {
+            let current_age = if let Some(sombra::model::PropertyValue::Int(age)) = db
+                .get_node(node_id)
+                .expect("get node")
+                .properties
+                .get("age")
+            {
                 *age
             } else {
                 25
@@ -42,8 +44,9 @@ fn benchmark_single_property_update(node_count: usize, updates_per_node: usize) 
             db.set_node_property(
                 node_id,
                 "age".to_string(),
-                sombra::model::PropertyValue::Int(current_age + 1)
-            ).expect("set property");
+                sombra::model::PropertyValue::Int(current_age + 1),
+            )
+            .expect("set property");
         }
     }
     update_start.elapsed().as_micros()
@@ -66,14 +69,10 @@ fn benchmark_property_add_and_remove(node_count: usize, updates_per_node: usize)
             "name".to_string(),
             sombra::model::PropertyValue::String(format!("User_{}", i)),
         );
-        node.properties.insert(
-            "age".to_string(),
-            sombra::model::PropertyValue::Int(25),
-        );
-        node.properties.insert(
-            "score".to_string(),
-            sombra::model::PropertyValue::Int(100),
-        );
+        node.properties
+            .insert("age".to_string(), sombra::model::PropertyValue::Int(25));
+        node.properties
+            .insert("score".to_string(), sombra::model::PropertyValue::Int(100));
         let id = db.add_node(node).expect("add node");
         node_ids.push(id);
     }
@@ -85,10 +84,12 @@ fn benchmark_property_add_and_remove(node_count: usize, updates_per_node: usize)
                 db.set_node_property(
                     node_id,
                     "temp".to_string(),
-                    sombra::model::PropertyValue::String("temp_value".to_string())
-                ).expect("set property");
+                    sombra::model::PropertyValue::String("temp_value".to_string()),
+                )
+                .expect("set property");
             } else {
-                db.remove_node_property(node_id, "temp").expect("remove property");
+                db.remove_node_property(node_id, "temp")
+                    .expect("remove property");
             }
         }
     }
@@ -108,7 +109,10 @@ fn main() {
     println!("- Reduces WAL writes and page modifications\n");
 
     for &count in &node_counts {
-        println!("Testing with {} nodes, {} operations per node:", count, updates_per_node);
+        println!(
+            "Testing with {} nodes, {} operations per node:",
+            count, updates_per_node
+        );
 
         let update_time = benchmark_single_property_update(count, updates_per_node);
         println!(
@@ -124,8 +128,10 @@ fn main() {
             add_remove_time as f64 / 1000.0
         );
 
-        let ops_per_sec_update = (count * updates_per_node) as f64 / (update_time as f64 / 1_000_000.0);
-        let ops_per_sec_cycle = (count * updates_per_node) as f64 / (add_remove_time as f64 / 1_000_000.0);
+        let ops_per_sec_update =
+            (count * updates_per_node) as f64 / (update_time as f64 / 1_000_000.0);
+        let ops_per_sec_cycle =
+            (count * updates_per_node) as f64 / (add_remove_time as f64 / 1_000_000.0);
 
         println!(
             "  Throughput (set):         {:.0} ops/sec",

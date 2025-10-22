@@ -1,3 +1,6 @@
+#![cfg_attr(test, allow(clippy::uninlined_format_args))]
+#![cfg_attr(test, allow(clippy::useless_vec))]
+
 //! # Sombra - High Performance Graph Database
 //!
 //! Sombra is a fast, embedded graph database written in Rust with ACID transactions,
@@ -74,4 +77,12 @@ pub use crate::db::{
     PerformanceMetrics, SyncMode, Transaction, TxId, TxState,
 };
 pub use crate::error::{GraphError, Result};
-pub use crate::model::{Edge, EdgeId, Node, NodeId, PropertyValue};
+pub use crate::model::{Edge, EdgeDirection, EdgeId, Node, NodeId, PropertyValue};
+
+// Re-export query API types
+pub use crate::db::query::analytics::{DegreeDistribution, DegreeType};
+pub use crate::db::query::builder::{QueryBuilder, QueryResult};
+pub use crate::db::query::pattern::{
+    EdgePattern, Match, NodePattern, Pattern, PropertyBound, PropertyFilters, PropertyRangeFilter,
+};
+pub use crate::db::query::subgraph::Subgraph;

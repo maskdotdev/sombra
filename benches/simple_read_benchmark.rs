@@ -1,3 +1,7 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::manual_hash_one)]
+#![allow(clippy::needless_range_loop)]
+
 use sombra::db::{Config, GraphDB};
 use sombra::model::{Edge, Node};
 use std::time::Instant;

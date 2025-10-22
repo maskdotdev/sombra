@@ -1,3 +1,6 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::let_unit_value)]
+
 use crate::{
     data_generator::DataGenerator, performance_utils::BenchmarkSuite,
     sqlite_adapter::SqliteGraphDB, Edge, GraphDB, Node, PropertyValue,

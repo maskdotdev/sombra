@@ -1,4 +1,7 @@
-use sombra::{GraphDB, PropertyValue, Node, Edge};
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
+use sombra::{Edge, GraphDB, Node, PropertyValue};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -12,17 +15,23 @@ fn stress_test_large_insertion() {
     let target_nodes = 1_000_000;
     let target_edges = 10_000_000;
 
-    println!("Starting insertion of {} nodes and {} edges", target_nodes, target_edges);
+    println!(
+        "Starting insertion of {} nodes and {} edges",
+        target_nodes, target_edges
+    );
 
     for i in 0..target_nodes {
         let mut props = BTreeMap::new();
         props.insert("id".to_string(), PropertyValue::Int(i as i64));
-        props.insert("name".to_string(), PropertyValue::String(format!("Node_{}", i)));
-        
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String(format!("Node_{}", i)),
+        );
+
         let mut node = Node::new(0);
         node.labels.push("TestNode".to_string());
         node.properties = props;
-        
+
         let mut tx = db.begin_transaction().unwrap();
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
@@ -40,13 +49,13 @@ fn stress_test_large_insertion() {
     for i in 0..target_edges {
         let from = (i % target_nodes) as u64 + 1;
         let to = ((i + 1) % target_nodes) as u64 + 1;
-        
+
         let mut props = BTreeMap::new();
         props.insert("weight".to_string(), PropertyValue::Float(1.0));
-        
+
         let mut edge = Edge::new(0, from, to, "CONNECTS");
         edge.properties = props;
-        
+
         let mut tx = db.begin_transaction().unwrap();
         tx.add_edge(edge).unwrap();
         tx.commit().unwrap();
@@ -79,27 +88,36 @@ fn stress_test_sustained_throughput() {
     let mut count = 0u64;
     let mut last_report = Instant::now();
 
-    println!("Running sustained {} tx/sec for {:?}", target_rate, duration);
+    println!(
+        "Running sustained {} tx/sec for {:?}",
+        target_rate, duration
+    );
 
     while start.elapsed() < duration {
         let mut props = BTreeMap::new();
         props.insert("index".to_string(), PropertyValue::Int(count as i64));
-        props.insert("timestamp".to_string(), PropertyValue::Int(start.elapsed().as_millis() as i64));
-        
+        props.insert(
+            "timestamp".to_string(),
+            PropertyValue::Int(start.elapsed().as_millis() as i64),
+        );
+
         let mut node = Node::new(0);
         node.labels.push("Stress".to_string());
         node.properties = props;
-        
+
         let mut tx = db.begin_transaction().unwrap();
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
-        
+
         count += 1;
 
         if last_report.elapsed() >= Duration::from_secs(5) {
             let elapsed = start.elapsed();
             let rate = count as f64 / elapsed.as_secs_f64();
-            println!("{:?} elapsed: {} transactions ({:.0} tx/sec)", elapsed, count, rate);
+            println!(
+                "{:?} elapsed: {} transactions ({:.0} tx/sec)",
+                elapsed, count, rate
+            );
             last_report = Instant::now();
         }
 
@@ -110,9 +128,17 @@ fn stress_test_sustained_throughput() {
     }
 
     let final_rate = count as f64 / start.elapsed().as_secs_f64();
-    println!("Completed {} transactions in {:?} ({:.0} tx/sec)", count, start.elapsed(), final_rate);
-    
-    assert!(final_rate >= target_rate as f64 * 0.9, "Failed to maintain target throughput");
+    println!(
+        "Completed {} transactions in {:?} ({:.0} tx/sec)",
+        count,
+        start.elapsed(),
+        final_rate
+    );
+
+    assert!(
+        final_rate >= target_rate as f64 * 0.9,
+        "Failed to maintain target throughput"
+    );
 }
 
 #[test]
@@ -126,18 +152,21 @@ fn stress_test_memory_stability() {
 
     for i in 0..iterations {
         let mut props = BTreeMap::new();
-        props.insert("data".to_string(), PropertyValue::String(format!("Data_{}", i)));
-        
+        props.insert(
+            "data".to_string(),
+            PropertyValue::String(format!("Data_{}", i)),
+        );
+
         let mut node = Node::new(0);
         node.labels.push("Memory".to_string());
         node.properties = props;
-        
+
         let mut tx = db.begin_transaction().unwrap();
         let node_id = tx.add_node(node).unwrap();
-        
+
         let retrieved_node = tx.get_node(node_id).unwrap();
         assert!(retrieved_node.id > 0);
-        
+
         tx.commit().unwrap();
 
         if i % 10_000 == 0 && i > 0 {
@@ -163,12 +192,15 @@ fn stress_test_mixed_workload() {
         match i % 4 {
             0 => {
                 let mut props = BTreeMap::new();
-                props.insert("type".to_string(), PropertyValue::String("mixed".to_string()));
-                
+                props.insert(
+                    "type".to_string(),
+                    PropertyValue::String("mixed".to_string()),
+                );
+
                 let mut node = Node::new(0);
                 node.labels.push("Mixed".to_string());
                 node.properties = props;
-                
+
                 let mut tx = db.begin_transaction().unwrap();
                 let node_id = tx.add_node(node).unwrap();
                 node_ids.push(node_id);
@@ -187,9 +219,9 @@ fn stress_test_mixed_workload() {
                 if node_ids.len() >= 2 {
                     let from = node_ids[i % node_ids.len()];
                     let to = node_ids[(i + 1) % node_ids.len()];
-                    
+
                     let edge = Edge::new(0, from, to, "LINKS");
-                    
+
                     let mut tx = db.begin_transaction().unwrap();
                     tx.add_edge(edge).unwrap();
                     tx.commit().unwrap();

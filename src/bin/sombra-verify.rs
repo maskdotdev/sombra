@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use sombra::{Config, GraphDB, IntegrityOptions};
 use std::env;
 use std::error::Error;

@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use sombra::index::BTreeIndex;
 use sombra::storage::RecordPointer;
 use std::collections::HashMap;
@@ -95,7 +97,7 @@ fn benchmark_btree_iteration(count: usize) -> u128 {
     }
 
     let start = Instant::now();
-    let _: Vec<_> = index.iter().collect();
+    let _ = index.iter();
     start.elapsed().as_micros()
 }
 

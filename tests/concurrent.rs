@@ -1,7 +1,10 @@
-use sombra::{Edge, GraphDB, Node, Result};
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
 use parking_lot::Mutex;
-use std::sync::{Arc, Barrier};
+use sombra::{Edge, GraphDB, Node, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -15,7 +18,7 @@ const STRESS_READERS: usize = 128;
 fn concurrent_node_insertion() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
-    
+
     // Open database once and share it across threads with proper synchronization
     let db = GraphDB::open(&path)?;
     let db = Arc::new(Mutex::new(db));
@@ -70,7 +73,7 @@ fn concurrent_edge_creation() -> Result<()> {
     // Create a central hub node first
     let mut db = GraphDB::open(&path)?;
     let hub_id = db.add_node(Node::new(9999))?;
-    
+
     let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
@@ -126,7 +129,7 @@ fn concurrent_read_write_operations() -> Result<()> {
     for i in 0..initial_node_count {
         db.add_node(Node::new(i as u64))?;
     }
-    
+
     let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let mut handles = vec![];
@@ -209,7 +212,7 @@ fn concurrent_transaction_operations() -> Result<()> {
                 // Add multiple nodes in a single transaction
                 let mut db_guard = db_clone.lock();
                 let mut tx = db_guard.begin_transaction()?;
-                
+
                 for j in 0..5 {
                     let node =
                         Node::new((thread_id * OPERATIONS_PER_THREAD * 5 + i * 5 + j) as u64);
@@ -283,7 +286,9 @@ fn concurrent_stress_test() -> Result<()> {
                             let to_id = ((thread_id * OPERATIONS_PER_THREAD + i) % 100 + 1) as u64;
 
                             // Only create edge if both nodes exist
-                            if db_clone.lock().get_node(from_id).is_ok() && db_clone.lock().get_node(to_id).is_ok() {
+                            if db_clone.lock().get_node(from_id).is_ok()
+                                && db_clone.lock().get_node(to_id).is_ok()
+                            {
                                 let edge = Edge::new(0, from_id, to_id, "stress_test");
                                 if db_clone.lock().add_edge(edge).is_ok() {
                                     edges_created += 1;
@@ -400,21 +405,29 @@ fn concurrent_massive_readers_stress() -> Result<()> {
     for i in 0..num_nodes {
         let mut node = Node::new(i as u64);
         node.labels.push(format!("Node_{}", i % 10));
-        node.properties.insert("index".to_string(), sombra::PropertyValue::Int(i as i64));
-        node.properties.insert("category".to_string(), sombra::PropertyValue::String(format!("cat_{}", i % 5)));
+        node.properties
+            .insert("index".to_string(), sombra::PropertyValue::Int(i as i64));
+        node.properties.insert(
+            "category".to_string(),
+            sombra::PropertyValue::String(format!("cat_{}", i % 5)),
+        );
         db.add_node(node)?;
     }
-    
+
     for i in 0..(num_nodes - 1) {
         let edge = Edge::new(0, (i + 1) as u64, (i + 2) as u64, "link");
         db.add_edge(edge)?;
     }
-    
+
     db.checkpoint()?;
     let db = Arc::new(Mutex::new(db));
 
-    println!("\n=== Testing {} Concurrent Readers ===", STRESS_READERS);
-    
+    println!(
+        "
+=== Testing {} Concurrent Readers ===",
+        STRESS_READERS
+    );
+
     let success_count = Arc::new(AtomicUsize::new(0));
     let barrier = Arc::new(Barrier::new(STRESS_READERS));
     let start_time = Instant::now();
@@ -427,13 +440,13 @@ fn concurrent_massive_readers_stress() -> Result<()> {
 
         let handle = thread::spawn(move || -> Result<usize> {
             barrier_clone.wait();
-            
+
             let mut local_ops = 0;
             let ops_per_reader = 50;
 
             for i in 0..ops_per_reader {
                 let node_id = ((thread_id * ops_per_reader + i) % num_nodes + 1) as u64;
-                
+
                 match i % 5 {
                     0 => {
                         if db_clone.lock().get_node(node_id).is_ok() {
@@ -482,12 +495,24 @@ fn concurrent_massive_readers_stress() -> Result<()> {
     let successful_readers = success_count.load(Ordering::SeqCst);
 
     println!("Completed in {:?}", elapsed);
-    println!("Successful readers: {}/{}", successful_readers, STRESS_READERS);
+    println!(
+        "Successful readers: {}/{}",
+        successful_readers, STRESS_READERS
+    );
     println!("Total read operations: {}", total_ops);
-    println!("Operations per second: {:.2}", total_ops as f64 / elapsed.as_secs_f64());
-    println!("Average latency per operation: {:.2}μs", elapsed.as_micros() as f64 / total_ops as f64);
+    println!(
+        "Operations per second: {:.2}",
+        total_ops as f64 / elapsed.as_secs_f64()
+    );
+    println!(
+        "Average latency per operation: {:.2}μs",
+        elapsed.as_micros() as f64 / total_ops as f64
+    );
 
-    assert_eq!(successful_readers, STRESS_READERS, "All readers should complete successfully");
+    assert_eq!(
+        successful_readers, STRESS_READERS,
+        "All readers should complete successfully"
+    );
     assert!(total_ops > 0, "Should have performed read operations");
 
     Ok(())
@@ -507,8 +532,11 @@ fn concurrent_readers_with_single_writer() -> Result<()> {
     db.checkpoint()?;
     let db = Arc::new(Mutex::new(db));
 
-    println!("\n=== Testing 100 Readers + 1 Writer ===");
-    
+    println!(
+        "
+=== Testing 100 Readers + 1 Writer ==="
+    );
+
     let num_readers = 100;
     let barrier = Arc::new(Barrier::new(num_readers + 1));
     let start_time = Instant::now();
@@ -523,7 +551,7 @@ fn concurrent_readers_with_single_writer() -> Result<()> {
 
         let handle = thread::spawn(move || -> Result<()> {
             barrier_clone.wait();
-            
+
             for i in 0..100 {
                 let node_id = ((thread_id * 100 + i) % 500 + 1) as u64;
                 if db_clone.lock().get_node(node_id).is_ok() {
@@ -539,21 +567,21 @@ fn concurrent_readers_with_single_writer() -> Result<()> {
     let db_clone = Arc::clone(&db);
     let barrier_clone = Arc::clone(&barrier);
     let write_count_clone = Arc::clone(&write_count);
-    
+
     let writer_handle = thread::spawn(move || -> Result<()> {
         barrier_clone.wait();
-        
+
         for i in 0..100 {
             let mut node = Node::new((1000 + i) as u64);
             node.labels.push(format!("NewNode_{}", i));
             db_clone.lock().add_node(node)?;
             write_count_clone.fetch_add(1, Ordering::Relaxed);
-            
+
             thread::sleep(Duration::from_micros(100));
         }
         Ok(())
     });
-    
+
     handles.push(writer_handle);
 
     for handle in handles {
@@ -565,9 +593,18 @@ fn concurrent_readers_with_single_writer() -> Result<()> {
     let total_writes = write_count.load(Ordering::Relaxed);
 
     println!("Completed in {:?}", elapsed);
-    println!("Total reads: {}, Total writes: {}", total_reads, total_writes);
-    println!("Read throughput: {:.2} ops/sec", total_reads as f64 / elapsed.as_secs_f64());
-    println!("Write throughput: {:.2} ops/sec", total_writes as f64 / elapsed.as_secs_f64());
+    println!(
+        "Total reads: {}, Total writes: {}",
+        total_reads, total_writes
+    );
+    println!(
+        "Read throughput: {:.2} ops/sec",
+        total_reads as f64 / elapsed.as_secs_f64()
+    );
+    println!(
+        "Write throughput: {:.2} ops/sec",
+        total_writes as f64 / elapsed.as_secs_f64()
+    );
 
     assert!(total_reads > 0, "Readers should complete successfully");
     assert_eq!(total_writes, 100, "Writer should complete all operations");

@@ -1,13 +1,27 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
 use proptest::prelude::*;
-use sombra::{GraphDB, PropertyValue, Node, Edge};
+use sombra::{Edge, GraphDB, Node, PropertyValue};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 enum Operation {
-    CreateNode { labels: Vec<String>, props: BTreeMap<String, PropertyValue> },
-    GetNode { node_id: u64 },
-    CreateEdge { from: u64, to: u64, rel_type: String },
-    GetNeighbors { node_id: u64 },
+    CreateNode {
+        labels: Vec<String>,
+        props: BTreeMap<String, PropertyValue>,
+    },
+    GetNode {
+        node_id: u64,
+    },
+    CreateEdge {
+        from: u64,
+        to: u64,
+        rel_type: String,
+    },
+    GetNeighbors {
+        node_id: u64,
+    },
 }
 
 fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
@@ -24,11 +38,11 @@ fn arb_operation() -> impl Strategy<Value = Operation> {
         (
             prop::collection::vec("[A-Z][a-z]{2,8}", 1..=3),
             prop::collection::btree_map("[a-z]{1,8}", arb_property_value(), 0..=3)
-        ).prop_map(|(labels, props)| Operation::CreateNode { labels, props }),
+        )
+            .prop_map(|(labels, props)| Operation::CreateNode { labels, props }),
         (1u64..=100).prop_map(|node_id| Operation::GetNode { node_id }),
-        (1u64..=50, 1u64..=50, "[A-Z]{3,10}").prop_map(|(from, to, rel_type)| {
-            Operation::CreateEdge { from, to, rel_type }
-        }),
+        (1u64..=50, 1u64..=50, "[A-Z]{3,10}")
+            .prop_map(|(from, to, rel_type)| { Operation::CreateEdge { from, to, rel_type } }),
         (1u64..=50).prop_map(|node_id| Operation::GetNeighbors { node_id }),
     ]
 }
@@ -120,11 +134,11 @@ proptest! {
             for value in &committed {
                 let mut props = BTreeMap::new();
                 props.insert("value".to_string(), PropertyValue::Int(*value));
-                
+
                 let mut node = Node::new(0);
                 node.labels.push("Committed".to_string());
                 node.properties = props;
-                
+
                 let node_id = tx.add_node(node).unwrap();
                 committed_ids.push(node_id);
             }
@@ -137,11 +151,11 @@ proptest! {
             for value in &rolled_back {
                 let mut props = BTreeMap::new();
                 props.insert("value".to_string(), PropertyValue::Int(*value));
-                
+
                 let mut node = Node::new(0);
                 node.labels.push("RolledBack".to_string());
                 node.properties = props;
-                
+
                 let node_id = tx.add_node(node).unwrap();
                 rolled_back_ids.push(node_id);
             }
@@ -150,17 +164,17 @@ proptest! {
 
         {
             let mut tx = db.begin_transaction().unwrap();
-            
+
             for node_id in &committed_ids {
                 let node = tx.get_node(*node_id).unwrap();
                 prop_assert!(node.id > 0, "Committed node {} should exist", node_id);
             }
-            
+
             for node_id in &rolled_back_ids {
                 let result = tx.get_node(*node_id);
                 prop_assert!(result.is_err(), "Rolled back node {} should not exist", node_id);
             }
-            
+
             tx.commit().unwrap();
         }
     }
@@ -174,16 +188,16 @@ proptest! {
         let mut db = GraphDB::open(temp.path()).unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        
+
         let mut node_ids = Vec::new();
         for value in &nodes {
             let mut props = BTreeMap::new();
             props.insert("value".to_string(), PropertyValue::Int(*value));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Node".to_string());
             node.properties = props;
-            
+
             let node_id = tx.add_node(node).unwrap();
             node_ids.push(node_id);
         }
@@ -226,11 +240,11 @@ proptest! {
         let mut tx = db.begin_transaction().unwrap();
         let retrieved_node = tx.get_node(node_id).unwrap();
         prop_assert!(retrieved_node.id > 0);
-        
+
         for (key, value) in &props {
             prop_assert_eq!(retrieved_node.properties.get(key), Some(value));
         }
-        
+
         tx.commit().unwrap();
     }
 }
@@ -242,7 +256,8 @@ fn property_test_idempotent_reads() {
 
     let mut node = Node::new(0);
     node.labels.push("Test".to_string());
-    node.properties.insert("test".to_string(), PropertyValue::Int(42));
+    node.properties
+        .insert("test".to_string(), PropertyValue::Int(42));
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
@@ -252,7 +267,7 @@ fn property_test_idempotent_reads() {
         let mut tx = db.begin_transaction().unwrap();
         let node1 = tx.get_node(node_id).unwrap();
         let node2 = tx.get_node(node_id).unwrap();
-        
+
         assert_eq!(node1, node2);
         tx.commit().unwrap();
     }
@@ -262,26 +277,22 @@ fn property_test_idempotent_reads() {
 fn property_test_commutative_node_creation() {
     let temp1 = tempfile::NamedTempFile::new().unwrap();
     let temp2 = tempfile::NamedTempFile::new().unwrap();
-    
+
     let mut db1 = GraphDB::open(temp1.path()).unwrap();
     let mut db2 = GraphDB::open(temp2.path()).unwrap();
 
-    let nodes = vec![
-        ("A", 1i64),
-        ("B", 2i64),
-        ("C", 3i64),
-    ];
+    let nodes = vec![("A", 1i64), ("B", 2i64), ("C", 3i64)];
 
     {
         let mut tx = db1.begin_transaction().unwrap();
         for (label, value) in &nodes {
             let mut props = BTreeMap::new();
             props.insert("value".to_string(), PropertyValue::Int(*value));
-            
+
             let mut node = Node::new(0);
             node.labels.push(label.to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -292,11 +303,11 @@ fn property_test_commutative_node_creation() {
         for (label, value) in nodes.iter().rev() {
             let mut props = BTreeMap::new();
             props.insert("value".to_string(), PropertyValue::Int(*value));
-            
+
             let mut node = Node::new(0);
             node.labels.push(label.to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -304,10 +315,10 @@ fn property_test_commutative_node_creation() {
 
     let mut tx1 = db1.begin_transaction().unwrap();
     let mut tx2 = db2.begin_transaction().unwrap();
-    
+
     let mut count1 = 0;
     let mut count2 = 0;
-    
+
     for i in 1..=10 {
         if tx1.get_node(i).is_ok() {
             count1 += 1;
@@ -316,9 +327,9 @@ fn property_test_commutative_node_creation() {
             count2 += 1;
         }
     }
-    
+
     assert_eq!(count1, count2);
-    
+
     tx1.commit().unwrap();
     tx2.commit().unwrap();
 }
@@ -330,19 +341,30 @@ fn test_set_node_property_in_place() {
 
     let mut node = Node::new(0);
     node.labels.push("User".to_string());
-    node.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-    node.properties.insert("age".to_string(), PropertyValue::Int(30));
+    node.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Alice".to_string()),
+    );
+    node.properties
+        .insert("age".to_string(), PropertyValue::Int(30));
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
-    db.set_node_property(node_id, "age".to_string(), PropertyValue::Int(31)).unwrap();
+    db.set_node_property(node_id, "age".to_string(), PropertyValue::Int(31))
+        .unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
     let updated_node = tx.get_node(node_id).unwrap();
-    assert_eq!(updated_node.properties.get("age"), Some(&PropertyValue::Int(31)));
-    assert_eq!(updated_node.properties.get("name"), Some(&PropertyValue::String("Alice".to_string())));
+    assert_eq!(
+        updated_node.properties.get("age"),
+        Some(&PropertyValue::Int(31))
+    );
+    assert_eq!(
+        updated_node.properties.get("name"),
+        Some(&PropertyValue::String("Alice".to_string()))
+    );
     tx.commit().unwrap();
 }
 
@@ -353,19 +375,31 @@ fn test_set_node_property_with_growth() {
 
     let mut node = Node::new(0);
     node.labels.push("User".to_string());
-    node.properties.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+    node.properties
+        .insert("name".to_string(), PropertyValue::String("Bob".to_string()));
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
     let long_bio = "a".repeat(1000);
-    db.set_node_property(node_id, "bio".to_string(), PropertyValue::String(long_bio.clone())).unwrap();
+    db.set_node_property(
+        node_id,
+        "bio".to_string(),
+        PropertyValue::String(long_bio.clone()),
+    )
+    .unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
     let updated_node = tx.get_node(node_id).unwrap();
-    assert_eq!(updated_node.properties.get("bio"), Some(&PropertyValue::String(long_bio)));
-    assert_eq!(updated_node.properties.get("name"), Some(&PropertyValue::String("Bob".to_string())));
+    assert_eq!(
+        updated_node.properties.get("bio"),
+        Some(&PropertyValue::String(long_bio))
+    );
+    assert_eq!(
+        updated_node.properties.get("name"),
+        Some(&PropertyValue::String("Bob".to_string()))
+    );
     tx.commit().unwrap();
 }
 
@@ -376,9 +410,16 @@ fn test_remove_node_property() {
 
     let mut node = Node::new(0);
     node.labels.push("User".to_string());
-    node.properties.insert("name".to_string(), PropertyValue::String("Charlie".to_string()));
-    node.properties.insert("age".to_string(), PropertyValue::Int(25));
-    node.properties.insert("email".to_string(), PropertyValue::String("charlie@example.com".to_string()));
+    node.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Charlie".to_string()),
+    );
+    node.properties
+        .insert("age".to_string(), PropertyValue::Int(25));
+    node.properties.insert(
+        "email".to_string(),
+        PropertyValue::String("charlie@example.com".to_string()),
+    );
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
@@ -389,8 +430,14 @@ fn test_remove_node_property() {
     let mut tx = db.begin_transaction().unwrap();
     let updated_node = tx.get_node(node_id).unwrap();
     assert_eq!(updated_node.properties.get("email"), None);
-    assert_eq!(updated_node.properties.get("name"), Some(&PropertyValue::String("Charlie".to_string())));
-    assert_eq!(updated_node.properties.get("age"), Some(&PropertyValue::Int(25)));
+    assert_eq!(
+        updated_node.properties.get("name"),
+        Some(&PropertyValue::String("Charlie".to_string()))
+    );
+    assert_eq!(
+        updated_node.properties.get("age"),
+        Some(&PropertyValue::Int(25))
+    );
     tx.commit().unwrap();
 }
 
@@ -401,7 +448,10 @@ fn test_remove_nonexistent_property() {
 
     let mut node = Node::new(0);
     node.labels.push("User".to_string());
-    node.properties.insert("name".to_string(), PropertyValue::String("Dave".to_string()));
+    node.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Dave".to_string()),
+    );
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
@@ -411,7 +461,10 @@ fn test_remove_nonexistent_property() {
 
     let mut tx = db.begin_transaction().unwrap();
     let node = tx.get_node(node_id).unwrap();
-    assert_eq!(node.properties.get("name"), Some(&PropertyValue::String("Dave".to_string())));
+    assert_eq!(
+        node.properties.get("name"),
+        Some(&PropertyValue::String("Dave".to_string()))
+    );
     tx.commit().unwrap();
 }
 
@@ -419,18 +472,20 @@ fn test_remove_nonexistent_property() {
 fn test_property_update_persistence() {
     let temp = tempfile::NamedTempFile::new().unwrap();
     let path = temp.path().to_path_buf();
-    
+
     let node_id = {
         let mut db = GraphDB::open(&path).unwrap();
         let mut node = Node::new(0);
         node.labels.push("User".to_string());
-        node.properties.insert("count".to_string(), PropertyValue::Int(0));
+        node.properties
+            .insert("count".to_string(), PropertyValue::Int(0));
 
         let mut tx = db.begin_transaction().unwrap();
         let node_id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
 
-        db.set_node_property(node_id, "count".to_string(), PropertyValue::Int(42)).unwrap();
+        db.set_node_property(node_id, "count".to_string(), PropertyValue::Int(42))
+            .unwrap();
         node_id
     };
 
@@ -450,14 +505,16 @@ fn test_property_update_multiple_times() {
 
     let mut node = Node::new(0);
     node.labels.push("Counter".to_string());
-    node.properties.insert("value".to_string(), PropertyValue::Int(0));
+    node.properties
+        .insert("value".to_string(), PropertyValue::Int(0));
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
     for i in 1..=10 {
-        db.set_node_property(node_id, "value".to_string(), PropertyValue::Int(i)).unwrap();
+        db.set_node_property(node_id, "value".to_string(), PropertyValue::Int(i))
+            .unwrap();
     }
 
     let mut tx = db.begin_transaction().unwrap();
@@ -473,23 +530,32 @@ fn test_property_update_index_consistency() {
 
     let mut node = Node::new(0);
     node.labels.push("User".to_string());
-    node.properties.insert("age".to_string(), PropertyValue::Int(25));
-    node.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+    node.properties
+        .insert("age".to_string(), PropertyValue::Int(25));
+    node.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Alice".to_string()),
+    );
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
-    db.set_node_property(node_id, "age".to_string(), PropertyValue::Int(30)).unwrap();
+    db.set_node_property(node_id, "age".to_string(), PropertyValue::Int(30))
+        .unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
-    let results = tx.find_nodes_by_property("User", "age", &PropertyValue::Int(30)).unwrap();
+    let results = tx
+        .find_nodes_by_property("User", "age", &PropertyValue::Int(30))
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0], node_id);
 
-    let old_results = tx.find_nodes_by_property("User", "age", &PropertyValue::Int(25)).unwrap();
+    let old_results = tx
+        .find_nodes_by_property("User", "age", &PropertyValue::Int(25))
+        .unwrap();
     assert_eq!(old_results.len(), 0);
-    
+
     tx.commit().unwrap();
 }
 
@@ -500,8 +566,12 @@ fn test_property_removal_updates_index() {
 
     let mut node = Node::new(0);
     node.labels.push("Product".to_string());
-    node.properties.insert("price".to_string(), PropertyValue::Int(100));
-    node.properties.insert("name".to_string(), PropertyValue::String("Widget".to_string()));
+    node.properties
+        .insert("price".to_string(), PropertyValue::Int(100));
+    node.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Widget".to_string()),
+    );
 
     let mut tx = db.begin_transaction().unwrap();
     let node_id = tx.add_node(node).unwrap();
@@ -510,12 +580,17 @@ fn test_property_removal_updates_index() {
     db.remove_node_property(node_id, "price").unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
-    let results = tx.find_nodes_by_property("Product", "price", &PropertyValue::Int(100)).unwrap();
+    let results = tx
+        .find_nodes_by_property("Product", "price", &PropertyValue::Int(100))
+        .unwrap();
     assert_eq!(results.len(), 0);
 
     let node = tx.get_node(node_id).unwrap();
-    assert_eq!(node.properties.get("name"), Some(&PropertyValue::String("Widget".to_string())));
+    assert_eq!(
+        node.properties.get("name"),
+        Some(&PropertyValue::String("Widget".to_string()))
+    );
     assert_eq!(node.properties.get("price"), None);
-    
+
     tx.commit().unwrap();
 }

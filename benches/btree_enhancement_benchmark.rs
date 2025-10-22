@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use sombra::index::{BTreeIndex, CustomBTree};
 use sombra::storage::RecordPointer;
 use std::time::Instant;
@@ -11,6 +13,7 @@ fn benchmark_persistence(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: (i % 1000) as u16,
+                byte_offset: 0,
             },
         );
     }
@@ -38,6 +41,7 @@ fn benchmark_range_queries(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -45,15 +49,16 @@ fn benchmark_range_queries(count: usize) {
     let start = Instant::now();
     let results: Vec<_> = btree
         .range(count as u64 / 4, count as u64 * 3 / 4)
+        .into_iter()
         .collect();
     let range_time = start.elapsed();
 
     let start = Instant::now();
-    let from_results: Vec<_> = btree.range_from(count as u64 / 2).collect();
+    let from_results: Vec<_> = btree.range_from(count as u64 / 2).into_iter().collect();
     let range_from_time = start.elapsed();
 
     let start = Instant::now();
-    let to_results: Vec<_> = btree.range_to(count as u64 / 2).collect();
+    let to_results: Vec<_> = btree.range_to(count as u64 / 2).into_iter().collect();
     let range_to_time = start.elapsed();
 
     println!("BTreeIndex Range Queries (n={})", count);
@@ -82,6 +87,7 @@ fn benchmark_bulk_operations(count: usize) {
                 RecordPointer {
                     page_id: i as u32,
                     slot_index: 0,
+                    byte_offset: 0,
                 },
             )
         })
@@ -118,6 +124,7 @@ fn benchmark_custom_btree(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -150,6 +157,7 @@ fn compare_btree_implementations(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }
@@ -162,6 +170,7 @@ fn compare_btree_implementations(count: usize) {
             RecordPointer {
                 page_id: i as u32,
                 slot_index: 0,
+                byte_offset: 0,
             },
         );
     }

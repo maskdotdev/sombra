@@ -1,3 +1,8 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::len_zero)]
+#![allow(clippy::ptr_arg)]
+
 use sombra::error::GraphError;
 use sombra::model::{Edge, Node, PropertyValue};
 use sombra::GraphDB;

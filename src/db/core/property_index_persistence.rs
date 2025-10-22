@@ -21,7 +21,10 @@ impl<'a> PropertyIndexSerializer<'a> {
         Self { pager }
     }
 
-    pub fn serialize_indexes(&mut self, indexes: &PropertyIndexMap) -> Result<(PageId, u32, Vec<PageId>)> {
+    pub fn serialize_indexes(
+        &mut self,
+        indexes: &PropertyIndexMap,
+    ) -> Result<(PageId, u32, Vec<PageId>)> {
         if indexes.is_empty() {
             return Ok((0, 0, Vec::new()));
         }
@@ -283,15 +286,7 @@ impl<'a> PropertyIndexSerializer<'a> {
             ]);
             offset += 4;
 
-            if label == "Record" && property_key == "active" {
-                eprintln!(
-                    "Deserializing value {:?} with node_count {} at offset {}",
-                    indexable_value, node_count, offset
-                );
-            }
-
             let mut node_ids = BTreeSet::new();
-            let mut prev_id: Option<u64> = None;
             for _ in 0..node_count {
                 if offset + 8 > data.len() {
                     return Err(GraphError::Corruption("truncated node id".into()));
@@ -308,17 +303,6 @@ impl<'a> PropertyIndexSerializer<'a> {
                     data[offset + 7],
                 ]);
                 offset += 8;
-                if label == "Record" && property_key == "active" {
-                    if let Some(prev) = prev_id {
-                        if node_id <= prev {
-                            eprintln!(
-                                "Non-increasing node id detected: prev={} current={} at offset {}",
-                                prev, node_id, offset
-                            );
-                        }
-                    }
-                    prev_id = Some(node_id);
-                }
                 node_ids.insert(node_id);
             }
 
@@ -502,7 +486,8 @@ mod tests {
 
             indexes.insert(("User".to_string(), "age".to_string()), index);
 
-            let (root_page, count, _pages) = serializer.serialize_indexes(&indexes).expect("serialize");
+            let (root_page, count, _pages) =
+                serializer.serialize_indexes(&indexes).expect("serialize");
             assert_eq!(count, 1);
             root_page
         };
@@ -563,7 +548,8 @@ mod tests {
             index3.insert(IndexableValue::Bool(true), node_set3);
             indexes.insert(("Post".to_string(), "published".to_string()), index3);
 
-            let (root_page, count, _pages) = serializer.serialize_indexes(&indexes).expect("serialize");
+            let (root_page, count, _pages) =
+                serializer.serialize_indexes(&indexes).expect("serialize");
             assert_eq!(count, 3);
             root_page
         };
@@ -598,7 +584,8 @@ mod tests {
 
             indexes.insert(("User".to_string(), "id".to_string()), index);
 
-            let (root_page, count, _pages) = serializer.serialize_indexes(&indexes).expect("serialize");
+            let (root_page, count, _pages) =
+                serializer.serialize_indexes(&indexes).expect("serialize");
             assert_eq!(count, 1);
             root_page
         };
@@ -617,7 +604,7 @@ mod tests {
             for i in 0..1000 {
                 let nodes = index
                     .get(&IndexableValue::Int(i as i64))
-                    .expect(&format!("value {} exists", i));
+                    .unwrap_or_else(|| panic!("value {} exists", i));
                 assert_eq!(nodes.len(), 1);
                 assert!(nodes.contains(&i));
             }

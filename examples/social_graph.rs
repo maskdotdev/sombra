@@ -4,7 +4,7 @@
 //! including user profiles and friendships.
 
 use chrono::{DateTime, Utc};
-use sombra::{GraphDB, Node, Edge, GraphError, NodeId, EdgeId, PropertyValue};
+use sombra::{Edge, EdgeId, GraphDB, GraphError, Node, NodeId, PropertyValue};
 use std::collections::BTreeMap;
 
 struct UserProfile {
@@ -48,7 +48,10 @@ impl SocialNetwork {
         let mut tx = self.db.begin_transaction()?;
 
         let mut properties = BTreeMap::new();
-        properties.insert("username".to_string(), PropertyValue::String(profile.username));
+        properties.insert(
+            "username".to_string(),
+            PropertyValue::String(profile.username),
+        );
         properties.insert("name".to_string(), PropertyValue::String(profile.name));
         properties.insert("email".to_string(), PropertyValue::String(profile.email));
         properties.insert("age".to_string(), PropertyValue::Int(profile.age as i64));
@@ -58,8 +61,14 @@ impl SocialNetwork {
         if let Some(location) = profile.location {
             properties.insert("location".to_string(), PropertyValue::String(location));
         }
-        properties.insert("joined_at".to_string(), PropertyValue::Int(profile.joined_at.timestamp()));
-        properties.insert("last_active".to_string(), PropertyValue::Int(profile.last_active.timestamp()));
+        properties.insert(
+            "joined_at".to_string(),
+            PropertyValue::Int(profile.joined_at.timestamp()),
+        );
+        properties.insert(
+            "last_active".to_string(),
+            PropertyValue::Int(profile.last_active.timestamp()),
+        );
 
         let mut node = Node::new(0);
         node.properties = properties;
@@ -79,7 +88,8 @@ impl SocialNetwork {
     ) -> Result<EdgeId, GraphError> {
         let mut tx = self.db.begin_transaction()?;
         let mut edge = Edge::new(0, user1_id, user2_id, "FRIENDS_WITH");
-        edge.properties.insert("since".to_string(), PropertyValue::Int(since.timestamp()));
+        edge.properties
+            .insert("since".to_string(), PropertyValue::Int(since.timestamp()));
         let edge_id = tx.add_edge(edge)?;
         tx.commit()?;
         Ok(edge_id)
@@ -131,7 +141,10 @@ impl SocialNetwork {
 
         let mut properties = BTreeMap::new();
         properties.insert("content".to_string(), PropertyValue::String(post.content));
-        properties.insert("created_at".to_string(), PropertyValue::Int(post.created_at.timestamp()));
+        properties.insert(
+            "created_at".to_string(),
+            PropertyValue::Int(post.created_at.timestamp()),
+        );
         properties.insert("likes".to_string(), PropertyValue::Int(post.likes as i64));
         properties.insert("shares".to_string(), PropertyValue::Int(post.shares as i64));
 
@@ -152,8 +165,14 @@ impl SocialNetwork {
         let mut tx = self.db.begin_transaction()?;
 
         let mut properties = BTreeMap::new();
-        properties.insert("content".to_string(), PropertyValue::String(comment.content));
-        properties.insert("created_at".to_string(), PropertyValue::Int(comment.created_at.timestamp()));
+        properties.insert(
+            "content".to_string(),
+            PropertyValue::String(comment.content),
+        );
+        properties.insert(
+            "created_at".to_string(),
+            PropertyValue::Int(comment.created_at.timestamp()),
+        );
 
         let mut node = Node::new(0);
         node.properties = properties;
@@ -213,7 +232,8 @@ fn main() -> Result<(), GraphError> {
     // Create posts
     let post1_id = social_network.create_post(Post {
         author_id: alice_id,
-        content: "Just finished a amazing hike in the mountains! 🏔️ The view was breathtaking.".to_string(),
+        content: "Just finished a amazing hike in the mountains! 🏔️ The view was breathtaking."
+            .to_string(),
         created_at: now - chrono::Duration::hours(2),
         likes: 5,
         shares: 2,
@@ -221,7 +241,9 @@ fn main() -> Result<(), GraphError> {
 
     let post2_id = social_network.create_post(Post {
         author_id: bob_id,
-        content: "Excited to share that I'll be speaking at the Data Science Conference next month! 🎤".to_string(),
+        content:
+            "Excited to share that I'll be speaking at the Data Science Conference next month! 🎤"
+                .to_string(),
         created_at: now - chrono::Duration::hours(4),
         likes: 12,
         shares: 8,
@@ -257,8 +279,10 @@ fn main() -> Result<(), GraphError> {
         post2_comments.len()
     );
 
-    println!("
-🎉 Social network example completed successfully!");
+    println!(
+        "
+🎉 Social network example completed successfully!"
+    );
     println!("Database saved to: social_network.db");
 
     Ok(())

@@ -220,9 +220,14 @@ impl Pager {
         }
         let mut page = Page::new(next_page_id, self.page_size);
         page.dirty = true;
-        
-        apply_page_checksum(self.checksum_enabled, self.page_size, next_page_id, &mut page.data)?;
-        
+
+        apply_page_checksum(
+            self.checksum_enabled,
+            self.page_size,
+            next_page_id,
+            &mut page.data,
+        )?;
+
         if let Some((evicted_id, evicted_page)) = self.cache.push(next_page_id, page) {
             if evicted_page.dirty {
                 if self.shadow_pages.contains_key(&evicted_id) {
@@ -341,10 +346,6 @@ impl Pager {
     fn flush_pages_internal(&mut self, mut pages: Vec<PageId>, tx_id: u64) -> Result<()> {
         pages.sort_unstable();
         pages.dedup();
-
-        if pages.contains(&14) || pages.contains(&26) {
-            eprintln!("[FLUSH_INTERNAL] flushing pages containing 14 or 26: {:?}", pages);
-        }
 
         let mut frames = Vec::with_capacity(pages.len());
         let checksum_enabled = self.checksum_enabled;
@@ -544,7 +545,7 @@ impl Pager {
             .map_err(|_| GraphError::Corruption("checksum slice conversion failed".into()))?;
         let expected = u32::from_le_bytes(stored);
         let actual = hash(payload);
-        
+
         if expected != actual {
             error!(page_id, expected, actual, "Checksum mismatch detected");
             return Err(GraphError::Corruption(format!(
@@ -655,17 +656,20 @@ fn write_page_image(
             "page size mismatch during flush".into(),
         ));
     }
-    
+
     if page_id == 14 || page_id == 26 {
         let (payload, checksum_bytes) = split_payload_checksum(data)?;
         let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
         let computed_checksum = hash(payload);
         eprintln!(
             "[WRITE] page_id={} stored_checksum=0x{:08X} computed_checksum=0x{:08X} valid={}",
-            page_id, stored_checksum, computed_checksum, stored_checksum == computed_checksum
+            page_id,
+            stored_checksum,
+            computed_checksum,
+            stored_checksum == computed_checksum
         );
     }
-    
+
     let offset = page_offset(page_id, page_size)?;
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(data)?;

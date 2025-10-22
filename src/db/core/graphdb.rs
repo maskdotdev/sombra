@@ -456,20 +456,20 @@ impl GraphDB {
         info!("Starting checkpoint");
 
         self.start_tracking();
-        
+
         self.persist_btree_index()?;
         self.persist_property_indexes()?;
         self.write_header()?;
-        
+
         let dirty_pages = self.take_recent_dirty_pages();
         self.stop_tracking();
-        
+
         for &page_id in &dirty_pages {
             self.pager.append_page_to_wal(page_id, 0)?;
         }
-        
+
         self.pager.checkpoint()?;
-        
+
         if !self.load_btree_index()? {
             return Err(GraphError::Corruption(
                 "failed to reload btree index after checkpoint".into(),

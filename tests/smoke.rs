@@ -1,3 +1,6 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
 use sombra::pager::Pager;
 use sombra::storage::header::Header;
 use sombra::{Edge, GraphDB, Node, Result};

@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::error::Result;
 use crate::db::metrics::PerformanceMetrics;
+use crate::error::Result;
 use crate::pager::Pager;
 use crate::storage::heap::RecordStore;
 
@@ -109,10 +109,8 @@ impl CompactionState {
         let mut pager = Pager::open(db_path)?;
         let mut store = RecordStore::new(&mut pager);
 
-        let candidates = store.identify_compaction_candidates(
-            config.threshold_percent,
-            config.batch_size,
-        )?;
+        let candidates =
+            store.identify_compaction_candidates(config.threshold_percent, config.batch_size)?;
 
         if candidates.is_empty() {
             return Ok(());

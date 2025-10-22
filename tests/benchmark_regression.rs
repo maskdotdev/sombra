@@ -1,4 +1,7 @@
-use sombra::{GraphDB, PropertyValue, Node, Edge};
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+
+use sombra::{Edge, GraphDB, Node, PropertyValue};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -21,11 +24,11 @@ fn benchmark_insert_throughput() -> BenchmarkResult {
         let mut tx = db.begin_transaction().unwrap();
         let mut props = BTreeMap::new();
         props.insert("id".to_string(), PropertyValue::Int(i));
-        
+
         let mut node = Node::new(0);
         node.labels.push("Benchmark".to_string());
         node.properties = props;
-        
+
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -49,11 +52,11 @@ fn benchmark_read_latency() -> BenchmarkResult {
         for i in 0..1000 {
             let mut props = BTreeMap::new();
             props.insert("id".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Benchmark".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -88,11 +91,11 @@ fn benchmark_edge_creation() -> BenchmarkResult {
         for i in 0..100 {
             let mut props = BTreeMap::new();
             props.insert("id".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Node".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -105,7 +108,7 @@ fn benchmark_edge_creation() -> BenchmarkResult {
         let mut tx = db.begin_transaction().unwrap();
         let from = (i % 100) + 1;
         let to = ((i + 1) % 100) + 1;
-        
+
         let edge = Edge::new(0, from, to, "CONNECTS");
         tx.add_edge(edge).unwrap();
         tx.commit().unwrap();
@@ -130,22 +133,22 @@ fn benchmark_traversal() -> BenchmarkResult {
         for i in 0..100 {
             let mut props = BTreeMap::new();
             props.insert("id".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Node".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
-        
+
         for i in 0..200 {
             let from = (i % 100) + 1;
             let to = ((i * 7) % 100) + 1;
-            
+
             let edge = Edge::new(0, from, to, "LINK");
             tx.add_edge(edge).unwrap();
         }
-        
+
         tx.commit().unwrap();
     }
 
@@ -178,11 +181,11 @@ fn benchmark_mixed_workload() -> BenchmarkResult {
         for i in 0..50 {
             let mut props = BTreeMap::new();
             props.insert("id".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Initial".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -193,16 +196,16 @@ fn benchmark_mixed_workload() -> BenchmarkResult {
 
     for i in 0..operations {
         let mut tx = db.begin_transaction().unwrap();
-        
+
         match i % 4 {
             0 => {
                 let mut props = BTreeMap::new();
                 props.insert("value".to_string(), PropertyValue::Int(i as i64));
-                
+
                 let mut node = Node::new(0);
                 node.labels.push("New".to_string());
                 node.properties = props;
-                
+
                 tx.add_node(node).unwrap();
             }
             1 => {
@@ -221,7 +224,7 @@ fn benchmark_mixed_workload() -> BenchmarkResult {
             }
             _ => unreachable!(),
         }
-        
+
         tx.commit().unwrap();
     }
 
@@ -239,11 +242,14 @@ fn benchmark_mixed_workload() -> BenchmarkResult {
 #[ignore]
 fn test_insert_throughput_regression() {
     let result = benchmark_insert_throughput();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 500.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Insert throughput regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
@@ -255,11 +261,14 @@ fn test_insert_throughput_regression() {
 #[ignore]
 fn test_read_latency_regression() {
     let result = benchmark_read_latency();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 5000.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Read latency regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
@@ -271,11 +280,14 @@ fn test_read_latency_regression() {
 #[ignore]
 fn test_edge_creation_regression() {
     let result = benchmark_edge_creation();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 400.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Edge creation regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
@@ -287,11 +299,14 @@ fn test_edge_creation_regression() {
 #[ignore]
 fn test_traversal_regression() {
     let result = benchmark_traversal();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 2000.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Traversal regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
@@ -303,11 +318,14 @@ fn test_traversal_regression() {
 #[ignore]
 fn test_mixed_workload_regression() {
     let result = benchmark_mixed_workload();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 1000.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Mixed workload regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
@@ -326,11 +344,20 @@ fn test_all_benchmarks() {
         benchmark_mixed_workload(),
     ];
 
-    println!("\n=== Benchmark Results ===");
+    println!(
+        "
+=== Benchmark Results ==="
+    );
     for result in &benchmarks {
-        println!("{:20} {:10.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
+        println!(
+            "{:20} {:10.2} ops/sec ({:?})",
+            result.name, result.throughput, result.duration
+        );
     }
-    println!("========================\n");
+    println!(
+        "========================
+"
+    );
 }
 
 fn benchmark_range_query() -> BenchmarkResult {
@@ -342,11 +369,11 @@ fn benchmark_range_query() -> BenchmarkResult {
         for i in 0..5000 {
             let mut props = BTreeMap::new();
             props.insert("index".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("RangeTest".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -381,11 +408,11 @@ fn benchmark_ordered_iteration() -> BenchmarkResult {
         for i in 0..2000 {
             let mut props = BTreeMap::new();
             props.insert("seq".to_string(), PropertyValue::Int(i));
-            
+
             let mut node = Node::new(0);
             node.labels.push("Ordered".to_string());
             node.properties = props;
-            
+
             tx.add_node(node).unwrap();
         }
         tx.commit().unwrap();
@@ -412,11 +439,14 @@ fn benchmark_ordered_iteration() -> BenchmarkResult {
 #[ignore]
 fn test_range_query_regression() {
     let result = benchmark_range_query();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 10000.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Range query regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
@@ -428,11 +458,14 @@ fn test_range_query_regression() {
 #[ignore]
 fn test_ordered_iteration_regression() {
     let result = benchmark_ordered_iteration();
-    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
-    
+    println!(
+        "{}: {:.2} ops/sec ({:?})",
+        result.name, result.throughput, result.duration
+    );
+
     let baseline_throughput = 100.0;
     let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
-    
+
     assert!(
         result.throughput >= min_acceptable,
         "Ordered iteration regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",

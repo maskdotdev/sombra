@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -225,15 +227,23 @@ impl PySombraDB {
         db.delete_edge(edge_id).map_err(graph_error_to_py)
     }
 
-    fn set_node_property(&self, py: Python<'_>, node_id: u64, key: String, value: Bound<PyAny>) -> PyResult<()> {
+    fn set_node_property(
+        &self,
+        _py: Python<'_>,
+        node_id: u64,
+        key: String,
+        value: Bound<PyAny>,
+    ) -> PyResult<()> {
         let prop_value = py_any_to_property_value(&value)?;
         let mut db = self.inner.write();
-        db.set_node_property(node_id, key, prop_value).map_err(graph_error_to_py)
+        db.set_node_property(node_id, key, prop_value)
+            .map_err(graph_error_to_py)
     }
 
     fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
         let mut db = self.inner.write();
-        db.remove_node_property(node_id, &key).map_err(graph_error_to_py)
+        db.remove_node_property(node_id, &key)
+            .map_err(graph_error_to_py)
     }
 
     fn flush(&self) -> PyResult<()> {
@@ -354,7 +364,7 @@ pub struct PySombraTransaction {
 #[pymethods]
 impl PySombraTransaction {
     fn id(&self) -> u64 {
-        self.tx_id as u64
+        self.tx_id
     }
 
     fn add_node(
@@ -450,15 +460,23 @@ impl PySombraTransaction {
         db.delete_edge_internal(edge_id).map_err(graph_error_to_py)
     }
 
-    fn set_node_property(&self, py: Python<'_>, node_id: u64, key: String, value: Bound<PyAny>) -> PyResult<()> {
+    fn set_node_property(
+        &self,
+        _py: Python<'_>,
+        node_id: u64,
+        key: String,
+        value: Bound<PyAny>,
+    ) -> PyResult<()> {
         let prop_value = py_any_to_property_value(&value)?;
         let mut db = self.db.write();
-        db.set_node_property_internal(node_id, key, prop_value).map_err(graph_error_to_py)
+        db.set_node_property_internal(node_id, key, prop_value)
+            .map_err(graph_error_to_py)
     }
 
     fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
         let mut db = self.db.write();
-        db.remove_node_property_internal(node_id, &key).map_err(graph_error_to_py)
+        db.remove_node_property_internal(node_id, &key)
+            .map_err(graph_error_to_py)
     }
 
     fn commit(&mut self) -> PyResult<()> {

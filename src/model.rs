@@ -43,6 +43,17 @@ pub const NULL_EDGE_ID: EdgeId = 0;
 /// Special value indicating no node (null node ID).
 pub const NULL_NODE_ID: NodeId = 0;
 
+/// Direction for traversing edges in the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDirection {
+    /// Follow outgoing edges (from source to target)
+    Outgoing,
+    /// Follow incoming edges (from target to source)
+    Incoming,
+    /// Follow edges in both directions
+    Both,
+}
+
 /// Represents a property value that can be stored on nodes and edges.
 ///
 /// Property values support various data types commonly used in graph databases.

@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use sombra::pager::DEFAULT_PAGE_SIZE;
 use sombra::{Config, GraphDB, GraphError, IntegrityOptions, Result};
 use std::env;
@@ -463,9 +465,11 @@ fn cmd_verify(args: Vec<String>) -> Result<()> {
             continue;
         }
         if let Some(value) = arg.strip_prefix("--max-errors=") {
-            max_errors = Some(value.parse().map_err(|_| {
-                GraphError::Corruption("Invalid max-errors value".to_string())
-            })?);
+            max_errors = Some(
+                value
+                    .parse()
+                    .map_err(|_| GraphError::Corruption("Invalid max-errors value".to_string()))?,
+            );
             continue;
         }
         if path.is_none() {

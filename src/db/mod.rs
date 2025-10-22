@@ -4,6 +4,7 @@ mod core;
 pub(crate) mod group_commit;
 mod health;
 mod metrics;
+pub mod query;
 mod transaction;
 
 #[cfg(test)]

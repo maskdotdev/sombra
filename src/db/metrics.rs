@@ -282,11 +282,17 @@ impl PerformanceMetrics {
 
         output.push_str("# HELP sombra_pages_compacted Total pages compacted\n");
         output.push_str("# TYPE sombra_pages_compacted counter\n");
-        output.push_str(&format!("sombra_pages_compacted {}\n", self.pages_compacted));
+        output.push_str(&format!(
+            "sombra_pages_compacted {}\n",
+            self.pages_compacted
+        ));
 
         output.push_str("# HELP sombra_bytes_reclaimed Total bytes reclaimed by compaction\n");
         output.push_str("# TYPE sombra_bytes_reclaimed counter\n");
-        output.push_str(&format!("sombra_bytes_reclaimed {}\n", self.bytes_reclaimed));
+        output.push_str(&format!(
+            "sombra_bytes_reclaimed {}\n",
+            self.bytes_reclaimed
+        ));
 
         if let Some(p50) = self.p50_commit_latency() {
             output.push_str(
@@ -438,8 +444,10 @@ impl ConcurrencyMetrics {
     }
 
     pub fn record_parallel_traversal(&self, speedup_ratio: u64) {
-        self.parallel_traversal_count.fetch_add(1, Ordering::Relaxed);
-        self.parallel_traversal_speedup.fetch_add(speedup_ratio, Ordering::Relaxed);
+        self.parallel_traversal_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.parallel_traversal_speedup
+            .fetch_add(speedup_ratio, Ordering::Relaxed);
     }
 
     pub fn get_concurrent_readers(&self) -> usize {
@@ -502,14 +510,38 @@ impl ConcurrencyMetrics {
 
     pub fn print_report(&self) {
         println!("\n=== Concurrency Metrics ===");
-        println!("Concurrent Readers:           {}", self.get_concurrent_readers());
-        println!("Concurrent Writers:           {}", self.get_concurrent_writers());
-        println!("Read Lock Acquisitions:       {}", self.read_lock_acquisitions.load(Ordering::Relaxed));
-        println!("Write Lock Acquisitions:      {}", self.write_lock_acquisitions.load(Ordering::Relaxed));
-        println!("Avg Reader Wait Time:         {:.2}μs", self.get_avg_reader_wait_us());
-        println!("Avg Writer Wait Time:         {:.2}μs", self.get_avg_writer_wait_us());
-        println!("Parallel Traversals:          {}", self.get_parallel_traversal_count());
-        println!("Avg Parallel Speedup:         {:.2}x", self.get_average_speedup());
+        println!(
+            "Concurrent Readers:           {}",
+            self.get_concurrent_readers()
+        );
+        println!(
+            "Concurrent Writers:           {}",
+            self.get_concurrent_writers()
+        );
+        println!(
+            "Read Lock Acquisitions:       {}",
+            self.read_lock_acquisitions.load(Ordering::Relaxed)
+        );
+        println!(
+            "Write Lock Acquisitions:      {}",
+            self.write_lock_acquisitions.load(Ordering::Relaxed)
+        );
+        println!(
+            "Avg Reader Wait Time:         {:.2}μs",
+            self.get_avg_reader_wait_us()
+        );
+        println!(
+            "Avg Writer Wait Time:         {:.2}μs",
+            self.get_avg_writer_wait_us()
+        );
+        println!(
+            "Parallel Traversals:          {}",
+            self.get_parallel_traversal_count()
+        );
+        println!(
+            "Avg Parallel Speedup:         {:.2}x",
+            self.get_average_speedup()
+        );
     }
 
     pub fn to_prometheus_format(&self) -> String {
@@ -517,35 +549,65 @@ impl ConcurrencyMetrics {
 
         output.push_str("# HELP sombra_concurrent_readers Current number of concurrent readers\n");
         output.push_str("# TYPE sombra_concurrent_readers gauge\n");
-        output.push_str(&format!("sombra_concurrent_readers {}\n", self.get_concurrent_readers()));
+        output.push_str(&format!(
+            "sombra_concurrent_readers {}\n",
+            self.get_concurrent_readers()
+        ));
 
         output.push_str("# HELP sombra_concurrent_writers Current number of concurrent writers\n");
         output.push_str("# TYPE sombra_concurrent_writers gauge\n");
-        output.push_str(&format!("sombra_concurrent_writers {}\n", self.get_concurrent_writers()));
+        output.push_str(&format!(
+            "sombra_concurrent_writers {}\n",
+            self.get_concurrent_writers()
+        ));
 
         output.push_str("# HELP sombra_read_lock_acquisitions Total read lock acquisitions\n");
         output.push_str("# TYPE sombra_read_lock_acquisitions counter\n");
-        output.push_str(&format!("sombra_read_lock_acquisitions {}\n", self.read_lock_acquisitions.load(Ordering::Relaxed)));
+        output.push_str(&format!(
+            "sombra_read_lock_acquisitions {}\n",
+            self.read_lock_acquisitions.load(Ordering::Relaxed)
+        ));
 
         output.push_str("# HELP sombra_write_lock_acquisitions Total write lock acquisitions\n");
         output.push_str("# TYPE sombra_write_lock_acquisitions counter\n");
-        output.push_str(&format!("sombra_write_lock_acquisitions {}\n", self.write_lock_acquisitions.load(Ordering::Relaxed)));
+        output.push_str(&format!(
+            "sombra_write_lock_acquisitions {}\n",
+            self.write_lock_acquisitions.load(Ordering::Relaxed)
+        ));
 
-        output.push_str("# HELP sombra_avg_reader_wait_us Average reader wait time in microseconds\n");
+        output.push_str(
+            "# HELP sombra_avg_reader_wait_us Average reader wait time in microseconds\n",
+        );
         output.push_str("# TYPE sombra_avg_reader_wait_us gauge\n");
-        output.push_str(&format!("sombra_avg_reader_wait_us {:.2}\n", self.get_avg_reader_wait_us()));
+        output.push_str(&format!(
+            "sombra_avg_reader_wait_us {:.2}\n",
+            self.get_avg_reader_wait_us()
+        ));
 
-        output.push_str("# HELP sombra_avg_writer_wait_us Average writer wait time in microseconds\n");
+        output.push_str(
+            "# HELP sombra_avg_writer_wait_us Average writer wait time in microseconds\n",
+        );
         output.push_str("# TYPE sombra_avg_writer_wait_us gauge\n");
-        output.push_str(&format!("sombra_avg_writer_wait_us {:.2}\n", self.get_avg_writer_wait_us()));
+        output.push_str(&format!(
+            "sombra_avg_writer_wait_us {:.2}\n",
+            self.get_avg_writer_wait_us()
+        ));
 
         output.push_str("# HELP sombra_parallel_traversals Total parallel traversals executed\n");
         output.push_str("# TYPE sombra_parallel_traversals counter\n");
-        output.push_str(&format!("sombra_parallel_traversals {}\n", self.get_parallel_traversal_count()));
+        output.push_str(&format!(
+            "sombra_parallel_traversals {}\n",
+            self.get_parallel_traversal_count()
+        ));
 
-        output.push_str("# HELP sombra_avg_parallel_speedup Average speedup from parallel traversals\n");
+        output.push_str(
+            "# HELP sombra_avg_parallel_speedup Average speedup from parallel traversals\n",
+        );
         output.push_str("# TYPE sombra_avg_parallel_speedup gauge\n");
-        output.push_str(&format!("sombra_avg_parallel_speedup {:.2}\n", self.get_average_speedup()));
+        output.push_str(&format!(
+            "sombra_avg_parallel_speedup {:.2}\n",
+            self.get_average_speedup()
+        ));
 
         output
     }

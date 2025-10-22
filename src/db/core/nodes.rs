@@ -269,7 +269,11 @@ impl GraphDB {
     }
 
     pub fn get_all_node_ids_ordered(&self) -> Vec<NodeId> {
-        self.node_index.iter().into_iter().map(|(id, _)| id).collect()
+        self.node_index
+            .iter()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     pub fn set_node_property(
@@ -306,7 +310,6 @@ impl GraphDB {
 
         let mut store = self.record_store();
         if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
-            drop(store);
             self.record_page_write(new_pointer.page_id);
 
             if let Some(old_val) = old_value {
@@ -330,8 +333,6 @@ impl GraphDB {
 
             Ok(())
         } else {
-            drop(store);
-
             self.free_record(pointer)?;
 
             let preferred = self.header.last_record_page;
@@ -396,7 +397,6 @@ impl GraphDB {
 
         let mut store = self.record_store();
         if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
-            drop(store);
             self.record_page_write(new_pointer.page_id);
 
             for label in &node.labels {
@@ -414,8 +414,6 @@ impl GraphDB {
 
             Ok(())
         } else {
-            drop(store);
-
             self.free_record(pointer)?;
 
             let preferred = self.header.last_record_page;
@@ -471,10 +469,8 @@ impl GraphDB {
 
         let mut store = self.record_store();
         if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
-            drop(store);
             self.record_page_write(new_pointer.page_id);
         } else {
-            drop(store);
             self.free_record(pointer)?;
 
             let preferred = self.header.last_record_page;
@@ -529,10 +525,8 @@ impl GraphDB {
 
         let mut store = self.record_store();
         if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
-            drop(store);
             self.record_page_write(new_pointer.page_id);
         } else {
-            drop(store);
             self.free_record(pointer)?;
 
             let preferred = self.header.last_record_page;

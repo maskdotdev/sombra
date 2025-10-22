@@ -1,6 +1,6 @@
 use super::graphdb::GraphDB;
 use crate::error::Result;
-use crate::model::{NodeId, NULL_EDGE_ID};
+use crate::model::{Edge, EdgeDirection, NodeId, NULL_EDGE_ID};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -340,5 +340,296 @@ impl GraphDB {
         self.outgoing_neighbors_cache
             .insert(node_id, neighbors.clone());
         Ok(neighbors)
+    }
+
+    /// Gets neighbors filtered by edge type and direction.
+    ///
+    /// This method traverses edges from the given node, filtering by the provided
+    /// edge types (using OR semantics) and following the specified direction.
+    ///
+    /// # Arguments
+    /// * `node_id` - The node to start from
+    /// * `edge_types` - Array of edge type names to match (logical OR)
+    /// * `direction` - Direction to traverse (Outgoing, Incoming, or Both)
+    ///
+    /// # Returns
+    /// * `Ok(Vec<NodeId>)` - List of neighbor node IDs matching the criteria
+    ///
+    /// # Time Complexity
+    /// O(E) where E is the number of edges connected to the node
+    ///
+    /// # Space Complexity
+    /// O(N) where N is the number of matching neighbors
+    pub fn get_neighbors_by_edge_type(
+        &mut self,
+        node_id: NodeId,
+        edge_types: &[&str],
+        direction: EdgeDirection,
+    ) -> Result<Vec<NodeId>> {
+        let mut neighbors = Vec::new();
+
+        match direction {
+            EdgeDirection::Outgoing => {
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_outgoing_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    self.metrics.edge_traversals += 1;
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        neighbors.push(edge.target_node_id);
+                    }
+                    edge_id = edge.next_outgoing_edge_id;
+                }
+            }
+            EdgeDirection::Incoming => {
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_incoming_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        neighbors.push(edge.source_node_id);
+                    }
+                    edge_id = edge.next_incoming_edge_id;
+                }
+            }
+            EdgeDirection::Both => {
+                // Get outgoing neighbors
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_outgoing_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    self.metrics.edge_traversals += 1;
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        neighbors.push(edge.target_node_id);
+                    }
+                    edge_id = edge.next_outgoing_edge_id;
+                }
+                // Get incoming neighbors
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_incoming_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        neighbors.push(edge.source_node_id);
+                    }
+                    edge_id = edge.next_incoming_edge_id;
+                }
+            }
+        }
+
+        Ok(neighbors)
+    }
+
+    /// Gets neighbors with their connecting edges, filtered by edge type and direction.
+    ///
+    /// This method is similar to `get_neighbors_by_edge_type` but returns both the
+    /// neighbor nodes and the edges connecting them. This is useful when you need
+    /// edge properties or IDs during traversal.
+    ///
+    /// # Arguments
+    /// * `node_id` - The node to start from
+    /// * `edge_types` - Array of edge type names to match (logical OR)
+    /// * `direction` - Direction to traverse (Outgoing, Incoming, or Both)
+    ///
+    /// # Returns
+    /// * `Ok(Vec<(NodeId, Edge)>)` - List of (neighbor_id, edge) tuples
+    ///
+    /// # Time Complexity
+    /// O(E) where E is the number of edges connected to the node
+    ///
+    /// # Space Complexity
+    /// O(N) where N is the number of matching neighbors
+    pub fn get_neighbors_with_edges_by_type(
+        &mut self,
+        node_id: NodeId,
+        edge_types: &[&str],
+        direction: EdgeDirection,
+    ) -> Result<Vec<(NodeId, Edge)>> {
+        let mut results = Vec::new();
+
+        match direction {
+            EdgeDirection::Outgoing => {
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_outgoing_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    self.metrics.edge_traversals += 1;
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        results.push((edge.target_node_id, edge.clone()));
+                    }
+                    edge_id = edge.next_outgoing_edge_id;
+                }
+            }
+            EdgeDirection::Incoming => {
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_incoming_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        results.push((edge.source_node_id, edge.clone()));
+                    }
+                    edge_id = edge.next_incoming_edge_id;
+                }
+            }
+            EdgeDirection::Both => {
+                // Get outgoing neighbors with edges
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_outgoing_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    self.metrics.edge_traversals += 1;
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        results.push((edge.target_node_id, edge.clone()));
+                    }
+                    edge_id = edge.next_outgoing_edge_id;
+                }
+                // Get incoming neighbors with edges
+                let node = self.get_node(node_id)?;
+                let mut edge_id = node.first_incoming_edge_id;
+                while edge_id != NULL_EDGE_ID {
+                    let edge = self.load_edge(edge_id)?;
+                    if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
+                        results.push((edge.source_node_id, edge.clone()));
+                    }
+                    edge_id = edge.next_incoming_edge_id;
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn shortest_path(
+        &mut self,
+        start: NodeId,
+        end: NodeId,
+        edge_types: Option<&[&str]>,
+    ) -> Result<Option<Vec<NodeId>>> {
+        if start == end {
+            return Ok(Some(vec![start]));
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let mut parent = HashMap::new();
+
+        queue.push_back(start);
+        visited.insert(start);
+
+        while let Some(current) = queue.pop_front() {
+            let neighbors = if let Some(types) = edge_types {
+                self.get_neighbors_by_edge_type(current, types, EdgeDirection::Outgoing)?
+            } else {
+                self.get_neighbors(current)?
+            };
+
+            for neighbor in neighbors {
+                if !visited.contains(&neighbor) {
+                    visited.insert(neighbor);
+                    parent.insert(neighbor, current);
+                    queue.push_back(neighbor);
+
+                    if neighbor == end {
+                        let mut path = Vec::new();
+                        let mut current = end;
+                        path.push(current);
+                        while let Some(&prev) = parent.get(&current) {
+                            path.push(prev);
+                            current = prev;
+                        }
+                        path.reverse();
+                        return Ok(Some(path));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn find_paths(
+        &mut self,
+        start: NodeId,
+        end: NodeId,
+        min_depth: usize,
+        max_depth: usize,
+        edge_types: Option<&[&str]>,
+    ) -> Result<Vec<Vec<NodeId>>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+
+        if start == end && min_depth == 0 {
+            return Ok(vec![vec![start]]);
+        }
+
+        let mut paths = Vec::new();
+        let mut current_path = vec![start];
+        let mut visited = HashSet::new();
+        visited.insert(start);
+
+        self.find_paths_dfs(
+            start,
+            end,
+            min_depth,
+            max_depth,
+            edge_types,
+            &mut current_path,
+            &mut visited,
+            &mut paths,
+        )?;
+
+        Ok(paths)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_paths_dfs(
+        &mut self,
+        current: NodeId,
+        end: NodeId,
+        min_depth: usize,
+        max_depth: usize,
+        edge_types: Option<&[&str]>,
+        current_path: &mut Vec<NodeId>,
+        visited: &mut HashSet<NodeId>,
+        paths: &mut Vec<Vec<NodeId>>,
+    ) -> Result<()> {
+        if current_path.len() > max_depth {
+            return Ok(());
+        }
+
+        if current == end && current_path.len() >= min_depth {
+            paths.push(current_path.clone());
+            return Ok(());
+        }
+
+        let neighbors = if let Some(types) = edge_types {
+            self.get_neighbors_by_edge_type(current, types, EdgeDirection::Outgoing)?
+        } else {
+            self.get_neighbors(current)?
+        };
+
+        for neighbor in neighbors {
+            if !visited.contains(&neighbor) {
+                visited.insert(neighbor);
+                current_path.push(neighbor);
+
+                self.find_paths_dfs(
+                    neighbor,
+                    end,
+                    min_depth,
+                    max_depth,
+                    edge_types,
+                    current_path,
+                    visited,
+                    paths,
+                )?;
+
+                current_path.pop();
+                visited.remove(&neighbor);
+            }
+        }
+
+        Ok(())
     }
 }

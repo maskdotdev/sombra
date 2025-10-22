@@ -1,3 +1,13 @@
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::never_loop)]
+#![allow(clippy::collapsible_if)]
+
 use crate::{Edge, Node, PropertyValue};
 use base64::Engine;
 use rusqlite::{params, Connection, Error as SqliteError, Result as SqliteResult};

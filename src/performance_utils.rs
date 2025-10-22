@@ -1,3 +1,12 @@
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::never_loop)]
+#![allow(clippy::collapsible_if)]
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -245,7 +254,10 @@ impl BenchmarkSuite {
     }
 
     pub fn print_summary(&self) {
-        println!("\n=== Benchmark Summary ===");
+        println!(
+            "
+=== Benchmark Summary ==="
+        );
         println!(
             "{:<30} {:<15} {:<15} {:<12} {:<12} {:<12}",
             "Operation", "Duration (ms)", "Ops/sec", "P50 (µs)", "P95 (µs)", "P99 (µs)"
@@ -278,9 +290,16 @@ impl BenchmarkSuite {
     }
 
     pub fn print_detailed(&self) {
-        println!("\n=== Detailed Benchmark Results ===");
+        println!(
+            "
+=== Detailed Benchmark Results ==="
+        );
         for result in &self.results {
-            println!("\nOperation: {}", result.operation);
+            println!(
+                "
+Operation: {}",
+                result.operation
+            );
             println!("  Duration: {:.2} ms", result.duration.as_millis());
             println!("  Operations/sec: {:.0}", result.operations_per_second);
             println!("  Memory usage: {:.2} MB", result.memory_usage_mb);

@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use parking_lot::RwLock;
@@ -5,8 +7,14 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
+use crate::db::query::analytics::{DegreeDistribution, DegreeType};
+use crate::db::query::builder::QueryResult;
+use crate::db::query::pattern::{
+    EdgePattern, Match, NodePattern, Pattern, PropertyBound, PropertyFilters, PropertyRangeFilter,
+};
+use crate::db::query::subgraph::{EdgeTypeFilter, Subgraph};
 use crate::db::{GraphDB, TxId};
-use crate::model::{Edge, Node, PropertyValue};
+use crate::model::{Edge, EdgeDirection, Node, PropertyValue};
 
 #[napi(js_name = "SombraDB")]
 pub struct SombraDB {
@@ -20,7 +28,7 @@ impl SombraDB {
         let db = GraphDB::open(&path).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("Failed to open database: {}", e),
+                format!("Failed to open database: {e}"),
             )
         })?;
 
@@ -232,12 +240,13 @@ impl SombraDB {
 
         let prop_value = PropertyValue::try_from(value)?;
 
-        db.set_node_property(node_id as u64, key, prop_value).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to set node property: {}", e),
-            )
-        })?;
+        db.set_node_property(node_id as u64, key, prop_value)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to set node property: {}", e),
+                )
+            })?;
 
         Ok(())
     }
@@ -454,6 +463,486 @@ impl SombraDB {
 
         Ok(count as f64)
     }
+
+    #[napi]
+    pub fn count_nodes_by_label(&mut self) -> std::result::Result<HashMap<String, f64>, Error> {
+        let db = self.inner.read();
+        let counts = db.count_nodes_by_label();
+        Ok(counts.into_iter().map(|(k, v)| (k, v as f64)).collect())
+    }
+
+    #[napi]
+    pub fn count_edges_by_type(&mut self) -> std::result::Result<HashMap<String, f64>, Error> {
+        let mut db = self.inner.write();
+        let counts = db.count_edges_by_type().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to count edges by type: {}", e),
+            )
+        })?;
+        Ok(counts.into_iter().map(|(k, v)| (k, v as f64)).collect())
+    }
+
+    #[napi]
+    pub fn get_total_node_count(&mut self) -> std::result::Result<f64, Error> {
+        let db = self.inner.read();
+        Ok(db.get_total_node_count() as f64)
+    }
+
+    #[napi]
+    pub fn get_total_edge_count(&mut self) -> std::result::Result<f64, Error> {
+        let db = self.inner.read();
+        Ok(db.get_total_edge_count() as f64)
+    }
+
+    #[napi]
+    pub fn degree_distribution(&mut self) -> std::result::Result<JsDegreeDistribution, Error> {
+        let mut db = self.inner.write();
+        let dist = db.degree_distribution().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to get degree distribution: {}", e),
+            )
+        })?;
+        Ok(JsDegreeDistribution::from(dist))
+    }
+
+    #[napi]
+    pub fn find_hubs(
+        &mut self,
+        min_degree: f64,
+        degree_type: String,
+    ) -> std::result::Result<Vec<HubNode>, Error> {
+        let dt = match degree_type.as_str() {
+            "in" => DegreeType::In,
+            "out" => DegreeType::Out,
+            "total" => DegreeType::Total,
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "degree_type must be 'in', 'out', or 'total'",
+                ))
+            }
+        };
+        let mut db = self.inner.write();
+        let hubs = db.find_hubs(min_degree as usize, dt).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to find hubs: {}", e),
+            )
+        })?;
+        Ok(hubs
+            .into_iter()
+            .map(|(node_id, degree)| HubNode {
+                node_id: node_id as f64,
+                degree: degree as f64,
+            })
+            .collect())
+    }
+
+    #[napi]
+    pub fn find_isolated_nodes(&mut self) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.write();
+        let nodes = db.find_isolated_nodes().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to find isolated nodes: {}", e),
+            )
+        })?;
+        Ok(nodes.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn find_leaf_nodes(&mut self, direction: String) -> std::result::Result<Vec<f64>, Error> {
+        let dir = match direction.as_str() {
+            "incoming" => EdgeDirection::Incoming,
+            "outgoing" => EdgeDirection::Outgoing,
+            "both" => EdgeDirection::Both,
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "direction must be 'incoming', 'outgoing', or 'both'",
+                ))
+            }
+        };
+        let mut db = self.inner.write();
+        let nodes = db.find_leaf_nodes(dir).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to find leaf nodes: {}", e),
+            )
+        })?;
+        Ok(nodes.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_average_degree(&mut self) -> std::result::Result<f64, Error> {
+        let mut db = self.inner.write();
+        db.get_average_degree().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to get average degree: {}", e),
+            )
+        })
+    }
+
+    #[napi]
+    pub fn get_density(&mut self) -> std::result::Result<f64, Error> {
+        let mut db = self.inner.write();
+        db.get_density().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to get density: {}", e),
+            )
+        })
+    }
+
+    #[napi]
+    pub fn count_nodes_with_label(&mut self, label: String) -> std::result::Result<f64, Error> {
+        let db = self.inner.read();
+        Ok(db.count_nodes_with_label(&label) as f64)
+    }
+
+    #[napi]
+    pub fn count_edges_with_type(&mut self, edge_type: String) -> std::result::Result<f64, Error> {
+        let mut db = self.inner.write();
+        let count = db.count_edges_with_type(&edge_type).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to count edges with type: {}", e),
+            )
+        })?;
+        Ok(count as f64)
+    }
+
+    #[napi]
+    pub fn extract_subgraph(
+        &mut self,
+        root_nodes: Vec<f64>,
+        depth: f64,
+        edge_types: Option<Vec<String>>,
+        direction: Option<String>,
+    ) -> std::result::Result<JsSubgraph, Error> {
+        let edge_filter = if let Some(types) = edge_types {
+            let dir = match direction.as_deref() {
+                Some("incoming") => EdgeDirection::Incoming,
+                Some("outgoing") => EdgeDirection::Outgoing,
+                Some("both") => EdgeDirection::Both,
+                None => EdgeDirection::Outgoing,
+                Some(_) => {
+                    return Err(Error::new(
+                        Status::InvalidArg,
+                        "direction must be 'incoming', 'outgoing', or 'both'",
+                    ))
+                }
+            };
+            Some(EdgeTypeFilter::new(types, dir))
+        } else {
+            None
+        };
+
+        let mut db = self.inner.write();
+        let root_nodes_u64: Vec<u64> = root_nodes.into_iter().map(|n| n as u64).collect();
+        let subgraph = db
+            .extract_subgraph(&root_nodes_u64, depth as usize, edge_filter)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to extract subgraph: {}", e),
+                )
+            })?;
+        Ok(JsSubgraph::from(subgraph))
+    }
+
+    #[napi]
+    pub fn extract_induced_subgraph(
+        &mut self,
+        node_ids: Vec<f64>,
+    ) -> std::result::Result<JsSubgraph, Error> {
+        let mut db = self.inner.write();
+        let node_ids_u64: Vec<u64> = node_ids.into_iter().map(|n| n as u64).collect();
+        let subgraph = db.extract_induced_subgraph(&node_ids_u64).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to extract induced subgraph: {}", e),
+            )
+        })?;
+        Ok(JsSubgraph::from(subgraph))
+    }
+
+    #[napi]
+    pub fn query(&self) -> JsQueryBuilder {
+        JsQueryBuilder {
+            inner: self.inner.clone(),
+            start_spec: None,
+            edge_types: Vec::new(),
+            direction: None,
+            depth: None,
+            limit_val: None,
+        }
+    }
+
+    #[napi]
+    pub fn find_ancestor_by_label(
+        &mut self,
+        start_node_id: f64,
+        label: String,
+        edge_type: String,
+    ) -> std::result::Result<Option<f64>, Error> {
+        let mut db = self.inner.write();
+        let result = db
+            .find_ancestor_by_label(start_node_id as u64, &label, &edge_type)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to find ancestor by label: {}", e),
+                )
+            })?;
+        Ok(result.map(|id| id as f64))
+    }
+
+    #[napi]
+    pub fn get_ancestors(
+        &mut self,
+        start_node_id: f64,
+        edge_type: String,
+        max_depth: Option<f64>,
+    ) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.write();
+        let max_depth_usize = max_depth.map(|d| d as usize);
+        let ancestors = db
+            .get_ancestors(start_node_id as u64, &edge_type, max_depth_usize)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to get ancestors: {}", e),
+                )
+            })?;
+        Ok(ancestors.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_descendants(
+        &mut self,
+        start_node_id: f64,
+        edge_type: String,
+        max_depth: Option<f64>,
+    ) -> std::result::Result<Vec<f64>, Error> {
+        let mut db = self.inner.write();
+        let max_depth_usize = max_depth.map(|d| d as usize);
+        let descendants = db
+            .get_descendants(start_node_id as u64, &edge_type, max_depth_usize)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to get descendants: {}", e),
+                )
+            })?;
+        Ok(descendants.into_iter().map(|id| id as f64).collect())
+    }
+
+    #[napi]
+    pub fn get_containing_file(&mut self, node_id: f64) -> std::result::Result<f64, Error> {
+        let mut db = self.inner.write();
+        let file_id = db.get_containing_file(node_id as u64).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to get containing file: {}", e),
+            )
+        })?;
+        Ok(file_id as f64)
+    }
+
+    #[napi]
+    pub fn match_pattern(
+        &mut self,
+        pattern: JsPattern,
+    ) -> std::result::Result<Vec<JsMatch>, Error> {
+        let mut db = self.inner.write();
+        let pattern = Pattern::try_from(pattern)?;
+        let matches = db.match_pattern(&pattern).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to match pattern: {}", e),
+            )
+        })?;
+        Ok(matches.into_iter().map(JsMatch::from).collect())
+    }
+
+    #[napi]
+    pub fn shortest_path(
+        &mut self,
+        start: f64,
+        end: f64,
+        edge_types: Option<Vec<String>>,
+    ) -> std::result::Result<Option<Vec<f64>>, Error> {
+        let mut db = self.inner.write();
+        let edge_type_refs: Option<Vec<&str>> = edge_types
+            .as_ref()
+            .map(|types| types.iter().map(|s| s.as_str()).collect());
+        let path = db
+            .shortest_path(start as u64, end as u64, edge_type_refs.as_deref())
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to find shortest path: {}", e),
+                )
+            })?;
+        Ok(path.map(|p| p.into_iter().map(|id| id as f64).collect()))
+    }
+
+    #[napi]
+    pub fn find_paths(
+        &mut self,
+        start: f64,
+        end: f64,
+        min_depth: f64,
+        max_depth: f64,
+        edge_types: Option<Vec<String>>,
+    ) -> std::result::Result<Vec<Vec<f64>>, Error> {
+        let mut db = self.inner.write();
+        let edge_type_refs: Option<Vec<&str>> = edge_types
+            .as_ref()
+            .map(|types| types.iter().map(|s| s.as_str()).collect());
+        let paths = db
+            .find_paths(
+                start as u64,
+                end as u64,
+                min_depth as usize,
+                max_depth as usize,
+                edge_type_refs.as_deref(),
+            )
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to find paths: {}", e),
+                )
+            })?;
+        Ok(paths
+            .into_iter()
+            .map(|path| path.into_iter().map(|id| id as f64).collect())
+            .collect())
+    }
+}
+
+#[napi(js_name = "QueryResult", object)]
+pub struct JsQueryResult {
+    pub start_nodes: Vec<f64>,
+    pub node_ids: Vec<f64>,
+    pub limited: bool,
+}
+
+impl From<QueryResult> for JsQueryResult {
+    fn from(result: QueryResult) -> Self {
+        Self {
+            start_nodes: result.start_nodes.into_iter().map(|n| n as f64).collect(),
+            node_ids: result.node_ids.into_iter().map(|n| n as f64).collect(),
+            limited: result.limited,
+        }
+    }
+}
+
+#[allow(clippy::enum_variant_names)]
+enum StartSpec {
+    FromNodes(Vec<u64>),
+    FromLabel(String),
+    FromProperty(String, String, String), // label, key, value
+}
+
+#[napi(js_name = "QueryBuilder")]
+pub struct JsQueryBuilder {
+    inner: Arc<RwLock<GraphDB>>,
+    start_spec: Option<StartSpec>,
+    edge_types: Vec<String>,
+    direction: Option<String>,
+    depth: Option<usize>,
+    limit_val: Option<usize>,
+}
+
+#[napi]
+impl JsQueryBuilder {
+    #[napi]
+    pub fn start_from(&mut self, node_ids: Vec<f64>) -> &Self {
+        self.start_spec = Some(StartSpec::FromNodes(
+            node_ids.into_iter().map(|n| n as u64).collect(),
+        ));
+        self
+    }
+
+    #[napi]
+    pub fn start_from_label(&mut self, label: String) -> &Self {
+        self.start_spec = Some(StartSpec::FromLabel(label));
+        self
+    }
+
+    #[napi]
+    pub fn start_from_property(&mut self, label: String, key: String, value: String) -> &Self {
+        self.start_spec = Some(StartSpec::FromProperty(label, key, value));
+        self
+    }
+
+    #[napi]
+    pub fn traverse(&mut self, edge_types: Vec<String>, direction: String, depth: f64) -> &Self {
+        self.edge_types = edge_types;
+        self.direction = Some(direction);
+        self.depth = Some(depth as usize);
+        self
+    }
+
+    #[napi]
+    pub fn limit(&mut self, n: f64) -> &Self {
+        self.limit_val = Some(n as usize);
+        self
+    }
+
+    #[napi]
+    pub fn execute(&self) -> std::result::Result<JsQueryResult, Error> {
+        let mut db = self.inner.write();
+        let mut builder = db.query();
+
+        match &self.start_spec {
+            Some(StartSpec::FromNodes(ids)) => {
+                builder = builder.start_from(ids.clone());
+            }
+            Some(StartSpec::FromLabel(label)) => {
+                builder = builder.start_from_label(label);
+            }
+            Some(StartSpec::FromProperty(label, key, value)) => {
+                builder =
+                    builder.start_from_property(label, key, PropertyValue::String(value.clone()));
+            }
+            None => {
+                return Err(Error::new(
+                    Status::GenericFailure,
+                    "No start specification provided",
+                ));
+            }
+        }
+
+        if let (Some(depth), Some(direction)) = (self.depth, &self.direction) {
+            let edge_type_refs: Vec<&str> = self.edge_types.iter().map(|s| s.as_str()).collect();
+            let dir = match direction.as_str() {
+                "incoming" => EdgeDirection::Incoming,
+                "outgoing" => EdgeDirection::Outgoing,
+                "both" => EdgeDirection::Both,
+                _ => EdgeDirection::Outgoing,
+            };
+            builder = builder.traverse(&edge_type_refs, dir, depth);
+        }
+
+        if let Some(limit) = self.limit_val {
+            builder = builder.limit(limit);
+        }
+
+        let result = builder.execute().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Query execution failed: {}", e),
+            )
+        })?;
+
+        Ok(JsQueryResult::from(result))
+    }
 }
 
 #[napi(js_name = "SombraTransaction")]
@@ -664,12 +1153,13 @@ impl SombraTransaction {
 
         let prop_value = PropertyValue::try_from(value)?;
 
-        db.set_node_property_internal(node_id as u64, key, prop_value).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to set node property in transaction: {}", e),
-            )
-        })?;
+        db.set_node_property_internal(node_id as u64, key, prop_value)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to set node property in transaction: {}", e),
+                )
+            })?;
 
         Ok(())
     }
@@ -682,12 +1172,13 @@ impl SombraTransaction {
     ) -> std::result::Result<(), Error> {
         let mut db = self.db.write();
 
-        db.remove_node_property_internal(node_id as u64, &key).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to remove node property in transaction: {}", e),
-            )
-        })?;
+        db.remove_node_property_internal(node_id as u64, &key)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to remove node property in transaction: {}", e),
+                )
+            })?;
 
         Ok(())
     }
@@ -1066,6 +1557,77 @@ pub struct BfsResult {
     pub depth: f64,
 }
 
+#[napi(object, js_name = "DegreeEntry")]
+pub struct DegreeEntry {
+    pub node_id: f64,
+    pub degree: f64,
+}
+
+#[napi(object, js_name = "DegreeDistribution")]
+pub struct JsDegreeDistribution {
+    pub in_degree: Vec<DegreeEntry>,
+    pub out_degree: Vec<DegreeEntry>,
+    pub total_degree: Vec<DegreeEntry>,
+}
+
+impl From<DegreeDistribution> for JsDegreeDistribution {
+    fn from(dist: DegreeDistribution) -> Self {
+        Self {
+            in_degree: dist
+                .in_degree
+                .into_iter()
+                .map(|(node_id, degree)| DegreeEntry {
+                    node_id: node_id as f64,
+                    degree: degree as f64,
+                })
+                .collect(),
+            out_degree: dist
+                .out_degree
+                .into_iter()
+                .map(|(node_id, degree)| DegreeEntry {
+                    node_id: node_id as f64,
+                    degree: degree as f64,
+                })
+                .collect(),
+            total_degree: dist
+                .total_degree
+                .into_iter()
+                .map(|(node_id, degree)| DegreeEntry {
+                    node_id: node_id as f64,
+                    degree: degree as f64,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[napi(object, js_name = "HubNode")]
+pub struct HubNode {
+    pub node_id: f64,
+    pub degree: f64,
+}
+
+#[napi(object, js_name = "Subgraph")]
+pub struct JsSubgraph {
+    pub nodes: Vec<SombraNode>,
+    pub edges: Vec<SombraEdge>,
+    pub boundary_nodes: Vec<f64>,
+}
+
+impl From<Subgraph> for JsSubgraph {
+    fn from(subgraph: Subgraph) -> Self {
+        Self {
+            nodes: subgraph.nodes.into_iter().map(SombraNode::from).collect(),
+            edges: subgraph.edges.into_iter().map(SombraEdge::from).collect(),
+            boundary_nodes: subgraph
+                .boundary_nodes
+                .into_iter()
+                .map(|id| id as f64)
+                .collect(),
+        }
+    }
+}
+
 impl From<Edge> for SombraEdge {
     fn from(edge: Edge) -> Self {
         let properties = edge
@@ -1080,6 +1642,193 @@ impl From<Edge> for SombraEdge {
             target_node_id: edge.target_node_id as f64,
             type_name: edge.type_name,
             properties,
+        }
+    }
+}
+
+#[napi(object, js_name = "PropertyBound")]
+pub struct JsPropertyBound {
+    pub value: SombraPropertyValue,
+    pub inclusive: bool,
+}
+
+impl TryFrom<JsPropertyBound> for PropertyBound {
+    type Error = Error;
+
+    fn try_from(value: JsPropertyBound) -> std::result::Result<Self, Self::Error> {
+        Ok(PropertyBound {
+            value: PropertyValue::try_from(value.value)?,
+            inclusive: value.inclusive,
+        })
+    }
+}
+
+#[napi(object, js_name = "PropertyRangeFilter")]
+pub struct JsPropertyRangeFilter {
+    pub key: String,
+    pub min: Option<JsPropertyBound>,
+    pub max: Option<JsPropertyBound>,
+}
+
+impl TryFrom<JsPropertyRangeFilter> for PropertyRangeFilter {
+    type Error = Error;
+
+    fn try_from(value: JsPropertyRangeFilter) -> std::result::Result<Self, Self::Error> {
+        Ok(PropertyRangeFilter {
+            key: value.key,
+            min: value.min.map(PropertyBound::try_from).transpose()?,
+            max: value.max.map(PropertyBound::try_from).transpose()?,
+        })
+    }
+}
+
+#[napi(object, js_name = "PropertyFilters")]
+pub struct JsPropertyFilters {
+    pub equals: Option<HashMap<String, SombraPropertyValue>>,
+    pub not_equals: Option<HashMap<String, SombraPropertyValue>>,
+    pub ranges: Option<Vec<JsPropertyRangeFilter>>,
+}
+
+impl TryFrom<JsPropertyFilters> for PropertyFilters {
+    type Error = Error;
+
+    fn try_from(value: JsPropertyFilters) -> std::result::Result<Self, Self::Error> {
+        let mut equals = std::collections::BTreeMap::new();
+        if let Some(eq_map) = value.equals {
+            for (k, v) in eq_map {
+                equals.insert(k, PropertyValue::try_from(v)?);
+            }
+        }
+
+        let mut not_equals = std::collections::BTreeMap::new();
+        if let Some(neq_map) = value.not_equals {
+            for (k, v) in neq_map {
+                not_equals.insert(k, PropertyValue::try_from(v)?);
+            }
+        }
+
+        let mut ranges = Vec::new();
+        if let Some(range_vec) = value.ranges {
+            for r in range_vec {
+                ranges.push(PropertyRangeFilter::try_from(r)?);
+            }
+        }
+
+        Ok(PropertyFilters {
+            equals,
+            not_equals,
+            ranges,
+        })
+    }
+}
+
+#[napi(object, js_name = "NodePattern")]
+pub struct JsNodePattern {
+    pub var_name: String,
+    pub labels: Option<Vec<String>>,
+    pub properties: Option<JsPropertyFilters>,
+}
+
+impl TryFrom<JsNodePattern> for NodePattern {
+    type Error = Error;
+
+    fn try_from(value: JsNodePattern) -> std::result::Result<Self, Self::Error> {
+        Ok(NodePattern {
+            var_name: value.var_name,
+            labels: value.labels.unwrap_or_default(),
+            properties: value
+                .properties
+                .map(PropertyFilters::try_from)
+                .transpose()?
+                .unwrap_or_default(),
+        })
+    }
+}
+
+#[napi(object, js_name = "EdgePattern")]
+pub struct JsEdgePattern {
+    pub from_var: String,
+    pub to_var: String,
+    pub types: Option<Vec<String>>,
+    pub properties: Option<JsPropertyFilters>,
+    pub direction: String,
+}
+
+impl TryFrom<JsEdgePattern> for EdgePattern {
+    type Error = Error;
+
+    fn try_from(value: JsEdgePattern) -> std::result::Result<Self, Self::Error> {
+        let direction = match value.direction.as_str() {
+            "outgoing" => EdgeDirection::Outgoing,
+            "incoming" => EdgeDirection::Incoming,
+            "both" => EdgeDirection::Both,
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("Invalid edge direction: {}", value.direction),
+                ))
+            }
+        };
+
+        Ok(EdgePattern {
+            from_var: value.from_var,
+            to_var: value.to_var,
+            types: value.types.unwrap_or_default(),
+            properties: value
+                .properties
+                .map(PropertyFilters::try_from)
+                .transpose()?
+                .unwrap_or_default(),
+            direction,
+        })
+    }
+}
+
+#[napi(object, js_name = "Pattern")]
+pub struct JsPattern {
+    pub nodes: Vec<JsNodePattern>,
+    pub edges: Vec<JsEdgePattern>,
+}
+
+impl TryFrom<JsPattern> for Pattern {
+    type Error = Error;
+
+    fn try_from(value: JsPattern) -> std::result::Result<Self, Self::Error> {
+        let nodes = value
+            .nodes
+            .into_iter()
+            .map(NodePattern::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let edges = value
+            .edges
+            .into_iter()
+            .map(EdgePattern::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(Pattern { nodes, edges })
+    }
+}
+
+#[napi(object, js_name = "Match")]
+pub struct JsMatch {
+    pub node_bindings: HashMap<String, f64>,
+    pub edge_ids: Vec<f64>,
+}
+
+impl From<Match> for JsMatch {
+    fn from(m: Match) -> Self {
+        let node_bindings = m
+            .node_bindings
+            .into_iter()
+            .map(|(k, v)| (k, v as f64))
+            .collect();
+
+        let edge_ids = m.edge_ids.into_iter().map(|id| id as f64).collect();
+
+        JsMatch {
+            node_bindings,
+            edge_ids,
         }
     }
 }

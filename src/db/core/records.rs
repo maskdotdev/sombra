@@ -171,7 +171,6 @@ impl GraphDB {
         let page_id = pointer.page_id;
         let mut store = self.record_store();
         let page_empty = store.mark_free(pointer)?;
-        drop(store);
 
         if page_empty {
             self.push_free_page(page_id)?;
