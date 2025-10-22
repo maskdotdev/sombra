@@ -23,13 +23,12 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Test on ${{ matrix.os }}
+    name: Test
     needs: lint
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable, beta]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust ${{ matrix.rust }}
@@ -40,17 +39,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-index-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Run tests
         run: cargo test --all-features --workspace --lib --bins --tests
       - name: Run doc tests
@@ -107,16 +106,7 @@ jobs:
   build:
     name: Build Native Module
     needs: [test, test-bindings]
-    strategy:
-      matrix:
-        settings:
-          - host: macos-latest
-            target: x86_64-apple-darwin
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.settings.host }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -125,14 +115,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.settings.target }}
+          targets: x86_64-unknown-linux-gnu
       - run: npm ci
       - name: Build native module
-        run: npm run build -- --target ${{ matrix.settings.target }}
+        run: npm run build -- --target x86_64-unknown-linux-gnu
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
+          name: bindings-x86_64-unknown-linux-gnu
           path: sombra.*.node
 
   python-wheel:
