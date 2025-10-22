@@ -101,9 +101,14 @@ harness = false
 name = "btree_benchmark"
 harness = false
 
+[[example]]
+name = "performance_metrics_demo"
+required-features = ["benchmarks"]
+
 [dev-dependencies]
-sombra = { path = ".", features = ["benchmarks"] }
 proptest = "1.0"
+tempfile = "3.10"
+rand = "0.8"
 
 [build-dependencies]
 napi-build = "2"
