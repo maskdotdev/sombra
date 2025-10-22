@@ -127,8 +127,8 @@ jobs:
         run: npx napi artifacts -d artifacts
       - name: List npm packages
         run: find npm -name "*.node" -ls
-      - name: Publish platform packages and main package
-        run: npm run prepublishOnly
+      - name: Publish platform packages with delay
+        run: ./scripts/publish-with-delay.sh
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub Release
