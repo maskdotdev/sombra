@@ -74,5 +74,8 @@
     "sombradb-linux-x64-musl": "0.3.3",
     "sombradb-linux-arm64-gnu": "0.3.3",
     "sombradb-linux-arm-gnueabihf": "0.3.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
