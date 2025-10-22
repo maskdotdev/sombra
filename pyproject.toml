@@ -37,6 +37,6 @@ sombra = "sombra._cli:main"
 
 [tool.maturin]
 features = ["python"]
-module-name = "sombra"
+module-name = "sombra.sombra"
 python-source = "python"
 generate-import-lib = true

@@ -20,6 +20,125 @@ class BfsResult:
     node_id: int
     depth: int
 
+class DegreeDistribution:
+    in_degree: List[tuple[int, int]]
+    out_degree: List[tuple[int, int]]
+    total_degree: List[tuple[int, int]]
+
+class Subgraph:
+    boundary_nodes: List[int]
+    
+    @property
+    def nodes(self) -> List[SombraNode]: ...
+    
+    @property
+    def edges(self) -> List[SombraEdge]: ...
+
+class PropertyBound:
+    value: Union[bool, int, float, str, bytes]
+    inclusive: bool
+    
+    def __init__(
+        self,
+        value: Union[bool, int, float, str, bytes],
+        inclusive: bool
+    ) -> None: ...
+
+class PropertyRangeFilter:
+    key: str
+    min: Optional[PropertyBound]
+    max: Optional[PropertyBound]
+    
+    def __init__(
+        self,
+        key: str,
+        min: Optional[PropertyBound] = None,
+        max: Optional[PropertyBound] = None
+    ) -> None: ...
+
+class PropertyFilters:
+    equals: Optional[Dict[str, Union[bool, int, float, str, bytes]]]
+    not_equals: Optional[Dict[str, Union[bool, int, float, str, bytes]]]
+    ranges: Optional[List[PropertyRangeFilter]]
+    
+    def __init__(
+        self,
+        equals: Optional[Dict[str, Union[bool, int, float, str, bytes]]] = None,
+        not_equals: Optional[Dict[str, Union[bool, int, float, str, bytes]]] = None,
+        ranges: Optional[List[PropertyRangeFilter]] = None
+    ) -> None: ...
+
+class NodePattern:
+    var_name: str
+    labels: Optional[List[str]]
+    properties: Optional[PropertyFilters]
+    
+    def __init__(
+        self,
+        var_name: str,
+        labels: Optional[List[str]] = None,
+        properties: Optional[PropertyFilters] = None
+    ) -> None: ...
+
+class EdgePattern:
+    from_var: str
+    to_var: str
+    types: Optional[List[str]]
+    properties: Optional[PropertyFilters]
+    direction: str
+    
+    def __init__(
+        self,
+        from_var: str,
+        to_var: str,
+        types: Optional[List[str]] = None,
+        properties: Optional[PropertyFilters] = None,
+        direction: str = "outgoing"
+    ) -> None: ...
+
+class Pattern:
+    nodes: List[NodePattern]
+    edges: List[EdgePattern]
+    
+    def __init__(
+        self,
+        nodes: List[NodePattern],
+        edges: List[EdgePattern]
+    ) -> None: ...
+
+class Match:
+    node_bindings: Dict[str, int]
+    edge_ids: List[int]
+
+class QueryResult:
+    start_nodes: List[int]
+    node_ids: List[int]
+    limited: bool
+    
+    @property
+    def nodes(self) -> List[SombraNode]: ...
+    
+    @property
+    def edges(self) -> List[SombraEdge]: ...
+
+class QueryBuilder:
+    def start_from(self, node_ids: List[int]) -> "QueryBuilder": ...
+    def start_from_label(self, label: str) -> "QueryBuilder": ...
+    def start_from_property(
+        self,
+        label: str,
+        key: str,
+        value: Union[bool, int, float, str, bytes]
+    ) -> "QueryBuilder": ...
+    def traverse(
+        self,
+        edge_types: List[str],
+        direction: str,
+        depth: int
+    ) -> "QueryBuilder": ...
+    def limit(self, n: int) -> "QueryBuilder": ...
+    def execute(self) -> QueryResult: ...
+
 class SombraDB:
     def __init__(self, path: str) -> None: ...
     def begin_transaction(self) -> "SombraTransaction": ...
@@ -66,6 +185,47 @@ class SombraDB:
         value: Union[bool, int, float, str, bytes]
     ) -> None: ...
     def remove_node_property(self, node_id: int, key: str) -> None: ...
+    def count_nodes_by_label(self) -> Dict[str, int]: ...
+    def count_edges_by_type(self) -> Dict[str, int]: ...
+    def get_total_node_count(self) -> int: ...
+    def get_total_edge_count(self) -> int: ...
+    def degree_distribution(self) -> DegreeDistribution: ...
+    def find_hubs(self, min_degree: int, degree_type: str) -> List[tuple[int, int]]: ...
+    def find_isolated_nodes(self) -> List[int]: ...
+    def find_leaf_nodes(self, direction: str) -> List[int]: ...
+    def get_average_degree(self) -> float: ...
+    def get_density(self) -> float: ...
+    def count_nodes_with_label(self, label: str) -> int: ...
+    def count_edges_with_type(self, edge_type: str) -> int: ...
+    def extract_subgraph(
+        self,
+        root_nodes: List[int],
+        depth: int,
+        edge_types: Optional[List[str]] = None,
+        direction: Optional[str] = None
+    ) -> Subgraph: ...
+    def extract_induced_subgraph(self, node_ids: List[int]) -> Subgraph: ...
+    def query(self) -> QueryBuilder: ...
+    def find_ancestor_by_label(
+        self,
+        node_id: int,
+        label: str,
+        edge_type: str
+    ) -> Optional[int]: ...
+    def get_ancestors(
+        self,
+        node_id: int,
+        edge_type: str,
+        max_depth: Optional[int] = None
+    ) -> List[int]: ...
+    def get_descendants(
+        self,
+        node_id: int,
+        edge_type: str,
+        max_depth: Optional[int] = None
+    ) -> List[int]: ...
+    def get_containing_file(self, node_id: int) -> int: ...
+    def match_pattern(self, pattern: Pattern) -> List[Match]: ...
 
 class SombraTransaction:
     def id(self) -> int: ...
