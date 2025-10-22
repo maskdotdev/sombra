@@ -24,8 +24,8 @@
     }
   },
   "scripts": {
-    "build": "napi build --platform --release --features napi --cargo-flags='--lib' && node scripts/fix-exports.js",
-    "build:debug": "napi build --platform --features napi --cargo-flags='--lib' && node scripts/fix-exports.js",
+    "build": "napi build --platform --release --features napi --cargo-flags=--lib && node scripts/fix-exports.js",
+    "build:debug": "napi build --platform --features napi --cargo-flags=--lib && node scripts/fix-exports.js",
     "prepublishOnly": "napi prepublish -t npm --skip-gh-release && node scripts/fix-exports.js",
     "test": "node test/test.js",
     "test:comprehensive": "node test/test-comprehensive.js",
