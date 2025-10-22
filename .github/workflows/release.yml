@@ -119,54 +119,11 @@ jobs:
         with:
           path: artifacts
           pattern: bindings-*
-      - name: Organize artifacts for napi prepublish
+      - name: Move artifacts to root for napi prepublish
         run: |
-          # napi expects files in npm/{platform-name}/sombradb.{platform-name}.node
-          mkdir -p npm
-          
-          # Map Rust target triples to napi platform names
-          if [ -f artifacts/bindings-x86_64-pc-windows-msvc/sombradb.win32-x64-msvc.node ]; then
-            mkdir -p npm/win32-x64-msvc
-            cp artifacts/bindings-x86_64-pc-windows-msvc/*.node npm/win32-x64-msvc/
-          fi
-          
-          if [ -f artifacts/bindings-i686-pc-windows-msvc/sombradb.win32-ia32-msvc.node ]; then
-            mkdir -p npm/win32-ia32-msvc
-            cp artifacts/bindings-i686-pc-windows-msvc/*.node npm/win32-ia32-msvc/
-          fi
-          
-          if [ -f artifacts/bindings-x86_64-apple-darwin/sombradb.darwin-x64.node ]; then
-            mkdir -p npm/darwin-x64
-            cp artifacts/bindings-x86_64-apple-darwin/*.node npm/darwin-x64/
-          fi
-          
-          if [ -f artifacts/bindings-aarch64-apple-darwin/sombradb.darwin-arm64.node ]; then
-            mkdir -p npm/darwin-arm64
-            cp artifacts/bindings-aarch64-apple-darwin/*.node npm/darwin-arm64/
-          fi
-          
-          if [ -f artifacts/bindings-x86_64-unknown-linux-gnu/sombradb.linux-x64-gnu.node ]; then
-            mkdir -p npm/linux-x64-gnu
-            cp artifacts/bindings-x86_64-unknown-linux-gnu/*.node npm/linux-x64-gnu/
-          fi
-          
-          if [ -f artifacts/bindings-x86_64-unknown-linux-musl/sombradb.linux-x64-musl.node ]; then
-            mkdir -p npm/linux-x64-musl
-            cp artifacts/bindings-x86_64-unknown-linux-musl/*.node npm/linux-x64-musl/
-          fi
-          
-          if [ -f artifacts/bindings-aarch64-unknown-linux-gnu/sombradb.linux-arm64-gnu.node ]; then
-            mkdir -p npm/linux-arm64-gnu
-            cp artifacts/bindings-aarch64-unknown-linux-gnu/*.node npm/linux-arm64-gnu/
-          fi
-          
-          if [ -f artifacts/bindings-armv7-unknown-linux-gnueabihf/sombradb.linux-arm-gnueabihf.node ]; then
-            mkdir -p npm/linux-arm-gnueabihf
-            cp artifacts/bindings-armv7-unknown-linux-gnueabihf/*.node npm/linux-arm-gnueabihf/
-          fi
-          
-          # List what we have
-          find npm -name "*.node" -ls
+          # napi prepublish expects *.node files in root, then creates npm/ structure
+          find artifacts -name "*.node" -exec cp {} . \;
+          ls -la *.node
       - name: Publish platform packages and main package
         run: npm run prepublishOnly
         env:
@@ -174,7 +131,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: "npm/**/*.node"
+          files: "*.node"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
