@@ -13,6 +13,9 @@ pub struct HeaderState {
     pub last_committed_tx_id: TxId,
     pub btree_index_page: Option<PageId>,
     pub btree_index_size: u32,
+    pub property_index_root_page: Option<PageId>,
+    pub property_index_count: u32,
+    pub property_index_version: u16,
 }
 
 impl From<Header> for HeaderState {
@@ -25,6 +28,9 @@ impl From<Header> for HeaderState {
             last_committed_tx_id: header.last_committed_tx_id,
             btree_index_page: header.btree_index_page,
             btree_index_size: header.btree_index_size,
+            property_index_root_page: header.property_index_root_page,
+            property_index_count: header.property_index_count,
+            property_index_version: header.property_index_version,
         }
     }
 }
@@ -39,6 +45,9 @@ impl HeaderState {
         header.last_committed_tx_id = self.last_committed_tx_id;
         header.btree_index_page = self.btree_index_page;
         header.btree_index_size = self.btree_index_size;
+        header.property_index_root_page = self.property_index_root_page;
+        header.property_index_count = self.property_index_count;
+        header.property_index_version = self.property_index_version;
         Ok(header)
     }
 }

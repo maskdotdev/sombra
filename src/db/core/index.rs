@@ -1,4 +1,5 @@
 use super::graphdb::GraphDB;
+use super::property_index_persistence::PropertyIndexSerializer;
 use crate::error::{GraphError, Result};
 use crate::index::BTreeIndex;
 use crate::pager::PageId;
@@ -6,6 +7,7 @@ use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::{deserialize_edge, deserialize_node, RecordPointer};
 use std::convert::TryFrom;
+use tracing::{info, warn};
 
 impl GraphDB {
     pub(crate) fn load_btree_index(&mut self) -> Result<bool> {
@@ -55,19 +57,35 @@ impl GraphDB {
                 for i in 0..old_pages {
                     self.push_free_page(old_page + i as u32)?;
                 }
-                self.pager.allocate_page()?
+                let start = self.pager.allocate_page()?;
+                for i in 1..pages_needed {
+                    let expected_page = start + i as u32;
+                    let allocated = self.pager.allocate_page()?;
+                    if allocated != expected_page {
+                        return Err(GraphError::Corruption(
+                            format!("Expected contiguous page allocation: got {}, expected {}", allocated, expected_page)
+                        ));
+                    }
+                }
+                start
             }
         } else {
-            self.pager.allocate_page()?
+            let new_page = self.pager.allocate_page()?;
+            for i in 1..pages_needed {
+                let expected_page = new_page + i as u32;
+                let allocated = self.pager.allocate_page()?;
+                if allocated != expected_page {
+                    return Err(GraphError::Corruption(
+                        format!("Expected contiguous page allocation: got {}, expected {}", allocated, expected_page)
+                    ));
+                }
+            }
+            new_page
         };
 
         let mut offset = 0;
         for i in 0..pages_needed {
-            let page_id = if i == 0 {
-                start_page
-            } else {
-                self.pager.allocate_page()?
-            };
+            let page_id = start_page + i as u32;
 
             let page = self.pager.fetch_page(page_id)?;
             let to_write = (data_size - offset).min(page_size);
@@ -83,6 +101,66 @@ impl GraphDB {
         self.header.btree_index_page = Some(start_page);
         self.header.btree_index_size = data_size as u32;
         Ok(())
+    }
+
+    pub(crate) fn persist_property_indexes(&mut self) -> Result<()> {
+        let mut serializer = PropertyIndexSerializer::new(&mut self.pager);
+        let (root_page, count, written_pages) = serializer.serialize_indexes(&self.property_indexes)?;
+
+        if root_page == 0 {
+            self.header.property_index_root_page = None;
+            self.header.property_index_count = 0;
+            return Ok(());
+        }
+
+        if let Some(old_root) = self.header.property_index_root_page {
+            let old_pages = serializer.collect_old_pages(old_root)?;
+            for page_id in old_pages {
+                self.push_free_page(page_id)?;
+            }
+        }
+
+        for page_id in written_pages {
+            self.record_page_write(page_id);
+        }
+
+        self.header.property_index_root_page = Some(root_page);
+        self.header.property_index_count = count;
+        self.header.property_index_version = 1;
+
+        info!(
+            root_page,
+            count,
+            "Persisted property indexes"
+        );
+
+        Ok(())
+    }
+
+    pub(crate) fn load_property_indexes(&mut self) -> Result<bool> {
+        let root_page = match self.header.property_index_root_page {
+            Some(page) if page > 0 => page,
+            _ => return Ok(false),
+        };
+
+        let mut serializer = PropertyIndexSerializer::new(&mut self.pager);
+        match serializer.deserialize_indexes(root_page) {
+            Ok(indexes) => {
+                self.property_indexes = indexes;
+                info!(
+                    count = self.property_indexes.len(),
+                    "Loaded property indexes from disk"
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                warn!(
+                    error = ?e,
+                    "Failed to load property indexes, will rebuild"
+                );
+                Ok(false)
+            }
+        }
     }
 
     pub(crate) fn rebuild_indexes(&mut self) -> Result<()> {

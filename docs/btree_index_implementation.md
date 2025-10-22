@@ -105,6 +105,18 @@ let bytes = index.serialize()?;
 let index = BTreeIndex::deserialize(&bytes)?;
 ```
 
+### Multi-Page Persistence
+
+When the serialized B-tree index exceeds a single page size (4KB), it is split across multiple consecutive pages:
+
+**Implementation:**
+- Pages are allocated **sequentially** starting from a base page ID
+- Example: If start_page = 100 and 3 pages are needed, pages 100, 101, 102 are used
+- Sequential allocation ensures reads retrieve the correct data written during persistence
+- This prevents "ghost entries" where the index references non-existent nodes
+
+**Critical Note:** The persistence layer MUST allocate sequential pages. Random page allocation will cause data corruption during deserialization, resulting in the index containing stale data from previous checkpoint cycles.
+
 ### Integration with GraphDB
 
 The B-tree index replaces the HashMap in `src/db.rs`:

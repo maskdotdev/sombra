@@ -622,6 +622,60 @@ userStream.on('error', (error) => {
 });
 ```
 
+### Concurrent Read Operations
+
+Sombra supports multiple concurrent read operations using a multi-reader, single-writer concurrency model:
+
+```typescript
+import { GraphDB } from 'sombra';
+
+const db = new GraphDB('concurrent.db');
+
+async function concurrentReads() {
+    const userId1 = 1;
+    const userId2 = 2;
+    const userId3 = 3;
+    
+    const [user1Friends, user2Friends, user3Friends] = await Promise.all([
+        db.getOutgoingEdges(userId1),
+        db.getOutgoingEdges(userId2),
+        db.getOutgoingEdges(userId3)
+    ]);
+    
+    console.log(`User 1 has ${user1Friends.length} friends`);
+    console.log(`User 2 has ${user2Friends.length} friends`);
+    console.log(`User 3 has ${user3Friends.length} friends`);
+}
+
+async function parallelTraversals() {
+    const userIds = [1, 2, 3, 4, 5];
+    
+    const allFriends = await Promise.all(
+        userIds.map(userId => 
+            db.rangeQuery(userId, userId, 'KNOWS')
+        )
+    );
+    
+    allFriends.forEach((friends, idx) => {
+        console.log(`User ${userIds[idx]} friends: ${friends.length}`);
+    });
+}
+
+async function concurrentPropertyReads() {
+    const nodeIds = [1, 2, 3, 4, 5, 6, 7, 8];
+    
+    const properties = await Promise.all(
+        nodeIds.map(id => db.getNodeProperties(id))
+    );
+    
+    console.log(`Fetched ${properties.length} node properties concurrently`);
+}
+
+concurrentReads();
+parallelTraversals();
+concurrentPropertyReads();
+```
+
 ### Worker Threads
 
 ```typescript

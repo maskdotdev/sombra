@@ -9,6 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+parking_lot = "0.12"
+tempfile = "3.0"
 
 [dependencies.sombra]
 path = ".."
@@ -34,5 +36,11 @@ doc = false
 [[bin]]
 name = "btree_operations"
 path = "fuzz_targets/btree_operations.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "concurrent_operations"
+path = "fuzz_targets/concurrent_operations.rs"
 test = false
 doc = false

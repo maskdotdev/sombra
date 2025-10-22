@@ -332,3 +332,110 @@ fn test_all_benchmarks() {
     }
     println!("========================\n");
 }
+
+fn benchmark_range_query() -> BenchmarkResult {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    {
+        let mut tx = db.begin_transaction().unwrap();
+        for i in 0..5000 {
+            let mut props = BTreeMap::new();
+            props.insert("index".to_string(), PropertyValue::Int(i));
+            
+            let mut node = Node::new(0);
+            node.labels.push("RangeTest".to_string());
+            node.properties = props;
+            
+            tx.add_node(node).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let operations = 1000;
+    let start = Instant::now();
+
+    for i in 0..operations {
+        let offset = (i * 50) % 4500;
+        let range_start = offset + 1;
+        let range_end = offset + 100;
+        let _ = db.get_nodes_in_range(range_start, range_end);
+    }
+
+    let duration = start.elapsed();
+    let throughput = operations as f64 / duration.as_secs_f64();
+
+    BenchmarkResult {
+        name: "range_query".to_string(),
+        duration,
+        throughput,
+    }
+}
+
+fn benchmark_ordered_iteration() -> BenchmarkResult {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let mut db = GraphDB::open(temp.path()).unwrap();
+
+    {
+        let mut tx = db.begin_transaction().unwrap();
+        for i in 0..2000 {
+            let mut props = BTreeMap::new();
+            props.insert("seq".to_string(), PropertyValue::Int(i));
+            
+            let mut node = Node::new(0);
+            node.labels.push("Ordered".to_string());
+            node.properties = props;
+            
+            tx.add_node(node).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let operations = 100;
+    let start = Instant::now();
+
+    for _ in 0..operations {
+        let _ = db.get_all_node_ids_ordered();
+    }
+
+    let duration = start.elapsed();
+    let throughput = operations as f64 / duration.as_secs_f64();
+
+    BenchmarkResult {
+        name: "ordered_iteration".to_string(),
+        duration,
+        throughput,
+    }
+}
+
+#[test]
+#[ignore]
+fn test_range_query_regression() {
+    let result = benchmark_range_query();
+    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
+    
+    let baseline_throughput = 10000.0;
+    let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
+    
+    assert!(
+        result.throughput >= min_acceptable,
+        "Range query regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
+        result.throughput, min_acceptable, baseline_throughput, REGRESSION_THRESHOLD * 100.0
+    );
+}
+
+#[test]
+#[ignore]
+fn test_ordered_iteration_regression() {
+    let result = benchmark_ordered_iteration();
+    println!("{}: {:.2} ops/sec ({:?})", result.name, result.throughput, result.duration);
+    
+    let baseline_throughput = 100.0;
+    let min_acceptable = baseline_throughput * (1.0 - REGRESSION_THRESHOLD);
+    
+    assert!(
+        result.throughput >= min_acceptable,
+        "Ordered iteration regression detected: {:.2} ops/sec < {:.2} ops/sec (baseline: {:.2}, threshold: {}%)",
+        result.throughput, min_acceptable, baseline_throughput, REGRESSION_THRESHOLD * 100.0
+    );
+}

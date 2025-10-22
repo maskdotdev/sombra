@@ -1,6 +1,7 @@
 use sombra::{Edge, GraphDB, Node, Result};
 use parking_lot::Mutex;
 use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -8,6 +9,7 @@ use tempfile::NamedTempFile;
 const NUM_THREADS: usize = 8;
 const OPERATIONS_PER_THREAD: usize = 100;
 const CONCURRENT_NODES: usize = NUM_THREADS * OPERATIONS_PER_THREAD;
+const STRESS_READERS: usize = 128;
 
 #[test]
 fn concurrent_node_insertion() -> Result<()> {
@@ -384,6 +386,191 @@ fn concurrent_database_open_close() -> Result<()> {
     }
 
     assert_eq!(found_nodes, NUM_THREADS * 10);
+
+    Ok(())
+}
+
+#[test]
+fn concurrent_massive_readers_stress() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let path = tmp.path().to_path_buf();
+
+    let mut db = GraphDB::open(&path)?;
+    let num_nodes: usize = 1000;
+    for i in 0..num_nodes {
+        let mut node = Node::new(i as u64);
+        node.labels.push(format!("Node_{}", i % 10));
+        node.properties.insert("index".to_string(), sombra::PropertyValue::Int(i as i64));
+        node.properties.insert("category".to_string(), sombra::PropertyValue::String(format!("cat_{}", i % 5)));
+        db.add_node(node)?;
+    }
+    
+    for i in 0..(num_nodes - 1) {
+        let edge = Edge::new(0, (i + 1) as u64, (i + 2) as u64, "link");
+        db.add_edge(edge)?;
+    }
+    
+    db.checkpoint()?;
+    let db = Arc::new(Mutex::new(db));
+
+    println!("\n=== Testing {} Concurrent Readers ===", STRESS_READERS);
+    
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(STRESS_READERS));
+    let start_time = Instant::now();
+    let mut handles = vec![];
+
+    for thread_id in 0..STRESS_READERS {
+        let db_clone = Arc::clone(&db);
+        let barrier_clone = Arc::clone(&barrier);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || -> Result<usize> {
+            barrier_clone.wait();
+            
+            let mut local_ops = 0;
+            let ops_per_reader = 50;
+
+            for i in 0..ops_per_reader {
+                let node_id = ((thread_id * ops_per_reader + i) % num_nodes + 1) as u64;
+                
+                match i % 5 {
+                    0 => {
+                        if db_clone.lock().get_node(node_id).is_ok() {
+                            local_ops += 1;
+                        }
+                    }
+                    1 => {
+                        if let Ok(neighbors) = db_clone.lock().get_neighbors(node_id) {
+                            local_ops += neighbors.len();
+                        }
+                    }
+                    2 => {
+                        let label = format!("Node_{}", i % 10);
+                        if let Ok(nodes) = db_clone.lock().get_nodes_by_label(&label) {
+                            local_ops += nodes.len();
+                        }
+                    }
+                    3 => {
+                        if let Ok(count) = db_clone.lock().count_outgoing_edges(node_id) {
+                            local_ops += count;
+                        }
+                    }
+                    4 => {
+                        if let Ok(count) = db_clone.lock().count_incoming_edges(node_id) {
+                            local_ops += count;
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            success_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(local_ops)
+        });
+
+        handles.push(handle);
+    }
+
+    let mut total_ops = 0;
+    for handle in handles {
+        let ops = handle.join().unwrap()?;
+        total_ops += ops;
+    }
+
+    let elapsed = start_time.elapsed();
+    let successful_readers = success_count.load(Ordering::SeqCst);
+
+    println!("Completed in {:?}", elapsed);
+    println!("Successful readers: {}/{}", successful_readers, STRESS_READERS);
+    println!("Total read operations: {}", total_ops);
+    println!("Operations per second: {:.2}", total_ops as f64 / elapsed.as_secs_f64());
+    println!("Average latency per operation: {:.2}μs", elapsed.as_micros() as f64 / total_ops as f64);
+
+    assert_eq!(successful_readers, STRESS_READERS, "All readers should complete successfully");
+    assert!(total_ops > 0, "Should have performed read operations");
+
+    Ok(())
+}
+
+#[test]
+fn concurrent_readers_with_single_writer() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let path = tmp.path().to_path_buf();
+
+    let mut db = GraphDB::open(&path)?;
+    for i in 0..500 {
+        let mut node = Node::new(i as u64);
+        node.labels.push(format!("Node_{}", i));
+        db.add_node(node)?;
+    }
+    db.checkpoint()?;
+    let db = Arc::new(Mutex::new(db));
+
+    println!("\n=== Testing 100 Readers + 1 Writer ===");
+    
+    let num_readers = 100;
+    let barrier = Arc::new(Barrier::new(num_readers + 1));
+    let start_time = Instant::now();
+    let mut handles = vec![];
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let write_count = Arc::new(AtomicUsize::new(0));
+
+    for thread_id in 0..num_readers {
+        let db_clone = Arc::clone(&db);
+        let barrier_clone = Arc::clone(&barrier);
+        let read_count_clone = Arc::clone(&read_count);
+
+        let handle = thread::spawn(move || -> Result<()> {
+            barrier_clone.wait();
+            
+            for i in 0..100 {
+                let node_id = ((thread_id * 100 + i) % 500 + 1) as u64;
+                if db_clone.lock().get_node(node_id).is_ok() {
+                    read_count_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Ok(())
+        });
+
+        handles.push(handle);
+    }
+
+    let db_clone = Arc::clone(&db);
+    let barrier_clone = Arc::clone(&barrier);
+    let write_count_clone = Arc::clone(&write_count);
+    
+    let writer_handle = thread::spawn(move || -> Result<()> {
+        barrier_clone.wait();
+        
+        for i in 0..100 {
+            let mut node = Node::new((1000 + i) as u64);
+            node.labels.push(format!("NewNode_{}", i));
+            db_clone.lock().add_node(node)?;
+            write_count_clone.fetch_add(1, Ordering::Relaxed);
+            
+            thread::sleep(Duration::from_micros(100));
+        }
+        Ok(())
+    });
+    
+    handles.push(writer_handle);
+
+    for handle in handles {
+        handle.join().unwrap()?;
+    }
+
+    let elapsed = start_time.elapsed();
+    let total_reads = read_count.load(Ordering::Relaxed);
+    let total_writes = write_count.load(Ordering::Relaxed);
+
+    println!("Completed in {:?}", elapsed);
+    println!("Total reads: {}, Total writes: {}", total_reads, total_writes);
+    println!("Read throughput: {:.2} ops/sec", total_reads as f64 / elapsed.as_secs_f64());
+    println!("Write throughput: {:.2} ops/sec", total_writes as f64 / elapsed.as_secs_f64());
+
+    assert!(total_reads > 0, "Readers should complete successfully");
+    assert_eq!(total_writes, 100, "Writer should complete all operations");
 
     Ok(())
 }

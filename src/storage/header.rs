@@ -6,9 +6,9 @@ use crate::model::{EdgeId, NodeId};
 use crate::pager::PageId;
 
 const MAGIC: &[u8; 8] = b"GRPHITE\0";
-const HEADER_REGION_SIZE: usize = 80;
+const HEADER_REGION_SIZE: usize = 96;
 const VERSION_MAJOR: u16 = 1;
-const VERSION_MINOR: u16 = 1;
+const VERSION_MINOR: u16 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -20,6 +20,9 @@ pub struct Header {
     pub last_committed_tx_id: TxId,
     pub btree_index_page: Option<PageId>,
     pub btree_index_size: u32,
+    pub property_index_root_page: Option<PageId>,
+    pub property_index_count: u32,
+    pub property_index_version: u16,
 }
 
 impl Header {
@@ -35,6 +38,9 @@ impl Header {
             last_committed_tx_id: 0,
             btree_index_page: None,
             btree_index_size: 0,
+            property_index_root_page: None,
+            property_index_count: 0,
+            property_index_version: 1,
         })
     }
 
@@ -56,10 +62,10 @@ impl Header {
         }
 
         let major = u16::from_le_bytes([data[8], data[9]]);
-        let minor = u16::from_le_bytes([data[10], data[11]]);
-        if major != VERSION_MAJOR || minor != VERSION_MINOR {
+        let _minor = u16::from_le_bytes([data[10], data[11]]);
+        if major != VERSION_MAJOR {
             return Err(GraphError::Corruption(format!(
-                "unsupported header version {major}.{minor}"
+                "unsupported header major version {major} (expected {VERSION_MAJOR})"
             )));
         }
 
@@ -86,6 +92,29 @@ impl Header {
             0
         };
 
+        let property_index_root_page = if data.len() >= 64 {
+            let page = u32::from_le_bytes([data[56], data[57], data[58], data[59]]);
+            if page == 0 {
+                None
+            } else {
+                Some(page)
+            }
+        } else {
+            None
+        };
+
+        let property_index_count = if data.len() >= 64 {
+            u32::from_le_bytes([data[60], data[61], data[62], data[63]])
+        } else {
+            0
+        };
+
+        let property_index_version = if data.len() >= 66 {
+            u16::from_le_bytes([data[64], data[65]])
+        } else {
+            0
+        };
+
         Ok(Some(Self {
             page_size,
             next_node_id,
@@ -103,6 +132,9 @@ impl Header {
             last_committed_tx_id,
             btree_index_page,
             btree_index_size,
+            property_index_root_page,
+            property_index_count,
+            property_index_version,
         }))
     }
 
@@ -125,6 +157,9 @@ impl Header {
         data[40..48].copy_from_slice(&self.last_committed_tx_id.to_le_bytes());
         data[48..52].copy_from_slice(&self.btree_index_page.unwrap_or(0).to_le_bytes());
         data[52..56].copy_from_slice(&self.btree_index_size.to_le_bytes());
+        data[56..60].copy_from_slice(&self.property_index_root_page.unwrap_or(0).to_le_bytes());
+        data[60..64].copy_from_slice(&self.property_index_count.to_le_bytes());
+        data[64..66].copy_from_slice(&self.property_index_version.to_le_bytes());
         Ok(())
     }
 

@@ -684,3 +684,67 @@ fn property_index_falls_back_to_scan_when_not_indexed() {
     assert_eq!(age_30_nodes.len(), 1);
     assert_eq!(age_30_nodes[0], alice_id);
 }
+
+#[test]
+fn property_index_persists_across_checkpoint_and_reopen() {
+    let temp_file = create_temp_db("property_index_persistence");
+    
+    {
+        let mut db = GraphDB::open(&temp_file).expect("open db");
+        
+        let mut alice = Node::new(0);
+        alice.labels.push("Person".to_string());
+        alice.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+        alice.properties.insert("age".to_string(), PropertyValue::Int(30));
+        
+        let mut bob = Node::new(0);
+        bob.labels.push("Person".to_string());
+        bob.properties.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+        bob.properties.insert("age".to_string(), PropertyValue::Int(25));
+        
+        let mut charlie = Node::new(0);
+        charlie.labels.push("Person".to_string());
+        charlie.properties.insert("name".to_string(), PropertyValue::String("Charlie".to_string()));
+        charlie.properties.insert("age".to_string(), PropertyValue::Int(30));
+        
+        let alice_id = db.add_node(alice).expect("add alice");
+        let _bob_id = db.add_node(bob).expect("add bob");
+        let charlie_id = db.add_node(charlie).expect("add charlie");
+        
+        db.create_property_index("Person", "age").expect("create age index");
+        db.create_property_index("Person", "name").expect("create name index");
+        
+        let age_30_nodes = db
+            .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+            .expect("find age 30");
+        assert_eq!(age_30_nodes.len(), 2);
+        assert!(age_30_nodes.contains(&alice_id));
+        assert!(age_30_nodes.contains(&charlie_id));
+        
+        db.checkpoint().expect("checkpoint");
+    }
+    
+    {
+        let mut db = GraphDB::open(&temp_file).expect("reopen db");
+        
+        let age_30_nodes = db
+            .find_nodes_by_property("Person", "age", &PropertyValue::Int(30))
+            .expect("find age 30 after reopen");
+        assert_eq!(age_30_nodes.len(), 2);
+        
+        let age_25_nodes = db
+            .find_nodes_by_property("Person", "age", &PropertyValue::Int(25))
+            .expect("find age 25 after reopen");
+        assert_eq!(age_25_nodes.len(), 1);
+        
+        let alice_nodes = db
+            .find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".to_string()))
+            .expect("find alice by name");
+        assert_eq!(alice_nodes.len(), 1);
+        
+        let nonexistent_nodes = db
+            .find_nodes_by_property("Person", "age", &PropertyValue::Int(99))
+            .expect("find nonexistent age");
+        assert_eq!(nonexistent_nodes.len(), 0);
+    }
+}

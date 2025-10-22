@@ -361,6 +361,68 @@ plt.axis('off')
 plt.show()
 ```
 
+### Concurrent Read Operations
+
+Sombra supports multiple concurrent read operations using a multi-reader, single-writer concurrency model:
+
+```python
+import sombra
+import concurrent.futures
+
+db = sombra.GraphDB("concurrent.db")
+
+def concurrent_reads():
+    """Execute multiple read operations concurrently"""
+    user_ids = [1, 2, 3, 4, 5]
+    
+    def get_user_friends(user_id):
+        with db.transaction() as tx:
+            return tx.get_outgoing_edges(user_id)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(get_user_friends, user_ids))
+    
+    for idx, friends in enumerate(results):
+        print(f"User {user_ids[idx]} has {len(friends)} friends")
+
+def parallel_property_reads():
+    """Fetch node properties concurrently"""
+    node_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    
+    def get_properties(node_id):
+        with db.transaction() as tx:
+            return tx.get_node_properties(node_id)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        properties = list(executor.map(get_properties, node_ids))
+    
+    print(f"Fetched {len(properties)} node properties concurrently")
+    return properties
+
+def parallel_traversals():
+    """Execute multiple graph traversals concurrently"""
+    start_nodes = [1, 2, 3, 4]
+    
+    def traverse_from_node(node_id):
+        with db.transaction() as tx:
+            return tx.traverse() \
+                .from_node(node_id) \
+                .outgoing("KNOWS") \
+                .collect()
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(traverse_from_node, start_nodes))
+    
+    for idx, friends in enumerate(results):
+        print(f"Node {start_nodes[idx]} friends: {len(friends)}")
+    
+    return results
+
+concurrent_reads()
+parallel_property_reads()
+parallel_traversals()
+```
+
 ### Async Integration
 
 Use with async frameworks like asyncio:

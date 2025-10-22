@@ -52,6 +52,9 @@ impl BTreeIndex {
     }
 
     pub fn range(&self, start: NodeId, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
+        if start > end {
+            return Vec::new();
+        }
         self.root
             .read()
             .range(start..=end)

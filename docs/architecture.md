@@ -193,11 +193,54 @@ Application Request
 - **Random Page Access**: Page cache mitigates disk latency
 - **Checkpoint I/O**: Batched writes for efficiency
 
-### Concurrency
+### Concurrency Model
 
-- **Single Writer**: Only one transaction can be active
-- **Multiple Readers**: Read operations can be concurrent
-- **Lock Granularity**: Page-level locking for efficiency
+Sombra implements a **multi-reader, single-writer** concurrency model using `RwLock` for optimal read performance:
+
+- **Multiple Concurrent Readers**: Read operations can execute simultaneously without blocking each other
+- **Single Writer**: Write operations (including transactions) require exclusive access
+- **Lock Granularity**: Database-level locking via `Arc<RwLock<GraphDB>>`
+
+#### Read vs Write Operations
+
+**Read Operations** (acquire shared read lock):
+- `get_node()`, `get_edge()`
+- `get_node_properties()`, `get_edge_properties()`
+- `find_nodes_by_label()`, `find_nodes_by_property()`
+- `get_outgoing_edges()`, `get_incoming_edges()`
+- Range queries and ordered iteration
+- Graph traversals
+
+**Write Operations** (acquire exclusive write lock):
+- `create_node()`, `create_edge()`
+- `update_node_properties()`, `update_edge_properties()`
+- `delete_node()`, `delete_edge()`
+- Transaction commit/rollback
+- Index modifications
+- Checkpoint operations
+
+#### Transaction Isolation
+
+Transactions hold an exclusive write lock for their entire duration:
+1. **Begin**: Acquire write lock
+2. **Operations**: All modifications tracked in memory
+3. **Commit/Rollback**: Write to WAL, then release lock
+
+This ensures **serializable isolation** - transactions are effectively executed one at a time.
+
+#### Performance Characteristics
+
+- **Read Throughput Scaling**: 3-4x improvement with 4 concurrent readers
+- **No Read Blocking**: Readers never block other readers
+- **Writer Priority**: Writers may need to wait for active readers to complete
+- **Lock Contention**: Minimal for read-heavy workloads (typical graph queries)
+
+#### Implementation Details
+
+**Rust API**: Direct access to `Arc<RwLock<GraphDB>>`
+**Python/Node.js Bindings**: Transparent `RwLock` wrapping with automatic lock acquisition
+
+The RwLock choice optimizes for graph database query patterns, where reads typically outnumber writes 10:1 or more.
 
 ## Configuration Impact
 

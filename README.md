@@ -1,18 +1,13 @@
-# Sombra - Production-Ready Graph Database
+# Sombra - High-Performance Graph Database
 
 [![Crates.io](https://img.shields.io/crates/v/sombra)](https://crates.io/crates/sombra)
 [![Documentation](https://docs.rs/sombra/badge.svg)](https://docs.rs/sombra)
 [![CI](https://github.com/maskdotdev/sombra/workflows/CI/badge.svg)](https://github.com/maskdotdev/sombra/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Sombra is a file-based graph database inspired by SQLite's single-file architecture. Built in Rust with a focus on **reliability**, **performance**, and **ACID transactions**.
+> ⚠️ **Alpha Software**: Sombra is under active development. APIs may change, and the project is not yet recommended for production use. Feedback and contributions are welcome!
 
-**Version 0.2.0 - Production Ready** ✅
-- Zero panic paths in production code
-- Comprehensive error handling with graceful degradation
-- Battle-tested with 10,000+ corruption scenarios
-- Structured logging and health monitoring
-- Complete API documentation and operational guides
+Sombra is a file-based graph database inspired by SQLite's single-file architecture. Built in Rust with a focus on **reliability**, **performance**, and **ACID transactions**.
 
 ## Features
 
@@ -37,8 +32,8 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 - **Python API**: PyO3 bindings with native performance (build with `maturin -F python`)
 - **Cross-Platform**: Linux, macOS, and Windows support
 
-### Reliability & Production Features (v0.2.0) ✨ NEW
-- **Zero Panic Paths**: All errors handled gracefully with `Result` types
+### Reliability Features
+- **Comprehensive Error Handling**: All errors handled gracefully with `Result` types
 - **Corruption Resistance**: Safe deserialization with comprehensive validation
 - **Structured Logging**: Full tracing support with `tracing` crate
 - **Health Monitoring**: Built-in health checks and extended metrics
@@ -306,7 +301,7 @@ cargo run --example performance_metrics_demo --features benchmarks
 
 ## Current Status
 
-### ✅ Version 0.2.0 - Production Ready
+### Version 0.3.0 - Alpha
 
 **Core Features:**
 - Core graph operations (nodes, edges, properties)
@@ -317,9 +312,10 @@ cargo run --example performance_metrics_demo --features benchmarks
 - LRU node cache (90% hit rate)
 - Adjacency indexing for fast traversals (18-23x faster than SQLite)
 - Property-based indexes for O(log n) queries
+- Multi-reader concurrency support (100+ concurrent readers)
 
-**Production Hardening (v0.2.0):**
-- ✅ Zero panic paths - All errors handled gracefully
+**Quality & Reliability:**
+- ✅ Comprehensive error handling with graceful degradation
 - ✅ Corruption resistance - 10,000+ fuzzing scenarios
 - ✅ Structured logging - Full `tracing` support
 - ✅ Health monitoring - Extended metrics and health checks
@@ -335,15 +331,21 @@ cargo run --example performance_metrics_demo --features benchmarks
 - ✅ Python bindings (PyO3)
 - ✅ TypeScript/Node.js bindings (NAPI)
 
-### 🚀 Future Roadmap
+### 🚀 Roadmap to Production (v1.0)
+
+**In Progress:**
+- Real-world testing and feedback collection
+- API stabilization and versioning strategy
+- Performance optimization and profiling
 
 **Planned Features:**
 - Page-level checksums for data integrity validation
-- Concurrent readers with MVCC
+- MVCC for improved concurrency
 - Query planner with cost-based optimization
 - Replication and high availability
 - Backup/restore utilities
 - Performance dashboard
+- Production deployment case studies
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and [docs/roadmap.md](docs/roadmap.md) for future plans.
 
