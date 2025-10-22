@@ -198,7 +198,7 @@ impl Pager {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
-        if self.file_len % self.page_size as u64 != 0 {
+        if !self.file_len.is_multiple_of(self.page_size as u64) {
             return Err(GraphError::Corruption(
                 "underlying file length is not page aligned".into(),
             ));
