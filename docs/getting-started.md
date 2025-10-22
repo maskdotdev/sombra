@@ -10,7 +10,7 @@ Add Sombra to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-sombra = "0.1"
+sombra = "0.3"
 ```
 
 ### Python
@@ -61,20 +61,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tx = db.begin_transaction()?;
     
     // Create nodes
-    let alice = tx.create_node("Person", vec![
-        ("name".into(), PropertyValue::String("Alice".into())),
-        ("age".into(), PropertyValue::Integer(30)),
-    ])?;
+    let mut alice = Node::new(1);
+    alice.labels.push("Person".to_string());
+    alice.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+    alice.properties.insert("age".to_string(), PropertyValue::Int(30));
+    let alice_id = tx.add_node(alice)?;
     
-    let bob = tx.create_node("Person", vec![
-        ("name".into(), PropertyValue::String("Bob".into())),
-        ("age".into(), PropertyValue::Integer(25)),
-    ])?;
+    let mut bob = Node::new(2);
+    bob.labels.push("Person".to_string());
+    bob.properties.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+    bob.properties.insert("age".to_string(), PropertyValue::Int(25));
+    let bob_id = tx.add_node(bob)?;
     
     // Create an edge
-    tx.create_edge(alice, bob, "KNOWS", vec![
-        ("since".into(), PropertyValue::Integer(2020)),
-    ])?;
+    let mut edge = Edge::new(1, alice_id, bob_id, "KNOWS");
+    edge.properties.insert("since".to_string(), PropertyValue::Int(2020));
+    tx.add_edge(edge)?;
     
     // Commit the transaction
     tx.commit()?;
@@ -90,24 +92,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 import sombra
 
 # Open or create a database
-db = sombra.GraphDB("my_graph.db")
+db = sombra.SombraDB("my_graph.db")
 
 # Start a transaction
 tx = db.begin_transaction()
 
 # Create nodes
-alice = tx.create_node("Person", {
+alice = tx.add_node(["Person"], {
     "name": "Alice",
     "age": 30
 })
 
-bob = tx.create_node("Person", {
+bob = tx.add_node(["Person"], {
     "name": "Bob", 
     "age": 25
 })
 
 # Create an edge
-tx.create_edge(alice, bob, "KNOWS", {
+tx.add_edge(alice, bob, "KNOWS", {
     "since": 2020
 })
 
@@ -120,33 +122,33 @@ print("Graph created successfully!")
 ### Node.js/TypeScript
 
 ```typescript
-import { GraphDB } from 'sombra';
+import { SombraDB } from 'sombra';
 
 async function main() {
     // Open or create a database
-    const db = new GraphDB('my_graph.db');
+    const db = new SombraDB('my_graph.db');
     
     // Start a transaction
     const tx = db.beginTransaction();
     
     // Create nodes
-    const alice = await tx.createNode('Person', {
-        name: 'Alice',
-        age: 30
+    const alice = tx.addNode(['Person'], {
+        name: { type: 'string', value: 'Alice' },
+        age: { type: 'int', value: 30 }
     });
     
-    const bob = await tx.createNode('Person', {
-        name: 'Bob',
-        age: 25
+    const bob = tx.addNode(['Person'], {
+        name: { type: 'string', value: 'Bob' },
+        age: { type: 'int', value: 25 }
     });
     
     // Create an edge
-    await tx.createEdge(alice, bob, 'KNOWS', {
-        since: 2020
+    tx.addEdge(alice, bob, 'KNOWS', {
+        since: { type: 'int', value: 2020 }
     });
     
     // Commit the transaction
-    await tx.commit();
+    tx.commit();
     
     console.log('Graph created successfully!');
 }
@@ -159,12 +161,16 @@ main().catch(console.error);
 ### Creating Nodes
 
 ```rust
+use std::collections::BTreeMap;
+
 // Create a node with properties
-let node = tx.create_node("User", vec![
-    ("username".into(), PropertyValue::String("john_doe".into())),
-    ("email".into(), PropertyValue::String("john@example.com".into())),
-    ("active".into(), PropertyValue::Boolean(true)),
-])?;
+let mut node = Node::new(1);
+node.labels.push("User".to_string());
+node.properties.insert("username".to_string(), PropertyValue::String("john_doe".to_string()));
+node.properties.insert("email".to_string(), PropertyValue::String("john@example.com".to_string()));
+node.properties.insert("active".to_string(), PropertyValue::Bool(true));
+
+let node_id = tx.add_node(node)?;
 ```
 
 ### Reading Nodes
@@ -174,22 +180,20 @@ let node = tx.create_node("User", vec![
 let node = tx.get_node(node_id)?;
 
 // Get node properties
-let properties = tx.get_node_properties(node_id)?;
-if let Some(name) = properties.get("name") {
-    println!("Node name: {:?}", name);
+let name = node.properties.get("name");
+if let Some(PropertyValue::String(name_str)) = name {
+    println!("Node name: {}", name_str);
 }
 
 // Find nodes by label
-let users = tx.find_nodes_by_label("User")?;
+let users = tx.get_nodes_by_label("User")?;
 ```
 
 ### Updating Nodes
 
 ```rust
-// Update node properties
-tx.update_node_properties(node_id, vec![
-    ("last_login".into(), PropertyValue::Integer(timestamp)),
-])?;
+// Update node properties (outside transaction)
+db.set_node_property(node_id, "last_login".to_string(), PropertyValue::Int(timestamp))?;
 ```
 
 ### Deleting Nodes
@@ -203,13 +207,12 @@ tx.delete_node(node_id)?;
 
 ```rust
 // Create an edge
-tx.create_edge(from_node, to_node, "FOLLOWS", vec![
-    ("since".into(), PropertyValue::Integer(2023)),
-])?;
+let edge = Edge::new(1, from_node, to_node, "FOLLOWS");
+tx.add_edge(edge)?;
 
 // Get edges from a node
-let outgoing = tx.get_outgoing_edges(node_id)?;
-let incoming = tx.get_incoming_edges(node_id)?;
+let outgoing = db.get_outgoing_edges(node_id)?;
+let incoming = db.get_incoming_edges(node_id)?;
 
 // Delete an edge
 tx.delete_edge(edge_id)?;
@@ -220,44 +223,53 @@ tx.delete_edge(edge_id)?;
 ### Basic Traversal
 
 ```rust
+use sombra::EdgeDirection;
+
 // Find all friends of a user
-let user_node = tx.find_nodes_by_property("User", "username", &PropertyValue::String("alice".into()))?
-    .into_iter().next()
-    .ok_or("User not found")?;
+let result = db.query()
+    .start_from_label("User")
+    .filter_nodes(|node| {
+        matches!(
+            node.properties.get("username"),
+            Some(PropertyValue::String(name)) if name == "alice"
+        )
+    })
+    .traverse(&["FRIENDS_WITH"], EdgeDirection::Outgoing, 1)
+    .execute()?;
 
-let friends = tx.traverse()
-    .from(user_node)
-    .outgoing("FRIENDS_WITH")
-    .collect::<Result<Vec<_>, _>>()?;
-
-println!("Alice has {} friends", friends.len());
+println!("Alice has {} friends", result.node_ids.len() - 1);
 ```
 
 ### Multi-hop Traversal
 
 ```rust
 // Find friends of friends (2 hops)
-let fofs = tx.traverse()
-    .from(user_node)
-    .outgoing("FRIENDS_WITH")
-    .outgoing("FRIENDS_WITH")
-    .collect::<Result<Vec<_>, _>>()?;
+let result = db.query()
+    .start_from_label("User")
+    .filter_nodes(|node| {
+        matches!(
+            node.properties.get("username"),
+            Some(PropertyValue::String(name)) if name == "alice"
+        )
+    })
+    .traverse(&["FRIENDS_WITH"], EdgeDirection::Outgoing, 2)
+    .execute()?;
 ```
 
 ### Conditional Traversal
 
 ```rust
 // Find active users who follow the target user
-let active_followers = tx.traverse()
-    .from(user_node)
-    .incoming("FOLLOWS")
-    .filter(|node| {
-        let props = tx.get_node_properties(node.id)?;
-        Ok(props.get("active")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false))
+let result = db.query()
+    .start_from_property("User", "username", &PropertyValue::String("alice".to_string()))
+    .traverse(&["FOLLOWS"], EdgeDirection::Incoming, 1)
+    .filter_nodes(|node| {
+        matches!(
+            node.properties.get("active"),
+            Some(PropertyValue::Bool(true))
+        )
     })
-    .collect::<Result<Vec<_>, _>>()?;
+    .execute()?;
 ```
 
 ## Running Tests

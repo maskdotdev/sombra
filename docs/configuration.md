@@ -7,15 +7,14 @@ Sombra provides flexible configuration options to optimize performance for diffe
 ### Rust
 
 ```rust
-use sombra::{Config, GraphDB};
+use sombra::{Config, GraphDB, SyncMode};
 
 // Create custom configuration
-let config = Config::builder()
-    .cache_size(1024 * 1024 * 1024)  // 1GB cache
-    .wal_enabled(true)
-    .auto_checkpoint_interval(30000)  // 30 seconds
-    .max_transaction_pages(10000)
-    .build();
+let mut config = Config::default();
+config.page_cache_size = 250000;  // ~1GB cache (4KB pages)
+config.wal_sync_mode = SyncMode::GroupCommit;
+config.auto_checkpoint_interval_ms = Some(30000);  // 30 seconds
+config.max_transaction_pages = 10000;
 
 let db = GraphDB::open_with_config("my_graph.db", config)?;
 ```
@@ -23,33 +22,21 @@ let db = GraphDB::open_with_config("my_graph.db", config)?;
 ### Python
 
 ```python
+# Python bindings currently only support default configuration
+# Configuration must be set when opening the database in Rust
 import sombra
 
-# Create custom configuration
-config = sombra.Config.builder() \
-    .cache_size(1024 * 1024 * 1024)  # 1GB cache \
-    .wal_enabled(True) \
-    .auto_checkpoint_interval(30000)  # 30 seconds \
-    .max_transaction_pages(10000) \
-    .build()
-
-db = sombra.GraphDB("my_graph.db", config)
+db = sombra.SombraDB("my_graph.db")
 ```
 
 ### Node.js
 
 ```typescript
-import { Config, GraphDB } from 'sombra';
+// Node.js bindings currently only support default configuration
+// Configuration must be set when opening the database in Rust
+import { SombraDB } from 'sombra';
 
-// Create custom configuration
-const config = Config.builder()
-    .cacheSize(1024 * 1024 * 1024)  // 1GB cache
-    .walEnabled(true)
-    .autoCheckpointInterval(30000)  // 30 seconds
-    .maxTransactionPages(10000)
-    .build();
-
-const db = new GraphDB('my_graph.db', config);
+const db = new SombraDB('my_graph.db');
 ```
 
 ## Configuration Options
@@ -58,20 +45,21 @@ const db = new GraphDB('my_graph.db', config);
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `cache_size` | `usize` | 64MB | Page cache size in bytes |
-| `wal_enabled` | `bool` | `true` | Enable Write-Ahead Logging |
-| `auto_checkpoint_interval` | `Option<u64>` | `Some(30000)` | Auto-checkpoint interval in milliseconds |
+| `page_cache_size` | `usize` | 10000 | Number of pages to cache (1 page = 4KB) |
+| `wal_sync_mode` | `SyncMode` | `Full` | WAL synchronization mode |
+| `auto_checkpoint_interval_ms` | `Option<u64>` | `Some(30000)` | Auto-checkpoint interval in milliseconds |
 | `max_transaction_pages` | `usize` | 10000 | Maximum pages per transaction |
+| `checkpoint_threshold` | `usize` | 1000 | WAL frames before auto-checkpoint |
 
 ### Performance Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `group_commit_enabled` | `bool` | `false` | Enable group commit for higher throughput |
-| `group_commit_interval_ms` | `u64` | 10 | Group commit timeout in milliseconds |
-| `group_commit_max_transactions` | `usize` | 100 | Max transactions per group commit |
-| `read_ahead_enabled` | `bool` | `true` | Enable read-ahead optimization |
-| `read_ahead_pages` | `usize` | 4 | Number of pages to read ahead |
+| `group_commit_timeout_ms` | `u64` | 1 | Group commit timeout in milliseconds |
+| `sync_interval` | `usize` | 1 | Operations between syncs in Normal mode |
+| `use_mmap` | `bool` | `true` | Use memory-mapped I/O |
+| `parallel_traversal_threshold` | `usize` | 1024 | Min workload for parallel traversal |
+| `rayon_thread_pool_size` | `Option<usize>` | `None` | Override thread pool size |
 
 ### Safety Options
 
@@ -80,7 +68,27 @@ const db = new GraphDB('my_graph.db', config);
 | `max_database_size_mb` | `Option<u64>` | `None` | Maximum database size in MB |
 | `max_wal_size_mb` | `u64` | 100 | Maximum WAL size in MB |
 | `transaction_timeout_ms` | `Option<u64>` | `None` | Transaction timeout in milliseconds |
-| `fsync_enabled` | `bool` | `true` | Force fsync on commit |
+| `checksum_enabled` | `bool` | `true` | Enable page checksums |
+| `wal_size_warning_threshold_mb` | `u64` | 80 | WAL size warning threshold |
+
+### Compaction Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable_background_compaction` | `bool` | `false` | Enable background compaction |
+| `compaction_interval_secs` | `Option<u64>` | `Some(300)` | Interval between compaction runs |
+| `compaction_threshold_percent` | `u8` | 50 | Min dead space % to trigger compaction |
+| `compaction_batch_size` | `usize` | 100 | Max pages per compaction run |
+
+### Sync Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `SyncMode::Full` | Sync after every write | Maximum durability |
+| `SyncMode::Normal` | Periodic sync | Balanced |
+| `SyncMode::Checkpoint` | Sync only at checkpoints | Better performance |
+| `SyncMode::GroupCommit` | Batch multiple transactions | High throughput |
+| `SyncMode::Off` | No sync | Testing only |
 
 ## Predefined Profiles
 
@@ -153,13 +161,15 @@ let config = Config::benchmark();
 The page cache is the most important performance setting:
 
 ```rust
-// Calculate optimal cache size (70-80% of available memory)
-let total_memory = get_available_memory(); // Implementation depends on OS
-let cache_size = (total_memory as f64 * 0.75) as usize;
+// Calculate optimal cache size
+// Note: 1 page = 4KB, so 250000 pages = ~1GB
+let total_memory_mb = 8192; // 8GB system
+let cache_percentage = 0.75;
+let cache_size_mb = (total_memory_mb as f64 * cache_percentage) as u64;
+let cache_pages = (cache_size_mb * 1024 * 1024 / 4096) as usize;
 
-let config = Config::builder()
-    .cache_size(cache_size)
-    .build();
+let mut config = Config::default();
+config.page_cache_size = cache_pages;
 ```
 
 **Guidelines:**
@@ -167,17 +177,18 @@ let config = Config::builder()
 - **Server applications**: Use 70-80% of available memory
 - **Memory-constrained**: Use 20-30% of available memory
 
+**Calculation:** `pages = (MB * 1024 * 1024) / 4096`
+
 #### Transaction Memory
 
 Limit transaction memory usage to prevent OOM:
 
 ```rust
-let config = Config::builder()
-    .max_transaction_pages(max_pages_for_workload)
-    .build();
+let mut config = Config::default();
+config.max_transaction_pages = 25600;
 
-// Rough calculation: 1 page = 4KB
-// For 100MB transaction limit: 100 * 1024 * 1024 / 4096 = 25600 pages
+// Calculation: For 100MB transaction limit
+// 100MB / 4KB per page = 25600 pages
 ```
 
 ### Disk I/O Optimization
@@ -185,21 +196,20 @@ let config = Config::builder()
 #### WAL Configuration
 
 ```rust
+use sombra::SyncMode;
+
 // High durability
-let config = Config::builder()
-    .wal_enabled(true)
-    .fsync_enabled(true)
-    .auto_checkpoint_interval(Some(30000))  // 30 seconds
-    .max_wal_size_mb(100)
-    .build();
+let mut config = Config::default();
+config.wal_sync_mode = SyncMode::Full;
+config.auto_checkpoint_interval_ms = Some(30000);  // 30 seconds
+config.max_wal_size_mb = 100;
 
 // High performance
-let config = Config::builder()
-    .wal_enabled(true)
-    .fsync_enabled(false)  // Risk: data loss on crash
-    .auto_checkpoint_interval(Some(300000))  // 5 minutes
-    .max_wal_size_mb(1000)
-    .build();
+let mut config = Config::default();
+config.wal_sync_mode = SyncMode::Normal;
+config.sync_interval = 100;  // Sync every 100 operations
+config.auto_checkpoint_interval_ms = Some(300000);  // 5 minutes
+config.max_wal_size_mb = 1000;
 ```
 
 #### Group Commit
@@ -207,53 +217,40 @@ let config = Config::builder()
 Enable group commit for high-throughput workloads:
 
 ```rust
-let config = Config::builder()
-    .group_commit_enabled(true)
-    .group_commit_interval_ms(5)   // Shorter = lower latency
-    .group_commit_max_transactions(50)  // Batch size
-    .build();
+let mut config = Config::default();
+config.wal_sync_mode = SyncMode::GroupCommit;
+config.group_commit_timeout_ms = 5;  // Shorter = lower latency
 ```
 
 **Tradeoffs:**
-- **Shorter interval**: Lower latency, less batching
-- **Longer interval**: Higher throughput, more latency
-- **Larger batch**: Higher throughput, more memory usage
+- **Shorter timeout**: Lower latency, less batching
+- **Longer timeout**: Higher throughput, more latency
 
 ### Concurrency Optimization
 
 #### Read-Heavy Workloads
 
 ```rust
-let config = Config::builder()
-    .cache_size(large_cache)  // Maximize cache
-    .read_ahead_enabled(true)
-    .read_ahead_pages(8)      // Aggressive read-ahead
-    .group_commit_enabled(false)  // Disable for consistency
-    .build();
+let mut config = Config::default();
+config.page_cache_size = 50000;  // Large cache
+config.parallel_traversal_threshold = 512;  // Lower threshold for parallelism
 ```
 
 #### Write-Heavy Workloads
 
 ```rust
-let config = Config::builder()
-    .group_commit_enabled(true)
-    .group_commit_interval_ms(10)
-    .group_commit_max_transactions(100)
-    .wal_enabled(true)
-    .fsync_enabled(false)  // If durability allows
-    .build();
+let mut config = Config::default();
+config.wal_sync_mode = SyncMode::GroupCommit;
+config.group_commit_timeout_ms = 10;
+config.checkpoint_threshold = 5000;  // Less frequent checkpoints
 ```
 
 #### Mixed Workloads
 
 ```rust
-let config = Config::builder()
-    .cache_size(moderate_cache)
-    .group_commit_enabled(true)
-    .group_commit_interval_ms(5)   // Balanced latency
-    .read_ahead_enabled(true)
-    .auto_checkpoint_interval(Some(60000))  // 1 minute
-    .build();
+let mut config = Config::balanced();  // Use balanced preset
+config.page_cache_size = 20000;
+config.auto_checkpoint_interval_ms = Some(60000);  // 1 minute
 ```
 
 ## Environment-Specific Tuning
@@ -261,39 +258,32 @@ let config = Config::builder()
 ### Development
 
 ```rust
-let config = Config::builder()
-    .cache_size(64 * 1024 * 1024)  // 64MB - conservative
-    .wal_enabled(true)
-    .fsync_enabled(true)          // Ensure data integrity
-    .auto_checkpoint_interval(Some(10000))  // 10 seconds - frequent
-    .max_transaction_pages(1000)   // Small transactions
-    .build();
+let mut config = Config::default();
+config.page_cache_size = 16000;  // ~64MB
+config.wal_sync_mode = SyncMode::Full;  // Ensure data integrity
+config.checksum_enabled = true;
+config.auto_checkpoint_interval_ms = Some(10000);  // 10 seconds - frequent
+config.max_transaction_pages = 1000;  // Small transactions
 ```
 
 ### Testing
 
 ```rust
-let config = Config::builder()
-    .cache_size(32 * 1024 * 1024)  // 32MB - minimal
-    .wal_enabled(false)            // Faster tests
-    .auto_checkpoint_interval(None) // No auto-checkpoint
-    .max_transaction_pages(500)    // Very small transactions
-    .build();
+let mut config = Config::benchmark();  // Fast, no durability
+config.page_cache_size = 8000;  // ~32MB minimal
+config.auto_checkpoint_interval_ms = None;  // No auto-checkpoint
+config.max_transaction_pages = 500;  // Very small transactions
 ```
 
 ### Production
 
 ```rust
-let config = Config::builder()
-    .cache_size(calculate_production_cache())
-    .wal_enabled(true)
-    .fsync_enabled(true)
-    .auto_checkpoint_interval(Some(30000))  // 30 seconds
-    .max_transaction_pages(10000)
-    .max_database_size_mb(Some(1024 * 1024))  // 1TB limit
-    .max_wal_size_mb(500)
-    .transaction_timeout_ms(Some(300000))     // 5 minutes
-    .build();
+let mut config = Config::production();  // Start with production preset
+// Customize based on your needs:
+config.page_cache_size = calculate_production_cache();
+config.max_database_size_mb = Some(1024 * 1024);  // 1TB limit
+config.max_wal_size_mb = 500;
+config.transaction_timeout_ms = Some(300000);  // 5 minutes
 ```
 
 ## Monitoring Configuration Impact
@@ -342,7 +332,7 @@ let mut config = Config::balanced();
 let baseline = benchmark_with_config(&config);
 
 // Make one change at a time
-config.set_cache_size(new_cache_size);
+config.page_cache_size = new_cache_size;
 let with_cache = benchmark_with_config(&config);
 
 // Compare and keep improvements
@@ -357,11 +347,11 @@ if with_cache.throughput > baseline.throughput {
 Track memory, disk I/O, and CPU usage:
 
 ```rust
-// Monitor memory usage
+// Monitor memory usage  
 let memory_usage = get_process_memory();
-let cache_usage = config.cache_size;
+let cache_bytes = config.page_cache_size * 4096;
 
-if memory_usage > cache_usage * 2 {
+if memory_usage > cache_bytes * 2 {
     println!("Consider reducing cache size");
 }
 ```
@@ -377,8 +367,8 @@ test_with_disk_full(&config);
 // Test with memory pressure
 test_with_memory_pressure(&config);
 
-// Test with power loss
-test_with_power_loss(&config);
+// Test crash recovery
+test_wal_recovery(&config);
 ```
 
 ### 4. Document Configuration Changes
@@ -406,10 +396,10 @@ reason = "Handle increased user load"
 **Solutions:**
 ```rust
 // Reduce cache size
-config.set_cache_size(config.cache_size / 2);
+config.page_cache_size = config.page_cache_size / 2;
 
 // Reduce transaction limits
-config.set_max_transaction_pages(config.max_transaction_pages / 2);
+config.max_transaction_pages = config.max_transaction_pages / 2;
 ```
 
 ### Poor Performance
@@ -421,27 +411,27 @@ config.set_max_transaction_pages(config.max_transaction_pages / 2);
 **Solutions:**
 ```rust
 // Increase cache size
-config.set_cache_size(config.cache_size * 2);
+config.page_cache_size = config.page_cache_size * 2;
 
 // Enable group commit
-config.set_group_commit_enabled(true);
+config.wal_sync_mode = SyncMode::GroupCommit;
 
-// Enable read-ahead
-config.set_read_ahead_enabled(true);
+// Enable parallel traversal
+config.parallel_traversal_threshold = 512;
 ```
 
 ### Data Loss Risk
 
 **Symptoms:**
-- fsync disabled
-- WAL disabled
+- Using `SyncMode::Off` or `SyncMode::Checkpoint`
+- Auto-checkpoint disabled
 
 **Solutions:**
 ```rust
 // Enable durability features
-config.set_fsync_enabled(true);
-config.set_wal_enabled(true);
-config.set_auto_checkpoint_interval(Some(30000));
+config.wal_sync_mode = SyncMode::Full;
+config.checksum_enabled = true;
+config.auto_checkpoint_interval_ms = Some(30000);
 ```
 
 ## Next Steps

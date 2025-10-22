@@ -205,15 +205,15 @@ Sombra implements a **multi-reader, single-writer** concurrency model using `RwL
 
 **Read Operations** (acquire shared read lock):
 - `get_node()`, `get_edge()`
-- `get_node_properties()`, `get_edge_properties()`
-- `find_nodes_by_label()`, `find_nodes_by_property()`
+- `get_nodes_by_label()`, `get_nodes_in_range()`
 - `get_outgoing_edges()`, `get_incoming_edges()`
+- `get_neighbors()`, `bfs_traversal()`
 - Range queries and ordered iteration
-- Graph traversals
+- Graph traversals and analytics
 
 **Write Operations** (acquire exclusive write lock):
-- `create_node()`, `create_edge()`
-- `update_node_properties()`, `update_edge_properties()`
+- `add_node()`, `add_edge()`
+- `set_node_property()`, `remove_node_property()`
 - `delete_node()`, `delete_edge()`
 - Transaction commit/rollback
 - Index modifications

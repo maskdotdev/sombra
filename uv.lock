@@ -1,0 +1,7 @@
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "sombra"
+version = "0.3.2"
+source = { editable = "." }

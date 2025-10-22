@@ -1,0 +1,22 @@
+{
+  "name": "sombra-code-analysis-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx agent.ts",
+    "seed": "tsx seed.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^2.0.53",
+    "@ai-sdk/openai-compatible": "^1.0.22",
+    "ai": "^5.0.76",
+    "sombradb": "^0.3.2",
+    "zod-to-json-schema": "^3.24.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.8.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.0.0"
+  }
+}
