@@ -128,9 +128,7 @@ jobs:
       - name: List npm packages
         run: find npm -name "*.node" -ls
       - name: Publish platform packages and main package
-        run: |
-          echo "//registry.npmjs.org/:_authToken=$NODE_AUTH_TOKEN" >> ~/.npmrc
-          npm run prepublishOnly
+        run: npm run prepublishOnly
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub Release
