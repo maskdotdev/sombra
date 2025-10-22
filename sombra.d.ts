@@ -22,10 +22,90 @@ export interface BfsResult {
   depth: number;
 }
 
+export interface DegreeEntry {
+  nodeId: number;
+  degree: number;
+}
+
+export interface DegreeDistribution {
+  inDegree: DegreeEntry[];
+  outDegree: DegreeEntry[];
+  totalDegree: DegreeEntry[];
+}
+
+export interface HubNode {
+  nodeId: number;
+  degree: number;
+}
+
+export interface Subgraph {
+  nodes: SombraNode[];
+  edges: SombraEdge[];
+  boundaryNodes: number[];
+}
+
+export interface PropertyBound {
+  value: SombraPropertyValue;
+  inclusive: boolean;
+}
+
+export interface PropertyRangeFilter {
+  key: string;
+  min?: PropertyBound;
+  max?: PropertyBound;
+}
+
+export interface PropertyFilters {
+  equals?: Record<string, SombraPropertyValue>;
+  notEquals?: Record<string, SombraPropertyValue>;
+  ranges?: PropertyRangeFilter[];
+}
+
+export interface NodePattern {
+  varName: string;
+  labels?: string[];
+  properties?: PropertyFilters;
+}
+
+export interface EdgePattern {
+  fromVar: string;
+  toVar: string;
+  types?: string[];
+  properties?: PropertyFilters;
+  direction: 'incoming' | 'outgoing' | 'both';
+}
+
+export interface Pattern {
+  nodes: NodePattern[];
+  edges: EdgePattern[];
+}
+
+export interface Match {
+  nodeBindings: Record<string, number>;
+  edgeIds: number[];
+}
+
+export interface QueryResult {
+  startNodes: number[];
+  nodeIds: number[];
+  limited: boolean;
+}
+
+export declare class QueryBuilder {
+  startFrom(nodeIds: number[]): this;
+  startFromLabel(label: string): this;
+  startFromProperty(label: string, key: string, value: string): this;
+  traverse(edgeTypes: string[], direction: 'incoming' | 'outgoing' | 'both', depth: number): this;
+  limit(n: number): this;
+  execute(): QueryResult;
+}
+
 export declare class SombraDB {
   constructor(path: string);
   
   beginTransaction(): SombraTransaction;
+  
+  query(): QueryBuilder;
   
   addNode(labels: string[], properties?: Record<string, SombraPropertyValue>): number;
   
@@ -82,6 +162,44 @@ export declare class SombraDB {
   flush(): void;
   
   checkpoint(): void;
+  
+  countNodesByLabel(): Record<string, number>;
+  
+  countEdgesByType(): Record<string, number>;
+  
+  getTotalNodeCount(): number;
+  
+  getTotalEdgeCount(): number;
+  
+  degreeDistribution(): DegreeDistribution;
+  
+  findHubs(minDegree: number, degreeType: 'in' | 'out' | 'total'): HubNode[];
+  
+  findIsolatedNodes(): number[];
+  
+  findLeafNodes(direction: 'incoming' | 'outgoing' | 'both'): number[];
+  
+  getAverageDegree(): number;
+  
+  getDensity(): number;
+  
+  countNodesWithLabel(label: string): number;
+  
+  countEdgesWithType(edgeType: string): number;
+  
+  extractSubgraph(rootNodes: number[], depth: number, edgeTypes?: string[], direction?: 'incoming' | 'outgoing' | 'both'): Subgraph;
+  
+  extractInducedSubgraph(nodeIds: number[]): Subgraph;
+  
+  findAncestorByLabel(startNodeId: number, label: string, edgeType: string): number | null;
+  
+  getAncestors(startNodeId: number, edgeType: string, maxDepth?: number): number[];
+  
+  getDescendants(startNodeId: number, edgeType: string, maxDepth?: number): number[];
+  
+  getContainingFile(nodeId: number): number;
+
+  matchPattern(pattern: Pattern): Match[];
 }
 
 export declare class SombraTransaction {
