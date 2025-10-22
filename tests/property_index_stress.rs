@@ -521,7 +521,7 @@ fn test_property_index_stress_100k_entries() {
                     PropertyValue::Int((node_idx % 100) as i64),
                 );
                 node.properties
-                    .insert("active".to_string(), PropertyValue::Bool(node_idx % 3 == 0));
+                    .insert("active".to_string(), PropertyValue::Bool(node_idx.is_multiple_of(3)));
                 tx.add_node(node).expect("add node");
             }
 
