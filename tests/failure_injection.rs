@@ -267,9 +267,9 @@ fn test_transaction_abort_on_error() {
         let edge = Edge::new(0, 9999, 9998, "INVALID");
         let result = tx.add_edge(edge);
 
-        if result.is_err() {
+        if let Err(e) = result {
             tx.rollback()?;
-            return Err(result.unwrap_err());
+            return Err(e);
         }
 
         tx.commit()?;
