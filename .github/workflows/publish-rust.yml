@@ -15,9 +15,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Run tests
-        run: cargo test --lib
+        run: cargo test --manifest-path packages/core/Cargo.toml --lib
       
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --manifest-path packages/core/Cargo.toml --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

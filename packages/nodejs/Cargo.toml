@@ -1,0 +1,20 @@
+[package]
+name = "sombradb-native"
+version = "0.4.0"
+edition = "2021"
+description = "Node.js bindings for Sombra graph database"
+license = "MIT"
+repository = "https://github.com/maskdotdev/sombra"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sombra = { path = "../core" }
+napi = { version = "3.0.0", features = ["serde-json"] }
+napi-derive = "3.0.0"
+parking_lot = "0.12"
+serde_json = "1.0"
+
+[build-dependencies]
+napi-build = "2"
