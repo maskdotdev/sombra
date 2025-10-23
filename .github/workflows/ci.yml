@@ -148,6 +148,12 @@ jobs:
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
+      - name: Copy binding to root for testing
+        run: |
+          if [ -f npm/*/sombradb.*.node ]; then
+            cp npm/*/sombradb.*.node ./
+          fi
+        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
