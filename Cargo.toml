@@ -1,6 +1,6 @@
 [package]
 name = "sombra"
-version = "1.0.0"
+version = "0.3.3"
 edition = "2021"
 description = "High-performance graph database with ACID transactions, single-file storage, and bindings for Rust, TypeScript, and Python"
 license = "MIT"
