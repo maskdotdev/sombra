@@ -71,7 +71,7 @@ impl GraphDB {
         Ok(edge_id)
     }
 
-    pub(crate) fn add_edge_internal(&mut self, mut edge: Edge) -> Result<EdgeId> {
+    pub fn add_edge_internal(&mut self, mut edge: Edge) -> Result<EdgeId> {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
@@ -131,7 +131,7 @@ impl GraphDB {
         self.delete_edge_internal(edge_id)
     }
 
-    pub(crate) fn delete_edge_internal(&mut self, edge_id: EdgeId) -> Result<()> {
+    pub fn delete_edge_internal(&mut self, edge_id: EdgeId) -> Result<()> {
         let pointer = *self
             .edge_index
             .get(&edge_id)

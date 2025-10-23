@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sombra"
-version = "0.3.3"
+version = "0.4.0"
 description = "A high-performance graph database with ACID transactions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,7 +36,7 @@ Issues = "https://github.com/maskdotdev/sombra/issues"
 sombra = "sombra._cli:main"
 
 [tool.maturin]
-features = ["python"]
+manifest-path = "Cargo.toml"
 module-name = "sombra.sombra"
 python-source = "python"
 generate-import-lib = true

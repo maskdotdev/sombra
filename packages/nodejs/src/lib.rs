@@ -7,14 +7,14 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-use crate::db::query::analytics::{DegreeDistribution, DegreeType};
-use crate::db::query::builder::QueryResult;
-use crate::db::query::pattern::{
+use sombra::db::query::analytics::{DegreeDistribution, DegreeType};
+use sombra::db::query::builder::QueryResult;
+use sombra::db::query::pattern::{
     EdgePattern, Match, NodePattern, Pattern, PropertyBound, PropertyFilters, PropertyRangeFilter,
 };
-use crate::db::query::subgraph::{EdgeTypeFilter, Subgraph};
-use crate::db::{GraphDB, TxId};
-use crate::model::{Edge, EdgeDirection, Node, PropertyValue};
+use sombra::db::query::subgraph::{EdgeTypeFilter, Subgraph};
+use sombra::db::{GraphDB, TxId};
+use sombra::model::{Edge, EdgeDirection, Node, PropertyValue};
 
 #[napi(js_name = "SombraDB")]
 pub struct SombraDB {
@@ -137,7 +137,7 @@ impl SombraDB {
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
 
-        while edge_id != crate::model::NULL_EDGE_ID {
+        while edge_id != sombra::model::NULL_EDGE_ID {
             edges.push(edge_id as f64);
             let edge = db.load_edge(edge_id).map_err(|e| {
                 Error::new(
@@ -162,7 +162,7 @@ impl SombraDB {
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
 
-        while edge_id != crate::model::NULL_EDGE_ID {
+        while edge_id != sombra::model::NULL_EDGE_ID {
             edges.push(edge_id as f64);
             let edge = db.load_edge(edge_id).map_err(|e| {
                 Error::new(
@@ -1044,7 +1044,7 @@ impl SombraTransaction {
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
 
-        while edge_id != crate::model::NULL_EDGE_ID {
+        while edge_id != sombra::model::NULL_EDGE_ID {
             edges.push(edge_id as f64);
             let edge = db.load_edge(edge_id).map_err(|e| {
                 Error::new(
@@ -1072,7 +1072,7 @@ impl SombraTransaction {
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
 
-        while edge_id != crate::model::NULL_EDGE_ID {
+        while edge_id != sombra::model::NULL_EDGE_ID {
             edges.push(edge_id as f64);
             let edge = db.load_edge(edge_id).map_err(|e| {
                 Error::new(

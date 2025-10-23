@@ -1,19 +1,19 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "packages": {
-    ".": {
+    "packages/core": {
       "component": "sombra",
       "package-name": "sombra",
       "release-type": "rust",
       "changelog-path": "CHANGELOG-rust.md"
     },
-    "js": {
+    "packages/nodejs": {
       "component": "sombradb",
       "package-name": "sombradb", 
       "release-type": "node",
       "changelog-path": "CHANGELOG-js.md"
     },
-    "python": {
+    "packages/python": {
       "component": "sombra-py",
       "package-name": "sombra",
       "release-type": "python",

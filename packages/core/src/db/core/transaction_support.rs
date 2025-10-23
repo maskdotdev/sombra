@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use tracing::warn;
 
 impl GraphDB {
-    pub(crate) fn commit_to_wal(&mut self, tx_id: TxId, dirty_pages: &[PageId]) -> Result<()> {
+    pub fn commit_to_wal(&mut self, tx_id: TxId, dirty_pages: &[PageId]) -> Result<()> {
         if dirty_pages.is_empty() {
             self.pager.commit_shadow_transaction();
             return Ok(());
@@ -98,7 +98,7 @@ impl GraphDB {
         Ok(())
     }
 
-    pub(crate) fn rollback_transaction(&mut self, dirty_pages: &[PageId]) -> Result<()> {
+    pub fn rollback_transaction(&mut self, dirty_pages: &[PageId]) -> Result<()> {
         self.pager.rollback_shadow_transaction()?;
 
         self.reload_header_state()?;
@@ -119,17 +119,17 @@ impl GraphDB {
         Ok(())
     }
 
-    pub(crate) fn start_tracking(&mut self) {
+    pub fn start_tracking(&mut self) {
         self.recent_dirty_pages.clear();
         self.tracking_enabled = true;
     }
 
-    pub(crate) fn stop_tracking(&mut self) {
+    pub fn stop_tracking(&mut self) {
         self.tracking_enabled = false;
         self.recent_dirty_pages.clear();
     }
 
-    pub(crate) fn take_recent_dirty_pages(&mut self) -> Vec<PageId> {
+    pub fn take_recent_dirty_pages(&mut self) -> Vec<PageId> {
         if !self.tracking_enabled || self.recent_dirty_pages.is_empty() {
             return Vec::new();
         }
@@ -145,7 +145,7 @@ impl GraphDB {
         }
     }
 
-    pub(crate) fn allocate_tx_id(&mut self) -> Result<TxId> {
+    pub fn allocate_tx_id(&mut self) -> Result<TxId> {
         let tx_id = self.next_tx_id;
         self.next_tx_id = self
             .next_tx_id
@@ -154,7 +154,7 @@ impl GraphDB {
         Ok(tx_id)
     }
 
-    pub(crate) fn enter_transaction(&mut self, tx_id: TxId) -> Result<()> {
+    pub fn enter_transaction(&mut self, tx_id: TxId) -> Result<()> {
         if self.active_transaction.is_some() {
             return Err(GraphError::InvalidArgument(
                 "nested transactions are not supported".into(),
@@ -165,7 +165,7 @@ impl GraphDB {
         Ok(())
     }
 
-    pub(crate) fn exit_transaction(&mut self) {
+    pub fn exit_transaction(&mut self) {
         self.active_transaction = None;
     }
 
@@ -173,7 +173,7 @@ impl GraphDB {
         self.active_transaction.is_some()
     }
 
-    pub(crate) fn write_header(&mut self) -> Result<()> {
+    pub fn write_header(&mut self) -> Result<()> {
         let header = self.header.to_header(self.pager.page_size())?;
         let page = self.pager.fetch_page(0)?;
         Header::write(&header, &mut page.data)?;

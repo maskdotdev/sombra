@@ -35,18 +35,19 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
-      - run: npm ci
-      - run: ${{ matrix.settings.build }}
+      - run: cd packages/nodejs && npm ci
+      - run: cd packages/nodejs && ${{ matrix.settings.build }}
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
           path: |
-            *.node
-            index.js
-            index.d.ts
+            packages/nodejs/*.node
+            packages/nodejs/index.js
+            packages/nodejs/index.d.ts
 
   publish:
     needs: build
@@ -60,14 +61,17 @@ jobs:
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
-      - run: npx napi create-npm-dirs
+          cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
+      - run: cd packages/nodejs && npm ci
+      - run: cd packages/nodejs && npx napi create-npm-dirs
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - run: npm run artifacts
+      - run: cd packages/nodejs && npm run artifacts
       - name: Publish to npm
         run: |
+          cd packages/nodejs
           npm config set provenance true
           echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
           npm publish --access public
