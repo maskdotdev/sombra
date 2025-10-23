@@ -20,7 +20,7 @@
       "changelog-path": "CHANGELOG-python.md"
     }
   },
-  "bootstrap-sha": "e89886d5c98e13a51b270940557d7c0aef5b2eec",
+  "bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",
   "release-search-depth": 500,
   "pull-request-title-pattern": "chore: release ${component} ${version}",
   "changelog-sections": [
