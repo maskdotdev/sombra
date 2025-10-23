@@ -14,6 +14,10 @@ yarn-error.log*
 npm/**/*.node
 index.js
 index.d.ts
+*.wasi.cjs
+*.wasi-browser.js
+wasi-worker*.mjs
+browser.js
 
 # Database files
 *.db
