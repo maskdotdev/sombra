@@ -8,33 +8,35 @@
     "sombra": "./bin/sombra.js"
   },
   "napi": {
-    "name": "sombradb",
-    "triples": {
-      "defaults": true,
-      "additional": [
-        "x86_64-pc-windows-msvc",
-        "i686-pc-windows-msvc",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-gnu",
-        "armv7-unknown-linux-gnueabihf"
-      ]
-    }
+    "binaryName": "sombradb",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "i686-pc-windows-msvc",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "armv7-unknown-linux-gnueabihf",
+      "aarch64-pc-windows-msvc",
+      "x86_64-unknown-freebsd",
+      "wasm32-wasip1-threads"
+    ]
   },
   "scripts": {
-    "build": "napi build --platform --release --features napi --cargo-flags=--lib && node scripts/fix-exports.js",
-    "build:debug": "napi build --platform --features napi --cargo-flags=--lib && node scripts/fix-exports.js",
-    "prepublishOnly": "napi prepublish -t npm --skip-gh-release && node scripts/fix-exports.js",
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release --no-default-features --features napi && node scripts/fix-exports.js",
+    "build:debug": "napi build --platform --no-default-features --features napi && node scripts/fix-exports.js",
+    "prepublishOnly": "napi prepublish -t npm && node scripts/fix-exports.js",
     "test": "node test/test.js",
     "test:comprehensive": "node test/test-comprehensive.js",
     "test:all": "npm test && npm run test:comprehensive",
     "test:debug": "node --inspect-brk test/test.js",
-    "example": "node examples/nodejs-example.js"
+    "example": "node examples/nodejs-example.js",
+    "version": "napi version"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
+    "@napi-rs/cli": "^3.2.0",
     "@types/node": "^24.8.1",
     "typescript": "^5.0.0"
   },
@@ -73,7 +75,9 @@
     "sombradb-darwin-arm64": "0.3.3",
     "sombradb-linux-x64-musl": "0.3.3",
     "sombradb-linux-arm64-gnu": "0.3.3",
-    "sombradb-linux-arm-gnueabihf": "0.3.3"
+    "sombradb-linux-arm-gnueabihf": "0.3.3",
+    "sombradb-win32-arm64-msvc": "0.3.3",
+    "sombradb-freebsd-x64": "0.3.3"
   },
   "publishConfig": {
     "access": "public"
