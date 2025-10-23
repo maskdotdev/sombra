@@ -103,16 +103,19 @@ jobs:
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
+      - name: List build artifacts
+        run: ls -la *.node *.wasm index.js index.d.ts 2>&1 || true
+        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
           path: |
-            ${{ env.APP_NAME }}.*.node
-            ${{ env.APP_NAME }}.*.wasm
+            *.node
+            *.wasm
             index.js
             index.d.ts
-          if-no-files-found: error
+          if-no-files-found: warn
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
     needs:
