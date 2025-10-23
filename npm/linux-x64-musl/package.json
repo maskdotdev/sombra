@@ -1,40 +1,32 @@
 {
-  "name": "sombradb-linux-x64-musl",
-  "version": "0.3.3",
-  "os": [
-    "linux"
-  ],
-  "cpu": [
-    "x64"
-  ],
-  "main": "sombradb.linux-x64-musl.node",
-  "files": [
-    "sombradb.linux-x64-musl.node"
-  ],
-  "description": "A high-performance graph database with ACID transactions",
-  "keywords": [
-    "graph",
-    "database",
-    "graphdb",
-    "acid",
-    "transactions",
-    "rust",
-    "napi",
-    "nodejs"
-  ],
-  "author": "mask <maskdotdev@gmail.com>",
-  "license": "MIT",
-  "engines": {
-    "node": ">= 14"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/maskdotdev/sombra.git"
-  },
-  "libc": [
-    "musl"
-  ],
-  "publishConfig": {
-    "access": "public"
-  }
+	"name": "@sombradb/linux-x64-musl",
+	"version": "0.3.3",
+	"os": ["linux"],
+	"cpu": ["x64"],
+	"main": "sombradb.linux-x64-musl.node",
+	"files": ["sombradb.linux-x64-musl.node"],
+	"description": "A high-performance graph database with ACID transactions",
+	"keywords": [
+		"graph",
+		"database",
+		"graphdb",
+		"acid",
+		"transactions",
+		"rust",
+		"napi",
+		"nodejs"
+	],
+	"author": "mask <maskdotdev@gmail.com>",
+	"license": "MIT",
+	"engines": {
+		"node": ">= 14"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/maskdotdev/sombra.git"
+	},
+	"libc": ["musl"],
+	"publishConfig": {
+		"access": "public"
+	}
 }

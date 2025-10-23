@@ -8,8 +8,8 @@ env:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
+    tags-ignore:
+      - '**'
     paths-ignore:
       - '**/*.md'
       - LICENSE
@@ -273,8 +273,24 @@ jobs:
           if [[ $GITHUB_REF == refs/tags/v* ]];
           then
             echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
-            npm publish --access public
-            echo "Published to npm"
+            
+            # Try to publish - may fail due to npm spam detection on first release
+            if npm publish --access public; then
+              echo "✅ Published to npm successfully"
+            else
+              EXIT_CODE=$?
+              echo "❌ Publish failed with exit code $EXIT_CODE"
+              echo ""
+              echo "If you see '403 Package name triggered spam detection':"
+              echo "1. This is expected for new platform-specific packages"
+              echo "2. Contact npm support: https://npmjs.com/support"
+              echo "3. Reference the NPM_SPAM_DETECTION.md file for details"
+              echo "4. npm support typically responds within 24-48 hours"
+              echo ""
+              echo "The --skip-gh-release flag prevents duplicate GitHub releases."
+              echo "Platform packages will publish automatically after npm approval."
+              exit $EXIT_CODE
+            fi
           else
             echo "Not a tag release, skipping publish"
           fi
