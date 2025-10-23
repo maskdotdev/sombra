@@ -50,17 +50,17 @@ See [COMPATIBILITY.md](../COMPATIBILITY.md) for the version compatibility matrix
 
 ## Error Handling Strategy
 
-- Use the crate-wide `Result<T>` alias and `GraphError` enum (`src/error.rs`) for all fallible operations.
+- Use the crate-wide `Result<T>` alias and `GraphError` enum (`packages/core/src/error.rs`) for all fallible operations.
 - Propagate lower-level errors with `?` and enrich them with context at module boundaries using `GraphError::Io`, `GraphError::Corruption`, etc.
 - Reserve `panic!` for unrecoverable programmer errors (e.g., logic bugs), not for I/O or user input issues.
 - When adding new error variants, ensure they round-trip through `Display` and update any pattern matches that enumerate existing variants.
 
 ## Module Boundaries
 
-- `src/model.rs` owns the in-memory graph primitives (`Node`, `Edge`) and should remain serialization-agnostic.
-- `src/storage` encapsulates on-disk representation concerns (record layout, serializers, header). Keep it free of graph semantics.
-- `src/pager` handles file I/O, page caching, and durability plumbing. Higher layers should not access raw file handles directly.
-- `src/db.rs` orchestrates graph workflows (ID allocation, adjacency maintenance) by composing `model`, `storage`, and `pager`.
+- `packages/core/src/model.rs` owns the in-memory graph primitives (`Node`, `Edge`) and should remain serialization-agnostic.
+- `packages/core/src/storage` encapsulates on-disk representation concerns (record layout, serializers, header). Keep it free of graph semantics.
+- `packages/core/src/pager` handles file I/O, page caching, and durability plumbing. Higher layers should not access raw file handles directly.
+- `packages/core/src/db.rs` orchestrates graph workflows (ID allocation, adjacency maintenance) by composing `model`, `storage`, and `pager`.
 - New functionality should fit into this layering; if adding cross-cutting features (e.g., WAL), prefer creating a dedicated module that `db` orchestrates rather than collapsing boundaries.
 
 ## Workflow Expectations
