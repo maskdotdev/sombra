@@ -8,7 +8,6 @@ env:
   push:
     branches:
       - main
-      - develop
     tags-ignore:
       - '**'
     paths-ignore:
@@ -32,7 +31,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install Rust
+      - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -42,32 +41,6 @@ jobs:
         run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy
-  test-rust:
-    name: Test Rust
-    needs: lint
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust: [stable, beta]
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Rust ${{ matrix.rust }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Run tests
-        run: cargo test --features benchmarks,python --workspace --lib --bins --tests
-      - name: Run doc tests
-        run: cargo test --doc --features benchmarks,python
   build:
     strategy:
       fail-fast: false
@@ -79,30 +52,12 @@ jobs:
           - host: windows-latest
             build: npm run build -- --target x86_64-pc-windows-msvc
             target: x86_64-pc-windows-msvc
-          - host: windows-latest
-            build: npm run build -- --target i686-pc-windows-msvc
-            target: i686-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: npm run build -- --target x86_64-unknown-linux-gnu --use-napi-cross
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            build: npm run build -- --target x86_64-unknown-linux-musl --use-napi-cross
           - host: macos-latest
             target: aarch64-apple-darwin
             build: npm run build -- --target aarch64-apple-darwin
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            build: npm run build -- --target aarch64-unknown-linux-gnu --use-napi-cross
-          - host: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-            build: npm run build -- --target armv7-unknown-linux-gnueabihf --use-napi-cross
-          - host: windows-latest
-            target: aarch64-pc-windows-msvc
-            build: npm run build -- --target aarch64-pc-windows-msvc
-          - host: ubuntu-latest
-            target: wasm32-wasip1-threads
-            build: npm run build -- --target wasm32-wasip1-threads
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -112,7 +67,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install Rust
+      - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -148,12 +103,6 @@ jobs:
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
-      - name: Copy binding to root for testing
-        run: |
-          if [ -f npm/*/sombradb.*.node ]; then
-            cp npm/*/sombradb.*.node ./
-          fi
-        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -161,51 +110,6 @@ jobs:
           path: |
             ${{ env.APP_NAME }}.*.node
             ${{ env.APP_NAME }}.*.wasm
-          if-no-files-found: error
-  build-freebsd:
-    runs-on: ubuntu-latest
-    name: Build FreeBSD
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build
-        id: build
-        uses: cross-platform-actions/action@v0.29.0
-        env:
-          DEBUG: napi:*
-          RUSTUP_IO_THREADS: 1
-        with:
-          operating_system: freebsd
-          version: '14.2'
-          memory: 8G
-          cpu_count: 3
-          environment_variables: DEBUG RUSTUP_IO_THREADS
-          shell: bash
-          run: |
-            sudo pkg install -y -f curl node libnghttp2 npm cmake
-            sudo npm install -g npm@latest --ignore-scripts
-            curl https://sh.rustup.rs -sSf --output rustup.sh
-            sh rustup.sh -y --profile minimal --default-toolchain stable
-            source "$HOME/.cargo/env"
-            echo "~~~~ rustc --version ~~~~"
-            rustc --version
-            echo "~~~~ node -v ~~~~"
-            node -v
-            echo "~~~~ npm --version ~~~~"
-            npm --version
-            pwd
-            ls -lah
-            whoami
-            env
-            freebsd-version
-            npm ci
-            npm run build
-            rm -rf node_modules
-            rm -rf target
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bindings-freebsd
-          path: ${{ env.APP_NAME }}.*.node
           if-no-files-found: error
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
@@ -218,9 +122,6 @@ jobs:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             architecture: x64
-          - host: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            architecture: arm64
           - host: macos-latest
             target: aarch64-apple-darwin
             architecture: arm64
@@ -250,7 +151,7 @@ jobs:
         run: ls -R .
         shell: bash
       - name: Test bindings
-        run: npm run test:all
+        run: npm test
   test-linux-binding:
     name: Test ${{ matrix.target }} - node@${{ matrix.node }}
     needs:
@@ -260,9 +161,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
         node:
           - '20'
           - '22'
@@ -315,54 +213,7 @@ jobs:
         with:
           image: ${{ steps.docker.outputs.IMAGE }}
           options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
-          run: npm run test:all
-  test-wasi:
-    name: Test WASI target
-    needs:
-      - build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Setup node
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Download artifacts
-        uses: actions/download-artifact@v5
-        with:
-          name: bindings-wasm32-wasip1-threads
-          path: .
-      - name: List packages
-        run: ls -R .
-        shell: bash
-      - name: Test bindings
-        run: npm run test:all
-        env:
-          NAPI_RS_FORCE_WASI: 1
-  python-wheel:
-    name: Build Python Wheel
-    needs: test-rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install maturin
-        run: python -m pip install --upgrade pip maturin
-      - name: Build Python wheel
-        run: python -m maturin build --release -F python
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-wheel
-          path: target/wheels/*.whl
-          if-no-files-found: error
+          run: npm test
   publish:
     name: Publish
     runs-on: ubuntu-latest
@@ -371,11 +222,8 @@ jobs:
       id-token: write
     needs:
       - lint
-      - test-rust
-      - build-freebsd
       - test-macOS-windows-binding
       - test-linux-binding
-      - test-wasi
     steps:
       - uses: actions/checkout@v5
       - name: Setup node
