@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "component": "sombra",
+      "package-name": "sombra",
+      "release-type": "rust",
+      "changelog-path": "CHANGELOG-rust.md"
+    },
+    "js": {
+      "component": "sombradb",
+      "package-name": "sombradb", 
+      "release-type": "node",
+      "changelog-path": "CHANGELOG-js.md"
+    },
+    "python": {
+      "component": "sombra-py",
+      "package-name": "sombra",
+      "release-type": "python",
+      "changelog-path": "CHANGELOG-python.md"
+    }
+  },
+  "bootstrap-sha": "e89886d5c98e13a51b270940557d7c0aef5b2eec",
+  "release-search-depth": 500,
+  "pull-request-title-pattern": "chore: release ${component} ${version}",
+  "changelog-sections": [
+    {"type": "feat", "section": "Features"},
+    {"type": "fix", "section": "Bug Fixes"},
+    {"type": "perf", "section": "Performance Improvements"},
+    {"type": "docs", "section": "Documentation"},
+    {"type": "chore", "section": "Miscellaneous", "hidden": true}
+  ]
+}

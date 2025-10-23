@@ -1,31 +1,37 @@
 {
-	"name": "@sombradb/win32-ia32-msvc",
-	"version": "0.3.3",
-	"os": ["win32"],
-	"cpu": ["ia32"],
-	"main": "sombradb.win32-ia32-msvc.node",
-	"files": ["sombradb.win32-ia32-msvc.node"],
-	"description": "A high-performance graph database with ACID transactions",
-	"keywords": [
-		"graph",
-		"database",
-		"graphdb",
-		"acid",
-		"transactions",
-		"rust",
-		"napi",
-		"nodejs"
-	],
-	"author": "mask <maskdotdev@gmail.com>",
-	"license": "MIT",
-	"engines": {
-		"node": ">= 14"
-	},
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/maskdotdev/sombra.git"
-	},
-	"publishConfig": {
-		"access": "public"
-	}
+  "name": "@sombradb/win32-ia32-msvc",
+  "version": "0.3.3",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "ia32"
+  ],
+  "main": "sombradb.win32-ia32-msvc.node",
+  "files": [
+    "sombradb.win32-ia32-msvc.node"
+  ],
+  "description": "A high-performance graph database with ACID transactions",
+  "keywords": [
+    "graph",
+    "database",
+    "graphdb",
+    "acid",
+    "transactions",
+    "rust",
+    "napi",
+    "nodejs"
+  ],
+  "author": "mask <maskdotdev@gmail.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 14"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maskdotdev/sombra.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

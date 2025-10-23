@@ -48,6 +48,15 @@ Sombra is a file-based graph database inspired by SQLite's single-file architect
 - **Zero Clippy Warnings**: Strict linting with `-D warnings`
 - **Benchmark Suite**: Performance regression testing
 
+## 📦 Version Compatibility
+
+Sombra uses **independent versioning** for each language binding. See the [Compatibility Matrix](COMPATIBILITY.md) to ensure you're using compatible versions across ecosystems.
+
+**Quick Reference:**
+- Rust: `cargo add sombra@0.3.3`
+- Node.js: `npm install sombradb@0.3.3`
+- Python: `pip install sombra==0.3.3`
+
 ## Quick Start
 
 ### Rust API

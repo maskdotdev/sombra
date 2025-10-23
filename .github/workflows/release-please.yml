@@ -1,0 +1,29 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      rust_release: ${{ steps.release.outputs['--release_created'] }}
+      js_release: ${{ steps.release.outputs['js--release_created'] }}
+      py_release: ${{ steps.release.outputs['python--release_created'] }}
+      rust_tag: ${{ steps.release.outputs['--tag_name'] }}
+      js_tag: ${{ steps.release.outputs['js--tag_name'] }}
+      py_tag: ${{ steps.release.outputs['python--tag_name'] }}
+    steps:
+      - uses: google-github-actions/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
