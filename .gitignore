@@ -12,6 +12,7 @@ yarn-error.log*
 # NAPI build artifacts
 /*.node
 npm/**/*.node
+packages/nodejs/**/*.node
 index.js
 index.d.ts
 *.wasi.cjs
