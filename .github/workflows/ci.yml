@@ -153,7 +153,13 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: .
       - name: List packages
-        run: ls -R .
+        run: |
+          echo "=== Root directory ==="
+          ls -la
+          echo "=== .node files ==="
+          ls -la *.node 2>&1 || echo "No .node files found"
+          echo "=== index.js ==="
+          ls -la index.js 2>&1 || echo "No index.js found"
         shell: bash
       - name: Test bindings
         run: npm test
@@ -204,7 +210,13 @@ jobs:
           name: bindings-${{ matrix.target }}
           path: .
       - name: List packages
-        run: ls -R .
+        run: |
+          echo "=== Root directory ==="
+          ls -la
+          echo "=== .node files ==="
+          ls -la *.node 2>&1 || echo "No .node files found"
+          echo "=== index.js ==="
+          ls -la index.js 2>&1 || echo "No index.js found"
         shell: bash
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
