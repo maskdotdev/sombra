@@ -31,16 +31,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - name: Install dependencies
-        run: npm ci
+        run: cd packages/nodejs && npm ci
       - name: Cargo fmt
         run: cargo fmt -- --check
       - name: Clippy
-        run: cargo clippy
+        run: cargo clippy --all-targets --all-features
   build:
     strategy:
       fail-fast: false
@@ -67,6 +68,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -99,22 +101,22 @@ jobs:
         if: ${{ matrix.settings.setup }}
         shell: bash
       - name: Install dependencies
-        run: npm ci
+        run: cd packages/nodejs && npm ci
       - name: Build
-        run: ${{ matrix.settings.build }}
+        run: cd packages/nodejs && ${{ matrix.settings.build }}
         shell: bash
       - name: List build artifacts
-        run: ls -la *.node *.wasm index.js index.d.ts 2>&1 || true
+        run: ls -la packages/nodejs/*.node packages/nodejs/*.wasm packages/nodejs/index.js packages/nodejs/index.d.ts 2>&1 || true
         shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
           path: |
-            *.node
-            *.wasm
-            index.js
-            index.d.ts
+            packages/nodejs/*.node
+            packages/nodejs/*.wasm
+            packages/nodejs/index.js
+            packages/nodejs/index.d.ts
           if-no-files-found: warn
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
@@ -144,25 +146,26 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
           architecture: ${{ matrix.settings.architecture }}
       - name: Install dependencies
-        run: npm ci
+        run: cd packages/nodejs && npm ci
       - name: Download artifacts
         uses: actions/download-artifact@v5
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: .
+          path: packages/nodejs
       - name: List packages
         run: |
           echo "=== Root directory ==="
-          ls -la
+          ls -la packages/nodejs
           echo "=== .node files ==="
-          ls -la *.node 2>&1 || echo "No .node files found"
+          ls -la packages/nodejs/*.node 2>&1 || echo "No .node files found"
           echo "=== index.js ==="
-          ls -la index.js 2>&1 || echo "No index.js found"
+          ls -la packages/nodejs/index.js 2>&1 || echo "No index.js found"
         shell: bash
       - name: Test bindings
-        run: npm test
+        run: cd packages/nodejs && npm test
   test-linux-binding:
     name: Test ${{ matrix.target }} - node@${{ matrix.node }}
     needs:
@@ -183,6 +186,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
       - name: Output docker params
         id: docker
         run: |
@@ -203,20 +207,20 @@ jobs:
             }
           " >> $GITHUB_OUTPUT
       - name: Install dependencies
-        run: npm ci
+        run: cd packages/nodejs && npm ci
       - name: Download artifacts
         uses: actions/download-artifact@v5
         with:
           name: bindings-${{ matrix.target }}
-          path: .
+          path: packages/nodejs
       - name: List packages
         run: |
           echo "=== Root directory ==="
-          ls -la
+          ls -la packages/nodejs
           echo "=== .node files ==="
-          ls -la *.node 2>&1 || echo "No .node files found"
+          ls -la packages/nodejs/*.node 2>&1 || echo "No .node files found"
           echo "=== index.js ==="
-          ls -la index.js 2>&1 || echo "No index.js found"
+          ls -la packages/nodejs/index.js 2>&1 || echo "No index.js found"
         shell: bash
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -229,7 +233,7 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: ${{ steps.docker.outputs.IMAGE }}
-          options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
+          options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }}/packages/nodejs --platform ${{ steps.docker.outputs.PLATFORM }}'
           run: npm test
   publish:
     name: Publish
@@ -249,10 +253,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: packages/nodejs/package-lock.json
       - name: Install dependencies
-        run: npm ci
+        run: cd packages/nodejs && npm ci
       - name: create npm dirs
-        run: npx napi create-npm-dirs
+        run: cd packages/nodejs && npx napi create-npm-dirs
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
@@ -263,18 +268,18 @@ jobs:
           ls -R artifacts/
         shell: bash
       - name: Move artifacts
-        run: npm run artifacts
+        run: cd packages/nodejs && npm run artifacts
       - name: List packages
-        run: ls -R ./npm
+        run: ls -R ./packages/nodejs/npm
         shell: bash
       - name: Publish
         run: |
           npm config set provenance true
           if [[ $GITHUB_REF == refs/tags/v* ]];
           then
+            cd packages/nodejs
             echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
             
-            # Try to publish - may fail due to npm spam detection on first release
             if npm publish --access public; then
               echo "✅ Published to npm successfully"
             else

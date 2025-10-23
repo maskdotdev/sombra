@@ -24,13 +24,14 @@ jobs:
       
       - name: Build wheel
         run: |
+          cd packages/python
           python -m pip install maturin
-          python -m maturin build --release -F python
+          python -m maturin build --release
       
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: target/wheels/*.whl
+          path: packages/python/target/wheels/*.whl
 
   publish-pypi:
     needs: build-wheels

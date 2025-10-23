@@ -53,7 +53,7 @@ impl GraphDB {
         Ok(node_id)
     }
 
-    pub(crate) fn add_node_internal(&mut self, mut node: Node) -> Result<NodeId> {
+    pub fn add_node_internal(&mut self, mut node: Node) -> Result<NodeId> {
         let node_id = self.header.next_node_id;
         self.header.next_node_id += 1;
 
@@ -142,7 +142,7 @@ impl GraphDB {
         self.delete_node_internal(node_id)
     }
 
-    pub(crate) fn delete_node_internal(&mut self, node_id: NodeId) -> Result<()> {
+    pub fn delete_node_internal(&mut self, node_id: NodeId) -> Result<()> {
         let pointer = self
             .node_index
             .get(&node_id)
@@ -440,7 +440,7 @@ impl GraphDB {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn set_node_property_internal(
+    pub fn set_node_property_internal(
         &mut self,
         node_id: NodeId,
         key: String,
@@ -495,7 +495,7 @@ impl GraphDB {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn remove_node_property_internal(
+    pub fn remove_node_property_internal(
         &mut self,
         node_id: NodeId,
         key: &str,

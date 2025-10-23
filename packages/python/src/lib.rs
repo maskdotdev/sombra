@@ -9,9 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyModule};
 use pyo3::Bound;
 
-use crate::db::{GraphDB, TxId};
-use crate::error::GraphError;
-use crate::model::{Edge, Node, PropertyValue, NULL_EDGE_ID};
+use ::sombra::db::{GraphDB, TxId};
+use ::sombra::error::GraphError;
+use ::sombra::model::{Edge, Node, PropertyValue, NULL_EDGE_ID};
 
 #[pyclass(module = "sombra", name = "SombraNode")]
 pub struct PySombraNode {
