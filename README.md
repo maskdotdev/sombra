@@ -217,14 +217,27 @@ See the [CLI documentation](docs/cli.md) for complete usage guide.
 
 ## Architecture
 
-Sombra is built in layers:
+Sombra is organized as a **monorepo** with three independent packages:
+
+### Repository Structure
+```
+sombra/
+├── packages/
+│   ├── core/          # Rust core library (sombra)
+│   ├── nodejs/        # Node.js/TypeScript bindings (sombradb)
+│   └── python/        # Python bindings (sombra)
+├── docs/              # Shared documentation
+└── scripts/           # Build and release scripts
+```
+
+### Core Architecture Layers
 
 1. **Storage Layer**: Page-based file storage with 8KB pages
 2. **Pager Layer**: In-memory caching and dirty page tracking
 3. **WAL Layer**: Write-ahead logging for crash safety
 4. **Transaction Layer**: ACID transaction support
 5. **Graph API**: High-level graph operations
-6. **NAPI Bindings**: TypeScript/Node.js interface layer
+6. **Language Bindings**: Native bindings for Node.js and Python
 
 ## Documentation
 
@@ -360,10 +373,13 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and [docs/roadmap.md
 
 ## Examples
 
-See the `tests/` directory for comprehensive examples:
-- `tests/smoke.rs` - Basic usage patterns
-- `tests/stress.rs` - Performance and scalability
-- `tests/transactions.rs` - Transaction usage examples
+See the examples directories for comprehensive examples:
+- `packages/core/examples/` - Rust examples (social graph, transactions, performance metrics)
+- `packages/nodejs/examples/` - TypeScript/JavaScript examples and code analysis demo
+- `packages/python/examples/` - Python examples including social network demo
+
+For test examples, see:
+- `packages/core/tests/` - Rust tests including smoke, stress, and transaction tests
 
 ## License
 

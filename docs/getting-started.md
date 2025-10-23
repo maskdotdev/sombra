@@ -297,10 +297,10 @@ cargo bench
 pip install pytest
 
 # Run tests
-pytest tests/
+pytest packages/python/tests/
 
 # Run with coverage
-pytest --cov=sombra tests/
+pytest --cov=sombra packages/python/tests/
 ```
 
 ### Node.js Tests
@@ -319,7 +319,7 @@ npm run test:coverage
 - Check the [Operations Guide](operations.md) for production deployment
 - Explore the [Python Guide](python-guide.md) for Python-specific features
 - See the [Node.js Guide](nodejs-guide.md) for TypeScript patterns
-- Browse the [examples](../examples/) directory for complete applications
+- Browse the examples in `packages/core/examples/`, `packages/nodejs/examples/`, and `packages/python/examples/`
 
 ## Getting Help
 
