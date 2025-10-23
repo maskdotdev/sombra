@@ -495,11 +495,7 @@ impl GraphDB {
     }
 
     #[allow(dead_code)]
-    pub fn remove_node_property_internal(
-        &mut self,
-        node_id: NodeId,
-        key: &str,
-    ) -> Result<()> {
+    pub fn remove_node_property_internal(&mut self, node_id: NodeId, key: &str) -> Result<()> {
         if !self.is_in_transaction() {
             return Err(GraphError::InvalidArgument(
                 "remove_node_property_internal must be called within a transaction".into(),
