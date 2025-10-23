@@ -1,31 +1,37 @@
 {
-	"name": "@sombradb/linux-arm-gnueabihf",
-	"version": "0.3.3",
-	"os": ["linux"],
-	"cpu": ["arm"],
-	"main": "sombradb.linux-arm-gnueabihf.node",
-	"files": ["sombradb.linux-arm-gnueabihf.node"],
-	"description": "A high-performance graph database with ACID transactions",
-	"keywords": [
-		"graph",
-		"database",
-		"graphdb",
-		"acid",
-		"transactions",
-		"rust",
-		"napi",
-		"nodejs"
-	],
-	"author": "mask <maskdotdev@gmail.com>",
-	"license": "MIT",
-	"engines": {
-		"node": ">= 14"
-	},
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/maskdotdev/sombra.git"
-	},
-	"publishConfig": {
-		"access": "public"
-	}
+  "name": "@sombradb/linux-arm-gnueabihf",
+  "version": "0.3.3",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm"
+  ],
+  "main": "sombradb.linux-arm-gnueabihf.node",
+  "files": [
+    "sombradb.linux-arm-gnueabihf.node"
+  ],
+  "description": "A high-performance graph database with ACID transactions",
+  "keywords": [
+    "graph",
+    "database",
+    "graphdb",
+    "acid",
+    "transactions",
+    "rust",
+    "napi",
+    "nodejs"
+  ],
+  "author": "mask <maskdotdev@gmail.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 14"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maskdotdev/sombra.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
