@@ -261,11 +261,11 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
-          path: artifacts
+          path: packages/nodejs/artifacts
       - name: List downloaded artifacts
         run: |
           echo "=== Downloaded artifacts ==="
-          ls -R artifacts/
+          ls -R packages/nodejs/artifacts/
         shell: bash
       - name: Move artifacts
         run: cd packages/nodejs && npm run artifacts
