@@ -12,6 +12,7 @@ yarn-error.log*
 # NAPI build artifacts
 /*.node
 npm/**/*.node
+packages/nodejs/**/*.node
 index.js
 index.d.ts
 *.wasi.cjs
@@ -77,6 +78,8 @@ build/
 # Fuzz testing artifacts
 fuzz/target/
 fuzz/corpus/
+packages/core/fuzz/target/
+packages/core/fuzz/corpus/
 
 # Session reports and completion summaries
 *_SESSION*.md
