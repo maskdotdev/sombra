@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.6](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.5...sombrajs-v0.4.6) (2025-10-24)
+
+
+### Bug Fixes
+
+* **js:** add bin/sombra.js to nodejs package ([9e693de](https://github.com/maskdotdev/sombra/commit/9e693de426b5297497efa7cf1bd6f5baab4f1490))
+* **js:** examples cleanup ([d6c5f2a](https://github.com/maskdotdev/sombra/commit/d6c5f2a76ef104d7e5c3198d9ef229646c171d18))
+* **js:** skip optional package publish during prepublish ([903afc5](https://github.com/maskdotdev/sombra/commit/903afc5af56a3a6f41602183fe8641cacfa004a5))
+* **js:** update ci and agent ([9b7f8d4](https://github.com/maskdotdev/sombra/commit/9b7f8d476fea64cd7886a236d4484f44d43bca41))
+* **js:** use correct --no-gh-release flag in prepublishOnly script ([3427881](https://github.com/maskdotdev/sombra/commit/34278811e0ea2b7a07bfb3a0cacb9f5d8b41c01a))
+
 ## [0.4.5](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.4...sombrajs-v0.4.5) (2025-10-24)
 
 
