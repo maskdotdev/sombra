@@ -106,6 +106,12 @@ jobs:
         with:
           path: packages/nodejs/artifacts
       - run: cd packages/nodejs && npm run artifacts
+      - name: Copy index files from artifacts
+        run: |
+          cd packages/nodejs
+          cp artifacts/bindings-x86_64-apple-darwin/index.js . || true
+          cp artifacts/bindings-x86_64-apple-darwin/index.d.ts . || true
+          ls -la index.js index.d.ts
       - name: Publish to npm
         run: |
           cd packages/nodejs
