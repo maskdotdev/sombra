@@ -2,6 +2,8 @@
 
 High-performance graph database for Python, powered by Rust.
 
+> **Note:** This is alpha software under active development. APIs may change between minor versions.
+
 ## Installation
 
 ```bash

@@ -2,6 +2,8 @@
 
 Core Rust library for Sombra, a high-performance graph database.
 
+> **Note:** This is alpha software under active development. APIs may change between minor versions.
+
 ## Overview
 
 This package contains the core graph database implementation for Sombra. It provides the foundational data structures, storage engine, and graph algorithms that power the Node.js and Python bindings.
