@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.4...sombra-v0.3.5) (2025-10-24)
+
+
+### Bug Fixes
+
+* getNode returns null for non-existent nodes, remove transaction enforcement, and fix BFS depth semantics ([46e95e7](https://github.com/maskdotdev/sombra/commit/46e95e721fe9b0c59706166fdd0fb36418291917))
+
 ## [0.3.4](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.3...sombra-v0.3.4) (2025-10-24)
 
 
