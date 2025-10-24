@@ -1,23 +1,27 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
   "packages": {
     "packages/core": {
       "component": "sombra",
       "package-name": "sombra",
       "release-type": "rust",
-      "changelog-path": "CHANGELOG-rust.md"
+      "changelog-path": "CHANGELOG-rust.md",
+      "include-component-in-tag": false
     },
     "packages/nodejs": {
       "component": "sombradb",
       "package-name": "sombradb", 
       "release-type": "node",
-      "changelog-path": "CHANGELOG-js.md"
+      "changelog-path": "CHANGELOG-js.md",
+      "include-component-in-tag": false
     },
     "packages/python": {
       "component": "sombra-py",
       "package-name": "sombra",
       "release-type": "python",
-      "changelog-path": "CHANGELOG-python.md"
+      "changelog-path": "CHANGELOG-python.md",
+      "include-component-in-tag": false
     }
   },
   "bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",
