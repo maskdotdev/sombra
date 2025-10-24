@@ -6,22 +6,19 @@
       "component": "sombra",
       "package-name": "sombra",
       "release-type": "rust",
-      "changelog-path": "CHANGELOG-rust.md",
-      "include-component-in-tag": false
+      "changelog-path": "CHANGELOG-rust.md"
     },
     "packages/nodejs": {
       "component": "sombradb",
       "package-name": "sombradb", 
       "release-type": "node",
-      "changelog-path": "CHANGELOG-js.md",
-      "include-component-in-tag": false
+      "changelog-path": "CHANGELOG-js.md"
     },
     "packages/python": {
       "component": "sombra-py",
       "package-name": "sombra",
       "release-type": "python",
-      "changelog-path": "CHANGELOG-python.md",
-      "include-component-in-tag": false
+      "changelog-path": "CHANGELOG-python.md"
     }
   },
   "bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",
