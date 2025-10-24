@@ -52,6 +52,10 @@ println!("User {} authored {} posts", user, neighbors.len());
 
 See the [main Sombra documentation](https://docs.rs/sombra) for full API reference.
 
+## Repository
+
+[GitHub](https://github.com/maskdotdev/sombra)
+
 ## License
 
 MIT

@@ -69,6 +69,10 @@ maturin develop
 pytest
 ```
 
+## Repository
+
+[GitHub](https://github.com/maskdotdev/sombra)
+
 ## License
 
 MIT
