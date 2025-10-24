@@ -466,7 +466,9 @@ impl GraphDB {
         let mut candidates = Vec::new();
         let mut seen_edges = HashSet::new();
 
-        let node = self.get_node(from_node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(from_node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
 
         if matches!(
             pattern.direction,
