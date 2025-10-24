@@ -97,7 +97,9 @@ jobs:
         run: ls -la wheels/
       
       - name: Flatten wheels
-        run: find wheels -name "*.whl" -exec cp {} . \;
+        run: |
+          find wheels -name "*.whl" -exec cp {} . \;
+          rm -rf wheels
       
       - name: List wheels to publish
         run: ls -la *.whl
