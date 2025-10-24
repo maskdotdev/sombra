@@ -9,13 +9,13 @@
       "changelog-path": "CHANGELOG-rust.md"
     },
     "packages/nodejs": {
-      "component": "sombradb",
+      "component": "sombrajs",
       "package-name": "sombradb", 
       "release-type": "node",
       "changelog-path": "CHANGELOG-js.md"
     },
     "packages/python": {
-      "component": "sombra-py",
+      "component": "sombrapy",
       "package-name": "sombra",
       "release-type": "python",
       "changelog-path": "CHANGELOG-python.md"
