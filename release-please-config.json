@@ -1,34 +1,34 @@
 {
-  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "separate-pull-requests": true,
-  "packages": {
-    "packages/core": {
-      "component": "sombra",
-      "package-name": "sombra",
-      "release-type": "rust",
-      "changelog-path": "CHANGELOG-rust.md"
-    },
-    "packages/nodejs": {
-      "component": "sombrajs",
-      "package-name": "sombradb", 
-      "release-type": "node",
-      "changelog-path": "CHANGELOG-js.md"
-    },
-    "packages/python": {
-      "component": "sombrapy",
-      "package-name": "sombra",
-      "release-type": "python",
-      "changelog-path": "CHANGELOG-python.md"
-    }
-  },
-  "bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",
-  "release-search-depth": 500,
-  "pull-request-title-pattern": "chore(release): ${component} v${version}",
-  "changelog-sections": [
-    {"type": "feat", "section": "Features"},
-    {"type": "fix", "section": "Bug Fixes"},
-    {"type": "perf", "section": "Performance Improvements"},
-    {"type": "docs", "section": "Documentation"},
-    {"type": "chore", "section": "Miscellaneous", "hidden": true}
-  ]
+	"$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+	"separate-pull-requests": true,
+	"packages": {
+		"packages/core": {
+			"component": "sombra",
+			"package-name": "sombra",
+			"release-type": "rust",
+			"changelog-path": "CHANGELOG-rust.md"
+		},
+		"packages/nodejs": {
+			"component": "sombrajs",
+			"package-name": "sombradb",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG-js.md"
+		},
+		"packages/python": {
+			"component": "sombrapy",
+			"package-name": "sombra",
+			"release-type": "python",
+			"changelog-path": "CHANGELOG-python.md"
+		}
+	},
+	"bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",
+	"release-search-depth": 500,
+	"pull-request-title-pattern": "chore(release): ${component} v${version}",
+	"changelog-sections": [
+		{ "type": "feat", "section": "Features" },
+		{ "type": "fix", "section": "Bug Fixes" },
+		{ "type": "perf", "section": "Performance Improvements" },
+		{ "type": "docs", "section": "Documentation" },
+		{ "type": "chore", "section": "Miscellaneous", "hidden": true }
+	]
 }

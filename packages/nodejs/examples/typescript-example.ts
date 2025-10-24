@@ -1,32 +1,32 @@
 import {
-  SombraDB,
-  SombraNode,
-  SombraEdge,
-  SombraPropertyValue,
+	SombraDB,
+	type SombraEdge,
+	type SombraNode,
+	type SombraPropertyValue,
 } from "../index";
 
 const db = new SombraDB("./example-ts.db");
 
 const createProp = (
-  type: "string" | "int" | "float" | "bool",
-  value: any,
+	type: "string" | "int" | "float" | "bool",
+	value: string | number | boolean,
 ): SombraPropertyValue => ({
-  type,
-  value,
+	type,
+	value,
 });
 
 const alice: number = db.addNode(["Person"], {
-  name: createProp("string", "Alice"),
-  age: createProp("int", 30),
+	name: createProp("string", "Alice"),
+	age: createProp("int", 30),
 });
 
 const bob: number = db.addNode(["Person"], {
-  name: createProp("string", "Bob"),
-  age: createProp("int", 25),
+	name: createProp("string", "Bob"),
+	age: createProp("int", 25),
 });
 
 const knows: number = db.addEdge(alice, bob, "KNOWS", {
-  since: createProp("int", 2020),
+	since: createProp("int", 2020),
 });
 
 const aliceNode: SombraNode = db.getNode(alice);
@@ -48,17 +48,17 @@ const tx = db.beginTransaction();
 console.log("Transaction ID:", tx.id());
 
 try {
-  const charlie: number = tx.addNode(["Person"], {
-    name: createProp("string", "Charlie"),
-  });
+	const charlie: number = tx.addNode(["Person"], {
+		name: createProp("string", "Charlie"),
+	});
 
-  tx.addEdge(alice, charlie, "KNOWS");
-  tx.commit();
+	tx.addEdge(alice, charlie, "KNOWS");
+	tx.commit();
 
-  console.log("Charlie:", db.getNode(charlie));
+	console.log("Charlie:", db.getNode(charlie));
 } catch (error) {
-  console.error("Transaction failed:", error);
-  tx.rollback();
+	console.error("Transaction failed:", error);
+	tx.rollback();
 }
 
 db.flush();
