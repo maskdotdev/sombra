@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.5](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.4...sombrajs-v0.4.5) (2025-10-24)
+
+
+### Bug Fixes
+
+* **js:** examples cleanup ([d6c5f2a](https://github.com/maskdotdev/sombra/commit/d6c5f2a76ef104d7e5c3198d9ef229646c171d18))
+* **js:** improve TypeScript example formatting and type safety ([6b0645e](https://github.com/maskdotdev/sombra/commit/6b0645e39c2862ef7b2ef2ea983074379ed39665))
+
+
+### Documentation
+
+* **js:** add automated release note to README ([6cc0c68](https://github.com/maskdotdev/sombra/commit/6cc0c684a5e5ccfd3f17c371cc061254ad51ad3c))
+
 ## [0.4.8](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.7...sombrajs-v0.4.8) (2025-10-24)
 
 
