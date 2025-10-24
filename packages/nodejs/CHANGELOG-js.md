@@ -14,6 +14,14 @@
 ### Bug Fixes
 
 * **js:** remove obsolete optionalDependencies causing 404s ([9f62ac7](https://github.com/maskdotdev/sombra/commit/9f62ac7d364f6b44a3bd9fa46e70657e2cfa273f))
+* **js:** remove outdated note from README ([9e4b3b4](https://github.com/maskdotdev/sombra/commit/9e4b3b48098b11ac622afcdd7bbd5245bd751987))
+
+## [0.4.6](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.5...sombrajs-v0.4.6) (2025-10-24)
+
+
+### Bug Fixes
+
+* **js:** remove obsolete optionalDependencies causing 404s ([9f62ac7](https://github.com/maskdotdev/sombra/commit/9f62ac7d364f6b44a3bd9fa46e70657e2cfa273f))
 
 ## [0.4.6](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.5...sombrajs-v0.4.6) (2025-10-24)
 
