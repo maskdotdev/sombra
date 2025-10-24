@@ -35,13 +35,15 @@ jobs:
           echo "Event name: ${{ github.event_name }}"
           echo "Ref: ${{ github.ref }}"
           echo "Tag input: ${{ inputs.tag }}"
+          echo "inputs.tag != '': ${{ inputs.tag != '' }}"
           echo "Event name == 'workflow_call': ${{ github.event_name == 'workflow_call' }}"
           echo "startsWith(github.ref, 'refs/tags/sombrajs-v'): ${{ startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
-          echo "Build condition result: ${{ github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
+          echo "NEW Build condition (inputs.tag): ${{ inputs.tag != '' || startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
+          echo "OLD Build condition: ${{ github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
   
   build:
     if: |
-      github.event_name == 'workflow_call' || 
+      inputs.tag != '' || 
       startsWith(github.ref, 'refs/tags/sombrajs-v')
     strategy:
       fail-fast: false
