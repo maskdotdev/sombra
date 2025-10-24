@@ -417,7 +417,9 @@ impl<'db> QueryBuilder<'db> {
 
         let mut nodes = Vec::with_capacity(node_ids.len());
         for node_id in &node_ids {
-            nodes.push(self.db.get_node(*node_id)?);
+            if let Some(node) = self.db.get_node(*node_id)? {
+                nodes.push(node);
+            }
         }
 
         Ok(QueryResult {
@@ -443,9 +445,10 @@ impl<'db> QueryBuilder<'db> {
         let mut result = Vec::new();
         let predicate = &filter;
         for node_id in nodes {
-            let node = self.db.get_node(node_id)?;
-            if predicate(&node) {
-                result.push(node_id);
+            if let Some(node) = self.db.get_node(node_id)? {
+                if predicate(&node) {
+                    result.push(node_id);
+                }
             }
         }
         Ok(result)

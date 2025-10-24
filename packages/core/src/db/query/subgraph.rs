@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::db::GraphDB;
-use crate::error::Result;
+use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeDirection, EdgeId, Node, NodeId, NULL_EDGE_ID};
 
 /// Filters edges during subgraph extraction.
@@ -286,7 +286,9 @@ impl GraphDB {
 
         let mut nodes = Vec::with_capacity(node_ids.len());
         for node_id in &node_ids {
-            nodes.push(self.get_node(*node_id)?);
+            if let Some(node) = self.get_node(*node_id)? {
+                nodes.push(node);
+            }
         }
 
         let mut edge_list: Vec<Edge> = edges.into_values().collect();
@@ -381,7 +383,9 @@ impl GraphDB {
 
         let mut nodes = Vec::with_capacity(sorted_node_ids.len());
         for node_id in &sorted_node_ids {
-            nodes.push(self.get_node(*node_id)?);
+            if let Some(node) = self.get_node(*node_id)? {
+                nodes.push(node);
+            }
         }
 
         let mut edges: Vec<Edge> = edge_map.into_values().collect();
@@ -403,7 +407,7 @@ impl GraphDB {
         direction: EdgeDirection,
         type_filter: Option<&HashSet<&'a str>>,
     ) -> Result<Vec<(NodeId, Edge)>> {
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
 
         if matches!(direction, EdgeDirection::Outgoing | EdgeDirection::Both) {

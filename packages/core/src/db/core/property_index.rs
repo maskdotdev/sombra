@@ -6,12 +6,6 @@ use std::ops::RangeBounds;
 
 impl GraphDB {
     pub fn create_property_index(&mut self, label: &str, property_key: &str) -> Result<()> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "create_property_index must be called through a transaction when in transaction context".into(),
-            ));
-        }
-
         let key = (label.to_string(), property_key.to_string());
 
         if self.property_indexes.contains_key(&key) {
@@ -27,13 +21,14 @@ impl GraphDB {
             .unwrap_or_default();
 
         for node_id in node_ids {
-            let node = self.get_node(node_id)?;
-            if let Some(prop_value) = node.properties.get(property_key) {
-                if let Some(indexable_value) = Option::<IndexableValue>::from(prop_value) {
-                    index
-                        .entry(indexable_value)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(node_id);
+            if let Some(node) = self.get_node(node_id)? {
+                if let Some(prop_value) = node.properties.get(property_key) {
+                    if let Some(indexable_value) = Option::<IndexableValue>::from(prop_value) {
+                        index
+                            .entry(indexable_value)
+                            .or_insert_with(BTreeSet::new)
+                            .insert(node_id);
+                    }
                 }
             }
         }
@@ -43,12 +38,6 @@ impl GraphDB {
     }
 
     pub fn drop_property_index(&mut self, label: &str, property_key: &str) -> Result<()> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "drop_property_index must be called through a transaction when in transaction context".into(),
-            ));
-        }
-
         let key = (label.to_string(), property_key.to_string());
         self.property_indexes.remove(&key);
         Ok(())
@@ -119,10 +108,11 @@ impl GraphDB {
             .unwrap_or_default();
 
         for node_id in node_ids {
-            let node = self.get_node(node_id)?;
-            if let Some(prop_value) = node.properties.get(property_key) {
-                if prop_value == value {
-                    results.push(node_id);
+            if let Some(node) = self.get_node(node_id)? {
+                if let Some(prop_value) = node.properties.get(property_key) {
+                    if prop_value == value {
+                        results.push(node_id);
+                    }
                 }
             }
         }
@@ -171,7 +161,7 @@ impl GraphDB {
     }
 
     pub(crate) fn update_property_indexes_on_node_add(&mut self, node_id: NodeId) -> Result<()> {
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
 
         for label in &node.labels {
             for (property_key, property_value) in &node.properties {
@@ -183,7 +173,7 @@ impl GraphDB {
     }
 
     pub(crate) fn update_property_indexes_on_node_delete(&mut self, node_id: NodeId) -> Result<()> {
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
 
         for label in &node.labels {
             for (property_key, property_value) in &node.properties {

@@ -250,9 +250,10 @@ impl<'db> Transaction<'db> {
     /// # Returns
     /// The node with the specified ID.
     ///
-    /// # Errors
-    /// * `GraphError::NotFound` - Node doesn't exist
-    pub fn get_node(&mut self, node_id: NodeId) -> Result<Node> {
+    /// # Returns
+    /// * `Ok(Some(Node))` - Node found
+    /// * `Ok(None)` - Node doesn't exist
+    pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
         self.db.get_node(node_id)
     }
 

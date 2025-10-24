@@ -72,7 +72,9 @@ impl GraphDB {
             .collect();
 
         for &node_id in &all_node_ids {
-            let node = self.get_node(node_id)?;
+            let Some(node) = self.get_node(node_id)? else {
+                continue;
+            };
 
             let mut out_degree = 0;
             let mut edge_id = node.first_outgoing_edge_id;

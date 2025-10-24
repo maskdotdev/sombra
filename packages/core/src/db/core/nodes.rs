@@ -7,12 +7,6 @@ use std::collections::HashSet;
 
 impl GraphDB {
     pub fn add_node(&mut self, mut node: Node) -> Result<NodeId> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "add_node must be called through a transaction when in transaction context".into(),
-            ));
-        }
-
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 
@@ -132,13 +126,6 @@ impl GraphDB {
     }
 
     pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "delete_node must be called through a transaction when in transaction context"
-                    .into(),
-            ));
-        }
-
         self.delete_node_internal(node_id)
     }
 
@@ -192,23 +179,23 @@ impl GraphDB {
         Ok(())
     }
 
-    pub fn get_node(&mut self, node_id: NodeId) -> Result<Node> {
+    pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
         self.metrics.node_lookups += 1;
 
         if let Some(node) = self.node_cache.get(&node_id) {
             self.metrics.cache_hits += 1;
-            return Ok(node.clone());
+            return Ok(Some(node.clone()));
         }
 
         self.metrics.cache_misses += 1;
 
-        let pointer = self
-            .node_index
-            .get(&node_id)
-            .ok_or(GraphError::NotFound("node"))?;
+        let pointer = match self.node_index.get(&node_id) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
         let node = self.read_node_at(pointer)?;
         self.node_cache.put(node_id, node.clone());
-        Ok(node)
+        Ok(Some(node))
     }
 
     pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
@@ -282,13 +269,6 @@ impl GraphDB {
         key: String,
         value: crate::model::PropertyValue,
     ) -> Result<()> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "set_node_property must be called through a transaction when in transaction context"
-                    .into(),
-            ));
-        }
-
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 
@@ -365,13 +345,6 @@ impl GraphDB {
     }
 
     pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "remove_node_property must be called through a transaction when in transaction context"
-                    .into(),
-            ));
-        }
-
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 

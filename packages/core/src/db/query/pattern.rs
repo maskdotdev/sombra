@@ -343,7 +343,9 @@ impl GraphDB {
         let start_candidates = self.candidate_nodes(start_pattern)?;
 
         for node_id in start_candidates {
-            let node = self.get_node(node_id)?;
+            let Some(node) = self.get_node(node_id)? else {
+                continue;
+            };
             if !start_pattern.matches(&node) {
                 continue;
             }
@@ -401,7 +403,9 @@ impl GraphDB {
                     continue;
                 }
             } else {
-                let node = self.get_node(target_node_id)?;
+                let Some(node) = self.get_node(target_node_id)? else {
+                    continue;
+                };
                 if !target_pattern.matches(&node) {
                     continue;
                 }
@@ -444,9 +448,10 @@ impl GraphDB {
 
         let mut filtered = Vec::new();
         for node_id in candidates {
-            let node = self.get_node(node_id)?;
-            if pattern.matches(&node) {
-                filtered.push(node_id);
+            if let Some(node) = self.get_node(node_id)? {
+                if pattern.matches(&node) {
+                    filtered.push(node_id);
+                }
             }
         }
 
@@ -461,7 +466,7 @@ impl GraphDB {
         let mut candidates = Vec::new();
         let mut seen_edges = HashSet::new();
 
-        let node = self.get_node(from_node_id)?;
+        let node = self.get_node(from_node_id)?.ok_or(GraphError::NotFound("node"))?;
 
         if matches!(
             pattern.direction,

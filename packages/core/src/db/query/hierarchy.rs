@@ -78,7 +78,9 @@ impl GraphDB {
                     continue;
                 }
 
-                let node = self.get_node(parent)?;
+                let Some(node) = self.get_node(parent)? else {
+                    continue;
+                };
                 if node.labels.iter().any(|candidate| candidate == label) {
                     return Ok(Some(parent));
                 }

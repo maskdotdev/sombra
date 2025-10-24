@@ -37,7 +37,7 @@ fn graphdb_round_trip() {
     }
 
     let mut db = GraphDB::open(&path).expect("reopen db");
-    let node_a = db.get_node(1).expect("get node a");
+    let node_a = db.get_node(1).expect("get node a").expect("node exists");
     assert_eq!(node_a.labels, vec!["Alpha".to_string()]);
     let neighbors = db.get_neighbors(1).expect("neighbors");
     assert_eq!(neighbors, vec![2]);
@@ -99,7 +99,7 @@ fn delete_node_cascades_edge_removal() {
     tx.delete_node(a).expect("delete node a");
     tx.commit().expect("commit");
     db.checkpoint().expect("checkpoint");
-    assert!(matches!(db.get_node(a), Err(GraphError::NotFound("node"))));
+    assert!(db.get_node(a).expect("get_node succeeds").is_none(), "deleted node should not exist");
     assert!(db.get_neighbors(c).expect("neighbors of c").is_empty());
     {
         let mut tx = db.begin_transaction().expect("begin transaction");
@@ -124,7 +124,7 @@ fn transaction_commit_persists_changes() {
     }
 
     let mut db = GraphDB::open(&path).expect("reopen db");
-    let node = db.get_node(1).expect("read committed node");
+    let node = db.get_node(1).expect("read committed node").expect("node exists");
     assert_eq!(node.id, 1);
 }
 
@@ -152,7 +152,7 @@ fn rollback_restores_state() {
     }
 
     assert!(
-        matches!(db.get_node(1), Err(GraphError::NotFound("node"))),
+        db.get_node(1).expect("get_node succeeds").is_none(),
         "rolled back node should not exist"
     );
 
@@ -173,7 +173,7 @@ fn rollback_restores_state() {
 
     drop(db);
     let mut reopened = GraphDB::open(&path).expect("reopen db");
-    let node = reopened.get_node(1).expect("node committed after rollback");
+    let node = reopened.get_node(1).expect("node committed after rollback").expect("node exists");
     assert_eq!(node.id, 1);
 }
 
@@ -199,7 +199,7 @@ fn rollback_prevents_eviction_corruption() {
 
     {
         let mut tx = db.begin_transaction().expect("begin tx");
-        let node = tx.get_node(initial_node_id).expect("get initial node");
+        let node = tx.get_node(initial_node_id).expect("get initial node").expect("node exists");
         assert_eq!(node.id, initial_node_id);
 
         for i in 0..5 {
@@ -213,13 +213,14 @@ fn rollback_prevents_eviction_corruption() {
 
     let node = db
         .get_node(initial_node_id)
-        .expect("initial node should still exist");
+        .expect("initial node should still exist")
+        .expect("node exists");
     assert_eq!(node.id, initial_node_id);
 
     for i in 0..5 {
-        let result = db.get_node(initial_node_id + 1 + i as u64);
+        let result = db.get_node(initial_node_id + 1 + i as u64).expect("get_node succeeds");
         assert!(
-            matches!(result, Err(GraphError::NotFound("node"))),
+            result.is_none(),
             "rolled back node {} should not exist",
             initial_node_id + 1 + i as u64
         );
@@ -441,7 +442,7 @@ fn bfs_traversal_explores_graph_by_depth() {
     tx.commit().expect("commit");
     db.checkpoint().expect("checkpoint");
 
-    let results = db.bfs_traversal(root, 3).expect("bfs traversal");
+    let results = db.bfs_traversal(root, 2).expect("bfs traversal");
 
     assert_eq!(results.len(), 5);
 
@@ -475,7 +476,7 @@ fn bfs_traversal_explores_graph_by_depth() {
         .expect("find l2_b");
     assert_eq!(l2_b_result.1, 2);
 
-    let shallow_results = db.bfs_traversal(root, 1).expect("shallow bfs");
+    let shallow_results = db.bfs_traversal(root, 0).expect("shallow bfs");
     assert_eq!(shallow_results.len(), 1);
 }
 

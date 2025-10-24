@@ -7,12 +7,6 @@ use crate::storage::serialize_edge;
 
 impl GraphDB {
     pub fn add_edge(&mut self, mut edge: Edge) -> Result<EdgeId> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "add_edge must be called through a transaction when in transaction context".into(),
-            ));
-        }
-
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 
@@ -121,13 +115,6 @@ impl GraphDB {
     }
 
     pub fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
-        if self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "delete_edge must be called through a transaction when in transaction context"
-                    .into(),
-            ));
-        }
-
         self.delete_edge_internal(edge_id)
     }
 
@@ -184,7 +171,7 @@ impl GraphDB {
             return Ok(edges.len());
         }
 
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
         let mut count = 0;
         let mut edge_list = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -203,7 +190,7 @@ impl GraphDB {
             return Ok(edges.len());
         }
 
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
         let mut count = 0;
         let mut edge_list = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;

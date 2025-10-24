@@ -1,5 +1,5 @@
 use super::graphdb::GraphDB;
-use crate::error::Result;
+use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeDirection, NodeId, NULL_EDGE_ID};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,7 @@ impl GraphDB {
             return Ok(neighbors.clone());
         }
 
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -34,7 +34,7 @@ impl GraphDB {
             return Ok(neighbors.clone());
         }
 
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
@@ -114,11 +114,15 @@ impl GraphDB {
 
         visited.insert(start_node_id);
 
-        for depth in 0..max_depth {
+        for depth in 0..=max_depth {
             let mut next_level = Vec::new();
 
             for node_id in &current_level {
                 result.push((*node_id, depth));
+            }
+
+            if depth == max_depth {
+                break;
             }
 
             for node_id in current_level.drain(..) {
@@ -151,8 +155,12 @@ impl GraphDB {
 
         visited.insert(start_node_id);
 
-        for depth in 0..max_depth {
+        for depth in 0..=max_depth {
             result.extend(current_level.iter().map(|&node_id| (node_id, depth)));
+
+            if depth == max_depth {
+                break;
+            }
 
             let neighbor_lists =
                 self.collect_neighbors_for_frontier(&current_level, &mut adjacency_cache)?;
@@ -323,7 +331,7 @@ impl GraphDB {
             return Ok(neighbors.clone());
         }
 
-        let node = self.get_node(node_id)?;
+        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -370,7 +378,7 @@ impl GraphDB {
 
         match direction {
             EdgeDirection::Outgoing => {
-                let node = self.get_node(node_id)?;
+                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -382,7 +390,7 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Incoming => {
-                let node = self.get_node(node_id)?;
+                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     let edge = self.load_edge(edge_id)?;
@@ -393,8 +401,7 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Both => {
-                // Get outgoing neighbors
-                let node = self.get_node(node_id)?;
+                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -404,8 +411,6 @@ impl GraphDB {
                     }
                     edge_id = edge.next_outgoing_edge_id;
                 }
-                // Get incoming neighbors
-                let node = self.get_node(node_id)?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     let edge = self.load_edge(edge_id)?;
@@ -449,7 +454,7 @@ impl GraphDB {
 
         match direction {
             EdgeDirection::Outgoing => {
-                let node = self.get_node(node_id)?;
+                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -461,7 +466,7 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Incoming => {
-                let node = self.get_node(node_id)?;
+                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     let edge = self.load_edge(edge_id)?;
@@ -472,8 +477,7 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Both => {
-                // Get outgoing neighbors with edges
-                let node = self.get_node(node_id)?;
+                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -483,8 +487,6 @@ impl GraphDB {
                     }
                     edge_id = edge.next_outgoing_edge_id;
                 }
-                // Get incoming neighbors with edges
-                let node = self.get_node(node_id)?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     let edge = self.load_edge(edge_id)?;

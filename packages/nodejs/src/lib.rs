@@ -132,6 +132,8 @@ impl SombraDB {
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
+        })?.ok_or_else(|| {
+            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
         })?;
 
         let mut edges = Vec::new();
@@ -157,6 +159,8 @@ impl SombraDB {
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
+        })?.ok_or_else(|| {
+            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
         })?;
 
         let mut edges = Vec::new();
@@ -177,14 +181,14 @@ impl SombraDB {
     }
 
     #[napi]
-    pub fn get_node(&mut self, node_id: f64) -> std::result::Result<SombraNode, Error> {
+    pub fn get_node(&mut self, node_id: f64) -> std::result::Result<Option<SombraNode>, Error> {
         let mut db = self.inner.write();
 
         let node = db.get_node(node_id as u64).map_err(|e| {
             Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
         })?;
 
-        Ok(SombraNode::from(node))
+        Ok(node.map(SombraNode::from))
     }
 
     #[napi]
@@ -1039,6 +1043,8 @@ impl SombraTransaction {
                 Status::GenericFailure,
                 format!("Failed to get node in transaction: {}", e),
             )
+        })?.ok_or_else(|| {
+            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
         })?;
 
         let mut edges = Vec::new();
@@ -1067,6 +1073,8 @@ impl SombraTransaction {
                 Status::GenericFailure,
                 format!("Failed to get node in transaction: {}", e),
             )
+        })?.ok_or_else(|| {
+            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
         })?;
 
         let mut edges = Vec::new();
@@ -1087,7 +1095,7 @@ impl SombraTransaction {
     }
 
     #[napi]
-    pub fn get_node(&mut self, node_id: f64) -> std::result::Result<SombraNode, Error> {
+    pub fn get_node(&mut self, node_id: f64) -> std::result::Result<Option<SombraNode>, Error> {
         let mut db = self.db.write();
 
         let node = db.get_node(node_id as u64).map_err(|e| {
@@ -1097,7 +1105,7 @@ impl SombraTransaction {
             )
         })?;
 
-        Ok(SombraNode::from(node))
+        Ok(node.map(SombraNode::from))
     }
 
     #[napi]
