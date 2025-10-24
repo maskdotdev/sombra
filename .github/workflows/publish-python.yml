@@ -63,8 +63,19 @@ jobs:
           python -m pip install maturin
           python -m maturin build --release --out target/wheels
       
-      - name: List built wheels
+      - name: List built wheels (Unix)
+        if: runner.os != 'Windows'
         run: ls -la packages/python/target/wheels/ || echo "No wheels directory"
+      
+      - name: List built wheels (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          if (Test-Path packages/python/target/wheels/) {
+            Get-ChildItem packages/python/target/wheels/
+          } else {
+            Write-Host "No wheels directory"
+          }
+        shell: pwsh
       
       - uses: actions/upload-artifact@v4
         with:
