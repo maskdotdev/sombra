@@ -1,15 +1,34 @@
 name: Publish Rust Crate
 
+# This is a reusable workflow that can be called in two ways:
+# 1. Automatically by release-please.yml when a Rust release is created
+# 2. Manually via release creation events (fallback)
+#
+# The primary trigger is workflow_call from release-please.
+
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Git tag to publish (e.g., sombra-v0.4.3)'
+        required: true
+        type: string
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: true
   release:
     types: [created]
 
 jobs:
   publish-crate:
-    if: startsWith(github.event.release.tag_name, 'sombra-v')
+    if: |
+      github.event_name == 'workflow_call' || 
+      startsWith(github.event.release.tag_name, 'sombra-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

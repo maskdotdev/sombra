@@ -1,12 +1,29 @@
 name: Publish Python Package
 
+# This is a reusable workflow that can be called in two ways:
+# 1. Automatically by release-please.yml when a Python release is created
+# 2. Manually via release creation events (fallback)
+#
+# The primary trigger is workflow_call from release-please.
+
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Git tag to publish (e.g., sombrapy-v0.4.3)'
+        required: true
+        type: string
+    secrets:
+      PYPI_API_TOKEN:
+        required: true
   release:
     types: [created]
 
 jobs:
   build-wheels:
-    if: startsWith(github.event.release.tag_name, 'sombrapy-v')
+    if: |
+      github.event_name == 'workflow_call' || 
+      startsWith(github.event.release.tag_name, 'sombrapy-v')
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -14,6 +31,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       
       - uses: actions/setup-python@v5
         with:

@@ -33,8 +33,12 @@ BREAKING CHANGE: Transaction.commit() now returns Result
    - Version bumps in `Cargo.toml`/`package.json`/`pyproject.toml`
    - Updated changelog
 3. **Review the PR** and manually update `COMPATIBILITY.md` if bindings are affected
-4. **Merge the PR** → release-please creates a GitHub release and tag (e.g., `sombradb-v0.3.4`)
-5. **Publishing workflow** automatically publishes to crates.io/npm/PyPI
+4. **Merge the PR** → release-please:
+   - Creates a GitHub release and tag (e.g., `sombradb-v0.3.4`)
+   - Automatically triggers the appropriate publish workflow(s) for changed packages
+5. **Publishing workflows** build and publish to crates.io/npm/PyPI in parallel
+
+Note: The publish workflows are triggered automatically by the release-please workflow using reusable workflow calls, not by tag push events. Each package (Rust, npm, Python) publishes independently based on which packages had changes.
 
 ### Version Compatibility
 
