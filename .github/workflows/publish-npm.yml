@@ -68,7 +68,7 @@ jobs:
       - run: cd packages/nodejs && npx napi create-npm-dirs
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: packages/nodejs/artifacts
       - run: cd packages/nodejs && npm run artifacts
       - name: Publish to npm
         run: |
