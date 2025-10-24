@@ -161,7 +161,9 @@ impl GraphDB {
     }
 
     pub(crate) fn update_property_indexes_on_node_add(&mut self, node_id: NodeId) -> Result<()> {
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
 
         for label in &node.labels {
             for (property_key, property_value) in &node.properties {
@@ -173,7 +175,9 @@ impl GraphDB {
     }
 
     pub(crate) fn update_property_indexes_on_node_delete(&mut self, node_id: NodeId) -> Result<()> {
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
 
         for label in &node.labels {
             for (property_key, property_value) in &node.properties {

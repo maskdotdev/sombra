@@ -407,7 +407,9 @@ impl GraphDB {
         direction: EdgeDirection,
         type_filter: Option<&HashSet<&'a str>>,
     ) -> Result<Vec<(NodeId, Edge)>> {
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
 
         if matches!(direction, EdgeDirection::Outgoing | EdgeDirection::Both) {

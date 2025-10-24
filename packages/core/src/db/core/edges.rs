@@ -171,7 +171,9 @@ impl GraphDB {
             return Ok(edges.len());
         }
 
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
         let mut count = 0;
         let mut edge_list = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -190,7 +192,9 @@ impl GraphDB {
             return Ok(edges.len());
         }
 
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
         let mut count = 0;
         let mut edge_list = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;

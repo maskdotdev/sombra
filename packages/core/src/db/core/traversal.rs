@@ -11,7 +11,9 @@ impl GraphDB {
             return Ok(neighbors.clone());
         }
 
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -34,7 +36,9 @@ impl GraphDB {
             return Ok(neighbors.clone());
         }
 
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
@@ -331,7 +335,9 @@ impl GraphDB {
             return Ok(neighbors.clone());
         }
 
-        let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+        let node = self
+            .get_node(node_id)?
+            .ok_or(GraphError::NotFound("node"))?;
         let mut neighbors = Vec::new();
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -378,7 +384,9 @@ impl GraphDB {
 
         match direction {
             EdgeDirection::Outgoing => {
-                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+                let node = self
+                    .get_node(node_id)?
+                    .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -390,7 +398,9 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Incoming => {
-                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+                let node = self
+                    .get_node(node_id)?
+                    .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     let edge = self.load_edge(edge_id)?;
@@ -401,7 +411,9 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Both => {
-                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+                let node = self
+                    .get_node(node_id)?
+                    .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -454,7 +466,9 @@ impl GraphDB {
 
         match direction {
             EdgeDirection::Outgoing => {
-                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+                let node = self
+                    .get_node(node_id)?
+                    .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
@@ -466,7 +480,9 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Incoming => {
-                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+                let node = self
+                    .get_node(node_id)?
+                    .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     let edge = self.load_edge(edge_id)?;
@@ -477,7 +493,9 @@ impl GraphDB {
                 }
             }
             EdgeDirection::Both => {
-                let node = self.get_node(node_id)?.ok_or(GraphError::NotFound("node"))?;
+                let node = self
+                    .get_node(node_id)?
+                    .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;

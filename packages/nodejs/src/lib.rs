@@ -130,11 +130,15 @@ impl SombraDB {
     pub fn get_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
         let mut db = self.inner.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
-        })?.ok_or_else(|| {
-            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get node: {}", e)))?
+            .ok_or_else(|| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Node {} not found", node_id),
+                )
+            })?;
 
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -157,11 +161,15 @@ impl SombraDB {
     pub fn get_incoming_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
         let mut db = self.inner.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(Status::GenericFailure, format!("Failed to get node: {}", e))
-        })?.ok_or_else(|| {
-            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("Failed to get node: {}", e)))?
+            .ok_or_else(|| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Node {} not found", node_id),
+                )
+            })?;
 
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
@@ -1038,14 +1046,20 @@ impl SombraTransaction {
     pub fn get_outgoing_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
         let mut db = self.db.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to get node in transaction: {}", e),
-            )
-        })?.ok_or_else(|| {
-            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to get node in transaction: {}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Node {} not found", node_id),
+                )
+            })?;
 
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
@@ -1068,14 +1082,20 @@ impl SombraTransaction {
     pub fn get_incoming_edges(&mut self, node_id: f64) -> std::result::Result<Vec<f64>, Error> {
         let mut db = self.db.write();
 
-        let node = db.get_node(node_id as u64).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to get node in transaction: {}", e),
-            )
-        })?.ok_or_else(|| {
-            Error::new(Status::GenericFailure, format!("Node {} not found", node_id))
-        })?;
+        let node = db
+            .get_node(node_id as u64)
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to get node in transaction: {}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Node {} not found", node_id),
+                )
+            })?;
 
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
