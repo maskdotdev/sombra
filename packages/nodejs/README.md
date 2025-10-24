@@ -2,6 +2,8 @@
 
 High-performance graph database for Node.js and TypeScript, powered by Rust.
 
+> **Note**: This package is automatically published via GitHub Actions when changes are merged. See our [contributing guide](../../docs/contributing.md) for release process details.
+
 ## Installation
 
 ```bash
