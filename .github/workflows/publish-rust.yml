@@ -20,9 +20,24 @@ on:
     types: [created]
 
 jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug workflow inputs
+        run: |
+          echo "=== Workflow Debug Info ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag input: ${{ inputs.tag }}"
+          echo "inputs.tag != '': ${{ inputs.tag != '' }}"
+          echo "Event name == 'workflow_call': ${{ github.event_name == 'workflow_call' }}"
+          echo "startsWith(github.event.release.tag_name, 'sombra-v'): ${{ startsWith(github.event.release.tag_name, 'sombra-v') }}"
+          echo "NEW Build condition: ${{ inputs.tag != '' || startsWith(github.event.release.tag_name, 'sombra-v') }}"
+          echo "OLD Build condition: ${{ github.event_name == 'workflow_call' || startsWith(github.event.release.tag_name, 'sombra-v') }}"
+
   publish-crate:
     if: |
-      github.event_name == 'workflow_call' || 
+      inputs.tag != '' || 
       startsWith(github.event.release.tag_name, 'sombra-v')
     runs-on: ubuntu-latest
     steps:
