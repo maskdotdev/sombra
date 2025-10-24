@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.8](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.7...sombrajs-v0.4.8) (2025-10-24)
+
+
+### Bug Fixes
+
+* **js:** improve TypeScript example formatting and type safety ([6b0645e](https://github.com/maskdotdev/sombra/commit/6b0645e39c2862ef7b2ef2ea983074379ed39665))
+
 ## [0.4.7](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.6...sombrajs-v0.4.7) (2025-10-24)
 
 
