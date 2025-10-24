@@ -23,6 +23,7 @@
 		"prepublishOnly": "napi prepublish -t npm --no-gh-release --skip-optional-publish && node ../../scripts/fix-exports.js",
 		"test": "node test/test.js",
 		"test:comprehensive": "node test/test-comprehensive.js",
+		"test:issues": "node test/test-reported-issues.js",
 		"test:all": "npm test && npm run test:comprehensive",
 		"test:debug": "node --inspect-brk test/test.js",
 		"example": "node examples/nodejs-example.js",
