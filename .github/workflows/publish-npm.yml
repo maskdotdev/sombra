@@ -1,8 +1,9 @@
 name: Publish npm Package
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - 'sombrajs-v*'
 
 env:
   DEBUG: napi:*
@@ -11,7 +12,7 @@ env:
 
 jobs:
   build:
-    if: startsWith(github.event.release.tag_name, 'sombrajs-v')
+    if: startsWith(github.ref, 'refs/tags/sombrajs-v')
     strategy:
       fail-fast: false
       matrix:
