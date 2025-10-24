@@ -15,7 +15,7 @@ pip install sombra
 - **Property Graph Model**: Nodes, edges, and flexible properties
 - **ACID Transactions**: Full transactional support with rollback
 - **Native Performance**: Rust implementation with PyO3 bindings
-- **Type Hints**: Full type annotations for IDE support
+- **Type Hints**: Full type annotations and IDE support
 - **Cross-Platform**: Pre-built wheels for Linux, macOS, and Windows
 
 ## Quick Start
