@@ -37,6 +37,16 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      
+      - name: Debug release outputs
+        run: |
+          echo "releases_created: ${{ steps.release.outputs.releases_created }}"
+          echo "js_release: ${{ steps.release.outputs['packages/nodejs--release_created'] }}"
+          echo "js_tag: ${{ steps.release.outputs['packages/nodejs--tag_name'] }}"
+          echo "rust_release: ${{ steps.release.outputs['packages/core--release_created'] }}"
+          echo "rust_tag: ${{ steps.release.outputs['packages/core--tag_name'] }}"
+          echo "py_release: ${{ steps.release.outputs['packages/python--release_created'] }}"
+          echo "py_tag: ${{ steps.release.outputs['packages/python--tag_name'] }}"
 
   publish-npm:
     name: Publish npm Package

@@ -23,7 +23,7 @@
   },
   "bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",
   "release-search-depth": 500,
-  "pull-request-title-pattern": "chore: release ${component} ${version}",
+  "pull-request-title-pattern": "chore(release): ${component} v${version}",
   "changelog-sections": [
     {"type": "feat", "section": "Features"},
     {"type": "fix", "section": "Bug Fixes"},
