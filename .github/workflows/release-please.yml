@@ -51,7 +51,7 @@ jobs:
   publish-npm:
     name: Publish npm Package
     needs: release-please
-    if: needs.release-please.outputs.js_release == 'true'
+    if: needs.release-please.outputs.js_release
     permissions:
       contents: write
       id-token: write
@@ -64,7 +64,7 @@ jobs:
   publish-rust:
     name: Publish Rust Crate
     needs: release-please
-    if: needs.release-please.outputs.rust_release == 'true'
+    if: needs.release-please.outputs.rust_release
     permissions:
       contents: write
       id-token: write
@@ -77,7 +77,7 @@ jobs:
   publish-python:
     name: Publish Python Package
     needs: release-please
-    if: needs.release-please.outputs.py_release == 'true'
+    if: needs.release-please.outputs.py_release
     permissions:
       contents: write
       id-token: write
