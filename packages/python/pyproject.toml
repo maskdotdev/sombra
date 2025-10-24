@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sombra"
-version = "0.3.4"
+version = "0.3.5"
 description = "A high-performance graph database with ACID transactions"
 readme = "README.md"
 requires-python = ">=3.11"
