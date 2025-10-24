@@ -3,7 +3,7 @@
 	"version": "0.4.6",
 	"description": "A high-performance graph database with ACID transactions",
 	"main": "index.js",
-	"types": "sombra.d.ts",
+	"types": "index.d.ts",
 	"bin": {
 		"sombra": "./bin/sombra.js"
 	},
@@ -52,7 +52,6 @@
 	"files": [
 		"index.d.ts",
 		"index-napi.js",
-		"sombra.d.ts",
 		"index.js",
 		"bin/sombra.js",
 		"*.node"

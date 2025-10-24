@@ -46,7 +46,7 @@ console.log(`User ${user} authored ${neighbors.length} posts`);
 ## Documentation
 
 - [Getting Started Guide](https://github.com/maskdotdev/sombra/blob/main/docs/nodejs-guide.md)
-- [API Reference](https://github.com/maskdotdev/sombra/blob/main/sombra.d.ts)
+- [API Reference](https://github.com/maskdotdev/sombra/blob/main/packages/nodejs/index.d.ts)
 - [Main Documentation](https://github.com/maskdotdev/sombra)
 
 ## Building from Source
