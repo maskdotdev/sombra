@@ -2,6 +2,8 @@
 
 High-performance graph database for Node.js and TypeScript, powered by Rust.
 
+> ⚠️ **Alpha Software**: Sombra is under active development. APIs may change, and the project is not yet recommended for production use. Feedback and contributions are welcome!
+
 ## Installation
 
 ```bash
