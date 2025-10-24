@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.7](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.6...sombrajs-v0.4.7) (2025-10-24)
+
+
+### Bug Fixes
+
+* remove unused root sombra.d.ts and correct TypeScript definitions path ([9dd6a91](https://github.com/maskdotdev/sombra/commit/9dd6a91318f984e2440ca401be40c3105331f96b))
+
 ## [0.4.6](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.5...sombrajs-v0.4.6) (2025-10-24)
 
 
