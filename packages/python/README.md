@@ -58,7 +58,8 @@ except Exception as e:
 
 ## Documentation
 
-- [Getting Started Guide](https://github.com/maskdotdev/sombra/blob/main/docs/python-guide.md)
+- [Getting Started Guide](https://github.com/maskdotdev/sombra/blob/main/docs/getting-started.md)
+- [Python API Guide](https://github.com/maskdotdev/sombra/blob/main/docs/python-guide.md)
 - [Main Documentation](https://github.com/maskdotdev/sombra)
 
 ## Building from Source
