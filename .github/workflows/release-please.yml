@@ -47,11 +47,27 @@ jobs:
           echo "rust_tag: ${{ steps.release.outputs['packages/core--tag_name'] }}"
           echo "py_release: ${{ steps.release.outputs['packages/python--release_created'] }}"
           echo "py_tag: ${{ steps.release.outputs['packages/python--tag_name'] }}"
+          
+          echo "=== All release-please outputs ==="
+          echo '${{ toJSON(steps.release.outputs) }}'
+
+  debug-npm-conditions:
+    name: Debug npm publish conditions
+    needs: release-please
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug publish conditions
+        run: |
+          echo "js_release value: '${{ needs.release-please.outputs.js_release }}'"
+          echo "js_tag value: '${{ needs.release-please.outputs.js_tag }}'"
+          echo "js_release == 'true': ${{ needs.release-please.outputs.js_release == 'true' }}"
+          echo "js_tag != '': ${{ needs.release-please.outputs.js_tag != '' }}"
+          echo "Overall condition: ${{ needs.release-please.outputs.js_release == 'true' || needs.release-please.outputs.js_tag != '' }}"
 
   publish-npm:
     name: Publish npm Package
     needs: release-please
-    if: ${{ needs.release-please.outputs.js_release == 'true' || needs.release-please.outputs.js_tag != '' }}
+    if: ${{ needs.release-please.outputs.js_tag != '' && needs.release-please.outputs.js_tag != null }}
     permissions:
       contents: write
       id-token: write
