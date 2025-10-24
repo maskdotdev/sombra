@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.4](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.3...sombra-v0.3.4) (2025-10-24)
+
+
+### Bug Fixes
+
+* remove outdated docs and add alpha software warnings to all packages ([5599fa0](https://github.com/maskdotdev/sombra/commit/5599fa081642c211aefc96666e0d613a8333f2cd))
+
+
+### Documentation
+
+* add GitHub repository link to all package READMEs ([88d4584](https://github.com/maskdotdev/sombra/commit/88d4584bb2fccc089ec6caabf7a3a675ebf91232))
+
 ## [0.4.2](https://github.com/maskdotdev/sombra/compare/sombra-v0.4.1...sombra-v0.4.2) (2025-10-24)
 
 
