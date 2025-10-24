@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.10](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.9...sombrajs-v0.4.10) (2025-10-24)
+
+
+### Bug Fixes
+
+* **js:** nodejs example formatting ([6e6a4bc](https://github.com/maskdotdev/sombra/commit/6e6a4bc175a7e68151c2588aaa048848c78af3e4))
+
 ## [0.4.9](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.8...sombrajs-v0.4.9) (2025-10-24)
 
 
