@@ -1,55 +1,63 @@
-import { SombraDB, SombraNode, SombraEdge, SombraPropertyValue } from '../index';
+import {
+  SombraDB,
+  SombraNode,
+  SombraEdge,
+  SombraPropertyValue,
+} from "../index";
 
-const db = new SombraDB('./example-ts.db');
+const db = new SombraDB("./example-ts.db");
 
-const createProp = (type: 'string' | 'int' | 'float' | 'bool', value: any): SombraPropertyValue => ({
+const createProp = (
+  type: "string" | "int" | "float" | "bool",
+  value: any,
+): SombraPropertyValue => ({
   type,
-  value
+  value,
 });
 
-const alice: number = db.addNode(['Person'], {
-  name: createProp('string', 'Alice'),
-  age: createProp('int', 30)
+const alice: number = db.addNode(["Person"], {
+  name: createProp("string", "Alice"),
+  age: createProp("int", 30),
 });
 
-const bob: number = db.addNode(['Person'], {
-  name: createProp('string', 'Bob'),
-  age: createProp('int', 25)
+const bob: number = db.addNode(["Person"], {
+  name: createProp("string", "Bob"),
+  age: createProp("int", 25),
 });
 
-const knows: number = db.addEdge(alice, bob, 'KNOWS', {
-  since: createProp('int', 2020)
+const knows: number = db.addEdge(alice, bob, "KNOWS", {
+  since: createProp("int", 2020),
 });
 
 const aliceNode: SombraNode = db.getNode(alice);
-console.log('Alice:', aliceNode);
+console.log("Alice:", aliceNode);
 
 const knowsEdge: SombraEdge = db.getEdge(knows);
-console.log('Knows edge:', knowsEdge);
+console.log("Knows edge:", knowsEdge);
 
 const outgoing: number[] = db.getOutgoingEdges(alice);
-console.log('Outgoing edges:', outgoing);
+console.log("Outgoing edges:", outgoing);
 
 const neighbors: number[] = db.getNeighbors(alice);
-console.log('Neighbors:', neighbors);
+console.log("Neighbors:", neighbors);
 
 const bfsResults = db.bfsTraversal(alice, 2);
-console.log('BFS traversal:', bfsResults);
+console.log("BFS traversal:", bfsResults);
 
 const tx = db.beginTransaction();
-console.log('Transaction ID:', tx.id());
+console.log("Transaction ID:", tx.id());
 
 try {
-  const charlie: number = tx.addNode(['Person'], {
-    name: createProp('string', 'Charlie')
+  const charlie: number = tx.addNode(["Person"], {
+    name: createProp("string", "Charlie"),
   });
 
-  tx.addEdge(alice, charlie, 'KNOWS');
+  tx.addEdge(alice, charlie, "KNOWS");
   tx.commit();
-  
-  console.log('Charlie:', db.getNode(charlie));
+
+  console.log("Charlie:", db.getNode(charlie));
 } catch (error) {
-  console.error('Transaction failed:', error);
+  console.error("Transaction failed:", error);
   tx.rollback();
 }
 
