@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.3...sombrajs-v0.4.4) (2025-10-24)
+
+
+### Bug Fixes
+
+* **js:** update ci and agent ([9b7f8d4](https://github.com/maskdotdev/sombra/commit/9b7f8d476fea64cd7886a236d4484f44d43bca41))
+
 ## [0.4.3](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.2...sombrajs-v0.4.3) (2025-10-24)
 
 
