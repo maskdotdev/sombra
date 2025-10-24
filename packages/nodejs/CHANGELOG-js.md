@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.7](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.6...sombrajs-v0.4.7) (2025-10-24)
+
+
+### Documentation
+
+* **js:** add automated release note to README ([6cc0c68](https://github.com/maskdotdev/sombra/commit/6cc0c684a5e5ccfd3f17c371cc061254ad51ad3c))
+
 ## [0.4.6](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.5...sombrajs-v0.4.6) (2025-10-24)
 
 
