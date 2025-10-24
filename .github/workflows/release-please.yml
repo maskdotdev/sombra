@@ -67,7 +67,7 @@ jobs:
   publish-npm:
     name: Publish npm Package
     needs: release-please
-    if: ${{ needs.release-please.outputs.js_tag != '' && needs.release-please.outputs.js_tag != null }}
+    if: ${{ needs.release-please.outputs.js_tag != '' }}
     permissions:
       contents: write
       id-token: write

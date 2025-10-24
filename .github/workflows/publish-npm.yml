@@ -26,6 +26,19 @@ env:
   MACOSX_DEPLOYMENT_TARGET: '10.13'
 
 jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug workflow inputs
+        run: |
+          echo "=== Workflow Debug Info ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag input: ${{ inputs.tag }}"
+          echo "Event name == 'workflow_call': ${{ github.event_name == 'workflow_call' }}"
+          echo "startsWith(github.ref, 'refs/tags/sombrajs-v'): ${{ startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
+          echo "Build condition result: ${{ github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
+  
   build:
     if: |
       github.event_name == 'workflow_call' || 
