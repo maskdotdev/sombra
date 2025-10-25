@@ -23,13 +23,65 @@ npm install ./sombra-*.tgz
 
 ## TypeScript Support
 
-Sombra provides full TypeScript definitions:
+Sombra provides two APIs for TypeScript users:
+
+1. **Standard API**: Direct bindings with basic TypeScript definitions
+2. **Typed API** (Recommended): Type-safe wrapper with schema validation at compile time
+
+### Standard API
 
 ```typescript
-import { SombraDB } from 'sombra';
+import { SombraDB } from 'sombradb';
 
 const db = new SombraDB('example.db');
 ```
+
+### Typed API (Type-Safe Schema)
+
+For enhanced type safety with autocomplete and compile-time validation:
+
+```typescript
+import { createTypedDB } from 'sombradb/typed';
+
+interface MyGraphSchema {
+  nodes: {
+    Person: {
+      name: string;
+      age: number;
+    };
+    Company: {
+      name: string;
+      employees: number;
+    };
+  };
+  edges: {
+    WORKS_AT: {
+      from: 'Person';
+      to: 'Company';
+      properties: {
+        role: string;
+        since: number;
+      };
+    };
+  };
+}
+
+const db = createTypedDB<MyGraphSchema>('./example.db');
+
+const person = db.addNode('Person', { name: 'Alice', age: 30 });
+const company = db.addNode('Company', { name: 'ACME', employees: 100 });
+db.addEdge(person, company, 'WORKS_AT', { role: 'Engineer', since: 2020 });
+
+const found = db.findNodeByProperty('Company', 'name', 'ACME');
+const node = db.getNode(found!);
+console.log(node?.properties.employees);
+```
+
+Benefits of the Typed API:
+- **Autocomplete**: Full IntelliSense for labels, edge types, and properties
+- **Type Safety**: Compile-time validation of property types
+- **Automatic Conversion**: No manual property wrapper creation needed
+- **Cleaner Code**: Works with plain JavaScript objects
 
 ## Quick Start
 

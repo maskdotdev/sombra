@@ -30,7 +30,7 @@ fn sequential_transactions() {
         let mut tx = db.begin_transaction().unwrap();
 
         for node_id in 1..=100 {
-            let node = tx.get_node(node_id).unwrap();
+            let node = tx.get_node(node_id).unwrap().expect("node should exist");
             assert!(node.id > 0);
         }
 
@@ -40,7 +40,7 @@ fn sequential_transactions() {
 
     let mut tx = db.begin_transaction().unwrap();
     for node_id in 1..=100 {
-        let node = tx.get_node(node_id).unwrap();
+        let node = tx.get_node(node_id).unwrap().expect("node should exist");
         assert!(node.id > 0);
     }
     tx.commit().unwrap();
@@ -76,7 +76,7 @@ fn sequential_write_transactions() {
 
     let mut total_nodes = 0;
     for node_id in 1..=(batches * ops_per_batch + 100) {
-        if let Ok(node) = tx.get_node(node_id as u64) {
+        if let Ok(Some(node)) = tx.get_node(node_id as u64) {
             if node.id > 0 {
                 total_nodes += 1;
             }
@@ -160,7 +160,7 @@ fn rollback_safety() {
 
     let mut committed_nodes = 0;
     for node_id in 1..=1000 {
-        if let Ok(node) = tx.get_node(node_id) {
+        if let Ok(Some(node)) = tx.get_node(node_id) {
             if node.id > 0 {
                 committed_nodes += 1;
             }

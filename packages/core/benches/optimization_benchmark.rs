@@ -31,7 +31,10 @@ fn benchmark_read_with_mmap(enable_mmap: bool, node_count: usize) -> u128 {
 
     let read_start = Instant::now();
     for node_id in node_ids {
-        let node = db.get_node(node_id).expect("get node");
+        let node = db
+            .get_node(node_id)
+            .expect("get node")
+            .expect("node should exist");
         assert_eq!(node.id, node_id);
     }
     read_start.elapsed().as_micros()

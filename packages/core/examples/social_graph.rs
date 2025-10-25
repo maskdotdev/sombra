@@ -109,11 +109,12 @@ impl SocialNetwork {
         let post_ids = tx.get_nodes_by_label("Post")?;
         let mut user_posts = Vec::new();
         for post_id in post_ids {
-            let post_node = tx.get_node(post_id)?;
-            if let Some(edge_id) = post_node.first_incoming_edge_id.checked_sub(0) {
-                let edge = tx.get_edge(edge_id)?;
-                if edge.source_node_id == user_id {
-                    user_posts.push(post_id);
+            if let Some(post_node) = tx.get_node(post_id)? {
+                if let Some(edge_id) = post_node.first_incoming_edge_id.checked_sub(0) {
+                    let edge = tx.get_edge(edge_id)?;
+                    if edge.source_node_id == user_id {
+                        user_posts.push(post_id);
+                    }
                 }
             }
         }
@@ -127,9 +128,10 @@ impl SocialNetwork {
         let neighbor_ids = tx.get_neighbors(post_id)?;
         let mut comments = Vec::new();
         for neighbor_id in neighbor_ids {
-            let neighbor_node = tx.get_node(neighbor_id)?;
-            if neighbor_node.labels.contains(&"Comment".to_string()) {
-                comments.push(neighbor_id);
+            if let Some(neighbor_node) = tx.get_node(neighbor_id)? {
+                if neighbor_node.labels.contains(&"Comment".to_string()) {
+                    comments.push(neighbor_id);
+                }
             }
         }
         tx.commit()?;

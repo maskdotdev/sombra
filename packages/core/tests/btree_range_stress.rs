@@ -55,7 +55,7 @@ fn stress_large_scale_range_queries() -> Result<()> {
     let mut tx = db.begin_transaction()?;
     for (i, node_id) in range_node_ids.iter().enumerate() {
         assert!(*node_id >= range_start && *node_id <= range_end);
-        let node = tx.get_node(*node_id)?;
+        let node = tx.get_node(*node_id)?.expect("node should exist");
         let expected_index = (start_idx + i) as i64;
         assert_eq!(
             node.properties.get("index"),
@@ -162,7 +162,7 @@ fn stress_range_queries_with_fragmentation() -> Result<()> {
     let mut tx = db.begin_transaction()?;
     let mut validated_count = 0;
     for node_id in &range_node_ids {
-        if let Ok(node) = tx.get_node(*node_id) {
+        if let Ok(Some(node)) = tx.get_node(*node_id) {
             let seq = match node.properties.get("seq") {
                 Some(PropertyValue::Int(s)) => *s,
                 _ => panic!("Expected seq property"),
@@ -242,7 +242,7 @@ fn stress_concurrent_range_operations() -> Result<()> {
 
                     let mut tx = db.begin_transaction()?;
                     for node_id in &range_node_ids {
-                        let node = tx.get_node(*node_id)?;
+                        let node = tx.get_node(*node_id)?.expect("node should exist");
                         assert!(node.labels.contains(&"Concurrent".to_string()));
                         assert!(node.properties.contains_key("thread_safe"));
                     }
@@ -312,7 +312,7 @@ fn stress_range_queries_with_updates() -> Result<()> {
 
         for (idx, node_id) in node_ids.iter().enumerate() {
             if idx % 10 == 0 {
-                if let Ok(node) = tx.get_node(*node_id) {
+                if let Ok(Some(node)) = tx.get_node(*node_id) {
                     tx.delete_node(*node_id)?;
                     let mut updated_node = node.clone();
                     updated_node.id = 0;
@@ -341,7 +341,7 @@ fn stress_range_queries_with_updates() -> Result<()> {
     let mut updated_count = 0;
     let mut found_count = 0;
     for (idx, node_id) in range_node_ids.iter().enumerate() {
-        if let Ok(node) = tx.get_node(*node_id) {
+        if let Ok(Some(node)) = tx.get_node(*node_id) {
             found_count += 1;
             let version = match node.properties.get("version") {
                 Some(PropertyValue::Int(v)) => *v,
@@ -418,9 +418,10 @@ fn stress_range_queries_with_edges() -> Result<()> {
     let mut tx = db.begin_transaction()?;
     let mut nodes_with_edges = 0;
     for node_id in &range_node_ids {
-        let node = tx.get_node(*node_id)?;
-        if node.first_outgoing_edge_id != 0 || node.first_incoming_edge_id != 0 {
-            nodes_with_edges += 1;
+        if let Some(node) = tx.get_node(*node_id)? {
+            if node.first_outgoing_edge_id != 0 || node.first_incoming_edge_id != 0 {
+                nodes_with_edges += 1;
+            }
         }
     }
     tx.commit()?;
@@ -467,12 +468,13 @@ fn stress_multiple_small_ranges() -> Result<()> {
         let mut tx = db.begin_transaction()?;
         for node_id in range_node_ids {
             total_queried.insert(node_id);
-            let node = tx.get_node(node_id)?;
-            let node_bucket = match node.properties.get("bucket") {
-                Some(PropertyValue::Int(b)) => *b,
-                _ => panic!("Expected bucket property"),
-            };
-            assert_eq!(node_bucket, bucket as i64);
+            if let Some(node) = tx.get_node(node_id)? {
+                let node_bucket = match node.properties.get("bucket") {
+                    Some(PropertyValue::Int(b)) => *b,
+                    _ => panic!("Expected bucket property"),
+                };
+                assert_eq!(node_bucket, bucket as i64);
+            }
         }
         tx.commit()?;
     }

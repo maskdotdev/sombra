@@ -26,7 +26,7 @@ fn transaction_commit_wal_only() -> Result<()> {
     // Data should be recoverable from WAL after reopening
     {
         let mut db = GraphDB::open(&path)?;
-        let node = db.get_node(node_id)?;
+        let node = db.get_node(node_id)?.expect("node should exist");
         assert_eq!(node.id, node_id);
     }
 
@@ -239,7 +239,7 @@ fn large_transaction_dirty_page_tracking() -> Result<()> {
         // Check how many nodes were actually created
         let mut found_nodes = 0;
         for i in 1..=50 {
-            if let Ok(node) = db.get_node(i as u64) {
+            if let Ok(Some(node)) = db.get_node(i as u64) {
                 found_nodes += 1;
                 assert_eq!(node.id, i as u64);
             }

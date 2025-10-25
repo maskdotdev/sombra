@@ -177,7 +177,10 @@ impl PySombraDB {
 
     fn get_outgoing_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let mut db = self.inner.write();
-        let node = db.get_node(node_id).map_err(graph_error_to_py)?;
+        let node = db
+            .get_node(node_id)
+            .map_err(graph_error_to_py)?
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
         while edge_id != NULL_EDGE_ID {
@@ -190,7 +193,10 @@ impl PySombraDB {
 
     fn get_incoming_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let mut db = self.inner.write();
-        let node = db.get_node(node_id).map_err(graph_error_to_py)?;
+        let node = db
+            .get_node(node_id)
+            .map_err(graph_error_to_py)?
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
         while edge_id != NULL_EDGE_ID {
@@ -204,7 +210,9 @@ impl PySombraDB {
     fn get_node(&self, py: Python<'_>, node_id: u64) -> PyResult<PySombraNode> {
         let node = {
             let mut db = self.inner.write();
-            db.get_node(node_id).map_err(graph_error_to_py)?
+            db.get_node(node_id)
+                .map_err(graph_error_to_py)?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?
         };
         PySombraNode::from_node(py, node)
     }
@@ -410,7 +418,10 @@ impl PySombraTransaction {
 
     fn get_outgoing_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let mut db = self.db.write();
-        let node = db.get_node(node_id).map_err(graph_error_to_py)?;
+        let node = db
+            .get_node(node_id)
+            .map_err(graph_error_to_py)?
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
         while edge_id != NULL_EDGE_ID {
@@ -423,7 +434,10 @@ impl PySombraTransaction {
 
     fn get_incoming_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let mut db = self.db.write();
-        let node = db.get_node(node_id).map_err(graph_error_to_py)?;
+        let node = db
+            .get_node(node_id)
+            .map_err(graph_error_to_py)?
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?;
         let mut edges = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
         while edge_id != NULL_EDGE_ID {
@@ -437,7 +451,9 @@ impl PySombraTransaction {
     fn get_node(&self, py: Python<'_>, node_id: u64) -> PyResult<PySombraNode> {
         let node = {
             let mut db = self.db.write();
-            db.get_node(node_id).map_err(graph_error_to_py)?
+            db.get_node(node_id)
+                .map_err(graph_error_to_py)?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?
         };
         PySombraNode::from_node(py, node)
     }

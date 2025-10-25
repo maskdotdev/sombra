@@ -1,5 +1,4 @@
 use super::*;
-use crate::error::GraphError;
 use crate::model::{Edge, Node, PropertyValue};
 use tempfile::NamedTempFile;
 

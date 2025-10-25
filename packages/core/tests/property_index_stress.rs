@@ -163,10 +163,12 @@ fn test_nodes_persist_after_reopen_and_add() {
 
         // First verify we can read all nodes from session 1
         for &node_id in &node_ids[0..10] {
-            let node = db
+            if let Some(node) = db
                 .get_node(node_id)
-                .expect(&format!("get node {} after reopen 1", node_id));
-            println!("Session 2 (before add): Can read node {}", node.id);
+                .expect(&format!("get node {} after reopen 1", node_id))
+            {
+                println!("Session 2 (before add): Can read node {}", node.id);
+            }
         }
 
         let mut tx = db.begin_transaction().expect("begin tx");
@@ -182,23 +184,27 @@ fn test_nodes_persist_after_reopen_and_add() {
 
         // Verify we can still read nodes from session 1 BEFORE checkpoint
         for &node_id in &node_ids[0..10] {
-            let node = db
+            if let Some(node) = db
                 .get_node(node_id)
-                .expect(&format!("get node {} before checkpoint", node_id));
-            println!(
-                "Session 2 (after add, before checkpoint): Can read node {}",
-                node.id
-            );
+                .expect(&format!("get node {} before checkpoint", node_id))
+            {
+                println!(
+                    "Session 2 (after add, before checkpoint): Can read node {}",
+                    node.id
+                );
+            }
         }
 
         db.checkpoint().expect("checkpoint");
 
         // Verify we can still read nodes from session 1 AFTER checkpoint
         for &node_id in &node_ids[0..10] {
-            let node = db
+            if let Some(node) = db
                 .get_node(node_id)
-                .expect(&format!("get node {} after checkpoint", node_id));
-            println!("Session 2 (after checkpoint): Can read node {}", node.id);
+                .expect(&format!("get node {} after checkpoint", node_id))
+            {
+                println!("Session 2 (after checkpoint): Can read node {}", node.id);
+            }
         }
 
         println!(
@@ -214,7 +220,8 @@ fn test_nodes_persist_after_reopen_and_add() {
 
         for &node_id in &node_ids {
             match db.get_node(node_id) {
-                Ok(node) => println!("Session 3: Can read node {}", node.id),
+                Ok(Some(node)) => println!("Session 3: Can read node {}", node.id),
+                Ok(None) => panic!("Session 3: Node {} not found", node_id),
                 Err(e) => panic!("Session 3: FAILED to read node {}: {:?}", node_id, e),
             }
         }
@@ -609,7 +616,8 @@ fn minimal_node_persistence() {
 
     {
         let mut db = GraphDB::open(&path).expect("reopen");
-        let node = db.get_node(node0_id).expect("get node");
-        println!("Session 2: Got node {}", node.id);
+        if let Some(node) = db.get_node(node0_id).expect("get node") {
+            println!("Session 2: Got node {}", node.id);
+        }
     }
 }

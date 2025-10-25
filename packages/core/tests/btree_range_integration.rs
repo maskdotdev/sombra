@@ -47,7 +47,7 @@ fn test_range_queries_with_social_graph() -> Result<()> {
     for (i, node_id) in node_ids_in_range.iter().enumerate() {
         assert!(*node_id >= range_start && *node_id <= range_end);
         let mut tx = db.begin_transaction()?;
-        let node = tx.get_node(*node_id)?;
+        let node = tx.get_node(*node_id)?.expect("node should exist");
         assert!(node.labels.contains(&"User".to_string()));
         let user_id = match node.properties.get("user_id") {
             Some(PropertyValue::Int(id)) => *id,
@@ -142,7 +142,7 @@ fn test_range_queries_after_deletes() -> Result<()> {
 
     for node_id in &node_ids_in_range {
         let mut tx = db.begin_transaction()?;
-        let node = tx.get_node(*node_id)?;
+        let node = tx.get_node(*node_id)?.expect("node should exist");
         let index = match node.properties.get("index") {
             Some(PropertyValue::Int(i)) => *i,
             _ => panic!("Expected index property"),
@@ -271,9 +271,10 @@ fn test_range_queries_with_property_index() -> Result<()> {
     let mut level_5_count = 0;
     for node_id in &node_ids_in_range {
         let mut tx = db.begin_transaction()?;
-        let node = tx.get_node(*node_id)?;
-        if let Some(PropertyValue::Int(5)) = node.properties.get("level") {
-            level_5_count += 1;
+        if let Some(node) = tx.get_node(*node_id)? {
+            if let Some(PropertyValue::Int(5)) = node.properties.get("level") {
+                level_5_count += 1;
+            }
         }
         tx.commit()?;
     }

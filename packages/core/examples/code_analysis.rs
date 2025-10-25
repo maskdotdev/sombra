@@ -151,9 +151,10 @@ impl CodeGraph {
 
         let mut methods = Vec::new();
         for neighbor_id in neighbors {
-            let node = tx.get_node(neighbor_id)?;
-            if node.labels.contains(&"Function".to_string()) {
-                methods.push(neighbor_id);
+            if let Some(node) = tx.get_node(neighbor_id)? {
+                if node.labels.contains(&"Function".to_string()) {
+                    methods.push(neighbor_id);
+                }
             }
         }
 
@@ -174,22 +175,25 @@ impl CodeGraph {
 
         let mut total_complexity = 0;
         for neighbor_id in neighbors {
-            let node = tx.get_node(neighbor_id)?;
-            if node.labels.contains(&"Class".to_string()) {
-                let class_neighbors = tx.get_neighbors(neighbor_id)?;
-                for method_id in class_neighbors {
-                    let method_node = tx.get_node(method_id)?;
-                    if method_node.labels.contains(&"Function".to_string()) {
-                        if let Some(PropertyValue::Int(complexity)) =
-                            method_node.properties.get("complexity")
-                        {
-                            total_complexity += complexity;
+            if let Some(node) = tx.get_node(neighbor_id)? {
+                if node.labels.contains(&"Class".to_string()) {
+                    let class_neighbors = tx.get_neighbors(neighbor_id)?;
+                    for method_id in class_neighbors {
+                        if let Some(method_node) = tx.get_node(method_id)? {
+                            if method_node.labels.contains(&"Function".to_string()) {
+                                if let Some(PropertyValue::Int(complexity)) =
+                                    method_node.properties.get("complexity")
+                                {
+                                    total_complexity += complexity;
+                                }
+                            }
                         }
                     }
-                }
-            } else if node.labels.contains(&"Function".to_string()) {
-                if let Some(PropertyValue::Int(complexity)) = node.properties.get("complexity") {
-                    total_complexity += complexity;
+                } else if node.labels.contains(&"Function".to_string()) {
+                    if let Some(PropertyValue::Int(complexity)) = node.properties.get("complexity")
+                    {
+                        total_complexity += complexity;
+                    }
                 }
             }
         }
@@ -204,9 +208,10 @@ impl CodeGraph {
 
         let mut dependencies = Vec::new();
         for neighbor_id in neighbors {
-            let node = tx.get_node(neighbor_id)?;
-            if node.labels.contains(&"File".to_string()) && neighbor_id != file_id {
-                dependencies.push(neighbor_id);
+            if let Some(node) = tx.get_node(neighbor_id)? {
+                if node.labels.contains(&"File".to_string()) && neighbor_id != file_id {
+                    dependencies.push(neighbor_id);
+                }
             }
         }
 

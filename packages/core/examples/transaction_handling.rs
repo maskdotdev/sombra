@@ -114,9 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Read {} users within transaction", users.len());
 
         for user_id in users.iter().take(3) {
-            let user = tx.get_node(*user_id)?;
-            if let Some(PropertyValue::String(name)) = user.properties.get("name") {
-                println!("  - User: {}", name);
+            if let Some(user) = tx.get_node(*user_id)? {
+                if let Some(PropertyValue::String(name)) = user.properties.get("name") {
+                    println!("  - User: {}", name);
+                }
             }
         }
 

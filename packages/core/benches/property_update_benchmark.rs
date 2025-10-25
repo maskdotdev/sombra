@@ -31,13 +31,12 @@ fn benchmark_single_property_update(node_count: usize, updates_per_node: usize) 
     let update_start = Instant::now();
     for _ in 0..updates_per_node {
         for &node_id in &node_ids {
-            let current_age = if let Some(sombra::model::PropertyValue::Int(age)) = db
-                .get_node(node_id)
-                .expect("get node")
-                .properties
-                .get("age")
-            {
-                *age
+            let current_age = if let Some(node) = db.get_node(node_id).expect("get node") {
+                if let Some(sombra::model::PropertyValue::Int(age)) = node.properties.get("age") {
+                    *age
+                } else {
+                    25
+                }
             } else {
                 25
             };

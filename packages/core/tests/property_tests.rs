@@ -112,7 +112,7 @@ proptest! {
         {
             let mut tx = db.begin_transaction().unwrap();
             for (idx, node_id) in node_ids.iter().enumerate() {
-                let node = tx.get_node(*node_id).unwrap();
+                let node = tx.get_node(*node_id).unwrap().unwrap();
                 prop_assert!(node.id > 0);
                 prop_assert_eq!(&node.labels, &nodes[idx].0);
             }
@@ -166,7 +166,7 @@ proptest! {
             let mut tx = db.begin_transaction().unwrap();
 
             for node_id in &committed_ids {
-                let node = tx.get_node(*node_id).unwrap();
+                let node = tx.get_node(*node_id).unwrap().unwrap();
                 prop_assert!(node.id > 0, "Committed node {} should exist", node_id);
             }
 
@@ -238,7 +238,7 @@ proptest! {
         tx.commit().unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        let retrieved_node = tx.get_node(node_id).unwrap();
+        let retrieved_node = tx.get_node(node_id).unwrap().unwrap();
         prop_assert!(retrieved_node.id > 0);
 
         for (key, value) in &props {
@@ -265,8 +265,8 @@ fn property_test_idempotent_reads() {
 
     for _ in 0..100 {
         let mut tx = db.begin_transaction().unwrap();
-        let node1 = tx.get_node(node_id).unwrap();
-        let node2 = tx.get_node(node_id).unwrap();
+        let node1 = tx.get_node(node_id).unwrap().unwrap();
+        let node2 = tx.get_node(node_id).unwrap().unwrap();
 
         assert_eq!(node1, node2);
         tx.commit().unwrap();
@@ -356,7 +356,7 @@ fn test_set_node_property_in_place() {
         .unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
-    let updated_node = tx.get_node(node_id).unwrap();
+    let updated_node = tx.get_node(node_id).unwrap().unwrap();
     assert_eq!(
         updated_node.properties.get("age"),
         Some(&PropertyValue::Int(31))
@@ -391,7 +391,7 @@ fn test_set_node_property_with_growth() {
     .unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
-    let updated_node = tx.get_node(node_id).unwrap();
+    let updated_node = tx.get_node(node_id).unwrap().unwrap();
     assert_eq!(
         updated_node.properties.get("bio"),
         Some(&PropertyValue::String(long_bio))
@@ -428,7 +428,7 @@ fn test_remove_node_property() {
     db.remove_node_property(node_id, "email").unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
-    let updated_node = tx.get_node(node_id).unwrap();
+    let updated_node = tx.get_node(node_id).unwrap().unwrap();
     assert_eq!(updated_node.properties.get("email"), None);
     assert_eq!(
         updated_node.properties.get("name"),
@@ -460,7 +460,7 @@ fn test_remove_nonexistent_property() {
     db.remove_node_property(node_id, "nonexistent").unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
-    let node = tx.get_node(node_id).unwrap();
+    let node = tx.get_node(node_id).unwrap().unwrap();
     assert_eq!(
         node.properties.get("name"),
         Some(&PropertyValue::String("Dave".to_string()))
@@ -492,7 +492,7 @@ fn test_property_update_persistence() {
     {
         let mut db = GraphDB::open(&path).unwrap();
         let mut tx = db.begin_transaction().unwrap();
-        let node = tx.get_node(node_id).unwrap();
+        let node = tx.get_node(node_id).unwrap().unwrap();
         assert_eq!(node.properties.get("count"), Some(&PropertyValue::Int(42)));
         tx.commit().unwrap();
     }
@@ -518,7 +518,7 @@ fn test_property_update_multiple_times() {
     }
 
     let mut tx = db.begin_transaction().unwrap();
-    let node = tx.get_node(node_id).unwrap();
+    let node = tx.get_node(node_id).unwrap().unwrap();
     assert_eq!(node.properties.get("value"), Some(&PropertyValue::Int(10)));
     tx.commit().unwrap();
 }
@@ -585,7 +585,7 @@ fn test_property_removal_updates_index() {
         .unwrap();
     assert_eq!(results.len(), 0);
 
-    let node = tx.get_node(node_id).unwrap();
+    let node = tx.get_node(node_id).unwrap().unwrap();
     assert_eq!(
         node.properties.get("name"),
         Some(&PropertyValue::String("Widget".to_string()))

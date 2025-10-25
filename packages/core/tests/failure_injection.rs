@@ -61,7 +61,7 @@ fn test_commit_durability() {
     let mut db = GraphDB::open(&path).unwrap();
     let mut tx = db.begin_transaction().unwrap();
 
-    let node = tx.get_node(1).unwrap();
+    let node = tx.get_node(1).unwrap().unwrap();
     assert_eq!(node.labels, vec!["Durable".to_string()]);
 
     tx.commit().unwrap();

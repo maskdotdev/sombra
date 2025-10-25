@@ -71,7 +71,7 @@ fn stress_test_large_insertion() {
     println!("Total time: {:?}", start.elapsed());
 
     let mut tx = db.begin_transaction().unwrap();
-    let node = tx.get_node(1).unwrap();
+    let node = tx.get_node(1).unwrap().expect("node should exist");
     assert!(node.id > 0);
     tx.commit().unwrap();
 }
@@ -164,7 +164,7 @@ fn stress_test_memory_stability() {
         let mut tx = db.begin_transaction().unwrap();
         let node_id = tx.add_node(node).unwrap();
 
-        let retrieved_node = tx.get_node(node_id).unwrap();
+        let retrieved_node = tx.get_node(node_id).unwrap().expect("node should exist");
         assert!(retrieved_node.id > 0);
 
         tx.commit().unwrap();
@@ -210,7 +210,7 @@ fn stress_test_mixed_workload() {
                 if !node_ids.is_empty() {
                     let node_id = node_ids[i % node_ids.len()];
                     let mut tx = db.begin_transaction().unwrap();
-                    let node = tx.get_node(node_id).unwrap();
+                    let node = tx.get_node(node_id).unwrap().expect("node should exist");
                     assert!(node.id > 0);
                     tx.commit().unwrap();
                 }

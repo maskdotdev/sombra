@@ -151,15 +151,18 @@ fn investigate_btree_delete_behavior_large() -> Result<()> {
     let sample_size = 50.min(all_after.len());
     for node_id in all_after.iter().take(sample_size) {
         match tx.get_node(*node_id) {
-            Ok(node) => {
+            Ok(Some(node)) => {
                 let seq = match node.properties.get("seq") {
                     Some(PropertyValue::Int(s)) => *s,
                     _ => -1,
                 };
                 eprintln!("Node {} EXISTS (seq={})", node_id, seq);
             }
+            Ok(None) => {
+                eprintln!("Node {} MISSING: returned None", node_id);
+            }
             Err(e) => {
-                eprintln!("Node {} MISSING: {:?}", node_id, e);
+                eprintln!("Node {} ERROR: {:?}", node_id, e);
             }
         }
     }
