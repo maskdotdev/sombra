@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.12](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.11...sombrajs-v0.4.12) (2025-10-25)
+
+
+### Bug Fixes
+
+* **js:** fixing dx of types/functions etc ([a497034](https://github.com/maskdotdev/sombra/commit/a4970340703c58bccd31a6c49877b92e19d540d5))
+
 ## [0.4.11](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.10...sombrajs-v0.4.11) (2025-10-24)
 
 
