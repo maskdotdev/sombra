@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.13](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.12...sombrajs-v0.4.13) (2025-10-25)
+
+
+### Bug Fixes
+
+* **js:** implement unified SombraDB API with optional TypeScript generics ([8c1317e](https://github.com/maskdotdev/sombra/commit/8c1317e631861a8f883456704835c5ae6dc9ae77))
+
 ## [Unreleased]
 
 ### Features
