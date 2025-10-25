@@ -191,6 +191,119 @@ except Exception as e:
     raise
 ```
 
+## Typed API (Experimental)
+
+Sombra provides a type-safe wrapper API for Python similar to TypeScript, using `TypedDict` for schema definitions and enhanced IDE support.
+
+### Basic Usage
+
+```python
+from typing_extensions import TypedDict
+from sombra.typed import SombraDB
+
+# Define your schema using TypedDict
+class PersonProps(TypedDict):
+    name: str
+    age: int
+
+class PostProps(TypedDict):
+    title: str
+    content: str
+
+# Create a typed database instance
+db: SombraDB = SombraDB("blog.db")
+
+# Type-safe node creation with single label
+person_id = db.add_node("Person", {"name": "Alice", "age": 30})
+
+# Type-safe node creation with properties
+post_id = db.add_node("Post", {"title": "Hello", "content": "World"})
+
+# Create edges
+edge_id = db.add_edge(person_id, post_id, "authored")
+
+# Query operations remain type-safe
+person = db.get_node(person_id)
+print(f"{person.properties['name']} is {person.properties['age']} years old")
+```
+
+### Multi-Label Support
+
+The typed API supports multi-label nodes with proper type inference:
+
+```python
+from typing_extensions import TypedDict
+from sombra.typed import SombraDB
+
+class PersonProps(TypedDict):
+    name: str
+
+class EmployeeProps(TypedDict):
+    employee_id: str
+
+class ManagerProps(TypedDict):
+    department: str
+
+# Create nodes with multiple labels
+# Multi-label nodes require all properties from all label types
+manager_id = db.add_node(
+    ["Person", "Employee", "Manager"],
+    {
+        "name": "Alice",
+        "employee_id": "E123",
+        "department": "Engineering"
+    }
+)
+
+# Retrieve and verify
+manager = db.get_node(manager_id)
+assert "Person" in manager.labels
+assert "Employee" in manager.labels
+assert "Manager" in manager.labels
+```
+
+### Typed Transactions
+
+```python
+from sombra.typed import SombraDB
+
+db: SombraDB = SombraDB("blog.db")
+
+# Type-safe transactions
+tx = db.begin_transaction()
+
+person_id = tx.add_node("Person", {"name": "Bob", "age": 25})
+post_id = tx.add_node("Post", {"title": "My Post", "content": "Content"})
+tx.add_edge(person_id, post_id, "authored")
+
+tx.commit()
+```
+
+### Type-Safe Query Builder
+
+```python
+# Type-safe query building
+result = db.query() \
+    .start_from_label("Person") \
+    .traverse(["authored"], "outgoing", 1) \
+    .limit(10) \
+    .execute()
+
+for node_id in result:
+    node = db.get_node(node_id)
+    print(node.properties)
+```
+
+### Benefits of Typed API
+
+- **IDE Autocomplete**: Get property suggestions based on your schema
+- **Type Safety**: Catch errors at development time, not runtime
+- **Better Documentation**: Schema serves as living documentation
+- **Multi-Label Support**: Type-safe handling of nodes with multiple labels
+- **Familiar API**: Same patterns as TypeScript for cross-language consistency
+
+See `examples/typed_example.py` and `examples/multi_label_typed.py` for complete examples.
+
 ### Batch Operations
 
 ```python

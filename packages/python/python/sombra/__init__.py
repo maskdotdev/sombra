@@ -1,4 +1,5 @@
 from .sombra import *
+from . import typed
 
 __all__ = [
     "SombraDB",
@@ -16,4 +17,5 @@ __all__ = [
     "Pattern",
     "Match",
     "__version__",
+    "typed",
 ]
