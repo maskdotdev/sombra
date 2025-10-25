@@ -1,21 +1,21 @@
-import { 
-  SombraDB as NativeSombraDB, 
-  SombraPropertyValue, 
-  SombraNode, 
-  SombraEdge, 
-  QueryBuilder as NativeQueryBuilder,
-  SombraTransaction
-} from './index';
+import {
+  type QueryBuilder as NativeQueryBuilder,
+  SombraDB as NativeSombraDB,
+  SombraEdge,
+  SombraNode,
+  SombraPropertyValue,
+  SombraTransaction,
+} from "./index";
 
 export type PropertyType = string | number | boolean;
 
 export type InferPropertyValue<T> = T extends string
-  ? 'string'
+  ? "string"
   : T extends number
-  ? 'int' | 'float'
-  : T extends boolean
-  ? 'bool'
-  : never;
+    ? "int" | "float"
+    : T extends boolean
+      ? "bool"
+      : never;
 
 export type NodeSchema = Record<string, Record<string, PropertyType>>;
 export type EdgeSchema = Record<
@@ -32,34 +32,64 @@ export interface GraphSchema {
   edges: EdgeSchema;
 }
 
-export type NodeLabel<Schema extends GraphSchema> = keyof Schema['nodes'] & string;
-export type EdgeType<Schema extends GraphSchema> = keyof Schema['edges'] & string;
+export type NodeLabel<Schema extends GraphSchema> = keyof Schema["nodes"] &
+  string;
+export type EdgeType<Schema extends GraphSchema> = keyof Schema["edges"] &
+  string;
 
 export type NodeProperties<
   Schema extends GraphSchema,
-  Label extends NodeLabel<Schema>
-> = Schema['nodes'][Label];
+  Label extends NodeLabel<Schema>,
+> = Schema["nodes"][Label];
+
+type OneOrMore<T> = readonly [T, ...T[]];
+
+type UnionToIntersection<U> = (U extends any ? (k: U) => void : never) extends (
+  k: infer I,
+) => void
+  ? I
+  : never;
+
+export type UnionNodeProperties<
+  Schema extends GraphSchema,
+  Labels extends OneOrMore<NodeLabel<Schema>>,
+> = UnionToIntersection<
+  Labels[number] extends infer L extends NodeLabel<Schema>
+    ? NodeProperties<Schema, L>
+    : never
+>;
+
+type LabelTuple<
+  Schema extends GraphSchema,
+  T extends readonly NodeLabel<Schema>[] = readonly NodeLabel<Schema>[],
+> = T;
+
+// Helper type for all node properties across all labels (for autocomplete)
+export type AllNodeProperties<Schema extends GraphSchema> = Partial<
+  UnionToIntersection<NodeProperties<Schema, NodeLabel<Schema>>>
+>;
 
 export type EdgeProperties<
   Schema extends GraphSchema,
-  Edge extends EdgeType<Schema>
-> = Schema['edges'][Edge]['properties'] extends Record<string, PropertyType>
-  ? Schema['edges'][Edge]['properties']
-  : Record<string, never>;
+  Edge extends EdgeType<Schema>,
+> =
+  Schema["edges"][Edge]["properties"] extends Record<string, PropertyType>
+    ? Schema["edges"][Edge]["properties"]
+    : Record<string, never>;
 
 export type EdgeFrom<
   Schema extends GraphSchema,
-  Edge extends EdgeType<Schema>
-> = Schema['edges'][Edge]['from'];
+  Edge extends EdgeType<Schema>,
+> = Schema["edges"][Edge]["from"];
 
 export type EdgeTo<
   Schema extends GraphSchema,
-  Edge extends EdgeType<Schema>
-> = Schema['edges'][Edge]['to'];
+  Edge extends EdgeType<Schema>,
+> = Schema["edges"][Edge]["to"];
 
 export type TypedNode<
   Schema extends GraphSchema,
-  Label extends NodeLabel<Schema>
+  Label extends NodeLabel<Schema>,
 > = {
   id: number;
   labels: Label[];
@@ -68,7 +98,7 @@ export type TypedNode<
 
 export type TypedEdge<
   Schema extends GraphSchema,
-  Edge extends EdgeType<Schema>
+  Edge extends EdgeType<Schema>,
 > = {
   id: number;
   sourceNodeId: number;
@@ -80,15 +110,18 @@ export type TypedEdge<
 export interface TypedQueryBuilder<Schema extends GraphSchema> {
   startFrom(nodeIds: number[]): this;
   startFromLabel<L extends NodeLabel<Schema>>(label: L): this;
-  startFromProperty<L extends NodeLabel<Schema>, K extends keyof NodeProperties<Schema, L>>(
+  startFromProperty<
+    L extends NodeLabel<Schema>,
+    K extends keyof NodeProperties<Schema, L>,
+  >(
     label: L,
     key: K,
-    value: NodeProperties<Schema, L>[K]
+    value: NodeProperties<Schema, L>[K],
   ): this;
   traverse<E extends EdgeType<Schema>>(
     edgeTypes: E[],
-    direction: 'incoming' | 'outgoing' | 'both',
-    depth: number
+    direction: "incoming" | "outgoing" | "both",
+    depth: number,
   ): this;
   limit(n: number): this;
   execute(): {
@@ -103,47 +136,56 @@ export class SombraDB<Schema extends GraphSchema = any> {
 
   beginTransaction(): SombraTransaction;
 
-  addNode<L extends NodeLabel<Schema>>(
+  addNode<L extends keyof Schema["nodes"]>(
     label: L,
-    properties: NodeProperties<Schema, L>
+    props: Schema["nodes"][L],
   ): number;
-  addNode(labels: string[], properties?: Record<string, SombraPropertyValue> | null): number;
+  addNode<L1 extends keyof Schema["nodes"], L2 extends keyof Schema["nodes"]>(
+    labels: [L1, L2],
+    props: Schema["nodes"][L1] & Schema["nodes"][L2],
+  ): void;
 
+  addNode<
+    L1 extends keyof Schema["nodes"],
+    L2 extends keyof Schema["nodes"],
+    L3 extends keyof Schema["nodes"],
+  >(
+    labels: [L1, L2, L3],
+    props: Schema["nodes"][L1] & Schema["nodes"][L2] & Schema["nodes"][L3],
+  ): void;
   addEdge<E extends EdgeType<Schema>>(
     sourceNodeId: number,
     targetNodeId: number,
     edgeType: E,
-    properties: EdgeProperties<Schema, E>
+    properties: EdgeProperties<Schema, E>,
   ): number;
   addEdge(
     sourceNodeId: number,
     targetNodeId: number,
     label: string,
-    properties?: Record<string, SombraPropertyValue> | null
+    properties?: Record<string, SombraPropertyValue> | null,
   ): number;
 
   getNode<L extends NodeLabel<Schema> = NodeLabel<Schema>>(
-    nodeId: number
+    nodeId: number,
   ): TypedNode<Schema, L> | null;
   getNode(nodeId: number): SombraNode | null;
 
   getNodesByLabel<L extends NodeLabel<Schema>>(label: L): number[];
   getNodesByLabel(label: string): number[];
 
-  findNodeByProperty<L extends NodeLabel<Schema>, K extends keyof NodeProperties<Schema, L>>(
-    label: L,
-    key: K,
-    value: NodeProperties<Schema, L>[K]
-  ): number | undefined;
+  findNodeByProperty<
+    L extends NodeLabel<Schema>,
+    K extends keyof NodeProperties<Schema, L>,
+  >(label: L, key: K, value: NodeProperties<Schema, L>[K]): number | undefined;
 
-  findNodesByProperty<L extends NodeLabel<Schema>, K extends keyof NodeProperties<Schema, L>>(
-    label: L,
-    key: K,
-    value: NodeProperties<Schema, L>[K]
-  ): number[];
+  findNodesByProperty<
+    L extends NodeLabel<Schema>,
+    K extends keyof NodeProperties<Schema, L>,
+  >(label: L, key: K, value: NodeProperties<Schema, L>[K]): number[];
 
   getEdge<E extends EdgeType<Schema> = EdgeType<Schema>>(
-    edgeId: number
+    edgeId: number,
   ): TypedEdge<Schema, E> | null;
   getEdge(edgeId: number): SombraEdge;
 
@@ -155,19 +197,25 @@ export class SombraDB<Schema extends GraphSchema = any> {
   deleteNode(nodeId: number): void;
   deleteEdge(edgeId: number): void;
 
-  setNodeProperty<L extends NodeLabel<Schema>, K extends keyof NodeProperties<Schema, L>>(
+  setNodeProperty<
+    L extends NodeLabel<Schema>,
+    K extends keyof NodeProperties<Schema, L>,
+  >(nodeId: number, key: K, value: NodeProperties<Schema, L>[K]): void;
+  setNodeProperty(
     nodeId: number,
-    key: K,
-    value: NodeProperties<Schema, L>[K]
+    key: string,
+    value: SombraPropertyValue,
   ): void;
-  setNodeProperty(nodeId: number, key: string, value: SombraPropertyValue): void;
 
   removeNodeProperty(nodeId: number, key: string): void;
 
   flush(): void;
   checkpoint(): void;
 
-  bfsTraversal(startNodeId: number, maxDepth: number): Array<{ nodeId: number; depth: number }>;
+  bfsTraversal(
+    startNodeId: number,
+    maxDepth: number,
+  ): Array<{ nodeId: number; depth: number }>;
 
   query(): TypedQueryBuilder<Schema>;
   query(): NativeQueryBuilder;
@@ -183,19 +231,37 @@ export class SombraDB<Schema extends GraphSchema = any> {
   getFirstNode(): number | null;
   getLastNode(): number | null;
 
-  getAncestors(startNodeId: number, edgeType: string, maxDepth?: number): number[];
-  getDescendants(startNodeId: number, edgeType: string, maxDepth?: number): number[];
+  getAncestors(
+    startNodeId: number,
+    edgeType: string,
+    maxDepth?: number,
+  ): number[];
+  getDescendants(
+    startNodeId: number,
+    edgeType: string,
+    maxDepth?: number,
+  ): number[];
 
-  shortestPath(start: number, end: number, edgeTypes?: string[]): number[] | null;
+  shortestPath(
+    start: number,
+    end: number,
+    edgeTypes?: string[],
+  ): number[] | null;
   findPaths(
     start: number,
     end: number,
     minDepth: number,
     maxDepth: number,
-    edgeTypes?: string[]
+    edgeTypes?: string[],
   ): number[][];
 
   get db(): NativeSombraDB;
 }
 
-export { NativeSombraDB, SombraPropertyValue, SombraNode, SombraEdge, SombraTransaction };
+export {
+  NativeSombraDB,
+  SombraPropertyValue,
+  SombraNode,
+  SombraEdge,
+  SombraTransaction,
+};

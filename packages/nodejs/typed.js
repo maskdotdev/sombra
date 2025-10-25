@@ -59,10 +59,27 @@ function convertPropertiesFromSombra(sombraProperties) {
 }
 
 function isTypedCall(labelOrLabels, properties) {
-  return typeof labelOrLabels === 'string' && 
-         properties && 
-         typeof properties === 'object' &&
-         !Array.isArray(labelOrLabels);
+  // Check if it's a typed call (not raw API with {type, value} properties)
+  if (!properties || typeof properties !== 'object') {
+    return false;
+  }
+  
+  // Check if properties are in raw format
+  const firstValue = Object.values(properties)[0];
+  if (isTypedPropertyValue(firstValue)) {
+    return false;
+  }
+  
+  // Accept string or array of strings for labels
+  if (typeof labelOrLabels === 'string') {
+    return true;
+  }
+  
+  if (Array.isArray(labelOrLabels) && labelOrLabels.length > 0) {
+    return labelOrLabels.every(label => typeof label === 'string');
+  }
+  
+  return false;
 }
 
 function isTypedPropertyValue(value) {
@@ -149,14 +166,15 @@ class SombraDB {
 
   /**
    * Add a node to the graph.
-   * @param {string|string[]} labelOrLabels - Node label (typed) or array of labels (raw)
+   * @param {string|string[]} labelOrLabels - Node label (typed) or array of labels (typed/raw)
    * @param {Object} properties - Node properties (plain values for typed, {type, value} for raw)
    * @returns {number} The node ID
    */
   addNode(labelOrLabels, properties = {}) {
     if (isTypedCall(labelOrLabels, properties)) {
       const sombraProps = convertPropertiesToSombra(properties);
-      return this._db.addNode([labelOrLabels], sombraProps);
+      const labels = Array.isArray(labelOrLabels) ? labelOrLabels : [labelOrLabels];
+      return this._db.addNode(labels, sombraProps);
     }
     return this._db.addNode(labelOrLabels, properties);
   }

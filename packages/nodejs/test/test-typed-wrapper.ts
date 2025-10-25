@@ -9,6 +9,10 @@ interface TestSchema {
       age: number;
       active: boolean;
     };
+    Employee: {
+      employeeId: string;
+      department: string;
+    };
     Company: {
       name: string;
       employees: number;
@@ -140,6 +144,68 @@ const rawDb = db.db;
 assert.ok(rawDb !== null);
 assert.ok(typeof rawDb.getNode === 'function');
 console.log('✓ Can access underlying SombraDB instance');
+
+console.log('\n16. Testing multiple labels with combined properties...');
+const charlie = db.addNode(['Person', 'Employee'], { 
+  name: 'Charlie', 
+  age: 28, 
+  active: true,
+  employeeId: 'E200',
+  department: 'Engineering',
+});
+const charlieNode = db.db.getNode(charlie); // Use untyped API for multi-label nodes
+assert.strictEqual(charlieNode?.labels.length, 2);
+assert.ok(charlieNode?.labels.includes('Person'));
+assert.ok(charlieNode?.labels.includes('Employee'));
+assert.deepStrictEqual(charlieNode?.properties.name, { type: 'string', value: 'Charlie' });
+assert.deepStrictEqual(charlieNode?.properties.age, { type: 'int', value: 28 });
+assert.deepStrictEqual(charlieNode?.properties.employeeId, { type: 'string', value: 'E200' });
+assert.deepStrictEqual(charlieNode?.properties.department, { type: 'string', value: 'Engineering' });
+console.log('✓ Multi-label node with combined properties:', charlieNode);
+
+console.log('\n17. Testing another multi-label node...');
+const david = db.addNode(['Person', 'Employee'], { 
+  name: 'David',
+  age: 31,
+  active: false,
+  employeeId: 'E123', 
+  department: 'Engineering',
+});
+const davidNode = db.db.getNode(david); // Use untyped API for multi-label nodes
+assert.strictEqual(davidNode?.labels.length, 2);
+assert.deepStrictEqual(davidNode?.properties.name, { type: 'string', value: 'David' });
+assert.deepStrictEqual(davidNode?.properties.age, { type: 'int', value: 31 });
+assert.deepStrictEqual(davidNode?.properties.active, { type: 'bool', value: false });
+assert.deepStrictEqual(davidNode?.properties.employeeId, { type: 'string', value: 'E123' });
+assert.deepStrictEqual(davidNode?.properties.department, { type: 'string', value: 'Engineering' });
+console.log('✓ Multi-label node persisted with all properties:', davidNode);
+
+console.log('\n18. Testing multiple labels with properties from both...');
+const eve = db.addNode(['Person', 'Employee'], { 
+  name: 'Eve', 
+  age: 32, 
+  active: true,
+  employeeId: 'E456', 
+  department: 'Sales',
+});
+const eveNode = db.db.getNode(eve); // Use untyped API for multi-label nodes
+assert.strictEqual(eveNode?.labels.length, 2);
+assert.deepStrictEqual(eveNode?.properties.name, { type: 'string', value: 'Eve' });
+assert.deepStrictEqual(eveNode?.properties.age, { type: 'int', value: 32 });
+assert.deepStrictEqual(eveNode?.properties.employeeId, { type: 'string', value: 'E456' });
+assert.deepStrictEqual(eveNode?.properties.department, { type: 'string', value: 'Sales' });
+console.log('✓ Multi-label node with both properties:', eveNode);
+
+console.log('\n19. Testing query by label finds multi-label nodes...');
+const allPeople = db.getNodesByLabel('Person');
+assert.ok(allPeople.includes(charlie));
+assert.ok(allPeople.includes(david));
+assert.ok(allPeople.includes(eve));
+const allEmployees = db.getNodesByLabel('Employee');
+assert.ok(allEmployees.includes(charlie));
+assert.ok(allEmployees.includes(david));
+assert.ok(allEmployees.includes(eve));
+console.log('✓ Multi-label nodes found by both labels');
 
 db.flush();
 

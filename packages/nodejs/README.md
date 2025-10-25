@@ -70,6 +70,39 @@ console.log(`Found: ${userNode?.properties.name}`); // typed as string
 const foundUser = db.findNodeByProperty('User', 'name', 'Alice');
 ```
 
+#### Multiple Labels (Union Semantics)
+
+Nodes can have multiple labels, and properties from any label are accepted:
+
+```typescript
+interface MyGraphSchema {
+  nodes: {
+    Person: { name: string; age: number };
+    Employee: { employeeId: string; department: string };
+  };
+  edges: { /* ... */ };
+}
+
+const db = new SombraDB<MyGraphSchema>('./my_graph.db');
+
+// Node with both Person and Employee properties (all required fields from both labels)
+const user = db.addNode(['Person', 'Employee'], { 
+  name: 'Alice', 
+  age: 30,
+  employeeId: 'E123',
+  department: 'Engineering'
+});
+
+// Query by either label
+db.getNodesByLabel('Person');    // returns the node
+db.getNodesByLabel('Employee');  // returns the node
+```
+
+**IDE Autocomplete:**
+- **Label names**: When typing `['Person', '...']`, your IDE suggests valid label names
+- **Property names**: Autocomplete shows the union of properties from the selected labels; optional fields stay optional
+- **Type safety**: TypeScript validates label names, property names, and required fields at compile time
+
 **Benefits:**
 - Full autocomplete for node labels, edge types, and properties
 - Compile-time type validation
