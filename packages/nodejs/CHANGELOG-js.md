@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.14](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.13...sombrajs-v0.4.14) (2025-10-25)
+
+
+### Bug Fixes
+
+* **js:** add multi-label node support with union type semantics and IDE autocomplete ([f585129](https://github.com/maskdotdev/sombra/commit/f5851293a343967a9b587de181faf362d822f573))
+
 ## [0.4.13](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.12...sombrajs-v0.4.13) (2025-10-25)
 
 
