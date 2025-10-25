@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.5...sombra-v0.3.6) (2025-10-25)
+
+
+### Bug Fixes
+
+* **core:** update tests, examples, and benchmarks for Option&lt;Node&gt; return type ([2f13040](https://github.com/maskdotdev/sombra/commit/2f13040bfc94439d42324c5192c10c488c27e04a))
+
 ## [0.3.5](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.4...sombra-v0.3.5) (2025-10-24)
 
 
