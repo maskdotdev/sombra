@@ -1591,7 +1591,7 @@ pub struct DegreeEntry {
     pub degree: f64,
 }
 
-#[napi(object, js_name = "DegreeDistribution")]
+#[napi(object)]
 pub struct JsDegreeDistribution {
     pub in_degree: Vec<DegreeEntry>,
     pub out_degree: Vec<DegreeEntry>,
@@ -1635,7 +1635,7 @@ pub struct HubNode {
     pub degree: f64,
 }
 
-#[napi(object, js_name = "Subgraph")]
+#[napi(object)]
 pub struct JsSubgraph {
     pub nodes: Vec<SombraNode>,
     pub edges: Vec<SombraEdge>,
@@ -1812,7 +1812,7 @@ impl TryFrom<JsEdgePattern> for EdgePattern {
     }
 }
 
-#[napi(object, js_name = "Pattern")]
+#[napi(object)]
 pub struct JsPattern {
     pub nodes: Vec<JsNodePattern>,
     pub edges: Vec<JsEdgePattern>,
@@ -1838,7 +1838,7 @@ impl TryFrom<JsPattern> for Pattern {
     }
 }
 
-#[napi(object, js_name = "Match")]
+#[napi(object)]
 pub struct JsMatch {
     pub node_bindings: HashMap<String, f64>,
     pub edge_ids: Vec<f64>,
