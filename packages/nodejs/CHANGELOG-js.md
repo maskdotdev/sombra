@@ -1,5 +1,44 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **Unified API**: Single `SombraDB` class now works with or without TypeScript generics
+  - Use `new SombraDB<Schema>('./db')` for full type safety with autocomplete
+  - Use `new SombraDB('./db')` for backwards-compatible raw API
+  - Auto-detects input format (typed vs raw properties)
+  - Always returns plain JavaScript values (no manual `{type, value}` objects in typed mode)
+  - Removed separate `TypedSombraDB` class (replaced by generic parameter)
+  - All examples and tests updated to use unified API
+
+### Documentation
+
+* Updated README with unified API examples showing both usage patterns
+* Added comprehensive JSDoc comments to all methods in `typed.js`
+
+### Breaking Changes
+
+* Removed `createTypedDB()` helper function (use `new SombraDB<Schema>()` instead)
+* Removed separate `typed-wrapper.js` and `typed-wrapper.d.ts` files
+* Main entry point now uses `typed.js` and `typed.d.ts` for the unified API
+
+### Migration Guide
+
+**Before (v0.4.11 and earlier):**
+```typescript
+import { createTypedDB } from 'sombradb/typed';
+const db = createTypedDB<MySchema>('./db');
+```
+
+**After (v0.5.0+):**
+```typescript
+import { SombraDB } from 'sombradb';
+const db = new SombraDB<MySchema>('./db');
+```
+
+The raw/backwards-compatible API remains unchanged.
+
 ## [0.4.12](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.11...sombrajs-v0.4.12) (2025-10-25)
 
 

@@ -15,33 +15,93 @@ npm install sombradb
 - **Property Graph Model**: Nodes, edges, and flexible properties
 - **ACID Transactions**: Full transactional support with rollback
 - **Fast Performance**: Native Rust implementation with NAPI bindings
-- **TypeScript Support**: Full type definitions included
+- **TypeScript Support**: Full type definitions with optional generic schemas
+- **Unified API**: Single class works with or without type safety
 - **Cross-Platform**: Pre-built binaries for Linux, macOS, and Windows
 
 ## Quick Start
 
+### Type-Safe API (Recommended for TypeScript)
+
+The unified API works with or without TypeScript generics. For full compile-time type safety, define a schema:
+
 ```typescript
-import { SombraDB, SombraPropertyValue } from 'sombradb';
+import { SombraDB } from 'sombradb';
+
+interface MyGraphSchema {
+  nodes: {
+    User: {
+      name: string;
+      age: number;
+    };
+    Post: {
+      title: string;
+      content: string;
+    };
+  };
+  edges: {
+    AUTHORED: {
+      from: 'User';
+      to: 'Post';
+      properties: {
+        publishedAt: number;
+      };
+    };
+  };
+}
+
+const db = new SombraDB<MyGraphSchema>('./my_graph.db');
+
+// Full autocomplete and type checking
+const user = db.addNode('User', { name: 'Alice', age: 30 });
+
+const post = db.addNode('Post', { 
+  title: 'Hello World',
+  content: 'My first post'
+});
+
+db.addEdge(user, post, 'AUTHORED', { publishedAt: Date.now() });
+
+// Type-narrowed return values
+const userNode = db.getNode<'User'>(user);
+console.log(`Found: ${userNode?.properties.name}`); // typed as string
+
+// Type-safe property search
+const foundUser = db.findNodeByProperty('User', 'name', 'Alice');
+```
+
+**Benefits:**
+- Full autocomplete for node labels, edge types, and properties
+- Compile-time type validation
+- Automatic conversion between TypeScript types and SombraDB format
+- No manual `{type, value}` objects needed
+
+### JavaScript API (Backwards Compatible)
+
+For JavaScript or raw property access, use the same class without generics:
+
+```javascript
+const { SombraDB } = require('sombradb');
 
 const db = new SombraDB('./my_graph.db');
 
-const createProp = (type: 'string' | 'int' | 'float' | 'bool', value: any): SombraPropertyValue => ({
-  type,
-  value
+// Raw API with explicit property format
+const user = db.addNode(['User'], {
+  name: { type: 'string', value: 'Alice' },
+  age: { type: 'int', value: 30 }
 });
 
-const user = db.addNode();
-db.setNodeLabel(user, 'User');
-db.setNodeProperty(user, 'name', createProp('string', 'Alice'));
+const post = db.addNode(['Post']);
 
-const post = db.addNode();
-db.setNodeLabel(post, 'Post');
-
-db.addEdge(user, post, 'AUTHORED');
+db.addEdge(user, post, 'AUTHORED', {
+  publishedAt: { type: 'int', value: Date.now() }
+});
 
 const neighbors = db.getNeighbors(user);
-console.log(`User ${user} authored ${neighbors.length} posts`);
+console.log(`User ${user} has ${neighbors.length} connections`);
 ```
+
+**Note:** The API auto-detects input format, so you can mix approaches as needed.
 
 ## Documentation
 

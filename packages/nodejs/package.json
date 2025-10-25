@@ -2,8 +2,14 @@
 	"name": "sombradb",
 	"version": "0.4.12",
 	"description": "A high-performance graph database with ACID transactions",
-	"main": "index.js",
-	"types": "index.d.ts",
+	"main": "typed.js",
+	"types": "typed.d.ts",
+	"exports": {
+		".": {
+			"types": "./typed.d.ts",
+			"default": "./typed.js"
+		}
+	},
 	"bin": {
 		"sombra": "./bin/sombra.js"
 	},
@@ -54,6 +60,8 @@
 		"index.d.ts",
 		"index-napi.js",
 		"index.js",
+		"typed.d.ts",
+		"typed.js",
 		"bin/sombra.js",
 		"*.node"
 	],
