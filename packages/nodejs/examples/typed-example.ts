@@ -160,7 +160,7 @@ const result = db
   .query()
   .startFromLabel('Company')
   .traverse(['WORKS_AT'], 'incoming', 1)
-  .execute();
+  .getIds();
 
 console.log(`   Found ${result.nodeIds.length} total employees across all companies\n`);
 

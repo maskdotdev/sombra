@@ -360,6 +360,17 @@ impl PySombraDB {
         let mut db = self.inner.write();
         db.count_incoming_edges(node_id).map_err(graph_error_to_py)
     }
+
+    fn query(&self) -> PyResult<PyQueryBuilder> {
+        Ok(PyQueryBuilder {
+            db: self.inner.clone(),
+            start_spec: None,
+            edge_types: Vec::new(),
+            direction: None,
+            depth: None,
+            limit_val: None,
+        })
+    }
 }
 
 #[pyclass(module = "sombra", name = "SombraTransaction", unsendable)]
@@ -636,6 +647,17 @@ impl PySombraTransaction {
         let mut db = self.db.write();
         db.count_incoming_edges(node_id).map_err(graph_error_to_py)
     }
+
+    fn query(&self) -> PyResult<PyQueryBuilder> {
+        Ok(PyQueryBuilder {
+            db: self.db.clone(),
+            start_spec: None,
+            edge_types: Vec::new(),
+            direction: None,
+            depth: None,
+            limit_val: None,
+        })
+    }
 }
 
 impl PySombraTransaction {
@@ -648,6 +670,194 @@ impl PySombraTransaction {
     }
 }
 
+#[pyclass(module = "sombra", name = "QueryResult")]
+pub struct PyQueryResult {
+    #[pyo3(get)]
+    pub start_nodes: Vec<u64>,
+    #[pyo3(get)]
+    pub node_ids: Vec<u64>,
+    #[pyo3(get)]
+    pub limited: bool,
+    nodes: Vec<::sombra::model::Node>,
+    edges: Vec<::sombra::model::Edge>,
+}
+
+#[pymethods]
+impl PyQueryResult {
+    #[getter]
+    fn nodes(&self, py: Python<'_>) -> PyResult<Vec<PySombraNode>> {
+        self.nodes
+            .iter()
+            .map(|node| PySombraNode::from_node(py, node.clone()))
+            .collect()
+    }
+
+    #[getter]
+    fn edges(&self, py: Python<'_>) -> PyResult<Vec<PySombraEdge>> {
+        self.edges
+            .iter()
+            .map(|edge| PySombraEdge::from_edge(py, edge.clone()))
+            .collect()
+    }
+}
+
+impl PyQueryResult {
+    fn from_result(result: ::sombra::db::query::builder::QueryResult) -> Self {
+        Self {
+            start_nodes: result.start_nodes,
+            node_ids: result.node_ids,
+            limited: result.limited,
+            nodes: result.nodes,
+            edges: result.edges,
+        }
+    }
+}
+
+enum StartSpec {
+    FromNodes(Vec<u64>),
+    FromLabel(String),
+    FromProperty(String, String, PropertyValue),
+}
+
+#[pyclass(module = "sombra", name = "QueryBuilder")]
+pub struct PyQueryBuilder {
+    db: Arc<RwLock<GraphDB>>,
+    start_spec: Option<StartSpec>,
+    edge_types: Vec<String>,
+    direction: Option<String>,
+    depth: Option<usize>,
+    limit_val: Option<usize>,
+}
+
+#[pymethods]
+impl PyQueryBuilder {
+    fn start_from<'py>(slf: PyRefMut<'py, Self>, node_ids: Vec<u64>) -> PyRefMut<'py, Self> {
+        let mut builder = slf;
+        builder.start_spec = Some(StartSpec::FromNodes(node_ids));
+        builder
+    }
+
+    fn start_from_label<'py>(slf: PyRefMut<'py, Self>, label: String) -> PyRefMut<'py, Self> {
+        let mut builder = slf;
+        builder.start_spec = Some(StartSpec::FromLabel(label));
+        builder
+    }
+
+    fn start_from_property<'py>(
+        slf: PyRefMut<'py, Self>,
+        label: String,
+        key: String,
+        value: Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let mut builder = slf;
+        let prop_value = py_any_to_property_value(&value)?;
+        builder.start_spec = Some(StartSpec::FromProperty(label, key, prop_value));
+        Ok(builder)
+    }
+
+    fn traverse<'py>(
+        slf: PyRefMut<'py, Self>,
+        edge_types: Vec<String>,
+        direction: String,
+        depth: usize,
+    ) -> PyRefMut<'py, Self> {
+        let mut builder = slf;
+        builder.edge_types = edge_types;
+        builder.direction = Some(direction);
+        builder.depth = Some(depth);
+        builder
+    }
+
+    fn limit<'py>(slf: PyRefMut<'py, Self>, n: usize) -> PyRefMut<'py, Self> {
+        let mut builder = slf;
+        builder.limit_val = Some(n);
+        builder
+    }
+
+    fn get_ids(&self) -> PyResult<PyQueryResult> {
+        let mut db = self.db.write();
+        let mut builder = db.query();
+
+        match &self.start_spec {
+            Some(StartSpec::FromNodes(ids)) => {
+                builder = builder.start_from(ids.clone());
+            }
+            Some(StartSpec::FromLabel(label)) => {
+                builder = builder.start_from_label(label);
+            }
+            Some(StartSpec::FromProperty(label, key, value)) => {
+                builder = builder.start_from_property(label, key, value.clone());
+            }
+            None => {
+                return Err(PyValueError::new_err("No start specification provided"));
+            }
+        }
+
+        if let (Some(depth), Some(direction)) = (self.depth, &self.direction) {
+            let edge_type_refs: Vec<&str> = self.edge_types.iter().map(|s| s.as_str()).collect();
+            let dir = match direction.as_str() {
+                "incoming" => ::sombra::model::EdgeDirection::Incoming,
+                "outgoing" => ::sombra::model::EdgeDirection::Outgoing,
+                "both" => ::sombra::model::EdgeDirection::Both,
+                _ => ::sombra::model::EdgeDirection::Outgoing,
+            };
+            builder = builder.traverse(&edge_type_refs, dir, depth);
+        }
+
+        if let Some(limit) = self.limit_val {
+            builder = builder.limit(limit);
+        }
+
+        let result = builder.get_ids().map_err(graph_error_to_py)?;
+        Ok(PyQueryResult::from_result(result))
+    }
+
+    fn get_nodes(&self, py: Python<'_>) -> PyResult<Vec<PySombraNode>> {
+        let mut db = self.db.write();
+        let mut builder = db.query();
+
+        match &self.start_spec {
+            Some(StartSpec::FromNodes(ids)) => {
+                builder = builder.start_from(ids.clone());
+            }
+            Some(StartSpec::FromLabel(label)) => {
+                builder = builder.start_from_label(label);
+            }
+            Some(StartSpec::FromProperty(label, key, value)) => {
+                builder = builder.start_from_property(label, key, value.clone());
+            }
+            None => {
+                return Err(PyValueError::new_err("No start specification provided"));
+            }
+        }
+
+        if let (Some(depth), Some(direction)) = (self.depth, &self.direction) {
+            let edge_type_refs: Vec<&str> = self.edge_types.iter().map(|s| s.as_str()).collect();
+            let dir = match direction.as_str() {
+                "incoming" => ::sombra::model::EdgeDirection::Incoming,
+                "outgoing" => ::sombra::model::EdgeDirection::Outgoing,
+                "both" => ::sombra::model::EdgeDirection::Both,
+                _ => ::sombra::model::EdgeDirection::Outgoing,
+            };
+            builder = builder.traverse(&edge_type_refs, dir, depth);
+        }
+
+        if let Some(limit) = self.limit_val {
+            builder = builder.limit(limit);
+        }
+
+        let nodes = builder.get_nodes().map_err(graph_error_to_py)?;
+        nodes
+            .into_iter()
+            .map(|node| PySombraNode::from_node(py, node))
+            .collect()
+    }
+
+    fn execute(&self) -> PyResult<PyQueryResult> {
+        self.get_ids()
+    }
+}
+
 #[pymodule]
 fn sombra(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -656,6 +866,8 @@ fn sombra(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySombraNode>()?;
     m.add_class::<PySombraEdge>()?;
     m.add_class::<PyBfsResult>()?;
+    m.add_class::<PyQueryResult>()?;
+    m.add_class::<PyQueryBuilder>()?;
     Ok(())
 }
 

@@ -279,19 +279,108 @@ tx.add_edge(person_id, post_id, "authored")
 tx.commit()
 ```
 
-### Type-Safe Query Builder
+## Query Builder API (Native)
+
+Sombra provides a powerful query builder for complex graph queries:
 
 ```python
-# Type-safe query building
+# Basic query building with getIds()
 result = db.query() \
+    .start_from([1, 2, 3]) \
+    .traverse(['KNOWS'], 'outgoing', 2) \
+    .limit(10) \
+    .get_ids()
+
+print(f"Found {len(result.node_ids)} nodes")
+print(f"Limited: {result.limited}")
+
+# Query by label
+result = db.query() \
+    .start_from_label('User') \
+    .traverse(['FOLLOWS'], 'outgoing', 1) \
+    .get_ids()
+
+# Query by property
+result = db.query() \
+    .start_from_property('User', 'username', 'alice') \
+    .traverse(['KNOWS', 'FOLLOWS'], 'both', 2) \
+    .limit(50) \
+    .get_ids()
+```
+
+### Query Execution Methods
+
+The query builder provides three methods to execute queries:
+
+- **`get_ids()`**: Returns a `QueryResult` object with `{node_ids, limited, start_nodes}` - use when you need metadata or just node IDs
+- **`get_nodes()`**: Returns a list of fully hydrated Node objects - use when you need immediate access to node data
+- **`execute()`**: Backwards-compatible alias for `get_ids()` - kept for compatibility but `get_ids()` is preferred
+
+### Using `get_nodes()` for Immediate Data Access
+
+When you need the actual node data immediately:
+
+```python
+# Get nodes directly with all properties
+nodes = db.query() \
+    .start_from_label('User') \
+    .traverse(['FOLLOWS'], 'outgoing', 1) \
+    .limit(10) \
+    .get_nodes()
+
+for node in nodes:
+    print(f"User {node.properties['name']} (ID: {node.id})")
+    print(f"  Age: {node.properties['age']}")
+```
+
+### Using `get_ids()` for Selective Fetching
+
+When you only need IDs or want to fetch nodes selectively:
+
+```python
+# Get IDs first, then decide what to fetch
+result = db.query() \
+    .start_from_label('Product') \
+    .traverse(['PURCHASED_BY'], 'incoming', 1) \
+    .limit(100) \
+    .get_ids()
+
+if len(result.node_ids) > 50:
+    print('Many results, fetching first 10 only')
+    tx = db.begin_transaction()
+    nodes = [tx.get_node(node_id) for node_id in result.node_ids[:10]]
+    tx.commit()
+    
+    for node in nodes:
+        print(node.properties)
+```
+
+### Type-Safe Query Builder
+
+The typed API provides the same query methods with type safety:
+
+```python
+from sombra.typed import SombraDB
+
+db: SombraDB = SombraDB("blog.db")
+
+# Get nodes directly
+nodes = db.query() \
     .start_from_label("Person") \
     .traverse(["authored"], "outgoing", 1) \
     .limit(10) \
-    .execute()
+    .get_nodes()
 
-for node_id in result:
-    node = db.get_node(node_id)
-    print(node.properties)
+for node in nodes:
+    print(f"{node.properties['name']} wrote posts")
+
+# Get IDs for metadata
+result = db.query() \
+    .start_from_label("Person") \
+    .get_ids()
+
+print(f"Total people: {len(result.node_ids)}")
+print(f"Results were limited: {result.limited}")
 ```
 
 ### Benefits of Typed API

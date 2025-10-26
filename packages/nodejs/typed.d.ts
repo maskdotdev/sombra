@@ -124,6 +124,15 @@ export interface TypedQueryBuilder<Schema extends GraphSchema> {
     depth: number,
   ): this;
   limit(n: number): this;
+  getIds(): {
+    startNodes: number[];
+    nodeIds: number[];
+    limited: boolean;
+  };
+  getNodes<L extends NodeLabel<Schema> = NodeLabel<Schema>>(): TypedNode<
+    Schema,
+    L
+  >[];
   execute(): {
     startNodes: number[];
     nodeIds: number[];

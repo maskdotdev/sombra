@@ -44,7 +44,7 @@ enum QueryOp {
     Traverse(TraversalSpec),
 }
 
-/// Result produced by [`QueryBuilder::execute`].
+/// Result produced by [`QueryBuilder::get_ids`].
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     /// Nodes that seeded the traversal after all pre-traversal filters.
@@ -62,8 +62,9 @@ pub struct QueryResult {
 /// Chainable builder for composing query plans executed against [`GraphDB`].
 ///
 /// The builder records operations in the order they are declared and replays
-/// them during [`execute`](Self::execute). This allows ergonomic construction
-/// of queries without immediately borrowing the database for each step.
+/// them during [`get_ids`](Self::get_ids) or [`get_nodes`](Self::get_nodes). 
+/// This allows ergonomic construction of queries without immediately borrowing 
+/// the database for each step.
 ///
 /// # Examples
 /// ```rust,no_run
@@ -86,7 +87,7 @@ pub struct QueryResult {
 ///     })
 ///     .traverse(&["CALLS"], EdgeDirection::Outgoing, 3)
 ///     .limit(100)
-///     .execute()?;
+///     .get_ids()?;
 /// # Ok(()) }
 /// ```
 pub struct QueryBuilder<'db> {
@@ -301,7 +302,7 @@ impl<'db> QueryBuilder<'db> {
         self
     }
 
-    /// Executes the recorded operations against the backing [`GraphDB`].
+    /// Executes the recorded operations and returns node IDs with full query metadata.
     ///
     /// Operations are processed in the order they were registered, allowing
     /// filters to shape the traversal frontier incrementally.
@@ -333,7 +334,7 @@ impl<'db> QueryBuilder<'db> {
     ///     .query()
     ///     .start_from_label("File")
     ///     .traverse(&["CONTAINS"], EdgeDirection::Outgoing, 2)
-    ///     .execute()?;
+    ///     .get_ids()?;
     ///
     /// println!("matched nodes: {}", result.node_ids.len());
     /// # Ok(()) }
@@ -341,7 +342,8 @@ impl<'db> QueryBuilder<'db> {
     ///
     /// # See Also
     /// * [`QueryResult`] - Structure describing the returned data.
-    pub fn execute(mut self) -> Result<QueryResult> {
+    /// * [`Self::get_nodes`] - Returns only the materialized nodes.
+    pub fn get_ids(mut self) -> Result<QueryResult> {
         if !self.ops.iter().any(|op| matches!(op, QueryOp::Start(_))) {
             return Err(GraphError::InvalidArgument(
                 "QueryBuilder requires a starting point".into(),
@@ -429,6 +431,52 @@ impl<'db> QueryBuilder<'db> {
             edges,
             limited,
         })
+    }
+
+    /// Executes the query and returns only the materialized nodes.
+    ///
+    /// This is a convenience method that executes the query and extracts
+    /// just the nodes from the result, discarding metadata like edges and
+    /// start nodes.
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Node>)` containing all matched nodes.
+    /// * `Err(GraphError::InvalidArgument)` if no starting point was provided.
+    ///
+    /// # Errors
+    /// Propagates I/O and data access errors from the database.
+    ///
+    /// # Time Complexity
+    /// O(V + E) where V is visited nodes and E is traversed edges.
+    ///
+    /// # Space Complexity
+    /// O(V) for the returned node vector.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use sombra::{GraphDB, GraphError};
+    /// # use tempfile::NamedTempFile;
+    /// # fn demo() -> Result<(), GraphError> {
+    /// let tmp = NamedTempFile::new()?;
+    /// let mut db = GraphDB::open(tmp.path())?;
+    ///
+    /// let nodes = db
+    ///     .query()
+    ///     .start_from_label("User")
+    ///     .limit(10)
+    ///     .get_nodes()?;
+    ///
+    /// for node in nodes {
+    ///     println!("Node {}: {:?}", node.id, node.labels);
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # See Also
+    /// * [`Self::get_ids`] - Returns full query result with metadata.
+    pub fn get_nodes(self) -> Result<Vec<Node>> {
+        let result = self.get_ids()?;
+        Ok(result.nodes)
     }
 
     fn resolve_start(&mut self, spec: StartSpec) -> Result<Vec<NodeId>> {

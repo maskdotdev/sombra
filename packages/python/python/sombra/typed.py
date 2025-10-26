@@ -70,6 +70,12 @@ class TypedQueryBuilder(Generic[SchemaT]):
         self._builder.limit(n)
         return self
 
+    def get_ids(self) -> Any:
+        return self._builder.get_ids()
+
+    def get_nodes(self) -> Any:
+        return self._builder.get_nodes()
+
     def execute(self) -> Any:
         return self._builder.execute()
 

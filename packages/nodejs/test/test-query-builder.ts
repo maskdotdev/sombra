@@ -11,7 +11,7 @@ query
   .traverse(['CALLS'], 'outgoing', 2)
   .limit(10);
 
-const result = query.execute();
+const result = query.getIds();
 
 // Test result type
 console.log(result.startNodes);
@@ -21,9 +21,19 @@ console.log(result.limited);
 // Test other start methods
 db.query()
   .startFrom([1, 2, 3])
-  .execute();
+  .getIds();
 
 db.query()
   .startFromProperty('Function', 'name', 'main')
   .traverse(['CALLS'], 'both', 1)
-  .execute();
+  .getIds();
+
+// Test getNodes method
+const nodes = db.query()
+  .startFromLabel('Function')
+  .limit(5)
+  .getNodes();
+
+console.log(nodes.length);
+console.log(nodes[0]?.id);
+console.log(nodes[0]?.labels);

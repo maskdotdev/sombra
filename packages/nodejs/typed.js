@@ -120,8 +120,21 @@ class TypedQueryBuilderImpl {
     return this;
   }
 
+  getIds() {
+    return this._builder.getIds();
+  }
+
+  getNodes() {
+    const nodes = this._builder.getNodes();
+    return nodes.map(node => ({
+      id: node.id,
+      labels: node.labels,
+      properties: convertPropertiesFromSombra(node.properties),
+    }));
+  }
+
   execute() {
-    return this._builder.execute();
+    return this._builder.getIds();
   }
 }
 

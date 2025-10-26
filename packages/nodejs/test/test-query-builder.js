@@ -30,7 +30,7 @@ try {
     const query1 = db.query();
     query1.startFromLabel('Function');
     query1.traverse(['CALLS'], 'outgoing', 2);
-    const result1 = query1.execute();
+    const result1 = query1.getIds();
     
     console.log('  Result:', {
         startNodes: result1.startNodes,
@@ -50,7 +50,7 @@ try {
     const query2 = db.query();
     query2.startFrom([func1]);
     query2.traverse(['CALLS'], 'outgoing', 1);
-    const result2 = query2.execute();
+    const result2 = query2.getIds();
     
     console.log('  Node IDs:', result2.nodeIds);
     
@@ -66,7 +66,7 @@ try {
     const query3 = db.query();
     query3.startFromProperty('Function', 'name', 'main');
     query3.traverse(['CALLS'], 'outgoing', 2);
-    const result3 = query3.execute();
+    const result3 = query3.getIds();
     
     console.log('  Node IDs:', result3.nodeIds);
     
@@ -82,7 +82,7 @@ try {
     const query4 = db.query();
     query4.startFromLabel('Function');
     query4.limit(2);
-    const result4 = query4.execute();
+    const result4 = query4.getIds();
     
     console.log('  Node count:', result4.nodeIds.length);
     console.log('  Limited:', result4.limited);
@@ -91,6 +91,25 @@ try {
         console.log('✓ Query with limit executed');
     } else {
         console.error('✗ Limit not applied correctly');
+        process.exit(1);
+    }
+
+    // Test 5: getNodes method
+    console.log('\nTest 5: getNodes method');
+    const query5 = db.query();
+    query5.startFromLabel('Function');
+    query5.limit(2);
+    const nodes = query5.getNodes();
+    
+    console.log('  Nodes returned:', nodes.length);
+    console.log('  First node type:', typeof nodes[0]);
+    console.log('  First node has id:', 'id' in nodes[0]);
+    console.log('  First node has labels:', 'labels' in nodes[0]);
+    
+    if (nodes.length > 0 && nodes.length <= 2 && nodes[0].id !== undefined) {
+        console.log('✓ getNodes executed successfully');
+    } else {
+        console.error('✗ getNodes did not return proper nodes');
         process.exit(1);
     }
 

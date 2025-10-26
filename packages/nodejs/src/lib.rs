@@ -908,7 +908,7 @@ impl JsQueryBuilder {
     }
 
     #[napi]
-    pub fn execute(&self) -> std::result::Result<JsQueryResult, Error> {
+    pub fn get_ids(&self) -> std::result::Result<JsQueryResult, Error> {
         let mut db = self.inner.write();
         let mut builder = db.query();
 
@@ -946,7 +946,7 @@ impl JsQueryBuilder {
             builder = builder.limit(limit);
         }
 
-        let result = builder.execute().map_err(|e| {
+        let result = builder.get_ids().map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("Query execution failed: {}", e),
@@ -954,6 +954,55 @@ impl JsQueryBuilder {
         })?;
 
         Ok(JsQueryResult::from(result))
+    }
+
+    #[napi]
+    pub fn get_nodes(&self) -> std::result::Result<Vec<SombraNode>, Error> {
+        let mut db = self.inner.write();
+        let mut builder = db.query();
+
+        match &self.start_spec {
+            Some(StartSpec::FromNodes(ids)) => {
+                builder = builder.start_from(ids.clone());
+            }
+            Some(StartSpec::FromLabel(label)) => {
+                builder = builder.start_from_label(label);
+            }
+            Some(StartSpec::FromProperty(label, key, value)) => {
+                builder =
+                    builder.start_from_property(label, key, PropertyValue::String(value.clone()));
+            }
+            None => {
+                return Err(Error::new(
+                    Status::GenericFailure,
+                    "No start specification provided",
+                ));
+            }
+        }
+
+        if let (Some(depth), Some(direction)) = (self.depth, &self.direction) {
+            let edge_type_refs: Vec<&str> = self.edge_types.iter().map(|s| s.as_str()).collect();
+            let dir = match direction.as_str() {
+                "incoming" => EdgeDirection::Incoming,
+                "outgoing" => EdgeDirection::Outgoing,
+                "both" => EdgeDirection::Both,
+                _ => EdgeDirection::Outgoing,
+            };
+            builder = builder.traverse(&edge_type_refs, dir, depth);
+        }
+
+        if let Some(limit) = self.limit_val {
+            builder = builder.limit(limit);
+        }
+
+        let nodes = builder.get_nodes().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Query execution failed: {}", e),
+            )
+        })?;
+
+        Ok(nodes.into_iter().map(SombraNode::from).collect())
     }
 }
 

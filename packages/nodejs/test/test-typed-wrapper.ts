@@ -96,7 +96,7 @@ const queryResult = db
   .query()
   .startFromProperty('Company', 'name', 'ACME Corp')
   .traverse(['WORKS_AT'], 'incoming', 1)
-  .execute();
+  .getIds();
 assert.strictEqual(queryResult.nodeIds.length, 3);
 console.log('✓ Query result includes start node + employees:', queryResult.nodeIds.length, 'nodes');
 

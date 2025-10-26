@@ -223,27 +223,107 @@ console.log(`BFS found ${bfsResult.length} nodes`);
 
 ## Query Builder API
 
-Sombra provides a powerful query builder for complex graph queries:
+Sombra provides a powerful query builder for complex graph queries with three methods to execute queries:
+
+### Query Execution Methods
+
+- **`getIds()`**: Returns a `QueryResult` object with `{startNodes, nodeIds, limited}` - use when you need metadata or just node IDs
+- **`getNodes()`**: Returns an array of fully hydrated Node objects - use when you need immediate access to node data
+- **`execute()`**: Backwards-compatible alias for `getIds()` - kept for compatibility but `getIds()` is preferred
+
+### Basic Query Building
 
 ```typescript
 const query = db.query()
     .startFrom([1, 2, 3])
     .traverse(['KNOWS'], 'Outgoing', 2)
     .limit(10)
-    .execute();
+    .getIds();
 
 console.log(`Found ${query.nodeIds.length} nodes`);
+console.log(`Limited results: ${query.limited}`);
 
 const labelQuery = db.query()
     .startFromLabel('User')
     .traverse(['FOLLOWS'], 'Outgoing', 1)
-    .execute();
+    .getIds();
 
 const propQuery = db.query()
     .startFromProperty('User', 'username', 'alice')
     .traverse(['KNOWS', 'FOLLOWS'], 'Both', 2)
     .limit(50)
-    .execute();
+    .getIds();
+```
+
+### Using `getNodes()` for Immediate Data Access
+
+When you need the actual node data immediately, use `getNodes()`:
+
+```typescript
+const nodes = db.query()
+    .startFromLabel('User')
+    .traverse(['FOLLOWS'], 'Outgoing', 1)
+    .limit(10)
+    .getNodes();
+
+for (const node of nodes) {
+    console.log(`User ${node.properties.name} (ID: ${node.id})`);
+    console.log(`  Age: ${node.properties.age}`);
+}
+```
+
+### Using `getIds()` for Selective Fetching
+
+When you only need IDs or want to fetch nodes selectively:
+
+```typescript
+const result = db.query()
+    .startFromLabel('Product')
+    .traverse(['PURCHASED_BY'], 'Incoming', 1)
+    .limit(100)
+    .getIds();
+
+if (result.nodeIds.length > 50) {
+    console.log('Many results, fetching first 10 only');
+    const tx = db.beginTransaction();
+    const nodes = result.nodeIds.slice(0, 10).map(id => tx.getNode(id));
+    tx.commit();
+}
+```
+
+### Typed Query Builder
+
+The typed API provides the same query methods with full type safety:
+
+```typescript
+import { createTypedDB } from 'sombradb/typed';
+
+interface MySchema {
+    nodes: {
+        User: { name: string; email: string };
+        Post: { title: string; content: string };
+    };
+    edges: {
+        AUTHORED: { from: 'User'; to: 'Post'; properties: {} };
+    };
+}
+
+const db = createTypedDB<MySchema>('./blog.db');
+
+const users = db.query()
+    .startFromLabel('User')
+    .traverse(['AUTHORED'], 'Outgoing', 1)
+    .getNodes<'User'>();
+
+users.forEach(user => {
+    console.log(user.properties.name);
+});
+
+const userIds = db.query()
+    .startFromLabel('User')
+    .getIds();
+
+console.log(`Total users: ${userIds.nodeIds.length}`);
 ```
 
 ## Pattern Matching
