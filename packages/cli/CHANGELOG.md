@@ -2,6 +2,19 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.2.0](https://github.com/maskdotdev/sombra/compare/cli-v0.1.0...cli-v0.2.0) (2025-10-26)
+
+
+### Features
+
+* **cli:** add sombra-cli package with web UI and database tools orchestration ([dadccf3](https://github.com/maskdotdev/sombra/commit/dadccf3850ad5cf05f734ef99825ac9940f0ab69))
+* **web:** add sombra-web package with Next.js UI and demo seeding ([dadccf3](https://github.com/maskdotdev/sombra/commit/dadccf3850ad5cf05f734ef99825ac9940f0ab69))
+
+
+### Bug Fixes
+
+* **js:** publish multiplatform npm packages with corrected version ([cf92b27](https://github.com/maskdotdev/sombra/commit/cf92b27badd31c06b35189a292ce5fbd6ff96e26))
+
 ## [0.1.0] - Unreleased
 
 ### Added
@@ -22,4 +35,3 @@ All notable changes to the Sombra CLI will be documented in this file.
 - Helpful error messages when dependencies are missing
 - Support for version pinning of sombra-web
 - Browser auto-open for web UI
-
