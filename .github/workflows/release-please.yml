@@ -27,9 +27,13 @@ jobs:
       rust_release: ${{ steps.release.outputs['packages/core--release_created'] }}
       js_release: ${{ steps.release.outputs['packages/nodejs--release_created'] }}
       py_release: ${{ steps.release.outputs['packages/python--release_created'] }}
+      cli_release: ${{ steps.release.outputs['packages/cli--release_created'] }}
+      web_release: ${{ steps.release.outputs['packages/web--release_created'] }}
       rust_tag: ${{ steps.release.outputs['packages/core--tag_name'] }}
       js_tag: ${{ steps.release.outputs['packages/nodejs--tag_name'] }}
       py_tag: ${{ steps.release.outputs['packages/python--tag_name'] }}
+      cli_tag: ${{ steps.release.outputs['packages/cli--tag_name'] }}
+      web_tag: ${{ steps.release.outputs['packages/web--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -41,12 +45,16 @@ jobs:
       - name: Debug release outputs
         run: |
           echo "releases_created: ${{ steps.release.outputs.releases_created }}"
-          echo "js_release: ${{ steps.release.outputs['packages/nodejs--release_created'] }}"
-          echo "js_tag: ${{ steps.release.outputs['packages/nodejs--tag_name'] }}"
           echo "rust_release: ${{ steps.release.outputs['packages/core--release_created'] }}"
           echo "rust_tag: ${{ steps.release.outputs['packages/core--tag_name'] }}"
+          echo "js_release: ${{ steps.release.outputs['packages/nodejs--release_created'] }}"
+          echo "js_tag: ${{ steps.release.outputs['packages/nodejs--tag_name'] }}"
           echo "py_release: ${{ steps.release.outputs['packages/python--release_created'] }}"
           echo "py_tag: ${{ steps.release.outputs['packages/python--tag_name'] }}"
+          echo "cli_release: ${{ steps.release.outputs['packages/cli--release_created'] }}"
+          echo "cli_tag: ${{ steps.release.outputs['packages/cli--tag_name'] }}"
+          echo "web_release: ${{ steps.release.outputs['packages/web--release_created'] }}"
+          echo "web_tag: ${{ steps.release.outputs['packages/web--tag_name'] }}"
           
           echo "=== All release-please outputs ==="
           echo '${{ toJSON(steps.release.outputs) }}'
@@ -102,3 +110,29 @@ jobs:
       tag: ${{ needs.release-please.outputs.py_tag }}
     secrets:
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-cli:
+    name: Publish CLI Package
+    needs: release-please
+    if: ${{ needs.release-please.outputs.cli_release == 'true' || needs.release-please.outputs.cli_tag != '' }}
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/publish-cli.yml
+    with:
+      tag: ${{ needs.release-please.outputs.cli_tag }}
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-web:
+    name: Publish Web Package
+    needs: release-please
+    if: ${{ needs.release-please.outputs.web_release == 'true' || needs.release-please.outputs.web_tag != '' }}
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/publish-web.yml
+    with:
+      tag: ${{ needs.release-please.outputs.web_tag }}
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

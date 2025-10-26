@@ -99,7 +99,7 @@
         "transform": "lodash/{{member}}"
       }
     },
-    "outputFileTracingRoot": "/home/mask/Documents/personal/sombra/packages/web",
+    "outputFileTracingRoot": "/Users/mask/code/sombra/packages/web",
     "cacheComponents": false,
     "cacheLife": {
       "default": {
@@ -158,7 +158,7 @@
       "proxyPrefetch": "flexible",
       "optimisticClientCache": true,
       "manualClientBasePath": false,
-      "cpus": 15,
+      "cpus": 9,
       "memoryBasedWorkersCount": false,
       "imgOptConcurrency": null,
       "imgOptTimeoutInSeconds": 7,
@@ -293,11 +293,11 @@
       "sombradb"
     ],
     "turbopack": {
-      "root": "/home/mask/Documents/personal/sombra/packages/web"
+      "root": "/Users/mask/code/sombra/packages/web"
     },
     "distDirRoot": ".next"
   },
-  "appDir": "/home/mask/Documents/personal/sombra/packages/web",
+  "appDir": "/Users/mask/code/sombra/packages/web",
   "relativeAppDir": "",
   "files": [
     ".next/routes-manifest.json",
