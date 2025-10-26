@@ -1,5 +1,5 @@
 {
+	"packages/python": "0.3.7"
 	"packages/core": "0.3.6",
 	"packages/nodejs": "0.4.15",
-	"packages/python": "0.3.6"
 }
