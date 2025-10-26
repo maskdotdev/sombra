@@ -1,0 +1,24 @@
+{
+  "name": "@sombra/cli",
+  "version": "0.1.0",
+  "description": "Sombra CLI - orchestrator for Sombra tooling and web UI",
+  "bin": {
+    "sombra": "bin/sombra.js"
+  },
+  "files": [
+    "bin/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node -e \"console.log('ok')\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
+
+

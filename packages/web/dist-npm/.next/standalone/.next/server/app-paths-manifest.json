@@ -1,0 +1,12 @@
+{
+  "/_global-error/page": "app/_global-error/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/graph/edges/route": "app/api/graph/edges/route.js",
+  "/api/graph/nodes/route": "app/api/graph/nodes/route.js",
+  "/api/graph/stats/route": "app/api/graph/stats/route.js",
+  "/api/graph/traverse/route": "app/api/graph/traverse/route.js",
+  "/favicon.ico/route": "app/favicon.ico/route.js",
+  "/graph/d3/page": "app/graph/d3/page.js",
+  "/graph/page": "app/graph/page.js",
+  "/page": "app/page.js"
+}

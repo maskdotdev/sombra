@@ -1,0 +1,104 @@
+{
+  "version": 3,
+  "pages404": true,
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/api/graph/edges",
+      "regex": "^/api/graph/edges(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/graph/edges(?:/)?$"
+    },
+    {
+      "page": "/api/graph/nodes",
+      "regex": "^/api/graph/nodes(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/graph/nodes(?:/)?$"
+    },
+    {
+      "page": "/api/graph/stats",
+      "regex": "^/api/graph/stats(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/graph/stats(?:/)?$"
+    },
+    {
+      "page": "/api/graph/traverse",
+      "regex": "^/api/graph/traverse(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/graph/traverse(?:/)?$"
+    },
+    {
+      "page": "/favicon.ico",
+      "regex": "^/favicon\\.ico(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/favicon\\.ico(?:/)?$"
+    },
+    {
+      "page": "/graph",
+      "regex": "^/graph(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/graph(?:/)?$"
+    },
+    {
+      "page": "/graph/d3",
+      "regex": "^/graph/d3(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/graph/d3(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSuffix": ".prefetch.rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}
