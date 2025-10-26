@@ -1,12 +1,17 @@
 {
 	"name": "sombra-web",
-	"version": "0.1.0",
+	"version": "0.2.1",
 	"private": false,
 	"description": "Sombra web UI runtime (standalone Next.js runner)",
 	"bin": {
 		"sombra-web": "dist-npm/start.js"
 	},
-	"files": ["dist-npm/**", "scripts/seed-demo.js", "README.md", "LICENSE"],
+	"files": [
+		"dist-npm/**",
+		"scripts/seed-demo.js",
+		"README.md",
+		"LICENSE"
+	],
 	"scripts": {
 		"dev": "next dev",
 		"build": "next build",
@@ -20,7 +25,6 @@
 		"@swc/helpers": "^0.5.15",
 		"clsx": "^2.1.1",
 		"d3": "7.9.0",
-		"lightningcss-darwin-arm64": "^1.30.2",
 		"lucide-react": "0.548.0",
 		"next": "16.0.0",
 		"react": "19.2.0",
