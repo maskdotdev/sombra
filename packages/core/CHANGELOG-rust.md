@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.6](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.5...sombra-v0.3.6) (2025-10-26)
+
+
+### Bug Fixes
+
+* **core:** update tests, examples, and benchmarks for Option&lt;Node&gt; return type ([2f13040](https://github.com/maskdotdev/sombra/commit/2f13040bfc94439d42324c5192c10c488c27e04a))
+* **query:** add getIds() and getNodes() methods to QueryBuilder, fix execute() implementation ([1a650e9](https://github.com/maskdotdev/sombra/commit/1a650e9d588d48210dc5ba91173d00621f319aef))
+
 ## [0.3.5](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.4...sombra-v0.3.5) (2025-10-24)
 
 
