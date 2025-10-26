@@ -1,0 +1,103 @@
+name: Publish Web Package
+
+# This is a reusable workflow that can be called in two ways:
+# 1. Automatically by release-please.yml when a web release is created
+# 2. Manually via push to tags matching 'web-v*' (fallback)
+#
+# The primary trigger is workflow_call from release-please.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Git tag to publish (e.g., web-v0.1.0)'
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: true
+  push:
+    tags:
+      - 'web-v*'
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug workflow inputs
+        run: |
+          echo "=== Workflow Debug Info ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag input: ${{ inputs.tag }}"
+          echo "Build condition: ${{ inputs.tag != '' || startsWith(github.ref, 'refs/tags/web-v') }}"
+
+  build-and-publish:
+    if: |
+      inputs.tag != '' || 
+      startsWith(github.ref, 'refs/tags/web-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: packages/web/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd packages/web
+          npm ci
+
+      - name: Build Next.js standalone
+        run: |
+          cd packages/web
+          npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Package for npm
+        run: |
+          cd packages/web
+          node scripts/package-web-runtime.js
+
+      - name: Verify build output
+        run: |
+          cd packages/web
+          echo "=== Checking dist-npm directory ==="
+          ls -la dist-npm/
+          echo "=== Checking for required files ==="
+          test -f dist-npm/start.js && echo "✅ start.js found" || echo "❌ start.js missing"
+          test -d dist-npm/.next && echo "✅ .next directory found" || echo "❌ .next directory missing"
+
+      - name: Verify package contents
+        run: |
+          cd packages/web
+          echo "=== Package contents ==="
+          npm pack --dry-run
+          echo "=== Package.json ==="
+          cat package.json
+
+      - name: Publish to npm
+        run: |
+          cd packages/web
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify publish
+        run: |
+          echo "✅ sombra-web published successfully"
+          echo "Tag: ${{ inputs.tag || github.ref }}"
+          echo "View at: https://www.npmjs.com/package/sombra-web"
+

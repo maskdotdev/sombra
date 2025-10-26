@@ -2,91 +2,371 @@
 
 This directory contains the CI/CD workflows for the Sombra monorepo.
 
-## Workflow Architecture
+## Overview
 
-### Release Automation
+The repository uses **release-please** for automated releases across 5 packages:
+- `sombra` (Rust) - Core library
+- `sombradb` (Node.js) - Node.js bindings with native code
+- `sombra` (Python) - Python bindings
+- `sombra-cli` (Node.js) - CLI orchestrator
+- `sombra-web` (Node.js) - Web UI
 
-The release process is orchestrated through **reusable workflows** that avoid the GitHub Actions limitation where tags created by `GITHUB_TOKEN` don't trigger `push` events.
+## Workflows
 
-#### Main Workflow: `release-please.yml`
+### 📋 Main Workflows
 
-Triggers on pushes to `main` and coordinates the entire release process:
+#### `release-please.yml`
+**Orchestrator workflow** that manages releases for all packages.
 
-1. **Release Please Action** - Creates/updates release PRs with version bumps and changelogs
-2. **Conditional Publishing** - When a release PR is merged, invokes the appropriate publish workflow(s) via `workflow_call`
+**Triggers:** Push to `main` branch
 
-#### Reusable Publish Workflows
+**What it does:**
+1. Runs release-please to detect conventional commits
+2. Creates/updates release PRs for each package
+3. When release PRs are merged, invokes appropriate publish workflows
 
-Each package has its own publish workflow that accepts a `tag` input:
+**Outputs for each package:**
+- `{package}_release` - Boolean if release was created
+- `{package}_tag` - Git tag name (e.g., `cli-v0.1.0`)
 
-- **`publish-npm.yml`** - Builds and publishes the Node.js package to npm
-- **`publish-rust.yml`** - Publishes the Rust crate to crates.io
-- **`publish-python.yml`** - Builds wheels and publishes to PyPI
+#### `ci.yml`
+**Continuous Integration** - Runs tests and checks on PRs.
 
-These workflows can be triggered in two ways:
-1. **Primary**: Called by `release-please.yml` with the release tag as input
-2. **Fallback**: Direct tag push or release creation (for manual intervention)
+### 📦 Publish Workflows (Reusable)
 
-### Why This Architecture?
+Each package has its own publish workflow that can be called by `release-please.yml` or triggered manually.
 
-When Release Please creates a tag using `GITHUB_TOKEN`, GitHub **does not fire push events** for that tag (to prevent recursive workflow triggers). This means workflows with `on.push.tags` won't run automatically.
+#### `publish-cli.yml`
+Publishes the `sombra-cli` package to npm.
 
-Our solution: Use `workflow_call` to explicitly invoke publish workflows from the release-please workflow, passing the tag as an input parameter.
+**Triggers:**
+- Workflow call from `release-please.yml` (primary)
+- Push to tag `cli-v*` (fallback)
 
-### Required Secrets
+**Steps:**
+1. Checkout code at tag
+2. Setup Node.js with npm registry
+3. Verify package contents
+4. Publish to npm with `--access public`
 
-Ensure these secrets are configured in the repository settings:
+**Secrets required:** `NPM_TOKEN`
 
-- `NPM_TOKEN` - npm publish token with provenance support
-- `CARGO_REGISTRY_TOKEN` - crates.io API token
-- `PYPI_API_TOKEN` - PyPI API token for publishing
+#### `publish-web.yml`
+Publishes the `sombra-web` package to npm after building Next.js standalone.
 
-### CI Workflow: `ci.yml`
+**Triggers:**
+- Workflow call from `release-please.yml` (primary)
+- Push to tag `web-v*` (fallback)
 
-Runs on PRs and pushes to `main`:
-- Linting (rustfmt, clippy)
-- Multi-platform builds (macOS, Windows, Linux)
-- Test matrix across Node.js versions
-- Conditional npm publishing (only on version tags)
+**Steps:**
+1. Checkout code at tag
+2. Setup Node.js
+3. Install dependencies
+4. Build Next.js standalone (`npm run build`)
+5. Package for npm distribution
+6. Verify dist-npm/ output
+7. Publish to npm with `--access public`
 
-## Debugging Release Issues
+**Secrets required:** `NPM_TOKEN`
 
-### Release doesn't publish
+#### `publish-npm.yml`
+Publishes the `sombradb` package (Node.js bindings with native code).
 
-1. Check if the release PR was properly merged (not closed without merging)
-2. Verify the workflow outputs in `release-please.yml` show `js_release: true` (or `rust_release`/`py_release`)
-3. Ensure the correct secrets are configured
-4. Check the Actions tab for workflow run details
+**Triggers:**
+- Workflow call from `release-please.yml` (primary)
+- Push to tag `sombrajs-v*` (fallback)
 
-### Manual republishing
+**Steps:**
+1. Build native binaries for all platforms (macOS, Windows, Linux)
+2. Collect artifacts
+3. Publish to npm
 
-If you need to manually trigger a publish:
+**Secrets required:** `NPM_TOKEN`
 
-1. For npm: Push a tag matching `sombrajs-v*` pattern
-2. For Rust/Python: Create a GitHub release with tag matching `sombra-v*` or `sombrapy-v*`
+#### `publish-rust.yml`
+Publishes the `sombra` Rust crate to crates.io.
 
-Or run the workflow manually via GitHub Actions UI (if workflow_dispatch is added).
+**Triggers:**
+- Workflow call from `release-please.yml` (primary)
+- Push to tag `sombra-v*` (fallback)
 
-## Testing Workflows Locally
+**Secrets required:** `CARGO_REGISTRY_TOKEN`
 
-Use [act](https://github.com/nektos/act) to test workflows locally:
+#### `publish-python.yml`
+Publishes the `sombra` Python package to PyPI.
+
+**Triggers:**
+- Workflow call from `release-please.yml` (primary)
+- Push to tag `sombrapy-v*` (fallback)
+
+**Secrets required:** `PYPI_API_TOKEN`
+
+## Release Process
+
+### 1. Make Changes with Conventional Commits
+
+Use the appropriate scope for your changes:
 
 ```bash
-# Test the release-please workflow (dry-run)
-act push -W .github/workflows/release-please.yml -n
+# CLI changes
+git commit -m "feat(cli): add new seed command"
+git commit -m "fix(cli): resolve binary discovery issue"
 
-# Test a publish workflow with mock inputs
-act workflow_call -W .github/workflows/publish-npm.yml \
-  -s NPM_TOKEN=test-token \
-  --input tag=sombrajs-v0.4.6
+# Web changes
+git commit -m "feat(web): add graph filtering"
+git commit -m "fix(web): resolve rendering bug"
+
+# Core changes
+git commit -m "feat(core): add new traversal algorithm"
+
+# Node.js bindings
+git commit -m "fix(sombrajs): resolve memory leak"
+
+# Python bindings
+git commit -m "feat(sombrapy): add new API method"
 ```
 
-## Modifying Workflows
+### 2. Push to Main
 
-When making changes to these workflows:
+Merge your PR to the `main` branch. Release-please will:
+- Detect conventional commits
+- Calculate appropriate version bump
+- Create/update release PR(s)
 
-1. Ensure reusable workflows maintain both `workflow_call` and their fallback triggers
-2. Test the entire flow with a draft release PR before merging changes
-3. Update this README if the architecture changes
-4. Keep `docs/contributing.md` in sync with the release process description
+### 3. Review Release PR
 
+Check the release PR at: https://github.com/maskdotdev/sombra/pulls
+
+Verify:
+- ✅ Version bump is correct (major/minor/patch)
+- ✅ CHANGELOG entries are accurate
+- ✅ All commits are included
+
+### 4. Merge Release PR
+
+When you merge the release PR, release-please will:
+- Create GitHub release
+- Tag the commit
+- Trigger the appropriate publish workflow
+
+### 5. Automatic Publishing
+
+The publish workflow will automatically:
+- Build the package (if needed)
+- Publish to npm/crates.io/PyPI
+- Verify the publish succeeded
+
+### 6. Verify
+
+Check that the package is available:
+- npm: `npm view sombra-cli` or `npm view sombra-web`
+- crates.io: https://crates.io/crates/sombra
+- PyPI: https://pypi.org/project/sombra/
+
+## Version Bumping
+
+Release-please automatically determines version bumps based on commit types:
+
+| Commit Type | Version Bump | Example |
+|-------------|--------------|---------|
+| `feat(cli):` | Minor | 0.1.0 → 0.2.0 |
+| `fix(cli):` | Patch | 0.1.0 → 0.1.1 |
+| `feat(cli)!:` or `BREAKING CHANGE:` | Major | 0.1.0 → 1.0.0 |
+| `docs(cli):` | None | No release |
+| `chore(cli):` | None | No release |
+
+## Required Secrets
+
+The following secrets must be configured in the repository:
+
+### GitHub Secrets
+
+- `NPM_TOKEN` - npm token for publishing packages
+  - Used by: `publish-cli.yml`, `publish-web.yml`, `publish-npm.yml`
+  - Get from: https://www.npmjs.com/settings/~/tokens
+  - Permissions: Publish
+
+- `CARGO_REGISTRY_TOKEN` - crates.io token
+  - Used by: `publish-rust.yml`
+  - Get from: https://crates.io/settings/tokens
+  - Permissions: Publish new versions
+
+- `PYPI_API_TOKEN` - PyPI token
+  - Used by: `publish-python.yml`
+  - Get from: https://pypi.org/manage/account/token/
+  - Scope: Project (sombra)
+
+## Manual Publishing (Fallback)
+
+If automated publishing fails, you can manually trigger workflows by pushing tags:
+
+```bash
+# CLI
+git tag cli-v0.1.0
+git push origin cli-v0.1.0
+
+# Web
+git tag web-v0.1.0
+git push origin web-v0.1.0
+
+# Rust
+git tag sombra-v0.3.6
+git push origin sombra-v0.3.6
+
+# Node.js
+git tag sombrajs-v0.4.15
+git push origin sombrajs-v0.4.15
+
+# Python
+git tag sombrapy-v0.3.6
+git push origin sombrapy-v0.3.6
+```
+
+## Troubleshooting
+
+### Release PR Not Created
+
+**Possible causes:**
+1. No conventional commits since last release
+2. Commits don't trigger releases (e.g., `docs`, `chore`)
+3. Incorrect scope in commit message
+4. Previous release PR still open
+
+**Solution:**
+- Check commit messages follow format: `type(scope): message`
+- Use triggering types: `feat`, `fix`, `perf`
+- Close old release PRs if stale
+
+### Publish Workflow Failed
+
+**Common issues:**
+
+1. **Build failure**
+   - Check workflow logs
+   - Verify dependencies install correctly
+   - Test build locally first
+
+2. **npm publish permission denied**
+   - Verify `NPM_TOKEN` secret is set
+   - Check token hasn't expired
+   - Verify token has publish permissions
+
+3. **Version already exists**
+   - Check if version was already published
+   - May need to bump version manually
+
+**Solution:**
+- Check workflow logs in Actions tab
+- Fix the issue
+- Re-run workflow or manually publish
+
+### Multiple Packages Released at Once
+
+This is expected! The monorepo can release multiple packages independently:
+
+```
+feat(cli): add feature    → CLI v0.1.1
+feat(web): add feature    → Web v0.1.1
+fix(core): fix bug        → Core v0.3.7
+```
+
+Each gets its own:
+- Release PR
+- GitHub release
+- Git tag
+- Publish workflow
+
+## Testing Changes
+
+Before merging changes that affect workflows:
+
+1. **Create test branch**
+2. **Push and create PR** to see CI results
+3. **For publish workflows:** Test in fork with dummy npm package
+4. **Review logs carefully** before merging
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Developer: git commit -m "feat(cli): new feature"          │
+│                                                              │
+│  GitHub: Push to main                                       │
+└──────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────┐
+│  release-please.yml (orchestrator)                          │
+│                                                              │
+│  - Detects conventional commits                             │
+│  - Creates/updates release PRs                              │
+│  - Outputs: cli_tag, web_tag, etc.                         │
+└──────────────────────────────────────────────────────────────┘
+                              ↓
+                    [Developer merges release PR]
+                              ↓
+┌──────────────────────────────────────────────────────────────┐
+│  release-please.yml triggers publish workflows              │
+│                                                              │
+│  ├─→ publish-cli.yml    (if cli_tag exists)                │
+│  ├─→ publish-web.yml    (if web_tag exists)                │
+│  ├─→ publish-npm.yml    (if js_tag exists)                 │
+│  ├─→ publish-rust.yml   (if rust_tag exists)               │
+│  └─→ publish-python.yml (if py_tag exists)                 │
+└──────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────┐
+│  Packages published to registries                           │
+│                                                              │
+│  - sombra-cli → npm                                         │
+│  - sombra-web → npm                                         │
+│  - sombradb → npm                                           │
+│  - sombra → crates.io                                       │
+│  - sombra → PyPI                                            │
+└──────────────────────────────────────────────────────────────┘
+```
+
+## Best Practices
+
+1. **Test locally before pushing**
+   - Build packages locally
+   - Run tests
+   - Verify functionality
+
+2. **Use descriptive commit messages**
+   - Users read the CHANGELOG
+   - Be specific about what changed
+   - Include context when needed
+
+3. **One feature per commit**
+   - Makes CHANGELOG cleaner
+   - Easier to track changes
+   - Better for rollbacks
+
+4. **Coordinate releases**
+   - If CLI depends on web, release web first
+   - Update COMPATIBILITY.md
+   - Test integration before release
+
+5. **Monitor workflow runs**
+   - Check Actions tab after pushing
+   - Verify publish succeeded
+   - Test installation from registry
+
+## Related Documentation
+
+- `/release-please-config.json` - Release configuration
+- `/.release-please-manifest.json` - Current versions
+- `/RELEASE_PLEASE_SETUP.md` - Setup guide
+- `/packages/cli/RELEASING.md` - CLI release guide
+- `/packages/web/RELEASING.md` - Web release guide
+
+## Support
+
+If you encounter issues with workflows:
+
+1. Check workflow logs in Actions tab
+2. Review this documentation
+3. Check package-specific RELEASING.md files
+4. Open an issue if problem persists
+
+Happy releasing! 🚀

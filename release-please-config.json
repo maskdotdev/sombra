@@ -19,6 +19,18 @@
 			"package-name": "sombra",
 			"release-type": "python",
 			"changelog-path": "CHANGELOG-python.md"
+		},
+		"packages/cli": {
+			"component": "cli",
+			"package-name": "sombra-cli",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG.md"
+		},
+		"packages/web": {
+			"component": "web",
+			"package-name": "sombra-web",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG.md"
 		}
 	},
 	"bootstrap-sha": "d8d992343f2f7b8257211ef3976737f5211d4ce0",

@@ -1,5 +1,7 @@
 {
 	"packages/python": "0.3.7",
 	"packages/core": "0.3.6",
-	"packages/nodejs": "0.4.15"
+	"packages/nodejs": "0.4.15",
+	"packages/cli": "0.1.0",
+	"packages/web": "0.1.0"
 }
