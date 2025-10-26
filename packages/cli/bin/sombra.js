@@ -68,7 +68,9 @@ function ensureSombraWebInstalled(version) {
   const installSpec = isFilePath ? version : `sombra-web@${version || 'latest'}`;
   
   // Install to cache directory
-  const r2 = spawnSync('npm', ['i', installSpec], { cwd: target, stdio: 'inherit' });
+  // Use --force to ensure optional dependencies (native bindings) are properly installed
+  // This works around npm bug with optional dependencies: https://github.com/npm/cli/issues/4828
+  const r2 = spawnSync('npm', ['i', installSpec, '--force'], { cwd: target, stdio: 'inherit' });
   if (r2.status !== 0) {
     console.error('Failed to install sombra-web');
     process.exit(1);
