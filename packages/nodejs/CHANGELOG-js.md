@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.15](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.14...sombrajs-v0.4.15) (2025-10-26)
+
+
+### Bug Fixes
+
+* **query:** add getIds() and getNodes() methods to QueryBuilder, fix execute() implementation ([1a650e9](https://github.com/maskdotdev/sombra/commit/1a650e9d588d48210dc5ba91173d00621f319aef))
+
 ## [0.4.14](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.13...sombrajs-v0.4.14) (2025-10-25)
 
 
