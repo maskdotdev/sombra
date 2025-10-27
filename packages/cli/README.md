@@ -12,6 +12,17 @@ npm install -g sombra-cli
 
 After installation, the `sombra` command will be available globally.
 
+### Bun Global Installation
+
+```bash
+bun add -g sombra-cli
+```
+
+The CLI detects Bun-based installations automatically and will use Bun to
+download the `sombra-web` runtime. If Node.js is present, it is preferred for
+running the web server and seeding scripts; otherwise, Bun is used as a
+compatible fallback.
+
 ### Local Installation
 
 ```bash
@@ -275,6 +286,14 @@ If port 3000 is busy:
 sombra web --port 3001
 ```
 
+### Using Bun as Your Package Manager
+
+- Set `SOMBRA_PACKAGE_MANAGER=bun` (or `npm`, `pnpm`, `yarn`) to force a
+  specific installer for the cached `sombra-web` runtime.
+- Set `SOMBRA_NODE_RUNTIME=/path/to/node` if Node.js is installed in a
+  non-standard location and you want the CLI to prefer it over Bun when running
+  seeded scripts or the web server.
+
 ## Development
 
 For development and testing:
@@ -283,6 +302,9 @@ For development and testing:
 # Clone the repo
 git clone https://github.com/maskdotdev/sombra.git
 cd sombra/packages/cli
+
+# Build the CLI (Bun required)
+bun run build
 
 # Test locally
 node bin/sombra.js web
@@ -304,4 +326,3 @@ MIT
 - [Documentation](https://github.com/maskdotdev/sombra/tree/main/docs)
 - [GitHub](https://github.com/maskdotdev/sombra)
 - [Issues](https://github.com/maskdotdev/sombra/issues)
-

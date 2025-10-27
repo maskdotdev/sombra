@@ -45,9 +45,11 @@ Publishes the `sombra-cli` package to npm.
 
 **Steps:**
 1. Checkout code at tag
-2. Setup Node.js with npm registry
-3. Verify package contents
-4. Publish to npm with `--access public`
+2. Setup Bun runtime (required for `bun run build`)
+3. Setup Node.js with npm registry auth
+4. Build distributable bundle with `bun run build`
+5. Verify package contents
+6. Publish to npm with `--access public`
 
 **Secrets required:** `NPM_TOKEN`
 

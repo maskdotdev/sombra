@@ -21,7 +21,15 @@ cd packages/cli
 npm version patch  # or minor, or major
 ```
 
-### 2. Test Locally
+### 2. Build Distribution Artifacts
+
+Compile the CLI using Bun (required before testing or publishing):
+
+```bash
+bun run build
+```
+
+### 3. Test Locally
 
 Test the CLI before publishing:
 
@@ -34,12 +42,13 @@ node bin/sombra.js web --db test.db
 node bin/sombra.js inspect test.db info
 ```
 
-### 3. Test Global Installation
+### 4. Test Global Installation
 
 Test as if installed globally:
 
 ```bash
-# Link locally
+# Link locally (after building)
+bun run build
 npm link
 
 # Test commands
@@ -437,4 +446,3 @@ npm publish --access public
 - [Semantic Versioning](https://semver.org/)
 - [npm Organization Management](https://docs.npmjs.com/orgs/)
 - [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github)
-

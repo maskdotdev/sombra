@@ -17,6 +17,10 @@ All notable changes to the Sombra CLI will be documented in this file.
   - Previously, when sombradb was found but failed to load (e.g., native binding mismatch), the CLI would treat it as "not found" and continue searching
   - Now the CLI properly detects when a package exists but has a load error, and displays a helpful error message with solutions
   - Improved error messages for native binding compatibility issues with actionable solutions
+* **cli:** support Bun installs by auto-selecting an available package manager
+  - Detect Bun-based environments and use `bun add` when npm is not present
+  - Allow overriding the installer with `SOMBRA_PACKAGE_MANAGER`
+  - Prefer Node.js for running web/seeding scripts while falling back to Bun when necessary
 
 ## [0.3.4](https://github.com/maskdotdev/sombra/compare/cli-v0.3.3...cli-v0.3.4) (2025-10-27)
 

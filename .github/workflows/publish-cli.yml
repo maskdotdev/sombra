@@ -46,6 +46,11 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -53,6 +58,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: packages/cli/package.json
+
+      - name: Build CLI bundle
+        run: |
+          cd packages/cli
+          bun run build
 
       - name: Verify package contents
         run: |
@@ -74,4 +84,3 @@ jobs:
           echo "✅ sombra-cli published successfully"
           echo "Tag: ${{ inputs.tag || github.ref }}"
           echo "View at: https://www.npmjs.com/package/sombra-cli"
-
