@@ -90,10 +90,7 @@ test("loadSombraDB can find sombradb from CLI's node_modules", () => {
 		result.status === 0,
 		`CLI should find sombradb from its own node_modules. Status: ${result.status}, stderr: ${result.stderr}`,
 	);
-	assert(
-		!result.stderr.includes("sombradb package not found"),
-		"Should not show 'package not found' error",
-	);
+	assert(!result.stderr.includes("Error:"), "Should not print error output");
 	assert(fs.existsSync(testDb), "Database should be created");
 });
 
@@ -132,8 +129,8 @@ try {
 	);
 	
 	console.log(result.stderr);
-	if (!result.stderr.includes('sombradb package not found')) {
-		throw new Error('Should show error message');
+	if (!result.stderr.includes('Error: sombradb')) {
+		throw new Error('Should show sombradb error message');
 	}
 } finally {
 	if (renamed) {
@@ -171,10 +168,7 @@ test("All inspect commands can load sombradb", () => {
 		timeout: 30000,
 	});
 	assert(result.status === 0, "inspect info should succeed");
-	assert(
-		!result.stderr.includes("sombradb package not found"),
-		"inspect info should not show loading error",
-	);
+	assert(!result.stderr.includes("Error:"), "inspect info should not show errors");
 
 	// Test inspect stats
 	result = spawnSync("node", [cliPath, "inspect", testDb, "stats"], {
@@ -183,10 +177,7 @@ test("All inspect commands can load sombradb", () => {
 		timeout: 30000,
 	});
 	assert(result.status === 0, "inspect stats should succeed");
-	assert(
-		!result.stderr.includes("sombradb package not found"),
-		"inspect stats should not show loading error",
-	);
+	assert(!result.stderr.includes("Error:"), "inspect stats should not show errors");
 
 	// Test inspect sample
 	result = spawnSync("node", [cliPath, "inspect", testDb, "sample"], {
@@ -195,10 +186,7 @@ test("All inspect commands can load sombradb", () => {
 		timeout: 30000,
 	});
 	assert(result.status === 0, "inspect sample should succeed");
-	assert(
-		!result.stderr.includes("sombradb package not found"),
-		"inspect sample should not show loading error",
-	);
+	assert(!result.stderr.includes("Error:"), "inspect sample should not show errors");
 });
 
 // ----------------------------------------------------------------------------
@@ -223,10 +211,7 @@ test("Repair command can load sombradb", () => {
 		timeout: 30000,
 	});
 	assert(result.status === 0, "repair should succeed");
-	assert(
-		!result.stderr.includes("sombradb package not found"),
-		"repair should not show loading error",
-	);
+	assert(!result.stderr.includes("Error:"), "repair should not show errors");
 });
 
 // ----------------------------------------------------------------------------
@@ -251,10 +236,7 @@ test("Verify command can load sombradb", () => {
 		timeout: 30000,
 	});
 	assert(result.status === 0, "verify should succeed");
-	assert(
-		!result.stderr.includes("sombradb package not found"),
-		"verify should not show loading error",
-	);
+	assert(!result.stderr.includes("Error:"), "verify should not show errors");
 });
 
 // ----------------------------------------------------------------------------
@@ -312,4 +294,3 @@ if (failed === 0) {
 	console.log(`\n${colors.red}✗ ${failed} test(s) failed${colors.reset}\n`);
 	process.exit(1);
 }
-
