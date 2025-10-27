@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.2](https://github.com/maskdotdev/sombra/compare/cli-v0.3.1...cli-v0.3.2) (2025-10-27)
+
+
+### Bug Fixes
+
+* **cli:** resolve sombradb from local/global roots and correct global install hint ([b7d05ec](https://github.com/maskdotdev/sombra/commit/b7d05ecd4dd2f184ad2967d0856f2b36cfb76653))
+
 ## [0.3.1](https://github.com/maskdotdev/sombra/compare/cli-v0.3.0...cli-v0.3.1) (2025-10-27)
 
 
