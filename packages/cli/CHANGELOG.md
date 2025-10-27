@@ -2,6 +2,14 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.7](https://github.com/maskdotdev/sombra/compare/cli-v0.3.6...cli-v0.3.7) (2025-10-27)
+
+
+### Bug Fixes
+
+* **cli:** bundling sombradb with the cli tool ([e1eda87](https://github.com/maskdotdev/sombra/commit/e1eda876154c7e5bb5e1ec693feff2faf9de3911))
+* scope npm packages under [@unyth](https://github.com/unyth) ([c5fb560](https://github.com/maskdotdev/sombra/commit/c5fb560b3d72cc45e82a2e03c0469318b5b61775))
+
 ## [0.3.6](https://github.com/maskdotdev/sombra/compare/cli-v0.3.5...cli-v0.3.6) (2025-10-27)
 
 
