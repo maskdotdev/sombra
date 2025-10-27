@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra Web UI will be documented in this file.
 
+## [0.2.6](https://github.com/maskdotdev/sombra/compare/web-v0.2.5...web-v0.2.6) (2025-10-27)
+
+
+### Bug Fixes
+
+* **web:** lightning css fix ([45f7e1f](https://github.com/maskdotdev/sombra/commit/45f7e1fecafd4d61cb034dcf4590c618c8f2e632))
+
 ## [0.2.5](https://github.com/maskdotdev/sombra/compare/web-v0.2.4...web-v0.2.5) (2025-10-27)
 
 
