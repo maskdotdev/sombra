@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.4](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.3...sombrajs-v0.5.4) (2025-10-27)
+
+
+### Bug Fixes
+
+* **js:** trying to fix npm publish pipeline ([edd113b](https://github.com/maskdotdev/sombra/commit/edd113bb4fc01c392e961c0ba59ae85237f3153d))
+* **js:** trying to fix npm publish pipeline ([9c727a3](https://github.com/maskdotdev/sombra/commit/9c727a32edf2a5f60c0caa1c82ec0099c8d58b06))
+
 ## [0.5.3](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.2...sombrajs-v0.5.3) (2025-10-27)
 
 
