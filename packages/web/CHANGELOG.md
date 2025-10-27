@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra Web UI will be documented in this file.
 
+## [0.2.5](https://github.com/maskdotdev/sombra/compare/web-v0.2.4...web-v0.2.5) (2025-10-27)
+
+
+### Bug Fixes
+
+* **web:** package-lock in sync ([fcb9c28](https://github.com/maskdotdev/sombra/commit/fcb9c28b01e6df2b158257dc201ff8ca942c85b1))
+
 ## [0.2.4](https://github.com/maskdotdev/sombra/compare/web-v0.2.3...web-v0.2.4) (2025-10-27)
 
 
