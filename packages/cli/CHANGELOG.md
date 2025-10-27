@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.1](https://github.com/maskdotdev/sombra/compare/cli-v0.3.0...cli-v0.3.1) (2025-10-27)
+
+
+### Bug Fixes
+
+* **js:** fixing package name for cli ([8e0e5a4](https://github.com/maskdotdev/sombra/commit/8e0e5a48ea77a9c5a67e9c341a5098b6a0b7f394))
+
 ## [0.3.0](https://github.com/maskdotdev/sombra/compare/cli-v0.2.0...cli-v0.3.0) (2025-10-27)
 
 
