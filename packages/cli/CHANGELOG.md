@@ -2,6 +2,15 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.5] - 2025-10-27
+
+### Bug Fixes
+
+* **cli:** properly handle sombradb native binding errors instead of treating them as "not found"
+  - Previously, when sombradb was found but failed to load (e.g., native binding mismatch), the CLI would treat it as "not found" and continue searching
+  - Now the CLI properly detects when a package exists but has a load error, and displays a helpful error message with solutions
+  - Improved error messages for native binding compatibility issues with actionable solutions
+
 ## [0.3.4](https://github.com/maskdotdev/sombra/compare/cli-v0.3.3...cli-v0.3.4) (2025-10-27)
 
 

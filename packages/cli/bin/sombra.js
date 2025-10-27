@@ -298,6 +298,51 @@ function loadSombraDB() {
 	const debug = process.env.SOMBRA_DEBUG_RESOLUTION === "1";
 	const attempts = [];
 
+	// Helper to try loading from a resolved path
+	const tryLoad = (resolved, context) => {
+		try {
+			return require(resolved);
+		} catch (loadError) {
+			// If the error is about the module not being found, it's a resolution error
+			// If it's any other error (like native binding), the package exists but failed to load
+			if (loadError.code === 'MODULE_NOT_FOUND' && loadError.message.includes(resolved)) {
+				// The resolved path itself doesn't exist - treat as not found
+				return null;
+			}
+			// Package exists but failed to load - report a helpful error
+			console.error("");
+			console.error("Error: Found sombradb but failed to load it.");
+			console.error("");
+			console.error(`  Location: ${resolved}`);
+			console.error(`  Context: ${context}`);
+			console.error("");
+			console.error("  Error details:");
+			console.error(`    ${loadError.message}`);
+			console.error("");
+			
+			// Check if it's a native binding issue
+			if (loadError.message.includes("Cannot find native binding") || 
+			    loadError.message.includes("NODE_MODULE_VERSION")) {
+				console.error("This appears to be a native binding compatibility issue.");
+				console.error("");
+				console.error("Solutions:");
+				console.error("  1. Reinstall sombradb in this location:");
+				console.error(`     cd ${path.dirname(path.dirname(resolved))}`);
+				console.error(`     npm install sombradb --force`);
+				console.error("");
+				console.error("  2. Or install sombradb locally in your project:");
+				console.error("     npm install sombradb");
+				console.error("");
+				console.error("  3. Or reinstall the CLI globally with your current package manager:");
+				console.error("     npm install -g sombra-cli --force");
+				console.error("     # or: pnpm add -g sombra-cli");
+				console.error("     # or: bun add -g sombra-cli");
+			}
+			console.error("");
+			process.exit(1);
+		}
+	};
+
 	// Attempt 1: resolve from CLI's own installation directory (for global install)
 	// __dirname is the 'bin' directory, so go up one level to package root
 	try {
@@ -305,10 +350,19 @@ function loadSombraDB() {
 		if (debug) console.error(`[DEBUG] Attempt 1: CLI package root: ${packageRoot}`);
 		const resolved = require.resolve("sombradb", { paths: [packageRoot] });
 		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
-		return require(resolved);
+		const loaded = tryLoad(resolved, "CLI package root");
+		if (loaded) return loaded;
+		if (debug) console.error(`[DEBUG] ✗ Path doesn't exist`);
 	} catch (e) {
-		if (debug) console.error(`[DEBUG] ✗ Failed: ${e.message}`);
-		attempts.push({ method: "CLI package root", error: e.message });
+		if (e.code === 'MODULE_NOT_FOUND' && e.message.includes('sombradb')) {
+			// sombradb package not found in this location
+			if (debug) console.error(`[DEBUG] ✗ Not found`);
+			attempts.push({ method: "CLI package root", error: "Package not found" });
+		} else {
+			// Found but failed to load - this is the real error
+			if (debug) console.error(`[DEBUG] ✗ Failed to load: ${e.message}`);
+			throw e;
+		}
 	}
 
 	// Attempt 2: regular resolution relative to this package
@@ -316,10 +370,17 @@ function loadSombraDB() {
 		if (debug) console.error(`[DEBUG] Attempt 2: Regular require.resolve`);
 		const resolved = require.resolve("sombradb");
 		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
-		return require(resolved);
+		const loaded = tryLoad(resolved, "Regular resolution");
+		if (loaded) return loaded;
+		if (debug) console.error(`[DEBUG] ✗ Path doesn't exist`);
 	} catch (e) {
-		if (debug) console.error(`[DEBUG] ✗ Failed: ${e.message}`);
-		attempts.push({ method: "Regular resolution", error: e.message });
+		if (e.code === 'MODULE_NOT_FOUND' && e.message.includes('sombradb')) {
+			if (debug) console.error(`[DEBUG] ✗ Not found`);
+			attempts.push({ method: "Regular resolution", error: "Package not found" });
+		} else {
+			if (debug) console.error(`[DEBUG] ✗ Failed to load: ${e.message}`);
+			throw e;
+		}
 	}
 
 	// Attempt 3: resolve from the current working directory (project-local install)
@@ -327,10 +388,17 @@ function loadSombraDB() {
 		if (debug) console.error(`[DEBUG] Attempt 3: CWD: ${process.cwd()}`);
 		const resolved = require.resolve("sombradb", { paths: [process.cwd()] });
 		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
-		return require(resolved);
+		const loaded = tryLoad(resolved, "Current working directory");
+		if (loaded) return loaded;
+		if (debug) console.error(`[DEBUG] ✗ Path doesn't exist`);
 	} catch (e) {
-		if (debug) console.error(`[DEBUG] ✗ Failed: ${e.message}`);
-		attempts.push({ method: "Current working directory", error: e.message });
+		if (e.code === 'MODULE_NOT_FOUND' && e.message.includes('sombradb')) {
+			if (debug) console.error(`[DEBUG] ✗ Not found`);
+			attempts.push({ method: "Current working directory", error: "Package not found" });
+		} else {
+			if (debug) console.error(`[DEBUG] ✗ Failed to load: ${e.message}`);
+			throw e;
+		}
 	}
 
 	// Attempt 4: resolve from common global roots (npm/yarn/pnpm/bun)
@@ -392,10 +460,17 @@ function loadSombraDB() {
 			if (debug) console.error(`[DEBUG]   Trying ${manager}: ${root}`);
 			const resolved = require.resolve("sombradb", { paths: [root] });
 			if (debug) console.error(`[DEBUG]   ✓ Found at: ${resolved}`);
-			return require(resolved);
+			const loaded = tryLoad(resolved, `Global ${manager} (${root})`);
+			if (loaded) return loaded;
+			if (debug) console.error(`[DEBUG]   ✗ Path doesn't exist`);
 		} catch (e) {
-			if (debug) console.error(`[DEBUG]   ✗ Not found`);
-			attempts.push({ method: `Global ${manager}`, path: root, error: e.message });
+			if (e.code === 'MODULE_NOT_FOUND' && e.message.includes('sombradb')) {
+				if (debug) console.error(`[DEBUG]   ✗ Not found`);
+				attempts.push({ method: `Global ${manager}`, path: root, error: "Package not found" });
+			} else {
+				if (debug) console.error(`[DEBUG]   ✗ Failed to load: ${e.message}`);
+				throw e;
+			}
 		}
 	}
 
