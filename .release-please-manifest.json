@@ -3,5 +3,5 @@
 	"packages/core": "0.3.6",
 	"packages/cli": "0.3.7",
 	"packages/nodejs": "0.5.4",
-	"packages/web": "0.2.6"
+	"packages/web": "0.2.7"
 }

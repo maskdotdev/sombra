@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra Web UI will be documented in this file.
 
+## [0.2.7](https://github.com/maskdotdev/sombra/compare/web-v0.2.6...web-v0.2.7) (2025-10-27)
+
+
+### Bug Fixes
+
+* **web:** stupid deps ([a49cdfa](https://github.com/maskdotdev/sombra/commit/a49cdfaa21e3df5607aa0cc70516b2d1c682b2f3))
+
 ## [0.2.6](https://github.com/maskdotdev/sombra/compare/web-v0.2.5...web-v0.2.6) (2025-10-27)
 
 
