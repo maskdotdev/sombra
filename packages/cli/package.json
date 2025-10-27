@@ -1,5 +1,5 @@
 {
-	"name": "sombra-cli",
+	"name": "@unyth/sombra-cli",
 	"version": "0.3.6",
 	"description": "Sombra CLI - command-line interface for Sombra graph database",
 	"bin": {
@@ -12,10 +12,10 @@
 		"LICENSE"
 	],
 	"dependencies": {
-		"sombradb": "^0.5.0"
+		"@unyth/sombra": "^0.5.1"
 	},
 	"scripts": {
-		"build": "bun build ./src/index.ts --target node --external sombradb --outdir dist --format cjs --sourcemap",
+		"build": "bun build ./src/index.ts --target node --external @unyth/sombra --outdir dist --format cjs --sourcemap",
 		"pretest": "bun run build",
 		"test": "node test/cli.test.js && node test/sombradb-loading.test.js",
 		"test:cli": "node test/cli.test.js",

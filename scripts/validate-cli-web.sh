@@ -135,7 +135,7 @@ fi
 # Test 10: Create test database
 test_step "Creating test database"
 cat > /tmp/create-test-db.js <<'EOF'
-const { SombraDB } = require('sombradb');
+const { SombraDB } = require('@unyth/sombra');
 const db = new SombraDB(process.argv[2]);
 // Create some test data using typed API (without schema)
 const n1 = db.addNode(['Person'], { name: 'Alice', age: 30 });
@@ -279,7 +279,7 @@ fi
 # Test 18: Check SombraDB dependency
 test_step "SombraDB dependency"
 cd "$WEB_DIR"
-if npm list sombradb > /dev/null 2>&1; then
+if npm list @unyth/sombra > /dev/null 2>&1; then
     test_pass "SombraDB is properly installed as dependency"
 else
     test_fail "SombraDB dependency issue"
@@ -297,4 +297,3 @@ else
     echo -e "\n${RED}✗ Some validations failed.${NC}"
     exit 1
 fi
-

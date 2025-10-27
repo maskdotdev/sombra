@@ -1,6 +1,6 @@
 {
-  "name": "sombradb-darwin-x64",
-  "version": "0.5.0",
+  "name": "@unyth/sombra-darwin-x64",
+  "version": "0.5.1",
   "os": [
     "darwin"
   ],
@@ -29,7 +29,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/maskdotdev/sombra.git"
+    "url": "https://github.com/unyth/sombra.git"
   },
   "publishConfig": {
     "access": "public"

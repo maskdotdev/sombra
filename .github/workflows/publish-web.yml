@@ -97,7 +97,6 @@ jobs:
 
       - name: Verify publish
         run: |
-          echo "✅ sombra-web published successfully"
+          echo "✅ @unyth/sombra-web published successfully"
           echo "Tag: ${{ inputs.tag || github.ref }}"
-          echo "View at: https://www.npmjs.com/package/sombra-web"
-
+          echo "View at: https://www.npmjs.com/package/@unyth/sombra-web"

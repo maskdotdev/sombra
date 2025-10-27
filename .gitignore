@@ -64,6 +64,7 @@ Thumbs.db
 
 # Logs
 *.log
+.nvimlog
 .venv/
 
 # Python

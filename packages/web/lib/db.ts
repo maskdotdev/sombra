@@ -1,4 +1,4 @@
-import { SombraDB } from 'sombradb';
+import { SombraDB } from '@unyth/sombra';
 import type { SombraNode, SombraEdge, GraphStats } from './types';
 
 let db: SombraDB | null = null;

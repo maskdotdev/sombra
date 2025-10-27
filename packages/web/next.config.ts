@@ -4,13 +4,13 @@ const nextConfig: NextConfig = {
   /* config options here */
   output: 'standalone',
   // Externalize native modules so they're not bundled by webpack/turbopack
-  serverExternalPackages: ['sombradb'],
+  serverExternalPackages: ['@unyth/sombra'],
   
   // Ensure native modules work with webpack
   webpack: (config, { isServer }) => {
     if (isServer) {
       config.externals = config.externals || [];
-      config.externals.push('sombradb');
+      config.externals.push('@unyth/sombra');
     }
     return config;
   },

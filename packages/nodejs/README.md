@@ -7,7 +7,7 @@ High-performance graph database for Node.js and TypeScript, powered by Rust.
 ## Installation
 
 ```bash
-npm install sombradb
+npm install @unyth/sombra
 ```
 
 ## Features
@@ -26,7 +26,7 @@ npm install sombradb
 The unified API works with or without TypeScript generics. For full compile-time type safety, define a schema:
 
 ```typescript
-import { SombraDB } from 'sombradb';
+import { SombraDB } from '@unyth/sombra';
 
 interface MyGraphSchema {
   nodes: {
@@ -114,7 +114,7 @@ db.getNodesByLabel('Employee');  // returns the node
 For JavaScript or raw property access, use the same class without generics:
 
 ```javascript
-const { SombraDB } = require('sombradb');
+const { SombraDB } = require('@unyth/sombra');
 
 const db = new SombraDB('./my_graph.db');
 

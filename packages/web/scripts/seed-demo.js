@@ -1,4 +1,4 @@
-const { SombraDB } = require('sombradb');
+const { SombraDB } = require('@unyth/sombra');
 const path = require('path');
 const fs = require('fs');
 

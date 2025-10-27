@@ -23,11 +23,11 @@ export async function runWebCommand(argv: string[]): Promise<void> {
 	if (argv.includes("--check-install")) {
 		const local = resolveLocalSombraWeb();
 		if (local) {
-			console.log("✓ sombra-web is installed");
+			console.log("✓ @unyth/sombra-web is installed");
 			console.log(`  Location: ${local}`);
 			process.exit(0);
 		}
-		console.log("✗ sombra-web is not installed");
+		console.log("✗ @unyth/sombra-web is not installed");
 		console.log("  Run 'sombra web --install' to install it");
 		process.exit(1);
 	}
@@ -50,7 +50,7 @@ export async function runWebCommand(argv: string[]): Promise<void> {
 	}
 
 	if (preinstall) {
-		console.log("sombra-web installed to cache.");
+		console.log("@unyth/sombra-web installed to cache.");
 		process.exit(0);
 	}
 
@@ -61,7 +61,7 @@ export async function runWebCommand(argv: string[]): Promise<void> {
 
 	const entry = entryCandidates.find((candidate) => existsSync(candidate));
 	if (!entry) {
-		console.error("Could not locate sombra-web runtime.");
+		console.error("Could not locate @unyth/sombra-web runtime.");
 		process.exit(1);
 	}
 
@@ -75,7 +75,10 @@ export async function runWebCommand(argv: string[]): Promise<void> {
 
 	const child = spawn(runtime, args, { stdio: "inherit", env });
 	child.on("error", (err) => {
-		console.error("Failed to launch sombra web runtime:", (err as Error).message);
+		console.error(
+			"Failed to launch Sombra web runtime:",
+			(err as Error).message,
+		);
 		const code = (err as NodeJS.ErrnoException).code;
 		if (code === "ENOENT") {
 			console.error(

@@ -18,10 +18,10 @@ platforms=(
 # Publish each platform package with a delay
 for platform in "${platforms[@]}"; do
   echo ""
-  echo "Publishing sombradb-${platform}..."
+  echo "Publishing @unyth/sombra-${platform}..."
   cd "npm/${platform}"
   
-  if [ -f "sombradb.*.node" ] || [ -f "*.node" ]; then
+  if ls *.node >/dev/null 2>&1; then
     npm publish --access public || echo "Warning: Failed to publish ${platform}, continuing..."
   else
     echo "Skipping ${platform} - no .node file found"

@@ -7,7 +7,7 @@ The official CLI for Sombra Graph Database - command-line interface for database
 ### Global Installation (Recommended)
 
 ```bash
-npm install -g sombra-cli
+npm install -g @unyth/sombra-cli
 ```
 
 After installation, the `sombra` command will be available globally.
@@ -15,7 +15,7 @@ After installation, the `sombra` command will be available globally.
 ### Bun Global Installation
 
 ```bash
-bun add -g sombra-cli
+bun add -g @unyth/sombra-cli
 ```
 
 The CLI detects Bun-based installations automatically and will use Bun to
@@ -32,7 +32,7 @@ npx sombra <command>
 Or add to your project:
 
 ```bash
-npm install sombra-cli
+npm install @unyth/sombra-cli
 ```
 
 ## Commands
@@ -233,8 +233,8 @@ echo "Database is healthy"
 
 The `sombra` CLI package provides a unified command-line interface that:
 
-1. **Handles `web` and `seed` commands** - Downloads and runs `sombra-web` package automatically
-2. **Uses native Node.js bindings** - For `inspect`, `repair`, `verify` commands via the `sombradb` package
+1. **Handles `web` and `seed` commands** - Downloads and runs `@unyth/sombra-web` package automatically
+2. **Uses native Node.js bindings** - For `inspect`, `repair`, `verify` commands via the `@unyth/sombra` package
 
 This design provides:
 - ✅ Easy installation via npm (no Rust toolchain needed)
@@ -244,18 +244,18 @@ This design provides:
 
 ## Troubleshooting
 
-### "sombradb package not found" Error
+### "@unyth/sombra package not found" Error
 
-If you see an error about `sombradb` not being found, ensure you have the latest version:
+If you see an error about `@unyth/sombra` not being found, ensure you have the latest version:
 
 ```bash
-npm install -g sombra
+npm install -g @unyth/sombra
 ```
 
 Or for local projects:
 
 ```bash
-npm install sombra
+npm install @unyth/sombra
 ```
 
 ### Web UI Not Starting
