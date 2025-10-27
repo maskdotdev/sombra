@@ -265,18 +265,24 @@ function printField(name, value) {
 
 // Load sombradb with error handling
 function loadSombraDB() {
-	// Attempt 1: regular resolution relative to this package
+	// Attempt 1: resolve from CLI's own installation directory (for global install)
+	try {
+		const resolved = require.resolve("sombradb", { paths: [__dirname] });
+		return require(resolved);
+	} catch (_) {}
+
+	// Attempt 2: regular resolution relative to this package
 	try {
 		return require("sombradb");
 	} catch (_) {}
 
-	// Attempt 2: resolve from the current working directory (project-local install)
+	// Attempt 3: resolve from the current working directory (project-local install)
 	try {
 		const resolved = require.resolve("sombradb", { paths: [process.cwd()] });
 		return require(resolved);
 	} catch (_) {}
 
-	// Attempt 3: resolve from common global roots (npm/yarn/pnpm/bun)
+	// Attempt 4: resolve from common global roots (npm/yarn/pnpm/bun)
 	const candidateRoots = [];
 
 	// npm global root

@@ -5,11 +5,7 @@
 	"bin": {
 		"sombra": "bin/sombra.js"
 	},
-	"files": [
-		"bin/**",
-		"README.md",
-		"LICENSE"
-	],
+	"files": ["bin/**", "README.md", "LICENSE"],
 	"dependencies": {
 		"sombradb": "^0.5.0"
 	},
@@ -22,11 +18,5 @@
 	"publishConfig": {
 		"access": "public"
 	},
-	"keywords": [
-		"sombra",
-		"graph",
-		"database",
-		"cli",
-		"graphdb"
-	]
+	"keywords": ["sombra", "graph", "database", "cli", "graphdb"]
 }
