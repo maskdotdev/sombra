@@ -1,6 +1,6 @@
 {
 	"name": "sombra-cli",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"description": "Sombra CLI - command-line interface for Sombra graph database",
 	"bin": {
 		"sombra": "bin/sombra.js"
