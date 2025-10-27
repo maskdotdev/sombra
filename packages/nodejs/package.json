@@ -10,9 +10,6 @@
 			"default": "./typed.js"
 		}
 	},
-	"bin": {
-		"sombra": "./bin/sombra.js"
-	},
 	"napi": {
 		"binaryName": "sombra",
 		"targets": [
@@ -62,7 +59,6 @@
 		"index.js",
 		"typed.d.ts",
 		"typed.js",
-		"bin/sombra.js",
 		"*.node"
 	],
 	"engines": {

@@ -1909,3 +1909,131 @@ impl From<Match> for JsMatch {
         }
     }
 }
+
+// Integrity verification support
+#[napi(object, js_name = "IntegrityOptions")]
+pub struct IntegrityOptions {
+    pub checksum_only: Option<bool>,
+    pub verify_indexes: Option<bool>,
+    pub verify_adjacency: Option<bool>,
+    pub max_errors: Option<u32>,
+}
+
+#[napi(object, js_name = "IntegrityReport")]
+pub struct IntegrityReport {
+    pub checked_pages: f64,
+    pub checksum_failures: f64,
+    pub record_errors: f64,
+    pub index_errors: f64,
+    pub adjacency_errors: f64,
+    pub errors: Vec<String>,
+}
+
+impl From<sombra::db::IntegrityReport> for IntegrityReport {
+    fn from(report: sombra::db::IntegrityReport) -> Self {
+        Self {
+            checked_pages: report.checked_pages as f64,
+            checksum_failures: report.checksum_failures as f64,
+            record_errors: report.record_errors as f64,
+            index_errors: report.index_errors as f64,
+            adjacency_errors: report.adjacency_errors as f64,
+            errors: report.errors,
+        }
+    }
+}
+
+#[napi]
+impl SombraDB {
+    #[napi]
+    pub fn verify_integrity(&mut self, opts: IntegrityOptions) -> std::result::Result<IntegrityReport, Error> {
+        let mut db = self.inner.write();
+        
+        let options = sombra::IntegrityOptions {
+            checksum_only: opts.checksum_only.unwrap_or(false),
+            verify_indexes: opts.verify_indexes.unwrap_or(true),
+            verify_adjacency: opts.verify_adjacency.unwrap_or(true),
+            max_errors: opts.max_errors.unwrap_or(16) as usize,
+        };
+        
+        let report = db.verify_integrity(options).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to verify integrity: {}", e),
+            )
+        })?;
+        
+        Ok(IntegrityReport::from(report))
+    }
+}
+
+// Header state access
+#[napi(object, js_name = "HeaderState")]
+pub struct HeaderState {
+    pub next_node_id: f64,
+    pub next_edge_id: f64,
+    pub free_page_head: Option<f64>,
+    pub last_record_page: Option<f64>,
+    pub last_committed_tx_id: f64,
+    pub btree_index_page: Option<f64>,
+    pub btree_index_size: f64,
+}
+
+#[napi]
+impl SombraDB {
+    #[napi]
+    pub fn get_header(&self) -> std::result::Result<HeaderState, Error> {
+        let db = self.inner.read();
+        
+        Ok(HeaderState {
+            next_node_id: db.header.next_node_id as f64,
+            next_edge_id: db.header.next_edge_id as f64,
+            free_page_head: db.header.free_page_head.map(|p| p as f64),
+            last_record_page: db.header.last_record_page.map(|p| p as f64),
+            last_committed_tx_id: db.header.last_committed_tx_id as f64,
+            btree_index_page: db.header.btree_index_page.map(|p| p as f64),
+            btree_index_size: db.header.btree_index_size as f64,
+        })
+    }
+}
+
+// Metrics access
+#[napi(object, js_name = "Metrics")]
+pub struct Metrics {
+    pub cache_hits: f64,
+    pub cache_misses: f64,
+    pub node_lookups: f64,
+    pub edge_traversals: f64,
+    pub wal_bytes_written: f64,
+    pub wal_syncs: f64,
+    pub checkpoints_performed: f64,
+    pub page_evictions: f64,
+    pub transactions_committed: f64,
+    pub transactions_rolled_back: f64,
+}
+
+#[napi]
+impl SombraDB {
+    #[napi]
+    pub fn get_metrics(&self) -> std::result::Result<Metrics, Error> {
+        let db = self.inner.read();
+        
+        Ok(Metrics {
+            cache_hits: db.metrics.cache_hits as f64,
+            cache_misses: db.metrics.cache_misses as f64,
+            node_lookups: db.metrics.node_lookups as f64,
+            edge_traversals: db.metrics.edge_traversals as f64,
+            wal_bytes_written: db.metrics.wal_bytes_written as f64,
+            wal_syncs: db.metrics.wal_syncs as f64,
+            checkpoints_performed: db.metrics.checkpoints_performed as f64,
+            page_evictions: db.metrics.page_evictions as f64,
+            transactions_committed: db.metrics.transactions_committed as f64,
+            transactions_rolled_back: db.metrics.transactions_rolled_back as f64,
+        })
+    }
+}
+
+// Page size constant
+#[napi]
+pub fn get_default_page_size() -> f64 {
+    sombra::pager::DEFAULT_PAGE_SIZE as f64
+}
