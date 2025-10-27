@@ -1,15 +1,15 @@
 {
-  "name": "@sombradb/darwin-x64",
-  "version": "0.3.3",
+  "name": "sombradb-darwin-x64",
+  "version": "0.5.0",
   "os": [
     "darwin"
   ],
   "cpu": [
     "x64"
   ],
-  "main": "sombradb.darwin-x64.node",
+  "main": "sombra.darwin-x64.node",
   "files": [
-    "sombradb.darwin-x64.node"
+    "sombra.darwin-x64.node"
   ],
   "description": "A high-performance graph database with ACID transactions",
   "keywords": [
