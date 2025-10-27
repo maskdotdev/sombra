@@ -81,6 +81,6 @@ jobs:
 
       - name: Verify publish
         run: |
-          echo "✅ @unyth/sombra-cli published successfully"
+          echo "✅ sombra-cli published successfully"
           echo "Tag: ${{ inputs.tag || github.ref }}"
-          echo "View at: https://www.npmjs.com/package/@unyth/sombra-cli"
+          echo "View at: https://www.npmjs.com/package/sombra-cli"

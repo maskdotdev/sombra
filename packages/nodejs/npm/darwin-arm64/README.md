@@ -1,3 +1,3 @@
-# `@unyth/sombra-darwin-arm64`
+# `sombradb-darwin-arm64`
 
-This is the **aarch64-apple-darwin** binary for `@unyth/sombra`
+This is the **aarch64-apple-darwin** binary for `sombradb`

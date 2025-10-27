@@ -107,7 +107,7 @@ export function installPackageToCache(
 		});
 	}
 
-	console.error("Failed to install @unyth/sombra-web after trying available managers.");
+	console.error("Failed to install sombra-web after trying available managers.");
 	for (const attempt of attempts) {
 		if (attempt.type === "missing") {
 			console.error(`  - ${attempt.name}: not found on PATH`);

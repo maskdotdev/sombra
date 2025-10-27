@@ -25,7 +25,7 @@ export function loadSombraDB(): any {
 			}
 
 			console.error("");
-			console.error("Error: Found @unyth/sombra but failed to load it.");
+			console.error("Error: Found sombradb but failed to load it.");
 			console.error("");
 			console.error(`  Location: ${resolved}`);
 			console.error(`  Context: ${context}`);
@@ -41,19 +41,19 @@ export function loadSombraDB(): any {
 				console.error("This appears to be a native binding compatibility issue.");
 				console.error("");
 				console.error("Solutions:");
-				console.error("  1. Reinstall @unyth/sombra in this location:");
+				console.error("  1. Reinstall sombradb in this location:");
 				console.error(`     cd ${dirname(dirname(resolved))}`);
-				console.error(`     npm install @unyth/sombra --force`);
+				console.error(`     npm install sombradb --force`);
 				console.error("");
-				console.error("  2. Or install @unyth/sombra locally in your project:");
-				console.error("     npm install @unyth/sombra");
+				console.error("  2. Or install sombradb locally in your project:");
+				console.error("     npm install sombradb");
 				console.error("");
 				console.error(
 					"  3. Or reinstall the CLI globally with your current package manager:",
 				);
-				console.error("     npm install -g @unyth/sombra-cli --force");
-				console.error("     # or: pnpm add -g @unyth/sombra-cli");
-				console.error("     # or: bun add -g @unyth/sombra-cli");
+				console.error("     npm install -g sombra-cli --force");
+				console.error("     # or: pnpm add -g sombra-cli");
+				console.error("     # or: bun add -g sombra-cli");
 			}
 			console.error("");
 			process.exit(1);
@@ -64,13 +64,13 @@ export function loadSombraDB(): any {
 		const packageRoot = dirname(__dirname);
 		if (debug) console.error(`[DEBUG] Attempt 1: CLI package root: ${packageRoot}`);
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const resolved = require.resolve("@unyth/sombra", { paths: [packageRoot] });
+		const resolved = require.resolve("sombradb", { paths: [packageRoot] });
 		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
 		const loaded = tryLoad(resolved, "CLI package root");
 		if (loaded) return loaded;
 		if (debug) console.error("[DEBUG] ✗ Path doesn't exist");
 	} catch (e: any) {
-		if (e.code === "MODULE_NOT_FOUND" && e.message.includes("@unyth/sombra")) {
+		if (e.code === "MODULE_NOT_FOUND" && e.message.includes("sombradb")) {
 			if (debug) console.error("[DEBUG] ✗ Not found");
 			attempts.push({ method: "CLI package root", error: "Package not found" });
 		} else {
@@ -82,13 +82,13 @@ export function loadSombraDB(): any {
 	try {
 		if (debug) console.error("[DEBUG] Attempt 2: Regular require.resolve");
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const resolved = require.resolve("@unyth/sombra");
+		const resolved = require.resolve("sombradb");
 		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
 		const loaded = tryLoad(resolved, "Regular resolution");
 		if (loaded) return loaded;
 		if (debug) console.error("[DEBUG] ✗ Path doesn't exist");
 	} catch (e: any) {
-		if (e.code === "MODULE_NOT_FOUND" && e.message.includes("@unyth/sombra")) {
+		if (e.code === "MODULE_NOT_FOUND" && e.message.includes("sombradb")) {
 			if (debug) console.error("[DEBUG] ✗ Not found");
 			attempts.push({ method: "Regular resolution", error: "Package not found" });
 		} else {
@@ -100,13 +100,13 @@ export function loadSombraDB(): any {
 	try {
 		if (debug) console.error(`[DEBUG] Attempt 3: CWD: ${process.cwd()}`);
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const resolved = require.resolve("@unyth/sombra", { paths: [process.cwd()] });
+		const resolved = require.resolve("sombradb", { paths: [process.cwd()] });
 		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
 		const loaded = tryLoad(resolved, "Current working directory");
 		if (loaded) return loaded;
 		if (debug) console.error("[DEBUG] ✗ Path doesn't exist");
 	} catch (e: any) {
-		if (e.code === "MODULE_NOT_FOUND" && e.message.includes("@unyth/sombra")) {
+		if (e.code === "MODULE_NOT_FOUND" && e.message.includes("sombradb")) {
 			if (debug) console.error("[DEBUG] ✗ Not found");
 			attempts.push({
 				method: "Current working directory",
@@ -190,13 +190,13 @@ export function loadSombraDB(): any {
 		try {
 			if (debug) console.error(`[DEBUG]   Trying ${manager}: ${root}`);
 			// eslint-disable-next-line @typescript-eslint/no-var-requires
-			const resolved = require.resolve("@unyth/sombra", { paths: [root] });
+			const resolved = require.resolve("sombradb", { paths: [root] });
 			if (debug) console.error(`[DEBUG]   ✓ Found at: ${resolved}`);
 			const loaded = tryLoad(resolved, `Global ${manager} (${root})`);
 			if (loaded) return loaded;
 			if (debug) console.error("[DEBUG]   ✗ Path doesn't exist");
 		} catch (e: any) {
-			if (e.code === "MODULE_NOT_FOUND" && e.message.includes("@unyth/sombra")) {
+			if (e.code === "MODULE_NOT_FOUND" && e.message.includes("sombradb")) {
 				if (debug) console.error("[DEBUG]   ✗ Not found");
 				attempts.push({
 					method: `Global ${manager}`,
@@ -210,20 +210,20 @@ export function loadSombraDB(): any {
 		}
 	}
 
-	console.error("Error: @unyth/sombra package not found or failed to load.");
+	console.error("Error: sombradb package not found or failed to load.");
 	console.error("");
 	console.error(
-		"To use inspect, repair, and verify commands, install @unyth/sombra (project-local):",
+		"To use inspect, repair, and verify commands, install sombradb (project-local):",
 	);
 	console.error("");
 	console.error(
-		"  npm install @unyth/sombra     # or: pnpm add @unyth/sombra / bun add @unyth/sombra",
+		"  npm install sombradb     # or: pnpm add sombradb / bun add sombradb",
 	);
 	console.error("");
-	console.error("Or install the CLI globally (includes @unyth/sombra):");
+	console.error("Or install the CLI globally (includes sombradb):");
 	console.error("");
 	console.error(
-		"  npm install -g @unyth/sombra-cli    # or: pnpm add -g @unyth/sombra-cli / bun add -g @unyth/sombra-cli",
+		"  npm install -g sombra-cli    # or: pnpm add -g sombra-cli / bun add -g sombra-cli",
 	);
 	console.error("");
 	console.error(

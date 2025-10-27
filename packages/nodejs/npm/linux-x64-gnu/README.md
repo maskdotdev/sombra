@@ -1,3 +1,3 @@
-# `@unyth/sombra-linux-x64-gnu`
+# `sombradb-linux-x64-gnu`
 
-This is the **x86_64-unknown-linux-gnu** binary for `@unyth/sombra`
+This is the **x86_64-unknown-linux-gnu** binary for `sombradb`

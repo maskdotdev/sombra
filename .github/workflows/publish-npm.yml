@@ -22,7 +22,7 @@ on:
 
 env:
   DEBUG: napi:*
-  APP_NAME: '@unyth/sombra'
+  APP_NAME: sombradb
   MACOSX_DEPLOYMENT_TARGET: '10.13'
 
 jobs:

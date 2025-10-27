@@ -26,13 +26,13 @@ Example:
 
 	let webDir = resolveLocalSombraWeb();
 	if (!webDir) {
-		console.log("Installing @unyth/sombra-web (needed for seeding)...");
+		console.log("Installing sombra-web (needed for seeding)...");
 		webDir = ensureSombraWebInstalled();
 	}
 
 	const seedScript = join(webDir, "scripts", "seed-demo.js");
 	if (!existsSync(seedScript)) {
-		console.error("Error: seed-demo.js not found in @unyth/sombra-web package.");
+		console.error("Error: seed-demo.js not found in sombra-web package.");
 		console.error("Try updating: sombra web --update");
 		process.exit(1);
 	}

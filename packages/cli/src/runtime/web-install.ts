@@ -19,17 +19,10 @@ function getCacheDir(): string {
 export function resolveLocalSombraWeb(): string | null {
 	try {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const pkgPath = require.resolve("@unyth/sombra-web/package.json");
+		const pkgPath = require.resolve("sombra-web/package.json");
 		return dirname(pkgPath);
 	} catch {
-		try {
-			// Support legacy installs prior to scope rename
-			// eslint-disable-next-line @typescript-eslint/no-var-requires
-			const legacyPath = require.resolve("sombra-web/package.json");
-			return dirname(legacyPath);
-		} catch {
-			return null;
-		}
+		return null;
 	}
 }
 
@@ -50,14 +43,14 @@ export function ensureSombraWebInstalled(version?: string): string {
 		: version || "latest";
 	const target = join(cacheDir, targetName);
 
-	const marker = join(target, "node_modules", "@unyth", "sombra-web", "package.json");
+	const marker = join(target, "node_modules", "sombra-web", "package.json");
 	if (existsSync(marker)) return dirname(marker);
 
 	mkdirSync(target, { recursive: true });
 
 	const installSpec = isFilePath
 		? version!
-		: `@unyth/sombra-web@${version || "latest"}`;
+		: `sombra-web@${version || "latest"}`;
 
 	const managerUsed = installPackageToCache(target, installSpec);
 	if (
@@ -65,10 +58,10 @@ export function ensureSombraWebInstalled(version?: string): string {
 		process.env.SOMBRA_DEBUG_RESOLUTION &&
 		process.env.SOMBRA_DEBUG_RESOLUTION !== "0"
 	) {
-	console.error(`[DEBUG] @unyth/sombra-web installed with ${managerUsed}`);
+		console.error(`[DEBUG] sombra-web installed with ${managerUsed}`);
 	}
 
-	const installedDir = join(target, "node_modules", "@unyth", "sombra-web");
+	const installedDir = join(target, "node_modules", "sombra-web");
 	if (existsSync(installedDir)) return installedDir;
 	return target;
 }

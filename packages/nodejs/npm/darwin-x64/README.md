@@ -1,3 +1,3 @@
-# `@unyth/sombra-darwin-x64`
+# `sombradb-darwin-x64`
 
-This is the **x86_64-apple-darwin** binary for `@unyth/sombra`
+This is the **x86_64-apple-darwin** binary for `sombradb`

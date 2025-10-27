@@ -1,3 +1,3 @@
-# `@unyth/sombra-linux-arm-gnueabihf`
+# `sombradb-linux-arm-gnueabihf`
 
-This is the **armv7-unknown-linux-gnueabihf** binary for `@unyth/sombra`
+This is the **armv7-unknown-linux-gnueabihf** binary for `sombradb`

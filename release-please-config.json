@@ -10,7 +10,7 @@
 		},
 		"packages/nodejs": {
 			"component": "sombrajs",
-			"package-name": "@unyth/sombra",
+			"package-name": "sombradb",
 			"release-type": "node",
 			"changelog-path": "CHANGELOG-js.md"
 		},
@@ -22,13 +22,13 @@
 		},
 		"packages/cli": {
 			"component": "cli",
-			"package-name": "@unyth/sombra-cli",
+			"package-name": "sombra-cli",
 			"release-type": "node",
 			"changelog-path": "CHANGELOG.md"
 		},
 		"packages/web": {
 			"component": "web",
-			"package-name": "@unyth/sombra-web",
+			"package-name": "sombra-web",
 			"release-type": "node",
 			"changelog-path": "CHANGELOG.md"
 		}

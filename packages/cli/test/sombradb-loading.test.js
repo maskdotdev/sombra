@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Test suite for @unyth/sombra loading mechanism
- * Tests that the CLI can find @unyth/sombra in various scenarios
+ * Test suite for sombradb loading mechanism
+ * Tests that the CLI can find sombradb in various scenarios
  */
 
 const { spawnSync } = require("child_process");
@@ -75,11 +75,11 @@ setup();
 // Test 1: CLI's own node_modules (simulating global install)
 // ----------------------------------------------------------------------------
 
-test("loadSombraDB can find @unyth/sombra from CLI's node_modules", () => {
-	// The CLI should be able to find @unyth/sombra in its own node_modules
+test("loadSombraDB can find sombradb from CLI's node_modules", () => {
+	// The CLI should be able to find sombradb in its own node_modules
 	const testDb = path.join(testDir, "test.db");
 	
-	// Run seed command which requires @unyth/sombra
+	// Run seed command which requires sombradb
 	const result = spawnSync("node", [cliPath, "seed", testDb, "--nodes", "5"], {
 		encoding: "utf8",
 		cwd: testDir, // Run from temp dir (no local node_modules)
@@ -88,27 +88,27 @@ test("loadSombraDB can find @unyth/sombra from CLI's node_modules", () => {
 
 	assert(
 		result.status === 0,
-		`CLI should find @unyth/sombra from its own node_modules. Status: ${result.status}, stderr: ${result.stderr}`,
+		`CLI should find sombradb from its own node_modules. Status: ${result.status}, stderr: ${result.stderr}`,
 	);
 	assert(
-		!result.stderr.includes("@unyth/sombra package not found"),
+		!result.stderr.includes("sombradb package not found"),
 		"Should not show 'package not found' error",
 	);
 	assert(fs.existsSync(testDb), "Database should be created");
 });
 
 // ----------------------------------------------------------------------------
-// Test 2: Verify error message when @unyth/sombra genuinely missing
+// Test 2: Verify error message when sombradb genuinely missing
 // ----------------------------------------------------------------------------
 
-test("loadSombraDB shows helpful error when @unyth/sombra missing", () => {
-	// Create a minimal test script that tries to load @unyth/sombra
+test("loadSombraDB shows helpful error when sombradb missing", () => {
+	// Create a minimal test script that tries to load sombradb
 	const testScript = path.join(testDir, "test-load.js");
 	const scriptContent = `
 const path = require('path');
 const cliDir = path.join(__dirname, '..', '..', 'cli', 'bin');
 
-// Temporarily rename node_modules to simulate missing @unyth/sombra
+// Temporarily rename node_modules to simulate missing sombradb
 const nodeModules = path.join(cliDir, '..', 'node_modules');
 const nodeModulesBackup = path.join(cliDir, '..', 'node_modules.backup');
 
@@ -132,7 +132,7 @@ try {
 	);
 	
 	console.log(result.stderr);
-	if (!result.stderr.includes('@unyth/sombra package not found')) {
+	if (!result.stderr.includes('sombradb package not found')) {
 		throw new Error('Should show error message');
 	}
 } finally {
@@ -150,10 +150,10 @@ try {
 });
 
 // ----------------------------------------------------------------------------
-// Test 3: Verify all inspect commands can load @unyth/sombra
+// Test 3: Verify all inspect commands can load sombradb
 // ----------------------------------------------------------------------------
 
-test("All inspect commands can load @unyth/sombra", () => {
+test("All inspect commands can load sombradb", () => {
 	const testDb = path.join(testDir, "inspect-test.db");
 	
 	// Create a database first
@@ -172,7 +172,7 @@ test("All inspect commands can load @unyth/sombra", () => {
 	});
 	assert(result.status === 0, "inspect info should succeed");
 	assert(
-		!result.stderr.includes("@unyth/sombra package not found"),
+		!result.stderr.includes("sombradb package not found"),
 		"inspect info should not show loading error",
 	);
 
@@ -184,7 +184,7 @@ test("All inspect commands can load @unyth/sombra", () => {
 	});
 	assert(result.status === 0, "inspect stats should succeed");
 	assert(
-		!result.stderr.includes("@unyth/sombra package not found"),
+		!result.stderr.includes("sombradb package not found"),
 		"inspect stats should not show loading error",
 	);
 
@@ -196,16 +196,16 @@ test("All inspect commands can load @unyth/sombra", () => {
 	});
 	assert(result.status === 0, "inspect sample should succeed");
 	assert(
-		!result.stderr.includes("@unyth/sombra package not found"),
+		!result.stderr.includes("sombradb package not found"),
 		"inspect sample should not show loading error",
 	);
 });
 
 // ----------------------------------------------------------------------------
-// Test 4: Verify repair command can load @unyth/sombra
+// Test 4: Verify repair command can load sombradb
 // ----------------------------------------------------------------------------
 
-test("Repair command can load @unyth/sombra", () => {
+test("Repair command can load sombradb", () => {
 	const testDb = path.join(testDir, "repair-test.db");
 	
 	// Create a database first
@@ -224,16 +224,16 @@ test("Repair command can load @unyth/sombra", () => {
 	});
 	assert(result.status === 0, "repair should succeed");
 	assert(
-		!result.stderr.includes("@unyth/sombra package not found"),
+		!result.stderr.includes("sombradb package not found"),
 		"repair should not show loading error",
 	);
 });
 
 // ----------------------------------------------------------------------------
-// Test 5: Verify verify command can load @unyth/sombra
+// Test 5: Verify verify command can load sombradb
 // ----------------------------------------------------------------------------
 
-test("Verify command can load @unyth/sombra", () => {
+test("Verify command can load sombradb", () => {
 	const testDb = path.join(testDir, "verify-test.db");
 	
 	// Create a database first
@@ -252,7 +252,7 @@ test("Verify command can load @unyth/sombra", () => {
 	});
 	assert(result.status === 0, "verify should succeed");
 	assert(
-		!result.stderr.includes("@unyth/sombra package not found"),
+		!result.stderr.includes("sombradb package not found"),
 		"verify should not show loading error",
 	);
 });
@@ -306,9 +306,10 @@ if (failures.length > 0) {
 }
 
 if (failed === 0) {
-	console.log(`\n${colors.green}✓ All @unyth/sombra loading tests passed!${colors.reset}\n`);
+	console.log(`\n${colors.green}✓ All sombradb loading tests passed!${colors.reset}\n`);
 	process.exit(0);
 } else {
 	console.log(`\n${colors.red}✗ ${failed} test(s) failed${colors.reset}\n`);
 	process.exit(1);
 }
+

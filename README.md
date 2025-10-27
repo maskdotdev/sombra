@@ -54,7 +54,7 @@ Sombra uses **independent versioning** for each language binding. See the [Compa
 
 **Quick Reference:**
 - Rust: `cargo add sombra@0.3.3`
-- Node.js: `npm install @unyth/sombra@0.3.3`
+- Node.js: `npm install sombradb@0.3.3`
 - Python: `pip install sombra==0.3.3`
 
 ## Quick Start
@@ -91,7 +91,7 @@ println!("Found {} users aged 30", users_age_30.len());
 ### TypeScript/Node.js API
 
 ```typescript
-import { SombraDB, SombraPropertyValue } from '@unyth/sombra';
+import { SombraDB, SombraPropertyValue } from 'sombradb';
 
 const db = new SombraDB('./my_graph.db');
 
@@ -176,7 +176,7 @@ cargo add sombra
 
 ### TypeScript/Node.js
 ```bash
-npm install @unyth/sombra
+npm install sombradb
 ```
 
 ### Python
@@ -205,7 +205,7 @@ sombra --help
 The CLI is also bundled with npm and pip installations:
 ```bash
 # Via npm
-npm install -g @unyth/sombra-cli
+npm install -g sombradb
 sombra inspect mydb.db info
 
 # Via pip
@@ -224,7 +224,7 @@ Sombra is organized as a **monorepo** with three independent packages:
 sombra/
 ├── packages/
 │   ├── core/          # Rust core library (sombra)
-│   ├── nodejs/        # Node.js/TypeScript bindings (@unyth/sombra)
+│   ├── nodejs/        # Node.js/TypeScript bindings (sombradb)
 │   └── python/        # Python bindings (sombra)
 ├── docs/              # Shared documentation
 └── scripts/           # Build and release scripts

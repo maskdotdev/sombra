@@ -16,7 +16,7 @@ PORT=13000
 
 echo -e "${GREEN}1. Creating demo database...${NC}"
 cat > /tmp/create-demo-db.js <<'EOF'
-const { SombraDB } = require('@unyth/sombra');
+const { SombraDB } = require('sombradb');
 const db = new SombraDB(process.argv[2]);
 
 console.log('Creating social network demo data...');
@@ -134,3 +134,4 @@ rm -f /tmp/create-demo-db.js /tmp/sombra-demo-server.log
 
 echo -e "\n${GREEN}=== Demo Complete ===${NC}"
 echo -e "The CLI and web package are working correctly!\n"
+

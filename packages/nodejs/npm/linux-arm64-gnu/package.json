@@ -1,6 +1,6 @@
 {
-  "name": "@unyth/sombra-linux-arm64-gnu",
-  "version": "0.5.1",
+  "name": "sombradb-linux-arm64-gnu",
+  "version": "0.5.0",
   "os": [
     "linux"
   ],
@@ -29,7 +29,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/unyth/sombra.git"
+    "url": "https://github.com/maskdotdev/sombra.git"
   },
   "libc": [
     "glibc"
