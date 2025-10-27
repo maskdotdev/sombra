@@ -4,39 +4,41 @@ Sombra provides a unified command-line interface for database inspection, repair
 
 ## Installation
 
-### Via Cargo (Recommended)
+### Via npm (Recommended)
+
+```bash
+npm install -g sombra
+```
+
+This installs the `sombra` CLI globally, making it available system-wide. No Rust toolchain required!
+
+### Via npx (No Installation)
+
+```bash
+npx sombra <command>
+```
+
+Use the CLI without installing it globally.
+
+### Via Cargo (For Rust Users)
 
 ```bash
 cargo install sombra
 ```
 
-This installs the `sombra` binary globally, making it available system-wide.
-
-### Via npm
-
-The CLI is bundled with the npm package:
-
-```bash
-npm install -g sombradb
-```
-
-The `sombra` command will be available after installation. Note: This requires the Rust binary to be installed separately via `cargo install sombra`.
-
-### Via pip
-
-The CLI is bundled with the Python package:
-
-```bash
-pip install sombra
-```
-
-The `sombra` command will be available after installation. Note: This requires the Rust binary to be installed separately via `cargo install sombra`.
+This installs the standalone Rust binary. The npm version is recommended for most users as it includes the web UI and is easier to install.
 
 ### From Source
 
 ```bash
 git clone https://github.com/maskdotdev/sombra.git
 cd sombra
+
+# For CLI (npm)
+cd packages/cli
+npm install -g .
+
+# Or for Rust binary
 cargo build --release
 # Binary will be at target/release/sombra
 ```
