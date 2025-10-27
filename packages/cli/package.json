@@ -14,7 +14,10 @@
 		"sombradb": "^0.5.0"
 	},
 	"scripts": {
-		"test": "node -e \"console.log('ok')\""
+		"test": "node test/cli.test.js && node test/sombradb-loading.test.js",
+		"test:cli": "node test/cli.test.js",
+		"test:loading": "node test/sombradb-loading.test.js",
+		"test:verbose": "VERBOSE=1 npm test"
 	},
 	"engines": {
 		"node": ">=18"

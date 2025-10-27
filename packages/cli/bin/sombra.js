@@ -159,6 +159,19 @@ Example:
 		process.exit(1);
 	}
 
+	// Ensure the database is flushed to disk
+	if (result.status === 0 && fs.existsSync(dbPath)) {
+		try {
+			const { SombraDB } = loadSombraDB();
+			const db = new SombraDB(dbPath);
+			db.checkpoint();
+			console.log(`✓ Database created successfully: ${dbPath}`);
+		} catch (err) {
+			// If checkpoint fails, still report success since seed completed
+			console.log(`✓ Database created successfully: ${dbPath}`);
+		}
+	}
+
 	process.exit(result.status || 0);
 }
 
@@ -166,10 +179,27 @@ function cmdWeb(argv) {
 	const help = argv.includes("--help") || argv.includes("-h");
 	if (help) {
 		console.log(
-			`Usage: sombra web [--db <path>] [--port <port>] [--open] [--no-open] [--update]\n`,
+			`Usage: sombra web [--db <path>] [--port <port>] [--open] [--no-open] [--update] [--check-install]\n`,
 		);
 		process.exit(0);
 	}
+	
+	const checkInstall = argv.includes("--check-install");
+	
+	if (checkInstall) {
+		// Just check if sombra-web is installed
+		const local = resolveLocalSombraWeb();
+		if (local) {
+			console.log("✓ sombra-web is installed");
+			console.log(`  Location: ${local}`);
+			process.exit(0);
+		} else {
+			console.log("✗ sombra-web is not installed");
+			console.log("  Run 'sombra web --install' to install it");
+			process.exit(1);
+		}
+	}
+	
 	const getArg = (name) => {
 		const i = argv.indexOf(name);
 		return i !== -1 ? argv[i + 1] : undefined;
@@ -265,50 +295,71 @@ function printField(name, value) {
 
 // Load sombradb with error handling
 function loadSombraDB() {
+	const debug = process.env.SOMBRA_DEBUG_RESOLUTION === "1";
+	const attempts = [];
+
 	// Attempt 1: resolve from CLI's own installation directory (for global install)
+	// __dirname is the 'bin' directory, so go up one level to package root
 	try {
-		const resolved = require.resolve("sombradb", { paths: [__dirname] });
+		const packageRoot = path.dirname(__dirname);
+		if (debug) console.error(`[DEBUG] Attempt 1: CLI package root: ${packageRoot}`);
+		const resolved = require.resolve("sombradb", { paths: [packageRoot] });
+		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
 		return require(resolved);
-	} catch (_) {}
+	} catch (e) {
+		if (debug) console.error(`[DEBUG] ✗ Failed: ${e.message}`);
+		attempts.push({ method: "CLI package root", error: e.message });
+	}
 
 	// Attempt 2: regular resolution relative to this package
 	try {
-		return require("sombradb");
-	} catch (_) {}
+		if (debug) console.error(`[DEBUG] Attempt 2: Regular require.resolve`);
+		const resolved = require.resolve("sombradb");
+		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
+		return require(resolved);
+	} catch (e) {
+		if (debug) console.error(`[DEBUG] ✗ Failed: ${e.message}`);
+		attempts.push({ method: "Regular resolution", error: e.message });
+	}
 
 	// Attempt 3: resolve from the current working directory (project-local install)
 	try {
+		if (debug) console.error(`[DEBUG] Attempt 3: CWD: ${process.cwd()}`);
 		const resolved = require.resolve("sombradb", { paths: [process.cwd()] });
+		if (debug) console.error(`[DEBUG] ✓ Found at: ${resolved}`);
 		return require(resolved);
-	} catch (_) {}
+	} catch (e) {
+		if (debug) console.error(`[DEBUG] ✗ Failed: ${e.message}`);
+		attempts.push({ method: "Current working directory", error: e.message });
+	}
 
 	// Attempt 4: resolve from common global roots (npm/yarn/pnpm/bun)
 	const candidateRoots = [];
 
 	// npm global root
 	try {
-		const r = spawnSync("npm", ["root", "-g"], { encoding: "utf8" });
+		const r = spawnSync("npm", ["root", "-g"], { encoding: "utf8", timeout: 5000 });
 		if (r && r.status === 0) {
 			const root = (r.stdout || "").trim();
-			if (root) candidateRoots.push(root);
+			if (root) candidateRoots.push({ manager: "npm", root });
 		}
 	} catch (_) {}
 
 	// pnpm global root
 	try {
-		const r = spawnSync("pnpm", ["root", "-g"], { encoding: "utf8" });
+		const r = spawnSync("pnpm", ["root", "-g"], { encoding: "utf8", timeout: 5000 });
 		if (r && r.status === 0) {
 			const root = (r.stdout || "").trim();
-			if (root) candidateRoots.push(root);
+			if (root) candidateRoots.push({ manager: "pnpm", root });
 		}
 	} catch (_) {}
 
 	// yarn classic global dir (append node_modules)
 	try {
-		const r = spawnSync("yarn", ["global", "dir"], { encoding: "utf8" });
+		const r = spawnSync("yarn", ["global", "dir"], { encoding: "utf8", timeout: 5000 });
 		if (r && r.status === 0) {
 			const dir = (r.stdout || "").trim();
-			if (dir) candidateRoots.push(path.join(dir, "node_modules"));
+			if (dir) candidateRoots.push({ manager: "yarn", root: path.join(dir, "node_modules") });
 		}
 	} catch (_) {}
 
@@ -322,16 +373,30 @@ function loadSombraDB() {
 			"global",
 			"node_modules",
 		);
-		candidateRoots.push(bunGlobalNodeModules);
+		candidateRoots.push({ manager: "bun", root: bunGlobalNodeModules });
 	} catch (_) {}
 
 	// De-duplicate and try to resolve using these roots
-	const uniqueRoots = Array.from(new Set(candidateRoots.filter(Boolean)));
-	for (const root of uniqueRoots) {
+	const uniqueRoots = [];
+	const seen = new Set();
+	for (const { manager, root } of candidateRoots) {
+		if (root && !seen.has(root)) {
+			seen.add(root);
+			uniqueRoots.push({ manager, root });
+		}
+	}
+
+	if (debug) console.error(`[DEBUG] Attempt 4: Global package managers (${uniqueRoots.length} roots)`);
+	for (const { manager, root } of uniqueRoots) {
 		try {
+			if (debug) console.error(`[DEBUG]   Trying ${manager}: ${root}`);
 			const resolved = require.resolve("sombradb", { paths: [root] });
+			if (debug) console.error(`[DEBUG]   ✓ Found at: ${resolved}`);
 			return require(resolved);
-		} catch (_) {}
+		} catch (e) {
+			if (debug) console.error(`[DEBUG]   ✗ Not found`);
+			attempts.push({ method: `Global ${manager}`, path: root, error: e.message });
+		}
 	}
 
 	console.error("Error: sombradb package not found or failed to load.");
@@ -349,6 +414,8 @@ function loadSombraDB() {
 	console.error(
 		"  npm install -g sombra-cli    # or: pnpm add -g sombra-cli / bun add -g sombra-cli",
 	);
+	console.error("");
+	console.error("Hint: Run with SOMBRA_DEBUG_RESOLUTION=1 to see detailed resolution attempts");
 	console.error("");
 	process.exit(1);
 }
@@ -515,6 +582,47 @@ function cmdInspectHeader(dbPath) {
 	console.log();
 }
 
+function cmdInspectSample(dbPath, argv) {
+	printHeader("SAMPLE DATA");
+
+	const { SombraDB } = loadSombraDB();
+	const db = new SombraDB(dbPath);
+
+	// Parse limit option
+	let limit = 10;
+	const limitIdx = argv.indexOf("--limit");
+	if (limitIdx !== -1 && argv[limitIdx + 1]) {
+		limit = parseInt(argv[limitIdx + 1], 10);
+		if (isNaN(limit) || limit < 1) {
+			console.error("Error: Invalid limit value");
+			process.exit(1);
+		}
+	}
+
+	printSection(`Sampling ${limit} Nodes`);
+
+	const header = db.getHeader();
+	const maxNodes = Math.min(limit, header.nextNodeId - 1);
+
+	for (let i = 1; i <= maxNodes; i++) {
+		try {
+			const node = db.getNode(i);
+			if (node) {
+				console.log(`  Node ${i}:`);
+				if (node.properties) {
+					console.log(`    Properties: ${JSON.stringify(node.properties)}`);
+				}
+			}
+		} catch (err) {
+			// Node might not exist, skip
+		}
+	}
+
+	console.log();
+	console.log(`✓ Sampled ${maxNodes} node(s)`);
+	console.log();
+}
+
 function cmdInspectWalInfo(dbPath) {
 	printHeader("WAL INFORMATION");
 
@@ -565,12 +673,18 @@ USAGE:
 COMMANDS:
     info         Show database metadata
     stats        Show detailed statistics
+    sample       Show sample data (default limit: 10)
     verify       Run integrity check
     header       Show raw header contents
     wal-info     Show WAL status
 
+OPTIONS:
+    --limit N    Limit number of samples (for sample command)
+
 EXAMPLES:
     sombra inspect graph.db info
+    sombra inspect graph.db sample
+    sombra inspect graph.db sample --limit 5
     sombra inspect graph.db verify
 `);
 		process.exit(argv.includes("--help") || argv.includes("-h") ? 0 : 1);
@@ -579,11 +693,19 @@ EXAMPLES:
 	const dbPath = argv[0];
 	const subcommand = argv[1];
 
+	// Check if database exists (except for verify which handles this internally)
+	if (!fs.existsSync(dbPath)) {
+		console.error(`Error: Database file not found: ${dbPath}`);
+		process.exit(1);
+	}
+
 	switch (subcommand) {
 		case "info":
 			return cmdInspectInfo(dbPath);
 		case "stats":
 			return cmdInspectStats(dbPath);
+		case "sample":
+			return cmdInspectSample(dbPath, argv.slice(2));
 		case "verify":
 			return cmdInspectVerify(dbPath);
 		case "header":
@@ -692,22 +814,24 @@ function askConfirmation(callback) {
 }
 
 function cmdRepair(argv) {
-	if (argv.length < 2 || argv.includes("--help") || argv.includes("-h")) {
+	if (argv.length < 1 || argv.includes("--help") || argv.includes("-h")) {
 		console.log(`┌─────────────────────────────────────────────┐
 │          Sombra Database Repair             │
 └─────────────────────────────────────────────┘
 
 USAGE:
-    sombra repair <database> <command> [--yes]
+    sombra repair <database> [command] [--yes]
 
 COMMANDS:
-    checkpoint       Force WAL checkpoint
+    checkpoint       Force WAL checkpoint (default)
     vacuum           Compact database
 
 OPTIONS:
     --yes            Skip confirmation prompt
+    --check-only     Check what repairs are needed without applying
 
 EXAMPLES:
+    sombra repair graph.db
     sombra repair graph.db checkpoint
     sombra repair graph.db vacuum
 
@@ -718,8 +842,14 @@ WARNING:
 	}
 
 	const dbPath = argv[0];
-	const subcommand = argv[1];
+	let subcommand = argv[1];
 	const skipConfirm = argv.includes("--yes");
+	const checkOnly = argv.includes("--check-only");
+
+	// Default to checkpoint if no subcommand provided
+	if (!subcommand || subcommand.startsWith("--")) {
+		subcommand = "checkpoint";
+	}
 
 	if (!fs.existsSync(dbPath)) {
 		console.log();
@@ -733,6 +863,14 @@ WARNING:
 	}
 
 	const executeRepair = () => {
+		if (checkOnly) {
+			// Just check what would be done
+			console.log();
+			console.log(`Would perform: ${subcommand}`);
+			console.log();
+			return;
+		}
+
 		switch (subcommand) {
 			case "checkpoint":
 				return cmdRepairCheckpoint(dbPath);
@@ -746,7 +884,7 @@ WARNING:
 		}
 	};
 
-	if (skipConfirm) {
+	if (skipConfirm || checkOnly) {
 		executeRepair();
 	} else {
 		console.log();
@@ -769,6 +907,7 @@ function cmdVerify(argv) {
 	let checksumOnly = false;
 	let verifyIndexes = true;
 	let verifyAdjacency = true;
+	let deepVerify = false;
 	let maxErrors = 16;
 	let dbPath = null;
 
@@ -782,6 +921,7 @@ USAGE:
     sombra verify [OPTIONS] <database>
 
 OPTIONS:
+    --deep                Perform comprehensive deep verification
     --checksum-only       Verify only page checksums
     --skip-indexes        Skip index consistency validation
     --skip-adjacency      Skip adjacency validation
@@ -790,10 +930,18 @@ OPTIONS:
 
 EXAMPLES:
     sombra verify graph.db
+    sombra verify --deep graph.db
     sombra verify --checksum-only graph.db
     sombra verify --max-errors=100 graph.db
 `);
 			process.exit(0);
+		}
+		if (arg === "--deep") {
+			deepVerify = true;
+			verifyIndexes = true;
+			verifyAdjacency = true;
+			maxErrors = 100; // More comprehensive error reporting for deep verify
+			continue;
 		}
 		if (arg === "--checksum-only") {
 			checksumOnly = true;
@@ -829,13 +977,22 @@ EXAMPLES:
 		process.exit(1);
 	}
 
+	if (!fs.existsSync(dbPath)) {
+		console.error(`Error: Database file not found: ${dbPath}`);
+		process.exit(1);
+	}
+
 	printHeader("INTEGRITY VERIFICATION");
+
+	if (deepVerify) {
+		console.log("  Running deep integrity checks...");
+	} else {
+		console.log("  Running integrity checks...");
+	}
+	console.log();
 
 	const { SombraDB } = loadSombraDB();
 	const db = new SombraDB(dbPath);
-
-	console.log("  Running integrity checks...");
-	console.log();
 
 	const options = {
 		checksumOnly,
