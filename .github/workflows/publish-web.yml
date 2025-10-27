@@ -57,7 +57,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd packages/web
-          npm ci
+          npm ci --include=optional
 
       - name: Build Next.js standalone
         run: |
