@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.0...sombrajs-v0.5.1) (2025-10-27)
+
+
+### Bug Fixes
+
+* **js:** align optional package manifests with binary names ([5cd21b3](https://github.com/maskdotdev/sombra/commit/5cd21b3a9615ac13701cd9395cc0ba4c8e6fb13f))
+
 ## [0.5.0](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.15...sombrajs-v0.5.0) (2025-10-27)
 
 
