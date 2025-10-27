@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.2...sombrajs-v0.5.3) (2025-10-27)
+
+
+### Bug Fixes
+
+* scope npm packages under [@unyth](https://github.com/unyth) ([c5fb560](https://github.com/maskdotdev/sombra/commit/c5fb560b3d72cc45e82a2e03c0469318b5b61775))
+
 ## [0.5.2](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.1...sombrajs-v0.5.2) (2025-10-27)
 
 
