@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.6](https://github.com/maskdotdev/sombra/compare/cli-v0.3.5...cli-v0.3.6) (2025-10-27)
+
+
+### Bug Fixes
+
+* **cli:** rewrote using bun instead ([9a43884](https://github.com/maskdotdev/sombra/commit/9a43884edabd08baf1814c5ee6e728c8cde314f9))
+
 ## [0.3.5](https://github.com/maskdotdev/sombra/compare/cli-v0.3.4...cli-v0.3.5) (2025-10-27)
 
 
