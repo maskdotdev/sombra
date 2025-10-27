@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.1...sombrajs-v0.5.2) (2025-10-27)
+
+
+### Bug Fixes
+
+* **js:** adding platform builds ([c1e0b19](https://github.com/maskdotdev/sombra/commit/c1e0b19da2bf6fba9cb476ab194634fd0839869f))
+
 ## [0.5.1](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.0...sombrajs-v0.5.1) (2025-10-27)
 
 
