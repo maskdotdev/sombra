@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.3](https://github.com/maskdotdev/sombra/compare/cli-v0.3.2...cli-v0.3.3) (2025-10-27)
+
+
+### Bug Fixes
+
+* **cli:** fixing sombradb path resolve ([aad3621](https://github.com/maskdotdev/sombra/commit/aad3621fd5635c733f60b90e25118362432a0f58))
+
 ## [0.3.2](https://github.com/maskdotdev/sombra/compare/cli-v0.3.1...cli-v0.3.2) (2025-10-27)
 
 
