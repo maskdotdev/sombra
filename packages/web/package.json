@@ -6,12 +6,7 @@
 	"bin": {
 		"sombra-web": "dist-npm/start.js"
 	},
-	"files": [
-		"dist-npm/**",
-		"scripts/seed-demo.js",
-		"README.md",
-		"LICENSE"
-	],
+	"files": ["dist-npm/**", "scripts/seed-demo.js", "README.md", "LICENSE"],
 	"scripts": {
 		"dev": "next dev",
 		"build": "next build",
