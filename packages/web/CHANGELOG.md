@@ -2,6 +2,13 @@
 
 All notable changes to the Sombra Web UI will be documented in this file.
 
+## [0.2.3](https://github.com/maskdotdev/sombra/compare/web-v0.2.2...web-v0.2.3) (2025-10-27)
+
+
+### Bug Fixes
+
+* **web:** bump sombradb version ([3e9e461](https://github.com/maskdotdev/sombra/commit/3e9e4615c39ff644595b0f29fcf272c713958e32))
+
 ## [0.2.2](https://github.com/maskdotdev/sombra/compare/web-v0.2.1...web-v0.2.2) (2025-10-27)
 
 
