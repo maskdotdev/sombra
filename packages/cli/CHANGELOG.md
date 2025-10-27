@@ -2,6 +2,18 @@
 
 All notable changes to the Sombra CLI will be documented in this file.
 
+## [0.3.0](https://github.com/maskdotdev/sombra/compare/cli-v0.2.0...cli-v0.3.0) (2025-10-27)
+
+
+### Features
+
+* **cli:** implement Node-only CLI without cargo requirement ([73b3154](https://github.com/maskdotdev/sombra/commit/73b3154b72f4f88b86768e7a1ddb8defa9a8fb38))
+
+
+### Bug Fixes
+
+* **cli:** add --force flag to npm install for native bindings ([e119e66](https://github.com/maskdotdev/sombra/commit/e119e6645bc86d6cd3afaf21e7fd08ee685e1d12))
+
 ## [0.2.0](https://github.com/maskdotdev/sombra/compare/cli-v0.1.0...cli-v0.2.0) (2025-10-26)
 
 
