@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.15...sombrajs-v0.5.0) (2025-10-27)
+
+
+### Features
+
+* **node:** add N-API bindings for database inspection and verification ([e9624eb](https://github.com/maskdotdev/sombra/commit/e9624eb9273fc6e28b9e1deb0e9091b85bcb109f))
+
 ## [0.4.15](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.4.14...sombrajs-v0.4.15) (2025-10-26)
 
 
