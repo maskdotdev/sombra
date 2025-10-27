@@ -7,7 +7,7 @@ Get up and running with Sombra CLI in 5 minutes!
 ### Option 1: Global Installation (Recommended)
 
 ```bash
-npm install -g sombra
+npm install -g sombra-cli
 ```
 
 ### Option 2: Use with npx (No Installation)

@@ -7,7 +7,7 @@ The official CLI for Sombra Graph Database - command-line interface for database
 ### Global Installation (Recommended)
 
 ```bash
-npm install -g sombra
+npm install -g sombra-cli
 ```
 
 After installation, the `sombra` command will be available globally.
@@ -21,7 +21,7 @@ npx sombra <command>
 Or add to your project:
 
 ```bash
-npm install sombra
+npm install sombra-cli
 ```
 
 ## Commands
