@@ -1,13 +1,13 @@
-# sombra-cli
+# sombra
 
-The official CLI for Sombra Graph Database - orchestrator for database inspection, web UI, and management tools.
+The official CLI for Sombra Graph Database - command-line interface for database inspection, web UI, and management tools.
 
 ## Installation
 
 ### Global Installation (Recommended)
 
 ```bash
-npm install -g sombra-cli
+npm install -g sombra
 ```
 
 After installation, the `sombra` command will be available globally.
@@ -15,8 +15,13 @@ After installation, the `sombra` command will be available globally.
 ### Local Installation
 
 ```bash
-npm install sombra-cli
 npx sombra <command>
+```
+
+Or add to your project:
+
+```bash
+npm install sombra
 ```
 
 ## Commands
@@ -79,8 +84,6 @@ sombra web --update
 
 Inspect database information, statistics, and health.
 
-> **Note:** Requires Rust binary. Install with: `cargo install sombra`
-
 ```bash
 # Show database information
 sombra inspect graph.db info
@@ -109,8 +112,6 @@ sombra inspect graph.db wal-info
 
 Perform maintenance and repair operations.
 
-> **Note:** Requires Rust binary. Install with: `cargo install sombra`
-
 ```bash
 # Force WAL checkpoint
 sombra repair graph.db checkpoint
@@ -128,8 +129,6 @@ sombra repair graph.db vacuum
 ### `sombra verify` - Integrity Verification
 
 Run comprehensive database integrity checks.
-
-> **Note:** Requires Rust binary. Install with: `cargo install sombra`
 
 ```bash
 # Full integrity check
@@ -167,30 +166,9 @@ sombra <command> --help
 
 ## Requirements
 
-### For Web UI
-
 - **Node.js** 18 or higher
-- Automatically installs `sombra-web` on first use
-
-### For Database Commands (inspect, repair, verify)
-
-- **Rust toolchain** and Sombra binary:
-  ```bash
-  cargo install sombra
-  ```
-
-Or build from source:
-```bash
-git clone https://github.com/maskdotdev/sombra.git
-cd sombra
-cargo build --release
-# Binary at target/release/sombra
-```
-
-The CLI will automatically find the Rust binary if it's:
-- In your system PATH
-- In `~/.cargo/bin/`
-- In the development directory at `target/release/`
+- Automatically installs `sombra-web` on first use for the web UI
+- All commands work with just Node.js - no Rust toolchain required!
 
 ## Examples
 
@@ -242,25 +220,31 @@ echo "Database is healthy"
 
 ## Architecture
 
-The `sombra-cli` package is a lightweight orchestrator that:
+The `sombra` CLI package provides a unified command-line interface that:
 
-1. **Handles `web` command natively** - Downloads and runs `sombra-web` package automatically
-2. **Delegates to Rust binary** - For `inspect`, `repair`, `verify` commands requiring native performance
+1. **Handles `web` and `seed` commands** - Downloads and runs `sombra-web` package automatically
+2. **Uses native Node.js bindings** - For `inspect`, `repair`, `verify` commands via the `sombradb` package
 
 This design provides:
-- ✅ Easy installation via npm
+- ✅ Easy installation via npm (no Rust toolchain needed)
 - ✅ Automatic web UI updates
-- ✅ No bundling overhead for native tools
+- ✅ Native performance through N-API bindings
 - ✅ Consistent CLI experience across all commands
 
 ## Troubleshooting
 
-### "Sombra CLI binary not found" Error
+### "sombradb package not found" Error
 
-The `inspect`, `repair`, and `verify` commands require the Rust binary. Install it:
+If you see an error about `sombradb` not being found, ensure you have the latest version:
 
 ```bash
-cargo install sombra
+npm install -g sombra
+```
+
+Or for local projects:
+
+```bash
+npm install sombra
 ```
 
 ### Web UI Not Starting

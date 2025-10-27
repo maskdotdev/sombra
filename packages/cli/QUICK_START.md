@@ -1,230 +1,242 @@
-# Quick Start: Publishing Sombra CLI
+# Sombra CLI - Quick Start Guide
 
-## What We've Built
+Get up and running with Sombra CLI in 5 minutes!
 
-The `@sombra/cli` package is now a complete orchestrator that provides:
+## 📦 Installation
 
-✅ `sombra web` - Auto-installs and runs the web UI
-✅ `sombra inspect` - Database inspection (delegates to Rust binary)
-✅ `sombra repair` - Database maintenance (delegates to Rust binary)
-✅ `sombra verify` - Integrity verification (delegates to Rust binary)
-✅ `sombra version` - Version information
-✅ Smart binary discovery - Finds Rust binary automatically
-
-## How to Publish (3 Steps)
-
-### 1. Test Locally
+### Option 1: Global Installation (Recommended)
 
 ```bash
-cd packages/cli
-
-# Test help
-node bin/sombra.js --help
-
-# Test web (creates test.db if needed)
-node bin/sombra.js web --help
-
-# Test inspect (requires Rust binary built)
-cd ../..
-cargo build --release
-cd packages/cli
-node bin/sombra.js inspect ../../test.db info
+npm install -g sombra
 ```
 
-### 2. Publish to npm
+### Option 2: Use with npx (No Installation)
 
 ```bash
-cd packages/cli
-
-# Update version if needed
-npm version patch  # or minor, or major
-
-# Login (first time only)
-npm login
-
-# Publish
-npm publish --access public
+npx sombra <command>
 ```
 
-### 3. Test Installation
+### Option 3: Local Project
 
 ```bash
-# Install globally
-npm install -g @sombra/cli
-
-# Test it works
-sombra --help
-sombra web --help
+npm install sombra
+# Then use: npx sombra <command>
 ```
 
-## User Installation
+## 🚀 Quick Start
 
-Tell your users to install with:
+### 1. Create a Demo Database
 
-### Minimum (Web UI only)
 ```bash
-npm install -g @sombra/cli
-sombra web
+sombra seed demo.db
 ```
 
-### Complete (Web UI + Database tools)
-```bash
-# Install both
-cargo install sombra
-npm install -g @sombra/cli
+This creates a sample graph database with:
+- 4 Person nodes (Alice, Bob, Charlie, Diana)
+- 3 Project nodes (Web App, Mobile App, API Service)
+- 2 Team nodes (Frontend Team, Backend Team)
+- 3 File nodes (source code files)
+- 24+ edges with various relationships
 
-# Now everything works
-sombra web
+### 2. Launch the Web UI
+
+```bash
+sombra web --db demo.db
+```
+
+The web UI will automatically open in your browser at `http://localhost:3000`.
+
+### 3. Inspect Your Database
+
+```bash
+# Show database information
+sombra inspect demo.db info
+
+# Show performance statistics
+sombra inspect demo.db stats
+
+# Check database integrity
+sombra verify demo.db
+```
+
+## 📚 All Commands
+
+### `sombra web` - Web UI
+
+Start the interactive web interface:
+
+```bash
+# Basic usage
+sombra web --db my-graph.db
+
+# Custom port
+sombra web --db my-graph.db --port 8080
+
+# Don't open browser automatically
+sombra web --db my-graph.db --no-open
+
+# Update to latest web UI version
+sombra web --update
+```
+
+### `sombra seed` - Create Demo Data
+
+```bash
+# Create demo database
+sombra seed demo.db
+
+# Default creates ./demo.db
+sombra seed
+```
+
+### `sombra inspect` - Database Inspection
+
+```bash
+# Show general information
 sombra inspect my-graph.db info
+
+# Show performance statistics
+sombra inspect my-graph.db stats
+
+# Show raw header contents
+sombra inspect my-graph.db header
+
+# Check WAL status
+sombra inspect my-graph.db wal-info
+
+# Quick integrity check
+sombra inspect my-graph.db verify
 ```
 
-## Architecture
+### `sombra verify` - Integrity Verification
 
-```
-User runs:
-$ sombra web
-    ↓
-@sombra/cli (this package)
-    ↓
-Downloads & runs @sombra/web automatically
-    ↓
-Web UI opens in browser
-
----
-
-User runs:
-$ sombra inspect test.db info
-    ↓
-@sombra/cli (this package)
-    ↓
-Finds sombra binary (Rust)
-    ↓
-Delegates command to binary
-    ↓
-Inspection results shown
-```
-
-## Key Features
-
-1. **Smart auto-installation**: `@sombra/web` is downloaded on first use
-2. **Caching**: Web UI is cached for fast subsequent launches
-3. **Binary discovery**: Finds Rust binary in PATH, ~/.cargo/bin, or dev location
-4. **Helpful errors**: Clear messages when dependencies are missing
-5. **Cross-platform**: Works on macOS, Linux, Windows
-
-## Documentation
-
-📖 Full documentation:
-- `README.md` - User guide for the CLI
-- `PUBLISHING.md` - Detailed publishing instructions
-- `../../../DISTRIBUTION_GUIDE.md` - Complete distribution strategy
-
-## What Happens When Users Install
-
-### `npm install -g @sombra/cli`
-
-Installs:
-- ✅ The `sombra` command globally
-- ✅ Lightweight Node.js orchestrator (~200 lines)
-
-Does NOT install:
-- ❌ `@sombra/web` (installed on first `sombra web` use)
-- ❌ Rust binary (optional, for inspect/repair/verify)
-
-### First `sombra web` run
-
-1. CLI detects `@sombra/web` is not installed
-2. Downloads latest `@sombra/web` to cache directory
-3. Extracts and prepares Next.js standalone server
-4. Launches web UI on specified port
-5. Opens browser automatically
-
-Subsequent runs are instant (uses cached version).
-
-### `sombra web --update`
-
-Forces download of latest `@sombra/web` version.
-
-### `sombra inspect` run
-
-1. CLI looks for Rust binary (`sombra`)
-2. If found: delegates command with all arguments
-3. If not found: shows helpful error with install instructions
-
-## Common User Questions
-
-**Q: Why do I need to install the Rust binary separately?**
-A: The Rust binary provides native performance for database operations. We keep it separate to minimize the npm package size and give users flexibility.
-
-**Q: Can I use just npm without Rust?**
-A: Yes! The web UI works perfectly with just `npm install -g @sombra/cli`. You only need the Rust binary for CLI inspection tools.
-
-**Q: How do I update the web UI?**
-A: Run `sombra web --update` to download the latest version.
-
-**Q: Where is the web UI cached?**
-A:
-- macOS: `~/Library/Caches/sombra/web`
-- Linux: `~/.cache/sombra/web`
-- Windows: `%LOCALAPPDATA%\sombra\web`
-
-## Troubleshooting
-
-### "Binary not found" when running `sombra inspect`
-
-Expected behavior! User needs to install:
 ```bash
-cargo install sombra
+# Full integrity check
+sombra verify my-graph.db
+
+# Quick checksum-only verification
+sombra verify --checksum-only my-graph.db
+
+# Skip index validation
+sombra verify --skip-indexes my-graph.db
+
+# Show more errors (default: 16)
+sombra verify --max-errors=100 my-graph.db
+```
+
+### `sombra repair` - Database Maintenance
+
+```bash
+# Force WAL checkpoint
+sombra repair my-graph.db checkpoint
+
+# Vacuum (compact) database
+sombra repair my-graph.db vacuum
+
+# Skip confirmation prompt
+sombra repair my-graph.db checkpoint --yes
+```
+
+⚠️ **Always backup your database before repair operations!**
+
+### `sombra version` - Version Info
+
+```bash
+sombra version
+```
+
+## 💡 Common Workflows
+
+### Development Workflow
+
+```bash
+# 1. Create a test database
+sombra seed test.db
+
+# 2. Start web UI for development
+sombra web --db test.db --port 3000
+
+# 3. Check database health periodically
+sombra inspect test.db stats
+```
+
+### Production Health Check
+
+```bash
+# Quick integrity check
+sombra verify --checksum-only production.db
+
+# Full verification
+sombra verify production.db
+
+# Check WAL status
+sombra inspect production.db wal-info
+
+# Checkpoint if needed
+sombra repair production.db checkpoint --yes
+```
+
+### Database Maintenance
+
+```bash
+# 1. Backup first!
+cp my-graph.db my-graph.db.backup
+
+# 2. Checkpoint WAL
+sombra repair my-graph.db checkpoint
+
+# 3. Vacuum to reclaim space
+sombra repair my-graph.db vacuum
+
+# 4. Verify integrity
+sombra verify my-graph.db
+```
+
+## 🔧 Requirements
+
+- **Node.js** 18 or higher
+- That's it! No Rust toolchain required.
+
+All commands work with just Node.js through native bindings.
+
+## 🐛 Troubleshooting
+
+### "sombradb package not found"
+
+Make sure you have the latest version:
+
+```bash
+npm install -g sombra
 ```
 
 ### Web UI not starting
 
-Try:
 ```bash
-sombra web --update  # Re-download web UI
-sombra web --port 3001  # Try different port
+# Update web UI
+sombra web --update
+
+# Check Node.js version (must be 18+)
+node --version
 ```
 
-### Permission errors during install
+### Port already in use
 
 ```bash
-# Use user-local installation
-npm install -g @sombra/cli --prefix ~/.local
-
-# Or use npx
-npx @sombra/cli web
+# Use a different port
+sombra web --db my-graph.db --port 3001
 ```
 
-## Next Steps
+## 📖 Learn More
 
-1. ✅ **Publish**: `npm publish --access public`
-2. 📝 **Document**: Update root README with installation instructions
-3. 🎯 **Test**: Install and test in clean environment
-4. 📢 **Announce**: Let users know about the new CLI
-5. 📊 **Monitor**: Watch for issues and feedback
+- [Full CLI Documentation](./README.md)
+- [Sombra Documentation](https://github.com/maskdotdev/sombra/tree/main/docs)
+- [Node.js API Guide](https://github.com/maskdotdev/sombra/tree/main/docs/nodejs-guide.md)
 
-## Files Modified
+## 🎯 Next Steps
 
-- ✅ `bin/sombra.js` - Added inspect/repair/verify commands
-- ✅ `README.md` - Created user documentation
-- ✅ `PUBLISHING.md` - Created publishing guide
-- ✅ `QUICK_START.md` - This file
+1. **Explore the Web UI** - Visual graph exploration and querying
+2. **Try the Node.js API** - Install `sombradb` for programmatic access
+3. **Build your graph** - Import your own data and relationships
+4. **Monitor performance** - Use `inspect stats` to track metrics
 
-## Success Criteria
-
-After publishing, verify:
-
-- [ ] `npm install -g @sombra/cli` works
-- [ ] `sombra --help` shows all commands
-- [ ] `sombra web` downloads and launches web UI
-- [ ] `sombra inspect` shows helpful error without Rust binary
-- [ ] `sombra inspect` works with Rust binary installed
-- [ ] Package appears on npmjs.com
-- [ ] README displays correctly on npm
-
-## Ready to Ship! 🚀
-
-Your CLI is ready to publish. The implementation is complete, tested, and documented.
-
-Run: `npm publish --access public` when ready!
-
+Happy graphing! 🚀
