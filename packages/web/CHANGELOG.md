@@ -2,6 +2,14 @@
 
 All notable changes to the Sombra Web UI will be documented in this file.
 
+## [0.2.2](https://github.com/maskdotdev/sombra/compare/web-v0.2.1...web-v0.2.2) (2025-10-27)
+
+
+### Bug Fixes
+
+* scope npm packages under [@unyth](https://github.com/unyth) ([c5fb560](https://github.com/maskdotdev/sombra/commit/c5fb560b3d72cc45e82a2e03c0469318b5b61775))
+* **web:** bump sombradb version ([06e428c](https://github.com/maskdotdev/sombra/commit/06e428ccfced91619c009c4e1bfa329141769088))
+
 ## [0.2.1](https://github.com/maskdotdev/sombra/compare/web-v0.2.0...web-v0.2.1) (2025-10-26)
 
 
