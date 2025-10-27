@@ -137,10 +137,19 @@ jobs:
           cp artifacts/bindings-x86_64-apple-darwin/index.js . || true
           cp artifacts/bindings-x86_64-apple-darwin/index.d.ts . || true
           ls -la index.js index.d.ts
+      - name: Verify npm authentication
+        run: |
+          cd packages/nodejs
+          echo "Testing npm authentication..."
+          npm whoami || echo "npm whoami failed"
+          npm ping || echo "npm ping failed"
+          echo "Checking package access..."
+          npm access ls-packages || echo "npm access ls-packages failed"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish to npm
         run: |
           cd packages/nodejs
-          npm install -g npm@latest
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
