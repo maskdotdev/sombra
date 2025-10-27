@@ -1,70 +1,76 @@
 {
-	"name": "sombradb",
-	"version": "0.5.1",
-	"description": "A high-performance graph database with ACID transactions",
-	"main": "typed.js",
-	"types": "typed.d.ts",
-	"exports": {
-		".": {
-			"types": "./typed.d.ts",
-			"default": "./typed.js"
-		}
-	},
-	"napi": {
-		"binaryName": "sombra",
-		"targets": [
-			"x86_64-pc-windows-msvc",
-			"x86_64-apple-darwin",
-			"x86_64-unknown-linux-gnu",
-			"aarch64-apple-darwin"
-		]
-	},
-	"scripts": {
-		"artifacts": "napi artifacts",
-		"build": "napi build --platform --release --manifest-path Cargo.toml && node ../../scripts/fix-exports.js",
-		"build:debug": "napi build --platform --manifest-path Cargo.toml && node ../../scripts/fix-exports.js",
-		"prepublishOnly": "napi prepublish -t npm --no-gh-release --skip-optional-publish && node ../../scripts/fix-exports.js",
-		"test": "node test/test.js",
-		"test:comprehensive": "node test/test-comprehensive.js",
-		"test:issues": "node test/test-reported-issues.js",
-		"test:all": "npm test && npm run test:comprehensive",
-		"test:debug": "node --inspect-brk test/test.js",
-		"example": "node examples/nodejs-example.js",
-		"version": "napi version"
-	},
-	"devDependencies": {
-		"@napi-rs/cli": "^3.2.0",
-		"@types/node": "^24.8.1",
-		"typescript": "^5.0.0"
-	},
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/maskdotdev/sombra.git"
-	},
-	"keywords": [
-		"graph",
-		"database",
-		"graphdb",
-		"acid",
-		"transactions",
-		"rust",
-		"napi",
-		"nodejs"
-	],
-	"author": "mask <maskdotdev@gmail.com>",
-	"license": "MIT",
-	"files": [
-		"index.d.ts",
-		"index-napi.js",
-		"index.js",
-		"typed.d.ts",
-		"typed.js",
-		"*.node"
-	],
-	"engines": {
-		"node": ">= 14"
-	},
-	"publishConfig": {
-		"access": "public"
-	}
+  "name": "sombradb",
+  "version": "0.5.1",
+  "description": "A high-performance graph database with ACID transactions",
+  "main": "typed.js",
+  "types": "typed.d.ts",
+  "exports": {
+    ".": {
+      "types": "./typed.d.ts",
+      "default": "./typed.js"
+    }
+  },
+  "napi": {
+    "binaryName": "sombra",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin"
+    ]
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release --manifest-path Cargo.toml && node ../../scripts/fix-exports.js",
+    "build:debug": "napi build --platform --manifest-path Cargo.toml && node ../../scripts/fix-exports.js",
+    "prepublishOnly": "napi prepublish -t npm --no-gh-release --skip-optional-publish && node ../../scripts/fix-exports.js",
+    "test": "node test/test.js",
+    "test:comprehensive": "node test/test-comprehensive.js",
+    "test:issues": "node test/test-reported-issues.js",
+    "test:all": "npm test && npm run test:comprehensive",
+    "test:debug": "node --inspect-brk test/test.js",
+    "example": "node examples/nodejs-example.js",
+    "version": "napi version"
+  },
+  "optionalDependencies": {
+    "sombradb-darwin-arm64": "file:./npm/darwin-arm64",
+    "sombradb-darwin-x64": "file:./npm/darwin-x64",
+    "sombradb-linux-x64-gnu": "file:./npm/linux-x64-gnu",
+    "sombradb-win32-x64-msvc": "file:./npm/win32-x64-msvc"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.2.0",
+    "@types/node": "^24.8.1",
+    "typescript": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maskdotdev/sombra.git"
+  },
+  "keywords": [
+    "graph",
+    "database",
+    "graphdb",
+    "acid",
+    "transactions",
+    "rust",
+    "napi",
+    "nodejs"
+  ],
+  "author": "mask <maskdotdev@gmail.com>",
+  "license": "MIT",
+  "files": [
+    "index.d.ts",
+    "index-napi.js",
+    "index.js",
+    "typed.d.ts",
+    "typed.js",
+    "*.node"
+  ],
+  "engines": {
+    "node": ">= 14"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

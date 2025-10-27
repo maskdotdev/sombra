@@ -76,6 +76,16 @@ jobs:
           targets: ${{ matrix.settings.target }}
       - run: cd packages/nodejs && npm ci
       - run: cd packages/nodejs && ${{ matrix.settings.build }}
+      - name: Inspect build output
+        shell: bash
+        run: |
+          cd packages/nodejs
+          echo "Listing *.node files for target ${{ matrix.settings.target }}"
+          find . -name "*.node" -print
+          if [ -d npm ]; then
+            echo "npm directory snapshot:"
+            find npm -type f -print
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
@@ -106,6 +116,21 @@ jobs:
         with:
           path: packages/nodejs/artifacts
       - run: cd packages/nodejs && npm run artifacts
+      - name: Verify packaged binaries
+        shell: bash
+        run: |
+          cd packages/nodejs
+          if [ -d npm ]; then
+            echo "Expecting binaries under npm/* directories"
+            find npm -type f -name "*.node" -print || true
+          else
+            echo "npm directory missing"
+          fi
+          for pkg in npm/*; do
+            [ -d "$pkg" ] || continue
+            echo "Contents of $pkg:"
+            ls -la "$pkg" || true
+          done
       - name: Copy index files from artifacts
         run: |
           cd packages/nodejs
