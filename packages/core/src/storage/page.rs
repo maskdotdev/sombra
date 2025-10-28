@@ -8,7 +8,16 @@ const RECORD_COUNT_OFFSET: usize = 0;
 const FREE_SPACE_OFFSET_OFFSET: usize = 2;
 const FREE_LIST_NEXT_OFFSET: usize = 4;
 
-// Known page type magic bytes - these are NOT RecordPages
+/// Page type identification via magic bytes
+///
+/// Sombra uses different page types for different purposes:
+/// - RecordPages: Store node/edge data and version records (no magic, start with record_count u16)
+/// - BTree index pages: Store node ID index (magic: "BIDX")
+/// - Property index pages: Store property value indexes (magic: "PIDX")
+///
+/// When scanning pages for available space (e.g., in insert_new_slot()), we need to
+/// distinguish RecordPages from special index pages to avoid misinterpreting their
+/// headers as corrupt record metadata.
 const BTREE_INDEX_MAGIC: &[u8; 4] = b"BIDX";
 const PROPERTY_INDEX_MAGIC: &[u8; 4] = b"PIDX";
 
@@ -31,9 +40,20 @@ impl<'a> RecordPage<'a> {
             ));
         }
 
-        // Check if this page has a known non-RecordPage magic signature
-        // BTree and Property index pages start with 4-byte magic, which would
-        // be misinterpreted as record_count/free_offset if we tried to parse them
+        // Page type detection via magic bytes
+        //
+        // RecordPages don't have magic bytes - they start directly with a u16 record_count.
+        // However, special index pages (BTree, Property) use 4-byte magic signatures at offset 0.
+        //
+        // Problem: When insert_new_slot() scans pages looking for space, it blindly calls
+        // RecordPage::from_bytes() on all pages. If it encounters a BTree page with magic
+        // "BIDX" (0x42 0x49 0x44 0x58), those bytes would be misinterpreted as:
+        //   - record_count = 0x4942 (18754)
+        //   - free_offset = 0x5844 (22596)
+        // This triggers false corruption errors since free_offset < expected.
+        //
+        // Solution: Detect magic bytes early and return InvalidArgument (not Corruption)
+        // so callers can skip these pages instead of reporting false positives.
         if data.len() >= 4 {
             let maybe_magic = &data[0..4];
             if maybe_magic == BTREE_INDEX_MAGIC || maybe_magic == PROPERTY_INDEX_MAGIC {

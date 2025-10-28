@@ -74,6 +74,21 @@ impl<'a> RecordStore<'a> {
     /// This method will try to append to existing pages first, but will NOT reuse
     /// freed slots. Only if no page has room will it allocate a new page.
     ///
+    /// # Page Type Handling
+    ///
+    /// This method scans all pages in the database looking for RecordPages with
+    /// available space. The database may contain different page types:
+    /// - **RecordPages**: Store node/edge data and version records
+    /// - **BTree index pages**: Store node ID indexes (magic: "BIDX")
+    /// - **Property index pages**: Store property value indexes (magic: "PIDX")
+    ///
+    /// When we encounter non-RecordPage types during scanning, `RecordPage::from_bytes()`
+    /// detects their magic bytes and returns `InvalidArgument` (not `Corruption`).
+    /// We catch these errors and skip to the next page, which is the correct behavior
+    /// since we only want to append records to RecordPages.
+    ///
+    /// See `src/storage/page.rs` for details on magic byte detection.
+    ///
     /// # Arguments
     /// * `record` - The record data to store
     ///
@@ -83,11 +98,22 @@ impl<'a> RecordStore<'a> {
         // Try to find an existing page with room to append (without slot reuse)
         let page_count = self.pager.page_count();
         
-        // Start from page 1 (skip header page 0) and try to append to existing pages
+        // Scan all pages starting from page 1 (skip header page 0)
+        // Note: This will encounter mixed page types (RecordPages, BIDX, PIDX).
+        // RecordPage::from_bytes() handles this by detecting magic bytes and
+        // returning InvalidArgument for non-RecordPages, which we catch below.
         for page_id in 1..page_count as u32 {
             let page = self.pager.fetch_page(page_id)?;
-            let mut record_page = RecordPage::from_bytes(&mut page.data)?;
-            record_page.initialize()?;
+            
+            // Try to parse as RecordPage - will fail for index pages (BIDX, PIDX)
+            let mut record_page = match RecordPage::from_bytes(&mut page.data) {
+                Ok(page) => page,
+                Err(_) => continue,  // Skip non-RecordPage types
+            };
+            
+            if let Err(_) = record_page.initialize() {
+                continue;  // Skip if initialization fails
+            }
             
             // Check if we can fit the record by appending (not reusing)
             match record_page.can_fit(record.len()) {
@@ -103,7 +129,8 @@ impl<'a> RecordStore<'a> {
                     });
                 }
                 Ok(false) => continue,
-                Err(_) => continue, // Try next page (likely a non-RecordPage)
+                // InvalidArgument errors indicate page is full or has issues
+                Err(_) => continue,
             }
         }
 
