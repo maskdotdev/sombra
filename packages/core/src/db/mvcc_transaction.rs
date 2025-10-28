@@ -240,6 +240,19 @@ impl MvccTransactionManager {
     pub fn active_count(&self) -> usize {
         self.active_transactions.len()
     }
+
+    /// Get all active transaction IDs
+    pub fn active_tx_ids(&self) -> Vec<TxId> {
+        self.active_transactions.keys().copied().collect()
+    }
+
+    /// End all active transactions (used during database close)
+    pub fn end_all_transactions(&mut self) {
+        let tx_ids: Vec<TxId> = self.active_transactions.keys().copied().collect();
+        for tx_id in tx_ids {
+            let _ = self.end_transaction(tx_id);
+        }
+    }
 }
 
 #[cfg(test)]

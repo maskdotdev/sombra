@@ -415,7 +415,7 @@ impl<'db> Transaction<'db> {
         if let Err(err) = write_header_result {
             let _ = self.db.rollback_transaction(&self.dirty_pages);
             self.db.stop_tracking();
-            self.db.exit_transaction();
+            self.db.exit_transaction(self.id);
             self.state = TxState::RolledBack;
             return Err(err);
         }
@@ -428,7 +428,7 @@ impl<'db> Transaction<'db> {
             if let Err(err) = self.db.update_versions_commit_ts(self.id, commit_ts, &self.dirty_pages) {
                 let _ = self.db.rollback_transaction(&self.dirty_pages);
                 self.db.stop_tracking();
-                self.db.exit_transaction();
+                self.db.exit_transaction(self.id);
                 self.state = TxState::RolledBack;
                 return Err(err);
             }
@@ -439,7 +439,7 @@ impl<'db> Transaction<'db> {
         match result {
             Ok(()) => {
                 self.db.stop_tracking();
-                self.db.exit_transaction();
+                self.db.exit_transaction(self.id);
                 self.state = TxState::Committed;
                 let duration = start.elapsed();
                 info!(
@@ -456,7 +456,7 @@ impl<'db> Transaction<'db> {
             Err(err) => {
                 let _ = self.db.rollback_transaction(&pages);
                 self.db.stop_tracking();
-                self.db.exit_transaction();
+                self.db.exit_transaction(self.id);
                 self.state = TxState::RolledBack;
                 Err(err)
             }
@@ -488,7 +488,7 @@ impl<'db> Transaction<'db> {
         let pages = self.dirty_pages.clone();
         let result = self.db.rollback_transaction(&pages);
         self.db.stop_tracking();
-        self.db.exit_transaction();
+        self.db.exit_transaction(self.id);
         self.state = TxState::RolledBack;
         warn!(tx_id = self.id, "Transaction rolled back");
         result
@@ -509,7 +509,7 @@ impl<'db> Drop for Transaction<'db> {
         self.db.stop_tracking();
         if self.state == TxState::Active {
             let _ = self.db.rollback_transaction(&self.dirty_pages);
-            self.db.exit_transaction();
+            self.db.exit_transaction(self.id);
             if !std::thread::panicking() {
                 panic!("transaction {} dropped without commit or rollback", self.id);
             }

@@ -176,10 +176,12 @@ impl GraphDB {
         }
     }
 
-    pub fn exit_transaction(&mut self) {
-        // In legacy mode, clear active_transaction
-        // In MVCC mode, transactions are managed separately
-        if self.mvcc_tx_manager.is_none() {
+    pub fn exit_transaction(&mut self, tx_id: TxId) {
+        // In MVCC mode, end the transaction in the manager
+        if let Some(ref mut tx_manager) = self.mvcc_tx_manager {
+            let _ = tx_manager.end_transaction(tx_id);
+        } else {
+            // Legacy mode: clear active_transaction
             self.active_transaction = None;
         }
     }

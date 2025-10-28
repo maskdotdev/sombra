@@ -1134,7 +1134,13 @@ impl GraphDB {
 
         if self.is_in_transaction() {
             warn!("Active transaction detected during close, rolling back");
-            self.exit_transaction();
+            // In MVCC mode, end all active transactions
+            if let Some(ref mut tx_manager) = self.mvcc_tx_manager {
+                tx_manager.end_all_transactions();
+            } else {
+                // Legacy mode: clear active_transaction
+                self.active_transaction = None;
+            }
         }
 
         self.persist_btree_index()?;
