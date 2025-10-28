@@ -8,6 +8,7 @@ use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::{
     deserialize_edge, deserialize_node, serialize_edge, serialize_node, RecordPointer, RecordStore,
 };
+use crate::storage::version_chain::VersionChainReader;
 use std::convert::TryFrom;
 
 impl GraphDB {
@@ -35,6 +36,56 @@ impl GraphDB {
 
         self.edge_cache.put(edge_id, edge.clone());
         Ok(edge)
+    }
+
+    /// Load an edge with MVCC snapshot isolation
+    ///
+    /// This method reads an edge using the provided snapshot timestamp,
+    /// ensuring the correct version is returned based on MVCC visibility rules.
+    ///
+    /// # Arguments
+    /// * `edge_id` - The ID of the edge to load
+    /// * `snapshot_ts` - Snapshot timestamp for visibility checking
+    /// * `current_tx_id` - Optional transaction ID for read-your-own-writes
+    ///
+    /// # Returns
+    /// * `Ok(Edge)` - Edge visible at the snapshot timestamp
+    /// * `Err(GraphError::NotFound)` - Edge doesn't exist or is not visible
+    /// * `Err(_)` - Error reading the edge
+    pub fn load_edge_with_snapshot(
+        &mut self,
+        edge_id: EdgeId,
+        snapshot_ts: u64,
+        current_tx_id: Option<crate::db::TxId>,
+    ) -> Result<Edge> {
+        // If MVCC is not enabled, fall back to regular load_edge
+        if !self.config.mvcc_enabled {
+            return self.load_edge(edge_id);
+        }
+
+        // Get the head pointer from the index
+        let head_pointer = self
+            .edge_index
+            .get(&edge_id)
+            .ok_or(GraphError::NotFound("edge"))?
+            .clone();
+
+        // Use VersionChainReader to find the visible version
+        let mut record_store = self.record_store();
+        let versioned_record = VersionChainReader::read_version_for_snapshot(
+            &mut record_store,
+            head_pointer,
+            snapshot_ts,
+            current_tx_id,
+        )?;
+
+        match versioned_record {
+            Some(vr) => {
+                // Deserialize the edge from the versioned record data
+                deserialize_edge(&vr.data)
+            }
+            None => Err(GraphError::NotFound("edge not visible at snapshot")),
+        }
     }
 
     pub fn load_edges_batch(&mut self, edge_ids: &[EdgeId]) -> Result<Vec<Edge>> {

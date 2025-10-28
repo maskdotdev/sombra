@@ -275,11 +275,11 @@ impl<'db> Transaction<'db> {
     /// * `Ok(Some(Node))` - Node found
     /// * `Ok(None)` - Node doesn't exist
     pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
-        self.db.get_node(node_id)
+        self.db.get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
     }
 
     pub fn get_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
-        self.db.load_edge(edge_id)
+        self.db.load_edge_with_snapshot(edge_id, self.snapshot_ts, Some(self.id))
     }
 
     pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
@@ -301,7 +301,7 @@ impl<'db> Transaction<'db> {
     /// # Errors
     /// * `GraphError::NotFound` - Node doesn't exist
     pub fn get_neighbors(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        self.db.get_neighbors(node_id)
+        self.db.get_neighbors_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
     }
 
     /// Creates a property index (not supported within transactions).

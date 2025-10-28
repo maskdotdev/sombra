@@ -3,6 +3,8 @@ use crate::error::{GraphError, Result};
 use crate::model::{Node, NodeId, NULL_EDGE_ID};
 use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_node;
+use crate::storage::version_chain::VersionChainReader;
+use crate::storage::deserialize_node;
 use std::collections::HashSet;
 
 impl GraphDB {
@@ -196,6 +198,58 @@ impl GraphDB {
         let node = self.read_node_at(pointer)?;
         self.node_cache.put(node_id, node.clone());
         Ok(Some(node))
+    }
+
+    /// Get a node with MVCC snapshot isolation
+    ///
+    /// This method reads a node using the provided snapshot timestamp,
+    /// ensuring the correct version is returned based on MVCC visibility rules.
+    ///
+    /// # Arguments
+    /// * `node_id` - The ID of the node to retrieve
+    /// * `snapshot_ts` - Snapshot timestamp for visibility checking
+    /// * `current_tx_id` - Optional transaction ID for read-your-own-writes
+    ///
+    /// # Returns
+    /// * `Ok(Some(Node))` - Node visible at the snapshot timestamp
+    /// * `Ok(None)` - Node doesn't exist or is not visible at snapshot
+    /// * `Err(_)` - Error reading the node
+    pub fn get_node_with_snapshot(
+        &mut self,
+        node_id: NodeId,
+        snapshot_ts: u64,
+        current_tx_id: Option<crate::db::TxId>,
+    ) -> Result<Option<Node>> {
+        self.metrics.node_lookups += 1;
+
+        // If MVCC is not enabled, fall back to regular get_node
+        if !self.config.mvcc_enabled {
+            return self.get_node(node_id);
+        }
+
+        // Get the head pointer from the index
+        let head_pointer = match self.node_index.get(&node_id) {
+            Some(p) => p.clone(),
+            None => return Ok(None),
+        };
+
+        // Use VersionChainReader to find the visible version
+        let mut record_store = self.record_store();
+        let versioned_record = VersionChainReader::read_version_for_snapshot(
+            &mut record_store,
+            head_pointer,
+            snapshot_ts,
+            current_tx_id,
+        )?;
+
+        match versioned_record {
+            Some(vr) => {
+                // Deserialize the node from the versioned record data
+                let node = deserialize_node(&vr.data)?;
+                Ok(Some(node))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
