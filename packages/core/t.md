@@ -20,7 +20,7 @@ Issue #3: Edges created with tx_id=0 🔴 - FIXED
 • Breaks read-your-own-writes for edges within transactions
 • Fix: 5 lines - pass tx_id and commit_ts to add_edge_internal() like nodes do
 
-Issue #4: Traversal snapshot isolation
+Issue #4: Traversal snapshot isolation - FIXED
 
 • Status: ⚠️ Partial issue
 • Traversals use load_edge() not load_edge_with_snapshot()
@@ -43,7 +43,7 @@ Issue #6: No file locking 🔴
 • Multiple processes can corrupt database
 • Fix: 30 lines using fs2 crate for exclusive lock
 
-Issue #7: API requires &mut
+Issue #7: API requires &mut -DONE
 
 • Status: ✅ Intentional design choice
 • All methods require &mut GraphDB, preventing concurrent access
