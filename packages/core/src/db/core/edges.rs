@@ -6,54 +6,11 @@ use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_edge;
 
 impl GraphDB {
-    pub fn add_edge(&mut self, mut edge: Edge) -> Result<EdgeId> {
+    pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId> {
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 
-        let edge_id = self.header.next_edge_id;
-        self.header.next_edge_id += 1;
-
-        let source_ptr = self
-            .node_index
-            .get(&edge.source_node_id)
-            .ok_or(GraphError::NotFound("source node"))?;
-        let target_ptr = self
-            .node_index
-            .get(&edge.target_node_id)
-            .ok_or(GraphError::NotFound("target node"))?;
-
-        let source_node = self.read_node_at(source_ptr)?;
-        let target_node = self.read_node_at(target_ptr)?;
-
-        edge.id = edge_id;
-        edge.next_outgoing_edge_id = source_node.first_outgoing_edge_id;
-        edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
-
-        let payload = serialize_edge(&edge)?;
-        let record = encode_record(RecordKind::Edge, &payload)?;
-        let preferred = self.header.last_record_page;
-        let pointer = self.insert_record(&record, preferred)?;
-        self.edge_index.insert(edge_id, pointer);
-        self.header.last_record_page = Some(pointer.page_id);
-
-        self.update_node_pointer(source_ptr, PointerKind::Outgoing, edge_id)?;
-        self.update_node_pointer(target_ptr, PointerKind::Incoming, edge_id)?;
-
-        self.outgoing_adjacency
-            .entry(edge.source_node_id)
-            .or_default()
-            .push(edge_id);
-        self.incoming_adjacency
-            .entry(edge.target_node_id)
-            .or_default()
-            .push(edge_id);
-
-        self.outgoing_neighbors_cache.remove(&edge.source_node_id);
-        self.incoming_neighbors_cache.remove(&edge.target_node_id);
-
-        self.node_cache.pop(&edge.source_node_id);
-        self.node_cache.pop(&edge.target_node_id);
-        self.edge_cache.put(edge_id, edge);
+        let (edge_id, _version_ptr) = self.add_edge_internal(edge)?;
 
         self.header.last_committed_tx_id = tx_id;
         self.write_header()?;
@@ -65,7 +22,7 @@ impl GraphDB {
         Ok(edge_id)
     }
 
-    pub fn add_edge_internal(&mut self, mut edge: Edge) -> Result<EdgeId> {
+    pub fn add_edge_internal(&mut self, mut edge: Edge) -> Result<(EdgeId, Option<crate::storage::heap::RecordPointer>)> {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
@@ -86,9 +43,37 @@ impl GraphDB {
         edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
 
         let payload = serialize_edge(&edge)?;
-        let record = encode_record(RecordKind::Edge, &payload)?;
-        let preferred = self.header.last_record_page;
-        let pointer = self.insert_record(&record, preferred)?;
+        
+        // Use store_new_version if MVCC enabled, otherwise legacy record format
+        let (pointer, version_pointer) = if self.config.mvcc_enabled {
+            use crate::storage::version_chain::store_new_version;
+            
+            let mut record_store = self.record_store();
+            let pointer = store_new_version(
+                &mut record_store,
+                None,  // No previous version for new edges
+                edge_id,
+                RecordKind::Edge,
+                &payload,
+                0,  // tx_id - will be set by transaction
+                0,  // commit_ts - will be set at commit time
+            )?;
+            
+            // Register dirty pages with GraphDB
+            let dirty_pages = record_store.take_dirty_pages();
+            for page_id in dirty_pages {
+                self.record_page_write(page_id);
+            }
+            
+            (pointer, Some(pointer))
+        } else {
+            // Legacy non-versioned record
+            let record = encode_record(RecordKind::Edge, &payload)?;
+            let preferred = self.header.last_record_page;
+            let pointer = self.insert_record(&record, preferred)?;
+            (pointer, None)
+        };
+        
         self.edge_index.insert(edge_id, pointer);
         self.header.last_record_page = Some(pointer.page_id);
 
@@ -111,7 +96,7 @@ impl GraphDB {
         self.node_cache.pop(&edge.target_node_id);
         self.edge_cache.put(edge_id, edge);
 
-        Ok(edge_id)
+        Ok((edge_id, version_pointer))
     }
 
     pub fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {

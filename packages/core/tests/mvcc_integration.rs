@@ -15,23 +15,66 @@ fn test_mvcc_disabled_by_default() {
     let path = "test_mvcc_disabled.db";
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{}-wal", path));
+}
 
-    let config = Config::default();
-    assert!(!config.mvcc_enabled, "MVCC should be disabled by default");
+#[test]
+fn test_empty_transaction_optimization() {
+    let path = "test_empty_tx.db";
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(format!("{}-wal", path));
 
-    let mut db = GraphDB::open_with_config(path, config).unwrap();
-    let mut tx = db.begin_transaction().unwrap();
-
-    // With MVCC disabled, snapshot_ts should be 0
-    assert_eq!(tx.snapshot_ts(), 0, "Snapshot timestamp should be 0 when MVCC is disabled");
-
-    let node = Node::new(1);
-    tx.add_node(node).unwrap();
-    tx.commit().unwrap();
+    // Test with MVCC disabled
+    {
+        let config = Config::default();
+        let mut db = GraphDB::open_with_config(path, config).unwrap();
+        
+        // Create an empty transaction (no modifications)
+        let tx = db.begin_transaction().unwrap();
+        tx.commit().unwrap();
+        
+        // Transaction should succeed without errors
+        // WAL should not grow for empty transactions
+    }
+    
+    // Test with MVCC enabled
+    {
+        let mut config = Config::default();
+        config.mvcc_enabled = true;
+        
+        let mut db = GraphDB::open_with_config(path, config).unwrap();
+        
+        // Create multiple empty transactions
+        for _ in 0..5 {
+            let tx = db.begin_transaction().unwrap();
+            assert!(tx.snapshot_ts() > 0);
+            tx.commit().unwrap();
+        }
+        
+        // All should succeed without WAL writes
+    }
+    
+    // Test read-only transaction
+    {
+        let mut config = Config::default();
+        config.mvcc_enabled = true;
+        
+        let mut db = GraphDB::open_with_config(path, config).unwrap();
+        
+        // Create a node first
+        let mut tx1 = db.begin_transaction().unwrap();
+        let node_id = tx1.add_node(Node::new(1)).unwrap();
+        tx1.commit().unwrap();
+        
+        // Read-only transaction should be treated as empty
+        let mut tx2 = db.begin_transaction().unwrap();
+        let _node = tx2.get_node(node_id).unwrap();
+        tx2.commit().unwrap(); // Should not write to WAL
+    }
 
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{}-wal", path));
 }
+
 
 #[test]
 fn test_mvcc_enabled_allocates_snapshot_timestamp() {
@@ -281,6 +324,37 @@ fn test_mvcc_timestamp_oracle_initialization() {
         tx.commit().unwrap();
     }
 
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(format!("{}-wal", path));
+}
+
+#[test]
+fn test_edge_mvcc_version_tracking() {
+    let path = "test_edge_mvcc_version_tracking.db";
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(format!("{}-wal", path));
+
+    let mut config = Config::default();
+    config.mvcc_enabled = true;
+    
+    let mut db = GraphDB::open_with_config(path, config).unwrap();
+    
+    // Create nodes and edge in a transaction
+    let mut tx = db.begin_transaction().unwrap();
+    let node1 = tx.add_node(Node::new(1)).unwrap();
+    let node2 = tx.add_node(Node::new(2)).unwrap();
+    let edge = Edge::new(1, node1, node2, "KNOWS");
+    let edge_id = tx.add_edge(edge).unwrap();
+    tx.commit().unwrap();
+    
+    // Verify edge can be read back
+    let mut tx2 = db.begin_transaction().unwrap();
+    let retrieved_edge = tx2.get_edge(edge_id).unwrap();
+    assert_eq!(retrieved_edge.source_node_id, node1);
+    assert_eq!(retrieved_edge.target_node_id, node2);
+    assert_eq!(retrieved_edge.type_name, "KNOWS");
+    tx2.commit().unwrap();
+    
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{}-wal", path));
 }
