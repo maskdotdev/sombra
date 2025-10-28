@@ -100,8 +100,8 @@ fn test_gc_respects_watermark() {
     let read_tx = db.begin_transaction().unwrap();
     let read_snapshot = read_tx.snapshot_ts();
     
-    // Must drop read_tx before starting new transaction to avoid double borrow
-    drop(read_tx);
+    // Rollback the read transaction properly (don't just drop it)
+    read_tx.rollback().unwrap();
 
     // Update the node
     {
@@ -156,7 +156,12 @@ fn test_gc_doesnt_break_concurrent_reads() {
 
 #[test]
 fn test_background_gc_start_stop() {
-    let (mut db, _temp) = create_test_db();
+    // Create a test database with background GC enabled
+    let temp_file = NamedTempFile::new().unwrap();
+    let mut config = Config::default();
+    config.mvcc_enabled = true;
+    config.gc_interval_secs = Some(60); // Enable background GC with 60s interval
+    let mut db = GraphDB::open_with_config(temp_file.path(), config).unwrap();
 
     // Start background GC
     db.start_background_gc().unwrap();
