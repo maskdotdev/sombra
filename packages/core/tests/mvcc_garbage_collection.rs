@@ -224,6 +224,7 @@ fn test_manual_gc_trigger() {
         Some(&PropertyValue::Int(10)),
         "Latest version should still be accessible after GC"
     );
+    tx.commit().unwrap();
 
     cleanup_test_db(path);
 }
@@ -358,6 +359,9 @@ fn test_gc_metrics() {
 
     // Run GC and check metrics
     let stats = db.run_gc().unwrap();
+    
+    println!("GC Stats: chains_scanned={}, versions_examined={}, versions_reclaimable={}, versions_reclaimed={}, gc_watermark={}, duration_ms={}",
+             stats.chains_scanned, stats.versions_examined, stats.versions_reclaimable, stats.versions_reclaimed, stats.gc_watermark, stats.duration_ms);
     
     // Verify all metrics are populated
     assert_eq!(stats.chains_scanned, 5, "Should have scanned 5 node chains");

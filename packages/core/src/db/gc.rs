@@ -529,19 +529,14 @@ impl GarbageCollector {
             // Mark the old version as free in the record store
             // This reclaims the storage space
             match record_store.mark_free(version.pointer) {
-                Ok(true) => {
+                Ok(page_emptied) => {
+                    // Count every successfully freed slot, not just page-emptying ones
                     freed_count += 1;
                     trace!(
                         record_id = version.record_id,
                         commit_ts = version.commit_ts,
+                        page_emptied = page_emptied,
                         "Freed old version"
-                    );
-                }
-                Ok(false) => {
-                    // Record was already freed or invalid
-                    trace!(
-                        record_id = version.record_id,
-                        "Version already freed or invalid"
                     );
                 }
                 Err(e) => {
