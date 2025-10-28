@@ -3,6 +3,7 @@ use super::group_commit::TxId;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, Node, NodeId};
 use crate::pager::PageId;
+use crate::storage::heap::RecordPointer;
 use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
@@ -68,6 +69,8 @@ pub struct Transaction<'db> {
     write_nodes: HashSet<NodeId>,
     /// Set of edge IDs written by this transaction (for conflict detection)
     write_edges: HashSet<EdgeId>,
+    /// Version record pointers created by this transaction (for efficient commit timestamp updates)
+    created_versions: Vec<RecordPointer>,
 }
 
 impl<'db> Transaction<'db> {
@@ -95,6 +98,7 @@ impl<'db> Transaction<'db> {
             read_nodes: HashSet::new(),
             write_nodes: HashSet::new(),
             write_edges: HashSet::new(),
+            created_versions: Vec::new(),
         })
     }
 
@@ -197,10 +201,14 @@ impl<'db> Transaction<'db> {
     /// ```
     pub fn add_node(&mut self, node: Node) -> Result<NodeId> {
         // Pass transaction ID and commit_ts=0 (will be set at commit time)
-        let node_id = self.db.add_node_internal(node, self.id, 0)?;
+        let (node_id, version_ptr) = self.db.add_node_internal(node, self.id, 0)?;
         self.capture_dirty_pages()?;
         // Track write for conflict detection
         self.write_nodes.insert(node_id);
+        // Track version pointer for efficient commit timestamp updates
+        if let Some(ptr) = version_ptr {
+            self.created_versions.push(ptr);
+        }
         Ok(node_id)
     }
 
@@ -233,10 +241,14 @@ impl<'db> Transaction<'db> {
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId> {
-        let edge_id = self.db.add_edge_internal(edge)?;
+        let (edge_id, version_ptr) = self.db.add_edge_internal(edge)?;
         self.capture_dirty_pages()?;
         // Track write for conflict detection
         self.write_edges.insert(edge_id);
+        // Track version pointer for efficient commit timestamp updates
+        if let Some(ptr) = version_ptr {
+            self.created_versions.push(ptr);
+        }
         Ok(edge_id)
     }
 
@@ -422,10 +434,29 @@ impl<'db> Transaction<'db> {
 
         self.capture_dirty_pages()?;
         
+        // Optimization: Skip WAL writes for empty transactions (no modifications)
+        // This is common for read-only transactions or rolled-back operations
+        if self.dirty_pages.is_empty() {
+            self.db.stop_tracking();
+            self.db.exit_transaction(self.id);
+            self.state = TxState::Committed;
+            let duration = start.elapsed();
+            info!(
+                tx_id = self.id,
+                dirty_pages = 0,
+                duration_ms = duration.as_millis(),
+                read_nodes = self.read_nodes.len(),
+                write_nodes = 0,
+                write_edges = 0,
+                "Empty transaction committed (no WAL write)"
+            );
+            return Ok(());
+        }
+        
         // Update commit_ts in all version metadata created by this transaction
-        // Use ALL dirty pages captured so far, not just the most recent ones
+        // Pass the tracked version pointers for direct update (optimization)
         if commit_ts > 0 {
-            if let Err(err) = self.db.update_versions_commit_ts(self.id, commit_ts, &self.dirty_pages) {
+            if let Err(err) = self.db.update_versions_commit_ts(self.id, commit_ts, &self.dirty_pages, &self.created_versions) {
                 let _ = self.db.rollback_transaction(&self.dirty_pages);
                 self.db.stop_tracking();
                 self.db.exit_transaction(self.id);

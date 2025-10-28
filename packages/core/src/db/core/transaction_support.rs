@@ -4,7 +4,7 @@ use crate::db::group_commit::{CommitRequest, ControlMessage, TxId};
 use crate::error::{acquire_lock, GraphError, Result};
 use crate::pager::PageId;
 use crate::storage::header::Header;
-use crate::storage::heap::RecordStore;
+use crate::storage::heap::RecordPointer;
 use crate::storage::version::{VersionMetadata, VersionedRecordKind};
 use std::mem;
 use std::sync::{Arc, Condvar, Mutex};
@@ -212,7 +212,8 @@ impl GraphDB {
     /// # Arguments
     /// * `tx_id` - The transaction ID that created the versions
     /// * `commit_ts` - The commit timestamp to set
-    /// * `dirty_pages` - Pages modified by the transaction
+    /// * `dirty_pages` - Pages modified by the transaction (used as fallback)
+    /// * `version_pointers` - Direct pointers to version records (optimization)
     ///
     /// # Returns
     /// Ok(()) if successful
@@ -221,9 +222,28 @@ impl GraphDB {
         tx_id: TxId,
         commit_ts: u64,
         dirty_pages: &[PageId],
+        version_pointers: &[RecordPointer],
     ) -> Result<()> {
+        use crate::storage::heap::RecordStore;
+        
+        // Fast path: if we have tracked version pointers, use them directly
+        if !version_pointers.is_empty() {
+            let mut record_store = RecordStore::new(&mut self.pager);
+            for &pointer in version_pointers {
+                record_store.update_commit_ts(pointer, commit_ts)?;
+            }
+            
+            // Register dirty pages with GraphDB
+            let update_dirty_pages = record_store.take_dirty_pages();
+            for page_id in update_dirty_pages {
+                self.record_page_write(page_id);
+            }
+            
+            return Ok(());
+        }
+        
+        // Slow path: scan dirty pages (fallback for legacy code paths)
         use crate::storage::page::RecordPage;
-        use crate::storage::heap::RecordPointer;
         
         // Collect all version pointers that need updating first,
         // then update them to avoid borrow checker issues

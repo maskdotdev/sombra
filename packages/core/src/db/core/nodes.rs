@@ -22,7 +22,7 @@ impl GraphDB {
             0
         };
 
-        let node_id = self.add_node_internal(node, tx_id, commit_ts)?;
+        let (node_id, _version_ptr) = self.add_node_internal(node, tx_id, commit_ts)?;
 
         self.header.last_committed_tx_id = tx_id;
         self.write_header()?;
@@ -34,7 +34,7 @@ impl GraphDB {
         Ok(node_id)
     }
 
-    pub fn add_node_internal(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<NodeId> {
+    pub fn add_node_internal(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
         // Detect if this is an update (node has ID and exists) or new node creation
         let is_update = node.id != 0 && self.node_index.get(&node.id).is_some();
         
@@ -48,7 +48,7 @@ impl GraphDB {
     }
 
     /// Create a new node with a new ID (not an update)
-    fn create_new_node(&mut self, mut node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<NodeId> {
+    fn create_new_node(&mut self, mut node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
         let node_id = self.header.next_node_id;
         self.header.next_node_id += 1;
 
@@ -59,7 +59,7 @@ impl GraphDB {
         let payload = serialize_node(&node)?;
         
         // Use store_new_version if MVCC enabled, otherwise legacy record format
-        let pointer = if self.config.mvcc_enabled {
+        let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
             
             let mut record_store = self.record_store();
@@ -79,12 +79,13 @@ impl GraphDB {
                 self.record_page_write(page_id);
             }
             
-            pointer
+            (pointer, Some(pointer))
         } else {
             // Legacy non-versioned record
             let record = encode_record(RecordKind::Node, &payload)?;
             let preferred = self.header.last_record_page;
-            self.insert_record(&record, preferred)?
+            let pointer = self.insert_record(&record, preferred)?;
+            (pointer, None)
         };
 
         self.node_index.insert(node_id, pointer);
@@ -100,11 +101,11 @@ impl GraphDB {
         self.node_cache.put(node_id, node.clone());
         self.header.last_record_page = Some(pointer.page_id);
 
-        Ok(node_id)
+        Ok((node_id, version_pointer))
     }
 
     /// Update an existing node by creating a new version in the version chain
-    fn update_node_version(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<NodeId> {
+    fn update_node_version(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
         let node_id = node.id;
         
         // Get pointer to current version (head of version chain)
@@ -153,7 +154,7 @@ impl GraphDB {
         self.node_cache.put(node_id, node.clone());
         self.header.last_record_page = Some(new_pointer.page_id);
         
-        Ok(node_id)
+        Ok((node_id, Some(new_pointer)))
     }
 
     pub fn add_nodes_bulk(&mut self, nodes: Vec<Node>) -> Result<Vec<NodeId>> {
@@ -173,7 +174,7 @@ impl GraphDB {
 
         for node in nodes {
             // Use add_node_internal which handles both create and update
-            let node_id = self.add_node_internal(node, tx_id, commit_ts)?;
+            let (node_id, _version_ptr) = self.add_node_internal(node, tx_id, commit_ts)?;
             node_ids.push(node_id);
         }
 
