@@ -14,7 +14,7 @@ use tracing::warn;
 impl GraphDB {
     pub fn commit_to_wal(&mut self, tx_id: TxId, dirty_pages: &[PageId]) -> Result<()> {
         if dirty_pages.is_empty() {
-            self.pager.lock().unwrap().commit_shadow_transaction();
+            self.pager.write().unwrap().commit_shadow_transaction();
             return Ok(());
         }
 
@@ -23,10 +23,10 @@ impl GraphDB {
         pages.dedup();
 
         for &page_id in &pages {
-            self.pager.lock().unwrap().append_page_to_wal(page_id, tx_id)?;
+            self.pager.write().unwrap().append_page_to_wal(page_id, tx_id)?;
         }
 
-        self.pager.lock().unwrap().append_commit_to_wal(tx_id)?;
+        self.pager.write().unwrap().append_commit_to_wal(tx_id)?;
 
         self.transactions_since_sync += 1;
         self.transactions_since_checkpoint += 1;
@@ -66,7 +66,7 @@ impl GraphDB {
         };
 
         if should_sync {
-            self.pager.lock().unwrap().sync_wal()?;
+            self.pager.write().unwrap().sync_wal()?;
             self.transactions_since_sync = 0;
         }
 
@@ -75,7 +75,7 @@ impl GraphDB {
             self.transactions_since_checkpoint = 0;
         }
 
-        let wal_size_bytes = self.pager.lock().unwrap().wal_size()?;
+        let wal_size_bytes = self.pager.read().unwrap().wal_size()?;
         let wal_size_mb = wal_size_bytes / (1024 * 1024);
         let max_wal_mb = self.config.max_wal_size_mb;
         let warning_threshold_mb = self.config.wal_size_warning_threshold_mb;
@@ -97,12 +97,12 @@ impl GraphDB {
             self.transactions_since_checkpoint = 0;
         }
 
-        self.pager.lock().unwrap().commit_shadow_transaction();
+        self.pager.write().unwrap().commit_shadow_transaction();
         Ok(())
     }
 
     pub fn rollback_transaction(&mut self, dirty_pages: &[PageId]) -> Result<()> {
-        self.pager.lock().unwrap().rollback_shadow_transaction()?;
+        self.pager.write().unwrap().rollback_shadow_transaction()?;
 
         self.reload_header_state()?;
 
@@ -113,7 +113,7 @@ impl GraphDB {
     }
 
     fn reload_header_state(&mut self) -> Result<()> {
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(0)?;
         let header = match Header::read(&page.data)? {
             Some(header) => header,
@@ -169,7 +169,7 @@ impl GraphDB {
         if let Some(ref mut tx_manager) = self.mvcc_tx_manager {
             // Register transaction with MVCC manager
             tx_manager.begin_transaction(tx_id)?;
-            self.pager.lock().unwrap().begin_shadow_transaction();
+            self.pager.write().unwrap().begin_shadow_transaction();
             Ok(())
         } else {
             // Legacy single-writer mode
@@ -178,7 +178,7 @@ impl GraphDB {
                     "nested transactions are not supported".into(),
                 ));
             }
-            self.pager.lock().unwrap().begin_shadow_transaction();
+            self.pager.write().unwrap().begin_shadow_transaction();
             self.active_transaction = Some(tx_id);
             Ok(())
         }
@@ -203,7 +203,7 @@ impl GraphDB {
     }
 
     pub fn write_header(&mut self) -> Result<()> {
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let header = self.header.to_header(pager_guard.page_size())?;
         let page = pager_guard.fetch_page(0)?;
         Header::write(&header, &mut page.data)?;
@@ -239,7 +239,7 @@ impl GraphDB {
         // Fast path: if we have tracked version pointers, use them directly
         if !version_pointers.is_empty() {
             let update_dirty_pages = {
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let mut record_store = RecordStore::new(&mut *pager_guard);
                 for &pointer in version_pointers {
                     record_store.update_commit_ts(pointer, commit_ts)?;
@@ -269,7 +269,7 @@ impl GraphDB {
         
         // Scan all dirty pages for versioned records created by this transaction
         for &page_id in dirty_pages {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
@@ -321,7 +321,7 @@ impl GraphDB {
         
         // Now update all collected versions
         let update_dirty_pages = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut record_store = RecordStore::new(&mut *pager_guard);
             for pointer in versions_to_update {
                 record_store.update_commit_ts(pointer, commit_ts)?;

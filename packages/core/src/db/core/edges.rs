@@ -59,7 +59,7 @@ impl GraphDB {
             use crate::storage::version_chain::store_new_version;
             
             let dirty_pages = {
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let mut record_store = RecordStore::new(&mut *pager_guard);
                 let pointer = store_new_version(
                     &mut record_store,

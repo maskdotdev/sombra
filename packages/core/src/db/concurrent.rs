@@ -447,7 +447,7 @@ impl ConcurrentTransaction {
 
         // Update all created versions with commit timestamp
         {
-            let mut pager_guard = db.pager.lock().unwrap();
+            let mut pager_guard = db.pager.write().unwrap();
             let mut record_store = crate::storage::heap::RecordStore::new(&mut *pager_guard);
             for version_ptr in &self.created_versions {
                 use crate::storage::version_chain::update_version_commit_timestamp;

@@ -21,7 +21,7 @@ impl GraphDB {
             .edge_index
             .get(&edge_id)
             .ok_or(GraphError::NotFound("edge"))?;
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(pointer.page_id)?;
         let record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice(pointer.slot_index as usize)?;
@@ -93,7 +93,7 @@ impl GraphDB {
             .clone();
 
         // Use VersionChainReader to find the visible version
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let mut record_store = RecordStore::new(&mut *pager_guard);
         let versioned_record = VersionChainReader::read_version_for_snapshot(
             &mut record_store,
@@ -135,7 +135,7 @@ impl GraphDB {
         }
 
         for (page_id, edges_on_page) in edges_to_load {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
 
@@ -187,7 +187,7 @@ impl GraphDB {
     }
 
     pub(crate) fn read_node_at(&mut self, pointer: RecordPointer) -> Result<Node> {
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(pointer.page_id)?;
         let record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice(pointer.slot_index as usize)?;
@@ -204,7 +204,7 @@ impl GraphDB {
         
         let payload_len = header.payload_length as usize;
         
-        if is_versioned {
+        let result = if is_versioned {
             // For versioned records, skip the 25-byte metadata header
             // Layout: [RecordHeader: 8][VersionMetadata: 25][Payload: N]
             // payload_len includes metadata, so actual data starts at offset 33
@@ -215,12 +215,15 @@ impl GraphDB {
             let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
             let data_end = RECORD_HEADER_SIZE + payload_len;
             let payload = &record[data_start..data_end];
-            deserialize_node(payload)
+            deserialize_node(payload)?
         } else {
             // Legacy non-versioned record
             let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
-            deserialize_node(payload)
-        }
+            deserialize_node(payload)?
+        };
+        
+        drop(pager_guard);
+        Ok(result)
     }
 
     // Helper removed - RecordStore creation inlined at call sites due to Mutex
@@ -232,7 +235,7 @@ impl GraphDB {
     ) -> Result<RecordPointer> {
         if let Some(page_id) = preferred_page {
             let pointer_opt = {
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let mut store = RecordStore::new(&mut *pager_guard);
                 let result = store.try_insert_into_page(page_id, record)?;
                 drop(store);
@@ -249,7 +252,7 @@ impl GraphDB {
         // Try to reuse slots from pages with free slots
         for &page_id in self.pages_with_free_slots.clone().iter() {
             let pointer_opt = {
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let mut store = RecordStore::new(&mut *pager_guard);
                 let result = store.try_insert_into_page(page_id, record)?;
                 drop(store);
@@ -259,7 +262,7 @@ impl GraphDB {
             
             if let Some(pointer) = pointer_opt {
                 self.record_page_write(pointer.page_id);
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let page = pager_guard.fetch_page(page_id)?;
                 let record_page = RecordPage::from_bytes(&mut page.data)?;
                 if !record_page.has_free_slots()? {
@@ -272,7 +275,7 @@ impl GraphDB {
 
         if let Some(page_id) = self.take_free_page()? {
             let pointer_opt = {
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let mut store = RecordStore::new(&mut *pager_guard);
                 let result = store.try_insert_into_page(page_id, record)?;
                 drop(store);
@@ -288,7 +291,7 @@ impl GraphDB {
             self.push_free_page(page_id)?;
         }
 
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page_id = pager_guard.allocate_page()?;
         let page = pager_guard.fetch_page(page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
@@ -313,7 +316,7 @@ impl GraphDB {
     pub(crate) fn free_record(&mut self, pointer: RecordPointer) -> Result<()> {
         let page_id = pointer.page_id;
         let page_empty = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut store = RecordStore::new(&mut *pager_guard);
             let result = store.mark_free(pointer)?;
             drop(store);
@@ -337,7 +340,7 @@ impl GraphDB {
         let Some(head) = self.header.free_page_head else {
             return Ok(None);
         };
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(head)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         let next = record_page.free_list_next()?;
@@ -351,7 +354,7 @@ impl GraphDB {
     }
 
     pub(crate) fn push_free_page(&mut self, page_id: PageId) -> Result<()> {
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         record_page.clear()?;
@@ -370,7 +373,7 @@ impl GraphDB {
         kind: PointerKind,
         new_edge_id: EdgeId,
     ) -> Result<()> {
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(pointer.page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice_mut(pointer.slot_index as usize)?;
@@ -433,7 +436,7 @@ impl GraphDB {
         kind: EdgePointerKind,
         new_edge_id: EdgeId,
     ) -> Result<()> {
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let page = pager_guard.fetch_page(pointer.page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice_mut(pointer.slot_index as usize)?;
@@ -540,7 +543,7 @@ impl GraphDB {
 
     fn recompute_last_record_page(&mut self) -> Result<()> {
         let mut last = None;
-        let page_count = self.pager.lock().unwrap().page_count();
+        let page_count = self.pager.read().unwrap().page_count();
         if page_count <= 1 {
             self.header.last_record_page = None;
             return Ok(());
@@ -548,7 +551,7 @@ impl GraphDB {
         for page_idx in (1..page_count).rev() {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             if record_page.live_record_count()? > 0 {

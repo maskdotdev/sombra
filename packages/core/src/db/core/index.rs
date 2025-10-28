@@ -18,12 +18,12 @@ impl GraphDB {
             };
 
         let mut data = Vec::new();
-        let page_size = self.pager.lock().unwrap().page_size();
+        let page_size = self.pager.read().unwrap().page_size();
         let mut current_page = index_page;
         let mut bytes_read = 0;
 
         while bytes_read < index_size {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(current_page)?;
             let to_read = (index_size - bytes_read).min(page_size);
             data.extend_from_slice(&page.data[..to_read]);
@@ -46,7 +46,7 @@ impl GraphDB {
             return Ok(());
         }
 
-        let page_size = self.pager.lock().unwrap().page_size();
+        let page_size = self.pager.read().unwrap().page_size();
         let pages_needed = data_size.div_ceil(page_size);
 
         let start_page = if let Some(old_page) = self.header.btree_index_page {
@@ -59,10 +59,10 @@ impl GraphDB {
                 for i in 0..old_pages {
                     self.push_free_page(old_page + i as u32)?;
                 }
-                let start = self.pager.lock().unwrap().allocate_page()?;
+                let start = self.pager.write().unwrap().allocate_page()?;
                 for i in 1..pages_needed {
                     let expected_page = start + i as u32;
-                    let allocated = self.pager.lock().unwrap().allocate_page()?;
+                    let allocated = self.pager.write().unwrap().allocate_page()?;
                     if allocated != expected_page {
                         return Err(GraphError::Corruption(format!(
                             "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
@@ -72,10 +72,10 @@ impl GraphDB {
                 start
             }
         } else {
-            let new_page = self.pager.lock().unwrap().allocate_page()?;
+            let new_page = self.pager.write().unwrap().allocate_page()?;
             for i in 1..pages_needed {
                 let expected_page = new_page + i as u32;
-                let allocated = self.pager.lock().unwrap().allocate_page()?;
+                let allocated = self.pager.write().unwrap().allocate_page()?;
                 if allocated != expected_page {
                     return Err(GraphError::Corruption(format!(
                         "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
@@ -89,7 +89,7 @@ impl GraphDB {
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
 
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let to_write = (data_size - offset).min(page_size);
             page.data[..to_write].copy_from_slice(&data[offset..offset + to_write]);
@@ -109,7 +109,7 @@ impl GraphDB {
 
     pub(crate) fn persist_property_indexes(&mut self) -> Result<()> {
         let (root_page, count, written_pages) = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut serializer = PropertyIndexSerializer::new(&mut *pager_guard);
             let (root_page, count, written_pages) =
                 serializer.serialize_indexes(&self.property_indexes)?;
@@ -158,7 +158,7 @@ impl GraphDB {
             _ => return Ok(false),
         };
 
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let mut serializer = PropertyIndexSerializer::new(&mut *pager_guard);
         match serializer.deserialize_indexes(root_page) {
             Ok(indexes) => {
@@ -207,12 +207,12 @@ impl GraphDB {
         let mut last_record_page: Option<PageId> = None;
         let mut max_node_id = 0;
         let mut max_edge_id = 0;
-        let page_count = self.pager.lock().unwrap().page_count();
+        let page_count = self.pager.read().unwrap().page_count();
 
         let btree_pages: std::collections::HashSet<PageId> =
             if let Some(btree_start) = self.header.btree_index_page {
                 let btree_size = self.header.btree_index_size as usize;
-                let page_size = self.pager.lock().unwrap().page_size();
+                let page_size = self.pager.read().unwrap().page_size();
                 let btree_page_count = btree_size.div_ceil(page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
@@ -227,7 +227,7 @@ impl GraphDB {
                 continue;
             }
 
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
@@ -318,12 +318,12 @@ impl GraphDB {
 
     fn try_load_btree_index(&mut self, start_page: PageId, size: usize) -> Result<()> {
         let mut data = Vec::with_capacity(size);
-        let page_size = self.pager.lock().unwrap().page_size();
+        let page_size = self.pager.read().unwrap().page_size();
         let pages_needed = size.div_ceil(page_size);
 
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let bytes_to_copy = (size - data.len()).min(page_size);
             data.extend_from_slice(&page.data[..bytes_to_copy]);
@@ -346,12 +346,12 @@ impl GraphDB {
 
         let mut last_record_page: Option<PageId> = None;
         let mut max_edge_id = 0;
-        let page_count = self.pager.lock().unwrap().page_count();
+        let page_count = self.pager.read().unwrap().page_count();
 
         let btree_pages: std::collections::HashSet<PageId> =
             if let Some(btree_start) = self.header.btree_index_page {
                 let btree_size = self.header.btree_index_size as usize;
-                let page_size = self.pager.lock().unwrap().page_size();
+                let page_size = self.pager.read().unwrap().page_size();
                 let btree_page_count = btree_size.div_ceil(page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
@@ -366,7 +366,7 @@ impl GraphDB {
                 continue;
             }
 
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
