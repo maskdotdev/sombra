@@ -3,6 +3,7 @@ use super::group_commit::TxId;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, Node, NodeId};
 use crate::pager::PageId;
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
 /// The state of a transaction.
@@ -61,6 +62,12 @@ pub struct Transaction<'db> {
     pub dirty_pages: Vec<PageId>,
     start_time: std::time::Instant,
     snapshot_ts: u64,
+    /// Set of node IDs read by this transaction (for conflict detection)
+    read_nodes: HashSet<NodeId>,
+    /// Set of node IDs written by this transaction (for conflict detection)
+    write_nodes: HashSet<NodeId>,
+    /// Set of edge IDs written by this transaction (for conflict detection)
+    write_edges: HashSet<EdgeId>,
 }
 
 impl<'db> Transaction<'db> {
@@ -85,6 +92,9 @@ impl<'db> Transaction<'db> {
             dirty_pages: Vec::new(),
             start_time: std::time::Instant::now(),
             snapshot_ts,
+            read_nodes: HashSet::new(),
+            write_nodes: HashSet::new(),
+            write_edges: HashSet::new(),
         })
     }
 
@@ -189,6 +199,8 @@ impl<'db> Transaction<'db> {
         // Pass transaction ID and commit_ts=0 (will be set at commit time)
         let node_id = self.db.add_node_internal(node, self.id, 0)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_nodes.insert(node_id);
         Ok(node_id)
     }
 
@@ -223,6 +235,8 @@ impl<'db> Transaction<'db> {
     pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId> {
         let edge_id = self.db.add_edge_internal(edge)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_edges.insert(edge_id);
         Ok(edge_id)
     }
 
@@ -241,6 +255,8 @@ impl<'db> Transaction<'db> {
     pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
         self.db.delete_node_internal(node_id)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_nodes.insert(node_id);
         Ok(())
     }
 
@@ -258,6 +274,8 @@ impl<'db> Transaction<'db> {
     pub fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         self.db.delete_edge_internal(edge_id)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_edges.insert(edge_id);
         Ok(())
     }
 
@@ -276,7 +294,12 @@ impl<'db> Transaction<'db> {
     /// * `Ok(Some(Node))` - Node found
     /// * `Ok(None)` - Node doesn't exist
     pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
-        self.db.get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
+        let result = self.db.get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.id))?;
+        // Track read for conflict detection
+        if result.is_some() {
+            self.read_nodes.insert(node_id);
+        }
+        Ok(result)
     }
 
     pub fn get_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
@@ -423,6 +446,9 @@ impl<'db> Transaction<'db> {
                     tx_id = self.id,
                     dirty_pages = dirty_page_count,
                     duration_ms = duration.as_millis(),
+                    read_nodes = self.read_nodes.len(),
+                    write_nodes = self.write_nodes.len(),
+                    write_edges = self.write_edges.len(),
                     "Transaction committed"
                 );
                 Ok(())
