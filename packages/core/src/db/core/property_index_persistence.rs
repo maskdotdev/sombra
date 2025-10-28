@@ -41,6 +41,13 @@ impl<'a> PropertyIndexSerializer<'a> {
             self.serialize_single_index(&mut serialized_data, label, property_key, index)?;
         }
 
+        // Debug assertion: Verify the magic bytes were written correctly
+        debug_assert_eq!(
+            &serialized_data[..PROPERTY_INDEX_MAGIC.len()],
+            PROPERTY_INDEX_MAGIC,
+            "Property index serialization must start with PIDX magic bytes"
+        );
+
         let (root_page, written_pages) = self.write_serialized_data(&serialized_data)?;
 
         info!(

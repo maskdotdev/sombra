@@ -141,6 +141,13 @@ impl BTreeIndex {
             buf.extend_from_slice(&pointer.byte_offset.to_le_bytes());
         }
 
+        // Debug assertion: Verify the magic bytes were written correctly
+        debug_assert_eq!(
+            &buf[..BTREE_MAGIC.len()],
+            BTREE_MAGIC,
+            "BTree serialization must start with BIDX magic bytes"
+        );
+
         Ok(buf)
     }
 

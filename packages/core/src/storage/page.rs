@@ -21,6 +21,58 @@ const FREE_LIST_NEXT_OFFSET: usize = 4;
 const BTREE_INDEX_MAGIC: &[u8; 4] = b"BIDX";
 const PROPERTY_INDEX_MAGIC: &[u8; 4] = b"PIDX";
 
+/// Page type enumeration for runtime type checking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageType {
+    /// Record page storing node/edge data and version records
+    Record,
+    /// BTree index page (magic: "BIDX")
+    BTreeIndex,
+    /// Property index page (magic: "PIDX")
+    PropertyIndex,
+    /// Unknown or uninitialized page type
+    Unknown,
+}
+
+/// Detects the type of a page by examining its magic bytes
+///
+/// This is used for debug assertions and page type validation to ensure
+/// we don't accidentally interpret index pages as record pages.
+///
+/// # Arguments
+/// * `data` - Raw page data (should be at least 4 bytes)
+///
+/// # Returns
+/// The detected page type based on magic bytes or page structure
+pub fn detect_page_type(data: &[u8]) -> PageType {
+    if data.len() < 4 {
+        return PageType::Unknown;
+    }
+    
+    let maybe_magic = &data[0..4];
+    if maybe_magic == BTREE_INDEX_MAGIC {
+        return PageType::BTreeIndex;
+    }
+    if maybe_magic == PROPERTY_INDEX_MAGIC {
+        return PageType::PropertyIndex;
+    }
+    
+    // If we have valid-looking record page metadata, assume it's a record page
+    // Otherwise, it's unknown/uninitialized
+    if data.len() >= PAGE_HEADER_SIZE {
+        // Try to read record_count - if it's reasonable, likely a record page
+        if let Ok(bytes) = data[RECORD_COUNT_OFFSET..RECORD_COUNT_OFFSET + 2].try_into() {
+            let record_count = u16::from_le_bytes(bytes);
+            // Heuristic: record counts over 10000 are suspicious for a single page
+            if record_count < 10000 {
+                return PageType::Record;
+            }
+        }
+    }
+    
+    PageType::Unknown
+}
+
 #[derive(Debug)]
 pub struct RecordPage<'a> {
     data: &'a mut [u8],
@@ -63,6 +115,13 @@ impl<'a> RecordPage<'a> {
                 ));
             }
         }
+        
+        // Debug assertion: Verify this page is actually a record page
+        debug_assert!(
+            matches!(detect_page_type(data), PageType::Record | PageType::Unknown),
+            "RecordPage::from_bytes called on non-record page (type: {:?})",
+            detect_page_type(data)
+        );
 
         Ok(Self { data })
     }
@@ -513,5 +572,78 @@ mod tests {
             }
             assert!(!page.can_fit(record.len()).unwrap());
         });
+    }
+
+    #[test]
+    fn detect_btree_index_page() {
+        let mut data = vec![0u8; 128];
+        // Write BIDX magic bytes
+        data[0..4].copy_from_slice(b"BIDX");
+        
+        assert_eq!(detect_page_type(&data), PageType::BTreeIndex);
+    }
+
+    #[test]
+    fn detect_property_index_page() {
+        let mut data = vec![0u8; 128];
+        // Write PIDX magic bytes
+        data[0..4].copy_from_slice(b"PIDX");
+        
+        assert_eq!(detect_page_type(&data), PageType::PropertyIndex);
+    }
+
+    #[test]
+    fn detect_record_page() {
+        let mut buf = PageBuffer::new(256);
+        buf.with_page(|page| {
+            page.initialize().expect("initialize");
+        });
+        
+        // After initialization, should be detected as a record page
+        assert_eq!(detect_page_type(&buf.data), PageType::Record);
+    }
+
+    #[test]
+    fn detect_unknown_page() {
+        // Page with suspicious record count (all 0xFF bytes)
+        let mut data = vec![0xFFu8; 128];
+        // This creates record_count = 0xFFFF which is > 10000, so should be Unknown
+        assert_eq!(detect_page_type(&data), PageType::Unknown);
+        
+        // Too small
+        let small_data = vec![0u8; 2];
+        assert_eq!(detect_page_type(&small_data), PageType::Unknown);
+    }
+
+    #[test]
+    fn record_page_rejects_btree_index() {
+        let mut data = vec![0u8; 128];
+        // Write BIDX magic bytes
+        data[0..4].copy_from_slice(b"BIDX");
+        
+        let result = RecordPage::from_bytes(&mut data);
+        assert!(result.is_err());
+        match result {
+            Err(GraphError::InvalidArgument(_)) => {
+                // Expected - should return InvalidArgument for non-record pages
+            }
+            _ => panic!("Expected InvalidArgument error for BTree index page"),
+        }
+    }
+
+    #[test]
+    fn record_page_rejects_property_index() {
+        let mut data = vec![0u8; 128];
+        // Write PIDX magic bytes
+        data[0..4].copy_from_slice(b"PIDX");
+        
+        let result = RecordPage::from_bytes(&mut data);
+        assert!(result.is_err());
+        match result {
+            Err(GraphError::InvalidArgument(_)) => {
+                // Expected - should return InvalidArgument for non-record pages
+            }
+            _ => panic!("Expected InvalidArgument error for property index page"),
+        }
     }
 }
