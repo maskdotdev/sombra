@@ -110,6 +110,31 @@ harness = false
 name = "btree_benchmark"
 harness = false
 
+[[bench]]
+name = "mvcc_performance"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "mvcc_criterion"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "mvcc_simple_criterion"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "mvcc_profile"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "mvcc_detailed_profile"
+harness = false
+required-features = ["benchmarks"]
+
 [[example]]
 name = "performance_metrics_demo"
 required-features = ["benchmarks"]
@@ -127,3 +152,4 @@ name = "transaction_handling"
 proptest = "1.0"
 tempfile = "3.10"
 rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
