@@ -24,6 +24,7 @@ use crate::db::config::{Config, SyncMode};
 use crate::db::gc::{BackgroundGcState, GarbageCollector, GcConfig, GcStats};
 use crate::db::group_commit::{GroupCommitState, TxId};
 use crate::db::metrics::{ConcurrencyMetrics, PerformanceMetrics};
+use crate::db::mvcc_transaction::MvccTransactionManager;
 use crate::db::timestamp_oracle::TimestampOracle;
 use crate::db::transaction::Transaction;
 
@@ -192,6 +193,7 @@ pub struct GraphDB {
     pub(crate) tracking_enabled: bool,
     pub(crate) recent_dirty_pages: Vec<PageId>,
     pub active_transaction: Option<TxId>,
+    pub(crate) mvcc_tx_manager: Option<MvccTransactionManager>,
     pub(crate) config: Config,
     pub(crate) transactions_since_sync: usize,
     pub(crate) transactions_since_checkpoint: usize,
@@ -348,7 +350,7 @@ impl GraphDB {
             })?;
 
         // Initialize MVCC components if enabled
-        let (timestamp_oracle, gc, bg_gc_state) = if config.mvcc_enabled {
+        let (timestamp_oracle, gc, bg_gc_state, mvcc_tx_manager) = if config.mvcc_enabled {
             // Restore timestamp oracle from persisted state if available
             let oracle = if header.max_timestamp > 0 {
                 Arc::new(TimestampOracle::with_timestamp(header.max_timestamp)?)
@@ -365,9 +367,13 @@ impl GraphDB {
                 None
             };
             
-            (Some(oracle), Some(collector), bg_gc)
+            // Create MVCC transaction manager with shared oracle
+            let max_concurrent = config.max_concurrent_transactions.unwrap_or(100);
+            let tx_manager = MvccTransactionManager::new_with_oracle(oracle.clone(), max_concurrent);
+            
+            (Some(oracle), Some(collector), bg_gc, Some(tx_manager))
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
         let mut db = Self {
@@ -399,6 +405,7 @@ impl GraphDB {
             timestamp_oracle,
             gc,
             bg_gc_state,
+            mvcc_tx_manager,
         };
 
         // Update header to reflect MVCC state
