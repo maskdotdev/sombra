@@ -157,22 +157,39 @@ impl GraphDB {
     }
 
     pub fn enter_transaction(&mut self, tx_id: TxId) -> Result<()> {
-        if self.active_transaction.is_some() {
-            return Err(GraphError::InvalidArgument(
-                "nested transactions are not supported".into(),
-            ));
+        // In MVCC mode, allow concurrent transactions via the manager
+        if let Some(ref mut tx_manager) = self.mvcc_tx_manager {
+            // Register transaction with MVCC manager
+            tx_manager.begin_transaction(tx_id)?;
+            self.pager.begin_shadow_transaction();
+            Ok(())
+        } else {
+            // Legacy single-writer mode
+            if self.active_transaction.is_some() {
+                return Err(GraphError::InvalidArgument(
+                    "nested transactions are not supported".into(),
+                ));
+            }
+            self.pager.begin_shadow_transaction();
+            self.active_transaction = Some(tx_id);
+            Ok(())
         }
-        self.pager.begin_shadow_transaction();
-        self.active_transaction = Some(tx_id);
-        Ok(())
     }
 
     pub fn exit_transaction(&mut self) {
-        self.active_transaction = None;
+        // In legacy mode, clear active_transaction
+        // In MVCC mode, transactions are managed separately
+        if self.mvcc_tx_manager.is_none() {
+            self.active_transaction = None;
+        }
     }
 
     pub(crate) fn is_in_transaction(&self) -> bool {
-        self.active_transaction.is_some()
+        if let Some(ref tx_manager) = self.mvcc_tx_manager {
+            tx_manager.active_count() > 0
+        } else {
+            self.active_transaction.is_some()
+        }
     }
 
     pub fn write_header(&mut self) -> Result<()> {
