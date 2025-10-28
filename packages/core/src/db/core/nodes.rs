@@ -64,7 +64,7 @@ impl GraphDB {
             use crate::storage::version_chain::store_new_version;
             
             let dirty_pages = {
-                let mut pager_guard = self.pager.lock().unwrap();
+                let mut pager_guard = self.pager.write().unwrap();
                 let mut record_store = RecordStore::new(&mut *pager_guard);
                 let pointer = store_new_version(
                     &mut record_store,
@@ -121,13 +121,16 @@ impl GraphDB {
         let prev_pointer = self.node_index.get(&node_id)
             .ok_or_else(|| GraphError::NotFound("node"))?;
         
+        // Read the old node version to compute diffs for index updates
+        let old_node = self.read_node_at(prev_pointer)?;
+        
         let payload = serialize_node(&node)?;
         
         // Create new version in version chain
         use crate::storage::version_chain::store_new_version;
         
         let new_pointer = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut record_store = RecordStore::new(&mut *pager_guard);
             let new_pointer = store_new_version(
                 &mut record_store,
@@ -155,9 +158,22 @@ impl GraphDB {
         // Update index to point to NEW head of version chain
         self.node_index.insert(node_id, new_pointer);
         
-        // Update label indexes
-        // Note: For simplicity, we add all labels from new version
-        // TODO: Compute diff between old and new labels to remove old ones
+        // Update label indexes: remove old labels, add new labels
+        use std::collections::HashSet;
+        let old_labels: HashSet<_> = old_node.labels.iter().collect();
+        let new_labels: HashSet<_> = node.labels.iter().collect();
+        
+        // Remove labels that are no longer present
+        for label in old_labels.difference(&new_labels) {
+            if let Some(node_set) = self.label_index.get_mut(*label) {
+                node_set.remove(&node_id);
+                if node_set.is_empty() {
+                    self.label_index.remove(*label);
+                }
+            }
+        }
+        
+        // Add new labels
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
@@ -165,8 +181,25 @@ impl GraphDB {
                 .insert(node_id);
         }
         
-        // Update property indexes
-        self.update_property_indexes_on_node_add(node_id)?;
+        // Update property indexes: remove old properties, add new properties
+        for label in &old_node.labels {
+            for (property_key, property_value) in &old_node.properties {
+                // Only remove if the property changed or label changed
+                let should_remove = !node.labels.contains(label) 
+                    || node.properties.get(property_key) != Some(property_value);
+                
+                if should_remove {
+                    self.update_property_index_on_remove(node_id, label, property_key, property_value);
+                }
+            }
+        }
+        
+        // Add new property index entries
+        for label in &node.labels {
+            for (property_key, property_value) in &node.properties {
+                self.update_property_index_on_add(node_id, label, property_key, property_value);
+            }
+        }
         
         // Update cache with new version
         self.node_cache.lock().unwrap().put(node_id, node.clone());
@@ -315,7 +348,7 @@ impl GraphDB {
         };
 
         // Use VersionChainReader to find the visible version
-        let mut pager_guard = self.pager.lock().unwrap();
+        let mut pager_guard = self.pager.write().unwrap();
         let mut record_store = RecordStore::new(&mut *pager_guard);
         let versioned_record = VersionChainReader::read_version_for_snapshot(
             &mut record_store,
@@ -425,7 +458,7 @@ impl GraphDB {
         )?;
 
         let update_result = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut store = RecordStore::new(&mut *pager_guard);
             let result = store.update_in_place(pointer, &record)?;
             drop(store);
@@ -513,7 +546,7 @@ impl GraphDB {
         )?;
 
         let update_result = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut store = RecordStore::new(&mut *pager_guard);
             let result = store.update_in_place(pointer, &record)?;
             drop(store);
@@ -593,7 +626,7 @@ impl GraphDB {
         )?;
 
         let update_result = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut store = RecordStore::new(&mut *pager_guard);
             let result = store.update_in_place(pointer, &record)?;
             drop(store);
@@ -653,7 +686,7 @@ impl GraphDB {
         )?;
 
         let update_result = {
-            let mut pager_guard = self.pager.lock().unwrap();
+            let mut pager_guard = self.pager.write().unwrap();
             let mut store = RecordStore::new(&mut *pager_guard);
             let result = store.update_in_place(pointer, &record)?;
             drop(store);
