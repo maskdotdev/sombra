@@ -3,6 +3,8 @@ pub mod heap;
 pub mod page;
 pub mod record;
 pub mod ser;
+pub(crate) mod version;
+pub(crate) mod version_chain;
 
 pub use header::Header;
 pub use heap::{RecordPointer, RecordStore};

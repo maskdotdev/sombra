@@ -1,10 +1,13 @@
 mod compaction;
 mod config;
 mod core;
+pub(crate) mod gc;
 pub(crate) mod group_commit;
 mod health;
 mod metrics;
+pub(crate) mod mvcc_transaction;
 pub mod query;
+pub(crate) mod timestamp_oracle;
 mod transaction;
 
 #[cfg(test)]
