@@ -186,7 +186,8 @@ impl<'db> Transaction<'db> {
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn add_node(&mut self, node: Node) -> Result<NodeId> {
-        let node_id = self.db.add_node_internal(node)?;
+        // Pass transaction ID and commit_ts=0 (will be set at commit time)
+        let node_id = self.db.add_node_internal(node, self.id, 0)?;
         self.capture_dirty_pages()?;
         Ok(node_id)
     }
@@ -378,10 +379,14 @@ impl<'db> Transaction<'db> {
 
         self.db.header.last_committed_tx_id = self.id;
         
-        // Update timestamp in header if MVCC is enabled
-        if let Some(ref oracle) = self.db.timestamp_oracle {
-            self.db.header.max_timestamp = oracle.current_timestamp();
-        }
+        // Get commit timestamp from oracle if MVCC is enabled
+        let commit_ts = if let Some(ref oracle) = self.db.timestamp_oracle {
+            let ts = oracle.allocate_commit_timestamp();
+            self.db.header.max_timestamp = ts;
+            ts
+        } else {
+            0
+        };
         
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
@@ -393,6 +398,19 @@ impl<'db> Transaction<'db> {
         }
 
         self.capture_dirty_pages()?;
+        
+        // Update commit_ts in all version metadata created by this transaction
+        // Use ALL dirty pages captured so far, not just the most recent ones
+        if commit_ts > 0 {
+            if let Err(err) = self.db.update_versions_commit_ts(self.id, commit_ts, &self.dirty_pages) {
+                let _ = self.db.rollback_transaction(&self.dirty_pages);
+                self.db.stop_tracking();
+                self.db.exit_transaction();
+                self.state = TxState::RolledBack;
+                return Err(err);
+            }
+        }
+        
         let pages = self.dirty_pages.clone();
         let result = self.db.commit_to_wal(self.id, &pages);
         match result {

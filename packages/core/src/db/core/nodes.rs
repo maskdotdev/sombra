@@ -8,37 +8,22 @@ use crate::storage::deserialize_node;
 use std::collections::HashSet;
 
 impl GraphDB {
-    pub fn add_node(&mut self, mut node: Node) -> Result<NodeId> {
+    pub fn add_node(&mut self, node: Node) -> Result<NodeId> {
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 
-        let node_id = self.header.next_node_id;
-        self.header.next_node_id += 1;
+        // Call add_node_internal with tx_id and commit_ts
+        // Note: commit_ts is allocated here since this is auto-committed
+        let commit_ts = if self.config.mvcc_enabled {
+            self.timestamp_oracle.as_ref()
+                .map(|oracle| oracle.allocate_commit_timestamp())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
-        node.id = node_id;
-        node.first_outgoing_edge_id = NULL_EDGE_ID;
-        node.first_incoming_edge_id = NULL_EDGE_ID;
+        let node_id = self.add_node_internal(node, tx_id, commit_ts)?;
 
-        let payload = serialize_node(&node)?;
-        let record = encode_record(RecordKind::Node, &payload)?;
-
-        let preferred = self.header.last_record_page;
-        let pointer = self.insert_record(&record, preferred)?;
-
-        self.node_index.insert(node_id, pointer);
-
-        for label in &node.labels {
-            self.label_index
-                .entry(label.clone())
-                .or_default()
-                .insert(node_id);
-        }
-
-        self.update_property_indexes_on_node_add(node_id)?;
-
-        self.node_cache.put(node_id, node.clone());
-
-        self.header.last_record_page = Some(pointer.page_id);
         self.header.last_committed_tx_id = tx_id;
         self.write_header()?;
 
@@ -49,7 +34,21 @@ impl GraphDB {
         Ok(node_id)
     }
 
-    pub fn add_node_internal(&mut self, mut node: Node) -> Result<NodeId> {
+    pub fn add_node_internal(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<NodeId> {
+        // Detect if this is an update (node has ID and exists) or new node creation
+        let is_update = node.id != 0 && self.node_index.get(&node.id).is_some();
+        
+        if is_update {
+            // Update existing node - create new version in version chain
+            self.update_node_version(node, tx_id, commit_ts)
+        } else {
+            // Create new node - allocate new ID
+            self.create_new_node(node, tx_id, commit_ts)
+        }
+    }
+
+    /// Create a new node with a new ID (not an update)
+    fn create_new_node(&mut self, mut node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<NodeId> {
         let node_id = self.header.next_node_id;
         self.header.next_node_id += 1;
 
@@ -58,10 +57,35 @@ impl GraphDB {
         node.first_incoming_edge_id = NULL_EDGE_ID;
 
         let payload = serialize_node(&node)?;
-        let record = encode_record(RecordKind::Node, &payload)?;
-
-        let preferred = self.header.last_record_page;
-        let pointer = self.insert_record(&record, preferred)?;
+        
+        // Use store_new_version if MVCC enabled, otherwise legacy record format
+        let pointer = if self.config.mvcc_enabled {
+            use crate::storage::version_chain::store_new_version;
+            
+            let mut record_store = self.record_store();
+            let pointer = store_new_version(
+                &mut record_store,
+                None,  // No previous version
+                node_id,
+                RecordKind::Node,
+                &payload,
+                tx_id,
+                commit_ts,
+            )?;
+            
+            // Register dirty pages with GraphDB
+            let dirty_pages = record_store.take_dirty_pages();
+            for page_id in dirty_pages {
+                self.record_page_write(page_id);
+            }
+            
+            pointer
+        } else {
+            // Legacy non-versioned record
+            let record = encode_record(RecordKind::Node, &payload)?;
+            let preferred = self.header.last_record_page;
+            self.insert_record(&record, preferred)?
+        };
 
         self.node_index.insert(node_id, pointer);
 
@@ -73,48 +97,86 @@ impl GraphDB {
         }
 
         self.update_property_indexes_on_node_add(node_id)?;
-
         self.node_cache.put(node_id, node.clone());
-
         self.header.last_record_page = Some(pointer.page_id);
+
+        Ok(node_id)
+    }
+
+    /// Update an existing node by creating a new version in the version chain
+    fn update_node_version(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<NodeId> {
+        let node_id = node.id;
+        
+        // Get pointer to current version (head of version chain)
+        let prev_pointer = self.node_index.get(&node_id)
+            .ok_or_else(|| GraphError::NotFound("node"))?;
+        
+        let payload = serialize_node(&node)?;
+        
+        // Create new version in version chain
+        use crate::storage::version_chain::store_new_version;
+        
+        let mut record_store = self.record_store();
+        let new_pointer = store_new_version(
+            &mut record_store,
+            Some(prev_pointer),  // Link to previous version
+            node_id,
+            RecordKind::Node,
+            &payload,
+            tx_id,
+            commit_ts,
+        )?;
+        
+        // Register dirty pages with GraphDB
+        let dirty_pages = record_store.take_dirty_pages();
+        for page_id in dirty_pages {
+            self.record_page_write(page_id);
+        }
+        
+        // Update index to point to NEW head of version chain
+        self.node_index.insert(node_id, new_pointer);
+        
+        // Update label indexes
+        // Note: For simplicity, we add all labels from new version
+        // TODO: Compute diff between old and new labels to remove old ones
+        for label in &node.labels {
+            self.label_index
+                .entry(label.clone())
+                .or_default()
+                .insert(node_id);
+        }
+        
+        // Update property indexes
+        self.update_property_indexes_on_node_add(node_id)?;
+        
+        // Update cache with new version
+        self.node_cache.put(node_id, node.clone());
+        self.header.last_record_page = Some(new_pointer.page_id);
+        
         Ok(node_id)
     }
 
     pub fn add_nodes_bulk(&mut self, nodes: Vec<Node>) -> Result<Vec<NodeId>> {
         let mut node_ids = Vec::with_capacity(nodes.len());
-        let mut index_entries = Vec::with_capacity(nodes.len());
+        
+        // Allocate a single transaction ID for the bulk operation
+        let tx_id = self.allocate_tx_id()?;
+        
+        // Allocate commit timestamp if MVCC enabled
+        let commit_ts = if self.config.mvcc_enabled {
+            self.timestamp_oracle.as_ref()
+                .map(|oracle| oracle.allocate_commit_timestamp())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
-        for mut node in nodes {
-            let node_id = self.header.next_node_id;
-            self.header.next_node_id += 1;
-
-            node.id = node_id;
-            node.first_outgoing_edge_id = NULL_EDGE_ID;
-            node.first_incoming_edge_id = NULL_EDGE_ID;
-
-            let payload = serialize_node(&node)?;
-            let record = encode_record(RecordKind::Node, &payload)?;
-
-            let preferred = self.header.last_record_page;
-            let pointer = self.insert_record(&record, preferred)?;
-
-            index_entries.push((node_id, pointer));
-
-            for label in &node.labels {
-                self.label_index
-                    .entry(label.clone())
-                    .or_default()
-                    .insert(node_id);
-            }
-
-            self.update_property_indexes_on_node_add(node_id)?;
-
-            self.node_cache.put(node_id, node.clone());
-            self.header.last_record_page = Some(pointer.page_id);
+        for node in nodes {
+            // Use add_node_internal which handles both create and update
+            let node_id = self.add_node_internal(node, tx_id, commit_ts)?;
             node_ids.push(node_id);
         }
 
-        self.node_index.batch_insert(index_entries);
         Ok(node_ids)
     }
 

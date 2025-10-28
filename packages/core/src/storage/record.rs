@@ -47,7 +47,18 @@ impl RecordHeader {
         if bytes.len() < RECORD_HEADER_SIZE {
             return Err(GraphError::Corruption("record header truncated".into()));
         }
-        let kind = RecordKind::from_byte(bytes[0])?;
+        
+        // Use lenient parsing: accept versioned kinds (0x03, 0x04) and map them to base kinds
+        // This allows RecordHeader to work with both legacy and versioned records
+        let kind = match bytes[0] {
+            0x00 => RecordKind::Free,
+            0x01 | 0x03 => RecordKind::Node,  // 0x03 = VersionedNode
+            0x02 | 0x04 => RecordKind::Edge,  // 0x04 = VersionedEdge
+            other => return Err(GraphError::Corruption(format!(
+                "unknown record kind: 0x{other:02X}"
+            ))),
+        };
+        
         let payload_length_bytes: [u8; 4] = bytes[4..8]
             .try_into()
             .map_err(|_| GraphError::Corruption("record header length slice invalid".into()))?;

@@ -111,9 +111,11 @@ impl VersionChainReader {
                         .map_err(|_| GraphError::Corruption("invalid record header".into()))?;
                     let payload_length = u32::from_le_bytes(payload_length_bytes) as usize;
                     
-                    // Data starts after metadata
+                    // Record layout: [header: 8][metadata: 25][data: N]
+                    // payload_length = 25 + N (total size of metadata + data)
+                    // Data starts at offset 33 (after 8-byte header and 25-byte metadata)
                     let data_start = 33;
-                    let data_end = data_start + (payload_length - 25); // Exclude metadata from payload length
+                    let data_end = 8 + payload_length; // header_size + total_payload_size
                     
                     if record_data.len() < data_end {
                         return Ok(None);
@@ -253,7 +255,9 @@ pub fn store_new_version(
     record_data.extend_from_slice(data);
 
     // Store in the record store
-    let pointer = record_store.insert(&record_data, None)?;
+    // Use insert_new_slot to ensure each version gets its own storage location
+    // This prevents slot reuse which would break version chain integrity
+    let pointer = record_store.insert_new_slot(&record_data)?;
 
     Ok(pointer)
 }

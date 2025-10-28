@@ -221,7 +221,25 @@ impl GraphDB {
                 let record = record_page.record_slice(slot)?;
                 let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
                 let payload_len = header.payload_length as usize;
-                let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+                
+                // Check if this is a versioned record by looking at the actual kind byte
+                let kind_byte = record[0];
+                let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+                
+                let payload = if is_versioned {
+                    // For versioned records, skip the 25-byte metadata header
+                    const VERSION_METADATA_SIZE: usize = 25;
+                    if payload_len < VERSION_METADATA_SIZE {
+                        continue; // Skip malformed versioned records
+                    }
+                    let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+                    let data_end = RECORD_HEADER_SIZE + payload_len;
+                    &record[data_start..data_end]
+                } else {
+                    // Legacy non-versioned record
+                    &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
+                };
+                
                 match header.kind {
                     RecordKind::Free => continue,
                     RecordKind::Node => {
@@ -338,7 +356,25 @@ impl GraphDB {
                 let record = record_page.record_slice(slot)?;
                 let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
                 let payload_len = header.payload_length as usize;
-                let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+                
+                // Check if this is a versioned record by looking at the actual kind byte
+                let kind_byte = record[0];
+                let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+                
+                let payload = if is_versioned {
+                    // For versioned records, skip the 25-byte metadata header
+                    const VERSION_METADATA_SIZE: usize = 25;
+                    if payload_len < VERSION_METADATA_SIZE {
+                        continue; // Skip malformed versioned records
+                    }
+                    let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+                    let data_end = RECORD_HEADER_SIZE + payload_len;
+                    &record[data_start..data_end]
+                } else {
+                    // Legacy non-versioned record
+                    &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
+                };
+                
                 match header.kind {
                     RecordKind::Free => continue,
                     RecordKind::Node => {

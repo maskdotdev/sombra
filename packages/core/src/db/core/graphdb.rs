@@ -730,7 +730,37 @@ impl GraphDB {
                     ));
                     continue;
                 }
-                let payload = &record_bytes[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+                
+                // Check if this is a versioned record by looking at the actual kind byte
+                let kind_byte = record_bytes[0];
+                let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+                
+                let payload_len = header.payload_length as usize;
+                let payload = if is_versioned {
+                    // For versioned records, skip the 25-byte metadata header
+                    const VERSION_METADATA_SIZE: usize = 25;
+                    if payload_len < VERSION_METADATA_SIZE {
+                        report.record_errors += 1;
+                        report.push_error(format!(
+                            "page {page_id} slot {slot_index} versioned record too small"
+                        ));
+                        continue;
+                    }
+                    let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+                    let data_end = RECORD_HEADER_SIZE + payload_len;
+                    if data_end > record_bytes.len() {
+                        report.record_errors += 1;
+                        report.push_error(format!(
+                            "page {page_id} slot {slot_index} payload exceeds slot bounds"
+                        ));
+                        continue;
+                    }
+                    &record_bytes[data_start..data_end]
+                } else {
+                    // Legacy non-versioned record
+                    &record_bytes[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
+                };
+                
                 let slot_u16 = slot_index as u16;
 
                 match header.kind {
@@ -964,7 +994,15 @@ impl GraphDB {
         let mut record_store = RecordStore::new(&mut self.pager);
         
         // Run GC
-        gc.run_gc(&mut record_store, record_ids, oracle)
+        let result = gc.run_gc(&mut record_store, record_ids, oracle)?;
+        
+        // Register dirty pages from GC operations
+        let dirty_pages = record_store.take_dirty_pages();
+        for page_id in dirty_pages {
+            self.record_page_write(page_id);
+        }
+        
+        Ok(result)
     }
 
     /// Starts background garbage collection.

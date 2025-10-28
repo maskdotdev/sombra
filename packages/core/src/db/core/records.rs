@@ -30,9 +30,30 @@ impl GraphDB {
                 "expected edge record, found other kind".into(),
             ));
         }
+        
+        // Check if this is a versioned record by looking at the actual kind byte
+        let kind_byte = record[0];
+        let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+        
         let payload_len = header.payload_length as usize;
-        let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
-        let edge = deserialize_edge(payload)?;
+        
+        let edge = if is_versioned {
+            // For versioned records, skip the 25-byte metadata header
+            // Layout: [RecordHeader: 8][VersionMetadata: 25][Payload: N]
+            // payload_len includes metadata, so actual data starts at offset 33
+            const VERSION_METADATA_SIZE: usize = 25;
+            if payload_len < VERSION_METADATA_SIZE {
+                return Err(GraphError::Corruption("versioned record too small".into()));
+            }
+            let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+            let data_end = RECORD_HEADER_SIZE + payload_len;
+            let payload = &record[data_start..data_end];
+            deserialize_edge(payload)?
+        } else {
+            // Legacy non-versioned record
+            let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+            deserialize_edge(payload)?
+        };
 
         self.edge_cache.put(edge_id, edge.clone());
         Ok(edge)
@@ -121,9 +142,28 @@ impl GraphDB {
                         "expected edge record, found other kind".into(),
                     ));
                 }
+                
+                // Check if this is a versioned record by looking at the actual kind byte
+                let kind_byte = record[0];
+                let is_versioned = kind_byte == 0x03 || kind_byte == 0x04;
+                
                 let payload_len = header.payload_length as usize;
-                let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
-                let edge = deserialize_edge(payload)?;
+                
+                let edge = if is_versioned {
+                    // For versioned records, skip the 25-byte metadata header
+                    const VERSION_METADATA_SIZE: usize = 25;
+                    if payload_len < VERSION_METADATA_SIZE {
+                        return Err(GraphError::Corruption("versioned record too small".into()));
+                    }
+                    let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+                    let data_end = RECORD_HEADER_SIZE + payload_len;
+                    let payload = &record[data_start..data_end];
+                    deserialize_edge(payload)?
+                } else {
+                    // Legacy non-versioned record
+                    let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+                    deserialize_edge(payload)?
+                };
 
                 self.edge_cache.put(edge_id, edge.clone());
                 loaded_edges.insert(edge_id, edge);
@@ -151,9 +191,30 @@ impl GraphDB {
                 "expected node record, found other kind".into(),
             ));
         }
+        
+        // Check if this is a versioned record by looking at the actual kind byte
+        let kind_byte = record[0];
+        let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+        
         let payload_len = header.payload_length as usize;
-        let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
-        deserialize_node(payload)
+        
+        if is_versioned {
+            // For versioned records, skip the 25-byte metadata header
+            // Layout: [RecordHeader: 8][VersionMetadata: 25][Payload: N]
+            // payload_len includes metadata, so actual data starts at offset 33
+            const VERSION_METADATA_SIZE: usize = 25;
+            if payload_len < VERSION_METADATA_SIZE {
+                return Err(GraphError::Corruption("versioned record too small".into()));
+            }
+            let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+            let data_end = RECORD_HEADER_SIZE + payload_len;
+            let payload = &record[data_start..data_end];
+            deserialize_node(payload)
+        } else {
+            // Legacy non-versioned record
+            let payload = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+            deserialize_node(payload)
+        }
     }
 
     pub(crate) fn record_store(&mut self) -> RecordStore<'_> {
@@ -277,20 +338,47 @@ impl GraphDB {
                 "expected node record, found other kind".into(),
             ));
         }
+        
+        // Check if this is a versioned record by looking at the actual kind byte
+        let kind_byte = record[0];
+        let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+        
         let payload_len = header.payload_length as usize;
-        let payload_slice = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
-        let mut node = deserialize_node(payload_slice)?;
+        
+        let (node, data_start) = if is_versioned {
+            // For versioned records, skip the 25-byte metadata header
+            const VERSION_METADATA_SIZE: usize = 25;
+            if payload_len < VERSION_METADATA_SIZE {
+                return Err(GraphError::Corruption("versioned record too small".into()));
+            }
+            let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+            let data_end = RECORD_HEADER_SIZE + payload_len;
+            let payload_slice = &record[data_start..data_end];
+            (deserialize_node(payload_slice)?, data_start)
+        } else {
+            // Legacy non-versioned record
+            let payload_slice = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+            (deserialize_node(payload_slice)?, RECORD_HEADER_SIZE)
+        };
+        
+        let mut node = node;
         match kind {
             PointerKind::Outgoing => node.first_outgoing_edge_id = new_edge_id,
             PointerKind::Incoming => node.first_incoming_edge_id = new_edge_id,
         }
         let new_payload = serialize_node(&node)?;
-        if new_payload.len() != payload_len {
+        let expected_payload_len = if is_versioned {
+            payload_len - 25  // Subtract VERSION_METADATA_SIZE
+        } else {
+            payload_len
+        };
+        if new_payload.len() != expected_payload_len {
             return Err(GraphError::Serialization(
                 "node payload size changed during pointer update".into(),
             ));
         }
-        record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len].copy_from_slice(&new_payload);
+        let data_end = data_start + new_payload.len();
+        record[data_start..data_end].copy_from_slice(&new_payload);
         page.dirty = true;
         self.record_page_write(pointer.page_id);
         Ok(())
@@ -311,21 +399,48 @@ impl GraphDB {
                 "expected edge record, found other kind".into(),
             ));
         }
+        
+        // Check if this is a versioned record by looking at the actual kind byte
+        let kind_byte = record[0];
+        let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+        
         let payload_len = header.payload_length as usize;
-        let payload_slice = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
-        let mut edge = deserialize_edge(payload_slice)?;
+        
+        let (edge, data_start) = if is_versioned {
+            // For versioned records, skip the 25-byte metadata header
+            const VERSION_METADATA_SIZE: usize = 25;
+            if payload_len < VERSION_METADATA_SIZE {
+                return Err(GraphError::Corruption("versioned record too small".into()));
+            }
+            let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+            let data_end = RECORD_HEADER_SIZE + payload_len;
+            let payload_slice = &record[data_start..data_end];
+            (deserialize_edge(payload_slice)?, data_start)
+        } else {
+            // Legacy non-versioned record
+            let payload_slice = &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+            (deserialize_edge(payload_slice)?, RECORD_HEADER_SIZE)
+        };
+        
+        let mut edge = edge;
         let edge_id = edge.id;
         match kind {
             EdgePointerKind::Outgoing => edge.next_outgoing_edge_id = new_edge_id,
             EdgePointerKind::Incoming => edge.next_incoming_edge_id = new_edge_id,
         }
         let new_payload = serialize_edge(&edge)?;
-        if new_payload.len() != payload_len {
+        let expected_payload_len = if is_versioned {
+            payload_len - 25  // Subtract VERSION_METADATA_SIZE
+        } else {
+            payload_len
+        };
+        if new_payload.len() != expected_payload_len {
             return Err(GraphError::Serialization(
                 "edge payload size changed during pointer update".into(),
             ));
         }
-        record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len].copy_from_slice(&new_payload);
+        let data_end = data_start + new_payload.len();
+        record[data_start..data_end].copy_from_slice(&new_payload);
         page.dirty = true;
         self.record_page_write(pointer.page_id);
         self.edge_cache.pop(&edge_id);

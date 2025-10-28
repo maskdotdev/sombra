@@ -134,10 +134,6 @@ impl GarbageCollector {
     ) -> Result<bool> {
         // Try to visit the record - if it fails, consider it non-versioned
         let result = record_store.visit_record(pointer, |record_data| {
-            eprintln!("GC: is_record_versioned - record_len={}, first_bytes={:?}", 
-                      record_data.len(), 
-                      &record_data[0..std::cmp::min(10, record_data.len())]);
-            
             if record_data.len() < 1 {
                 debug!(
                     page_id = pointer.page_id,
@@ -148,13 +144,10 @@ impl GarbageCollector {
             }
             let kind_byte = record_data[0];
             
-            eprintln!("GC: is_record_versioned - kind_byte={} (0x{:02X})", kind_byte, kind_byte);
-            
             // Try to parse the kind - if it fails, the record is invalid
             match VersionedRecordKind::from_byte(kind_byte) {
                 Ok(kind) => {
                     let is_versioned = kind.is_versioned();
-                    eprintln!("GC: is_record_versioned - kind={:?}, is_versioned={}", kind, is_versioned);
                     trace!(
                         page_id = pointer.page_id,
                         slot_index = pointer.slot_index,
@@ -164,9 +157,8 @@ impl GarbageCollector {
                     );
                     Ok(is_versioned)
                 }
-                Err(e) => {
+                Err(_e) => {
                     // Invalid kind byte - treat as non-versioned
-                    eprintln!("GC: is_record_versioned - ERROR parsing kind: {:?}", e);
                     debug!(
                         page_id = pointer.page_id,
                         slot_index = pointer.slot_index,
@@ -180,12 +172,8 @@ impl GarbageCollector {
         
         // If visit_record itself fails (e.g., freed slot), consider it non-versioned
         match result {
-            Ok(is_versioned) => {
-                eprintln!("GC: is_record_versioned - returning {}", is_versioned);
-                Ok(is_versioned)
-            }
+            Ok(is_versioned) => Ok(is_versioned),
             Err(e) => {
-                eprintln!("GC: is_record_versioned - visit_record failed: {:?}", e);
                 debug!(
                     page_id = pointer.page_id,
                     slot_index = pointer.slot_index,
@@ -195,6 +183,35 @@ impl GarbageCollector {
                 Ok(false)
             }
         }
+    }
+
+    /// Fixes the byte_offset in a RecordPointer by recalculating it from the slot directory
+    ///
+    /// When traversing version chains, prev_version pointers only store page_id and slot_index
+    /// (byte_offset is set to 0 in serialization). This function looks up the actual byte_offset
+    /// from the page's slot directory.
+    ///
+    /// # Arguments
+    /// * `record_store` - The record store to read from
+    /// * `pointer` - Pointer with potentially incorrect byte_offset
+    ///
+    /// # Returns
+    /// A corrected RecordPointer with the proper byte_offset
+    fn fix_byte_offset(
+        &self,
+        record_store: &mut RecordStore,
+        pointer: RecordPointer,
+    ) -> Result<RecordPointer> {
+        use crate::storage::page::RecordPage;
+        
+        // Fetch the page and recalculate byte_offset from slot directory
+        let byte_offset = record_store.get_byte_offset_for_slot(pointer.page_id, pointer.slot_index)?;
+        
+        Ok(RecordPointer {
+            page_id: pointer.page_id,
+            slot_index: pointer.slot_index,
+            byte_offset,
+        })
     }
 
     /// Scans a single version chain and identifies reclaimable versions
@@ -207,6 +224,7 @@ impl GarbageCollector {
     /// * `head_pointer` - Pointer to the newest version (head of chain)
     /// * `record_id` - The record ID for this chain
     /// * `gc_watermark` - Versions with commit_ts < watermark are candidates
+    /// * `versions_examined` - Mutable counter to track total versions examined
     ///
     /// # Returns
     /// A vector of reclaimable version information
@@ -216,14 +234,11 @@ impl GarbageCollector {
         head_pointer: RecordPointer,
         record_id: u64,
         gc_watermark: u64,
+        versions_examined: &mut usize,
     ) -> Result<Vec<ReclaimableVersion>> {
         // First check if this is a versioned record
         // Non-versioned records (legacy or non-MVCC databases) should be skipped
-        eprintln!("GC: scan_version_chain called for record_id={}, page={}, slot={}", 
-                  record_id, head_pointer.page_id, head_pointer.slot_index);
-        
         let is_versioned = self.is_record_versioned(record_store, head_pointer)?;
-        eprintln!("GC: is_versioned={} for record_id={}", is_versioned, record_id);
         
         debug!(
             record_id = record_id,
@@ -234,15 +249,12 @@ impl GarbageCollector {
         );
         
         if !is_versioned {
-            eprintln!("GC: Skipping non-versioned record_id={}", record_id);
             debug!(
                 record_id = record_id,
                 "Skipping non-versioned record in scan_version_chain"
             );
             return Ok(Vec::new());
         }
-
-        eprintln!("GC: About to scan versioned chain for record_id={}", record_id);
 
         let mut reclaimable = Vec::new();
         let mut current_pointer = Some(head_pointer);
@@ -257,6 +269,7 @@ impl GarbageCollector {
         // Traverse the version chain from head to tail
         while let Some(pointer) = current_pointer {
             version_count += 1;
+            *versions_examined += 1; // Track total versions examined
 
             debug!(
                 record_id = record_id,
@@ -267,7 +280,20 @@ impl GarbageCollector {
             );
 
             // Read the version metadata
-            let metadata = self.read_version_metadata(record_store, pointer)?;
+            let metadata_opt = self.read_version_metadata(record_store, pointer)?;
+            
+            // If None, we've reached a non-versioned record at the end of the chain
+            let metadata = match metadata_opt {
+                Some(m) => m,
+                None => {
+                    debug!(
+                        record_id = record_id,
+                        version = version_count,
+                        "Reached end of version chain (non-versioned record)"
+                    );
+                    break; // End of version chain
+                }
+            };
             
             debug!(
                 record_id = record_id,
@@ -293,7 +319,12 @@ impl GarbageCollector {
             }
 
             // Move to the previous version in the chain
-            current_pointer = metadata.prev_version;
+            // CRITICAL: Fix the byte_offset since it's not stored in version metadata
+            current_pointer = if let Some(prev_ptr) = metadata.prev_version {
+                Some(self.fix_byte_offset(record_store, prev_ptr)?)
+            } else {
+                None
+            };
 
             // Safety check: prevent infinite loops
             if version_count > 10000 {
@@ -358,17 +389,13 @@ impl GarbageCollector {
     /// * `pointer` - Pointer to the versioned record
     ///
     /// # Returns
-    /// The version metadata, or an error if the record is invalid
+    /// The version metadata, or None if the record is non-versioned (end of chain)
     fn read_version_metadata(
         &self,
         record_store: &mut RecordStore,
         pointer: RecordPointer,
-    ) -> Result<VersionMetadata> {
+    ) -> Result<Option<VersionMetadata>> {
         record_store.visit_record(pointer, |record_data| {
-            eprintln!("GC: read_version_metadata - record_len={}, first_bytes={:?}", 
-                      record_data.len(), 
-                      &record_data[0..std::cmp::min(10, record_data.len())]);
-            
             debug!(
                 page_id = pointer.page_id,
                 slot_index = pointer.slot_index,
@@ -377,12 +404,10 @@ impl GarbageCollector {
             );
             
             if record_data.len() < 8 {
-                eprintln!("GC: read_version_metadata - ERROR: record too short");
                 return Err(GraphError::Corruption("record too short".into()));
             }
 
             let kind_byte = record_data[0];
-            eprintln!("GC: read_version_metadata - kind_byte={} (0x{:02X})", kind_byte, kind_byte);
             
             debug!(
                 page_id = pointer.page_id,
@@ -392,7 +417,6 @@ impl GarbageCollector {
             );
             
             let kind = VersionedRecordKind::from_byte(kind_byte)?;
-            eprintln!("GC: read_version_metadata - kind={:?}, is_versioned={}", kind, kind.is_versioned());
             
             debug!(
                 page_id = pointer.page_id,
@@ -402,23 +426,23 @@ impl GarbageCollector {
                 "read_version_metadata: parsed kind"
             );
 
-            // Only versioned records have metadata
+            // Non-versioned records are the end of the chain (legacy records)
             if !kind.is_versioned() {
-                eprintln!("GC: read_version_metadata - ERROR: not versioned!");
-                return Err(GraphError::Corruption(
-                    "attempted to read metadata from non-versioned record".into(),
-                ));
+                debug!(
+                    page_id = pointer.page_id,
+                    slot_index = pointer.slot_index,
+                    "Reached non-versioned record at end of version chain"
+                );
+                return Ok(None);
             }
 
             // Metadata starts at offset 8 (after RecordHeader)
             if record_data.len() < 8 + 25 {
-                eprintln!("GC: read_version_metadata - ERROR: versioned record too short");
                 return Err(GraphError::Corruption("versioned record too short".into()));
             }
 
             let metadata = VersionMetadata::from_bytes(&record_data[8..33])?;
-            eprintln!("GC: read_version_metadata - SUCCESS: commit_ts={}", metadata.commit_ts);
-            Ok(metadata)
+            Ok(Some(metadata))
         })
     }
 
@@ -433,16 +457,17 @@ impl GarbageCollector {
     /// * `timestamp_oracle` - Oracle to get the GC watermark
     ///
     /// # Returns
-    /// A vector of all reclaimable versions found
+    /// A tuple of (reclaimable_versions, chains_scanned, versions_examined)
     pub fn scan_for_reclaimable_versions(
         &self,
         record_store: &mut RecordStore,
         record_ids: impl Iterator<Item = (u64, RecordPointer)>,
         timestamp_oracle: &Arc<TimestampOracle>,
-    ) -> Result<Vec<ReclaimableVersion>> {
+    ) -> Result<(Vec<ReclaimableVersion>, usize, usize)> {
         let gc_watermark = timestamp_oracle.gc_eligible_before();
         let mut all_reclaimable = Vec::new();
         let mut chains_scanned = 0;
+        let mut versions_examined = 0;
 
         info!(
             gc_watermark = gc_watermark,
@@ -455,6 +480,7 @@ impl GarbageCollector {
                 head_pointer,
                 record_id,
                 gc_watermark,
+                &mut versions_examined,
             )?;
 
             all_reclaimable.extend(reclaimable);
@@ -472,11 +498,12 @@ impl GarbageCollector {
 
         info!(
             chains_scanned = chains_scanned,
+            versions_examined = versions_examined,
             total_reclaimable = all_reclaimable.len(),
             "Completed GC scan"
         );
 
-        Ok(all_reclaimable)
+        Ok((all_reclaimable, chains_scanned, versions_examined))
     }
 
     /// Compacts version chains by removing reclaimable versions
@@ -560,7 +587,7 @@ impl GarbageCollector {
         info!(gc_watermark = gc_watermark, "Starting GC cycle");
 
         // Phase 1: Scan for reclaimable versions
-        let reclaimable = self.scan_for_reclaimable_versions(
+        let (reclaimable, chains_scanned, versions_examined) = self.scan_for_reclaimable_versions(
             record_store,
             record_ids,
             timestamp_oracle,
@@ -574,17 +601,19 @@ impl GarbageCollector {
         let duration = start.elapsed();
 
         let stats = GcStats {
-            chains_scanned: 0, // TODO: Track this in scan_for_reclaimable_versions
-            versions_examined: 0, // TODO: Track this in scan_version_chain
+            chains_scanned,
+            versions_examined,
             versions_reclaimable,
             versions_reclaimed,
-            pages_freed: 0, // TODO: Track freed pages
+            pages_freed: 0, // TODO: Track freed pages from record store
             duration_ms: duration.as_millis() as u64,
             gc_watermark,
         };
 
         info!(
             versions_reclaimed = stats.versions_reclaimed,
+            chains_scanned = stats.chains_scanned,
+            versions_examined = stats.versions_examined,
             duration_ms = stats.duration_ms,
             "GC cycle completed"
         );

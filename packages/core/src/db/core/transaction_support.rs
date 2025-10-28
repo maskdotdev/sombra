@@ -4,6 +4,8 @@ use crate::db::group_commit::{CommitRequest, ControlMessage, TxId};
 use crate::error::{acquire_lock, GraphError, Result};
 use crate::pager::PageId;
 use crate::storage::header::Header;
+use crate::storage::heap::RecordStore;
+use crate::storage::version::{VersionMetadata, VersionedRecordKind};
 use std::mem;
 use std::sync::{Arc, Condvar, Mutex};
 use tracing::warn;
@@ -179,6 +181,97 @@ impl GraphDB {
         Header::write(&header, &mut page.data)?;
         page.dirty = true;
         self.record_page_write(0);
+        Ok(())
+    }
+
+    /// Updates commit_ts for all versions created by a transaction
+    ///
+    /// This is called during transaction commit to update all version metadata
+    /// records from commit_ts=0 (uncommitted) to the actual commit timestamp.
+    /// This allows GC to identify committed versions for cleanup.
+    ///
+    /// # Arguments
+    /// * `tx_id` - The transaction ID that created the versions
+    /// * `commit_ts` - The commit timestamp to set
+    /// * `dirty_pages` - Pages modified by the transaction
+    ///
+    /// # Returns
+    /// Ok(()) if successful
+    pub fn update_versions_commit_ts(
+        &mut self,
+        tx_id: TxId,
+        commit_ts: u64,
+        dirty_pages: &[PageId],
+    ) -> Result<()> {
+        use crate::storage::page::RecordPage;
+        use crate::storage::heap::RecordPointer;
+        
+        // Collect all version pointers that need updating first,
+        // then update them to avoid borrow checker issues
+        let mut versions_to_update: Vec<RecordPointer> = Vec::new();
+        
+        // Scan all dirty pages for versioned records created by this transaction
+        for &page_id in dirty_pages {
+            let page = self.pager.fetch_page(page_id)?;
+            let record_page = RecordPage::from_bytes(&mut page.data)?;
+            let record_count = record_page.record_count()? as usize;
+            
+            for slot_index in 0..record_count {
+                // Get record data
+                let record_data = match record_page.record_slice(slot_index) {
+                    Ok(data) => data,
+                    Err(_) => continue, // Skip corrupted records
+                };
+                
+                if record_data.is_empty() {
+                    continue;
+                }
+                
+                // Check if this is a versioned record
+                let kind_byte = record_data[0];
+                let is_versioned = match VersionedRecordKind::from_byte(kind_byte) {
+                    Ok(VersionedRecordKind::VersionedNode) => true,
+                    Ok(VersionedRecordKind::VersionedEdge) => true,
+                    _ => false,
+                };
+                
+                if !is_versioned {
+                    continue;
+                }
+                
+                // Read version metadata (starts at offset 8, after 8-byte record header)
+                // Record layout: [kind:1][reserved:3][payload_len:4][metadata:25][data:N]
+                if record_data.len() < 8 + 25 {
+                    continue; // Not enough data for version metadata
+                }
+                
+                let metadata = VersionMetadata::from_bytes(&record_data[8..])?;
+                
+                // If this version was created by our transaction and is uncommitted
+                if metadata.tx_id == tx_id && metadata.commit_ts == 0 {
+                    let byte_offset = record_page.record_offset(slot_index)?;
+                    let pointer = RecordPointer {
+                        page_id,
+                        slot_index: slot_index as u16,
+                        byte_offset,
+                    };
+                    versions_to_update.push(pointer);
+                }
+            }
+        }
+        
+        // Now update all collected versions
+        let mut record_store = RecordStore::new(&mut self.pager);
+        for pointer in versions_to_update {
+            record_store.update_commit_ts(pointer, commit_ts)?;
+        }
+        
+        // Register dirty pages with GraphDB
+        let update_dirty_pages = record_store.take_dirty_pages();
+        for page_id in update_dirty_pages {
+            self.record_page_write(page_id);
+        }
+        
         Ok(())
     }
 }
