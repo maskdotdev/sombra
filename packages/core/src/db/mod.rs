@@ -1,5 +1,6 @@
 mod compaction;
 mod config;
+mod concurrent;
 mod core;
 pub(crate) mod gc;
 pub(crate) mod group_commit;
@@ -14,6 +15,7 @@ mod transaction;
 mod tests;
 
 pub use compaction::{CompactionConfig, CompactionState};
+pub use concurrent::{ConcurrentGraphDB, ConcurrentTransaction, TxState as ConcurrentTxState};
 pub use config::{Config, SyncMode};
 pub use core::{GraphDB, HeaderState, IntegrityOptions, IntegrityReport};
 pub use group_commit::TxId;

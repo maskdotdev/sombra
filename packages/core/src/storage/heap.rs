@@ -105,21 +105,20 @@ impl<'a> RecordStore<'a> {
         for page_id in 1..page_count as u32 {
             let page = self.pager.fetch_page(page_id)?;
             
-            // Debug assertion: When we fail to parse as RecordPage, verify it's actually
-            // an index page or unknown type (not a RecordPage we're incorrectly skipping)
-            #[cfg(debug_assertions)]
-            let detected_type = detect_page_type(&page.data);
-            
             // Try to parse as RecordPage - will fail for index pages (BIDX, PIDX)
             let mut record_page = match RecordPage::from_bytes(&mut page.data) {
                 Ok(page) => page,
                 Err(_) => {
                     // Debug assertion: Verify we're skipping a non-RecordPage
-                    debug_assert!(
-                        !matches!(detected_type, PageType::Record),
-                        "Skipping page {} which appears to be a RecordPage (type: {:?})",
-                        page_id, detected_type
-                    );
+                    #[cfg(debug_assertions)]
+                    {
+                        let detected_type = detect_page_type(&page.data);
+                        debug_assert!(
+                            !matches!(detected_type, PageType::Record),
+                            "Skipping page {} which appears to be a RecordPage (type: {:?})",
+                            page_id, detected_type
+                        );
+                    }
                     continue;  // Skip non-RecordPage types
                 }
             };

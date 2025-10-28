@@ -69,8 +69,9 @@ pub mod sqlite_adapter;
 
 // Re-export the main public API
 pub use crate::db::{
-    CompactionConfig, CompactionState, Config, GraphDB, IntegrityOptions, IntegrityReport,
-    PerformanceMetrics, SyncMode, Transaction, TxId, TxState,
+    CompactionConfig, CompactionState, ConcurrentGraphDB, ConcurrentTransaction, ConcurrentTxState,
+    Config, GraphDB, IntegrityOptions, IntegrityReport, PerformanceMetrics, SyncMode, Transaction,
+    TxId, TxState,
 };
 pub use crate::error::{GraphError, Result};
 pub use crate::model::{Edge, EdgeDirection, EdgeId, Node, NodeId, PropertyValue};

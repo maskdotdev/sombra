@@ -31,6 +31,7 @@ parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rayon = "1.7"
+fs2 = "0.4"
 
 [features]
 default = ["cli"]
@@ -134,6 +135,14 @@ required-features = ["benchmarks"]
 name = "mvcc_detailed_profile"
 harness = false
 required-features = ["benchmarks"]
+
+[[bench]]
+name = "concurrent_throughput"
+harness = false
+
+[[bench]]
+name = "concurrent_api_benchmark"
+harness = true
 
 [[example]]
 name = "performance_metrics_demo"

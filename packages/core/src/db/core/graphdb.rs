@@ -2,6 +2,7 @@ use crc32fast::hash;
 use lru::LruCache;
 use rayon::ThreadPoolBuilder;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -205,6 +206,9 @@ pub struct GraphDB {
     pub(crate) timestamp_oracle: Option<Arc<TimestampOracle>>,
     pub(crate) gc: Option<GarbageCollector>,
     pub(crate) bg_gc_state: Option<Arc<Mutex<BackgroundGcState>>>,
+    // File locking to prevent multi-process corruption
+    #[allow(dead_code)]
+    lock_file: Option<File>,
 }
 
 impl std::fmt::Debug for GraphDB {
@@ -287,6 +291,24 @@ impl GraphDB {
             checksum_enabled = config.checksum_enabled,
             "Opening database"
         );
+        
+        // Acquire exclusive file lock to prevent multi-process corruption
+        use fs2::FileExt;
+        let lock_path = path_ref.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+        
+        lock_file.try_lock_exclusive().map_err(|e| {
+            GraphError::InvalidArgument(format!(
+                "Database is already open in another process: {}. Lock file: {:?}",
+                e, lock_path
+            ))
+        })?;
+        
+        info!(lock_file = ?lock_path, "Acquired exclusive file lock");
+        
         configure_rayon_thread_pool(&config);
         let wal_sync_enabled = config.wal_sync_mode != SyncMode::Off;
         let use_mmap = config.use_mmap;
@@ -406,6 +428,7 @@ impl GraphDB {
             gc,
             bg_gc_state,
             mvcc_tx_manager,
+            lock_file: Some(lock_file),
         };
 
         // Update header to reflect MVCC state

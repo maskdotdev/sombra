@@ -10,7 +10,16 @@ impl GraphDB {
         let tx_id = self.allocate_tx_id()?;
         self.start_tracking();
 
-        let (edge_id, _version_ptr) = self.add_edge_internal(edge)?;
+        // Allocate commit timestamp for MVCC
+        let commit_ts = if self.config.mvcc_enabled {
+            self.timestamp_oracle.as_ref()
+                .map(|oracle| oracle.allocate_commit_timestamp())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let (edge_id, _version_ptr) = self.add_edge_internal(edge, tx_id, commit_ts)?;
 
         self.header.last_committed_tx_id = tx_id;
         self.write_header()?;
@@ -22,7 +31,7 @@ impl GraphDB {
         Ok(edge_id)
     }
 
-    pub fn add_edge_internal(&mut self, mut edge: Edge) -> Result<(EdgeId, Option<crate::storage::heap::RecordPointer>)> {
+    pub fn add_edge_internal(&mut self, mut edge: Edge, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(EdgeId, Option<crate::storage::heap::RecordPointer>)> {
         let edge_id = self.header.next_edge_id;
         self.header.next_edge_id += 1;
 
@@ -55,8 +64,8 @@ impl GraphDB {
                 edge_id,
                 RecordKind::Edge,
                 &payload,
-                0,  // tx_id - will be set by transaction
-                0,  // commit_ts - will be set at commit time
+                tx_id,
+                commit_ts,
             )?;
             
             // Register dirty pages with GraphDB

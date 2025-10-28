@@ -84,82 +84,97 @@ impl VersionChainReader {
         snapshot_ts: u64,
         current_tx_id: Option<TxId>,
     ) -> Result<Option<VersionedRecord>> {
-        // For now, implement a simplified version that only handles non-versioned records
-        // Full version chain traversal will be implemented in the next phase
+        let mut current_pointer = Some(head_pointer);
         
-        record_store.visit_record(head_pointer, |record_data| {
-            if record_data.len() < 8 {
-                return Ok(None); // Invalid pointer
-            }
-
-            let kind_byte = record_data[0];
-            
-            // Handle versioned records
-            if kind_byte == VersionedRecordKind::VersionedNode.to_byte() 
-                || kind_byte == VersionedRecordKind::VersionedEdge.to_byte() {
-                // This is a versioned record
-                if record_data.len() < 8 + 25 {
-                    return Ok(None);
+        // Traverse the version chain from newest to oldest
+        while let Some(pointer) = current_pointer {
+            let result = record_store.visit_record(pointer, |record_data| {
+                if record_data.len() < 8 {
+                    return Ok((None, None)); // Invalid pointer
                 }
 
-                let metadata = VersionMetadata::from_bytes(&record_data[8..33])?;
+                let kind_byte = record_data[0];
                 
-                // Check visibility
-                if is_version_visible(&metadata, snapshot_ts, current_tx_id) {
-                    let payload_length_bytes: [u8; 4] = record_data[4..8]
-                        .try_into()
-                        .map_err(|_| GraphError::Corruption("invalid record header".into()))?;
-                    let payload_length = u32::from_le_bytes(payload_length_bytes) as usize;
-                    
-                    // Record layout: [header: 8][metadata: 25][data: N]
-                    // payload_length = 25 + N (total size of metadata + data)
-                    // Data starts at offset 33 (after 8-byte header and 25-byte metadata)
-                    let data_start = 33;
-                    let data_end = 8 + payload_length; // header_size + total_payload_size
-                    
-                    if record_data.len() < data_end {
-                        return Ok(None);
+                // Handle versioned records
+                if kind_byte == VersionedRecordKind::VersionedNode.to_byte() 
+                    || kind_byte == VersionedRecordKind::VersionedEdge.to_byte() {
+                    // This is a versioned record
+                    if record_data.len() < 8 + 25 {
+                        return Ok((None, None));
                     }
 
-                    let data = record_data[data_start..data_end].to_vec();
+                    let metadata = VersionMetadata::from_bytes(&record_data[8..33])?;
                     
-                    return Ok(Some(VersionedRecord {
-                        pointer: head_pointer,
-                        metadata,
-                        data,
-                    }));
+                    // Check visibility
+                    if is_version_visible(&metadata, snapshot_ts, current_tx_id) {
+                        let payload_length_bytes: [u8; 4] = record_data[4..8]
+                            .try_into()
+                            .map_err(|_| GraphError::Corruption("invalid record header".into()))?;
+                        let payload_length = u32::from_le_bytes(payload_length_bytes) as usize;
+                        
+                        // Record layout: [header: 8][metadata: 25][data: N]
+                        // payload_length = 25 + N (total size of metadata + data)
+                        // Data starts at offset 33 (after 8-byte header and 25-byte metadata)
+                        let data_start = 33;
+                        let data_end = 8 + payload_length; // header_size + total_payload_size
+                        
+                        if record_data.len() < data_end {
+                            return Ok((None, None));
+                        }
+
+                        let data = record_data[data_start..data_end].to_vec();
+                        
+                        let versioned_record = VersionedRecord {
+                            pointer,
+                            metadata: metadata.clone(),
+                            data,
+                        };
+                        
+                        return Ok((Some(versioned_record), None)); // Found visible version
+                    }
+                    
+                    // Version not visible, continue to previous version in chain
+                    return Ok((None, metadata.prev_version));
                 }
                 
-                return Ok(None); // Version not visible - would traverse to prev_version in full implementation
-            }
-            
-            // Non-versioned record (backwards compatibility)
-            let payload_length_bytes: [u8; 4] = record_data[4..8]
-                .try_into()
-                .map_err(|_| GraphError::Corruption("invalid record header".into()))?;
-            let payload_length = u32::from_le_bytes(payload_length_bytes) as usize;
-            
-            let record_end = 8 + payload_length;
-            if record_data.len() < record_end {
-                return Ok(None);
-            }
+                // Non-versioned record (backwards compatibility)
+                let payload_length_bytes: [u8; 4] = record_data[4..8]
+                    .try_into()
+                    .map_err(|_| GraphError::Corruption("invalid record header".into()))?;
+                let payload_length = u32::from_le_bytes(payload_length_bytes) as usize;
+                
+                let record_end = 8 + payload_length;
+                if record_data.len() < record_end {
+                    return Ok((None, None));
+                }
 
-            let data = record_data[8..record_end].to_vec();
-            
-            // Create synthetic VersionMetadata for legacy records
-            let metadata = VersionMetadata {
-                tx_id: 0,
-                commit_ts: 0,
-                prev_version: None,
-                flags: VersionFlags::Alive,
-            };
+                let data = record_data[8..record_end].to_vec();
+                
+                // Create synthetic VersionMetadata for legacy records
+                let metadata = VersionMetadata {
+                    tx_id: 0,
+                    commit_ts: 0,
+                    prev_version: None,
+                    flags: VersionFlags::Alive,
+                };
 
-            Ok(Some(VersionedRecord {
-                pointer: head_pointer,
-                metadata,
-                data,
-            }))
-        })
+                let versioned_record = VersionedRecord {
+                    pointer,
+                    metadata,
+                    data,
+                };
+                
+                Ok((Some(versioned_record), None))
+            })?;
+            
+            match result {
+                (Some(versioned_record), _) => return Ok(Some(versioned_record)),
+                (None, Some(prev_pointer)) => current_pointer = Some(prev_pointer),
+                (None, None) => return Ok(None), // End of chain or error
+            }
+        }
+        
+        Ok(None) // No visible version found
     }
 
     /// Get the latest version pointer for a record
@@ -260,6 +275,60 @@ pub fn store_new_version(
     let pointer = record_store.insert_new_slot(&record_data)?;
 
     Ok(pointer)
+}
+
+/// Update the commit timestamp of an existing version record
+///
+/// This is called during transaction commit to update pending versions
+/// (commit_ts = 0) with the actual commit timestamp.
+///
+/// # Arguments
+/// * `record_store` - The record store containing the version
+/// * `version_ptr` - Pointer to the version record to update
+/// * `commit_ts` - The commit timestamp to set
+///
+/// # Returns
+/// * Ok(()) on success
+///
+/// # Errors
+/// * `GraphError::Corruption` - Invalid record format or not a versioned record
+pub fn update_version_commit_timestamp(
+    record_store: &mut RecordStore,
+    version_ptr: RecordPointer,
+    commit_ts: u64,
+) -> Result<()> {
+    record_store.visit_record_mut(version_ptr, |record_data| {
+        // Validate record format
+        if record_data.len() < 8 + 25 {
+            return Err(GraphError::Corruption(
+                "record too small to be a versioned record".into(),
+            ));
+        }
+
+        // Verify this is a versioned record
+        let kind_byte = record_data[0];
+        if kind_byte != VersionedRecordKind::VersionedNode.to_byte()
+            && kind_byte != VersionedRecordKind::VersionedEdge.to_byte()
+        {
+            return Err(GraphError::Corruption(
+                "not a versioned record".into(),
+            ));
+        }
+
+        // Parse existing metadata
+        let mut metadata = VersionMetadata::from_bytes(&record_data[8..33])?;
+
+        // Update commit timestamp
+        metadata.commit_ts = commit_ts;
+
+        // Serialize updated metadata
+        let metadata_bytes = metadata.to_bytes();
+
+        // Write updated metadata back to record
+        record_data[8..33].copy_from_slice(&metadata_bytes);
+
+        Ok(())
+    })
 }
 
 #[cfg(test)]

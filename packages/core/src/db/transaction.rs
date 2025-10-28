@@ -241,7 +241,8 @@ impl<'db> Transaction<'db> {
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId> {
-        let (edge_id, version_ptr) = self.db.add_edge_internal(edge)?;
+        // Pass transaction ID and commit_ts=0 (will be set at commit time)
+        let (edge_id, version_ptr) = self.db.add_edge_internal(edge, self.id, 0)?;
         self.capture_dirty_pages()?;
         // Track write for conflict detection
         self.write_edges.insert(edge_id);
