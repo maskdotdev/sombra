@@ -17,11 +17,14 @@ use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::RecordPointer;
 use crate::storage::{deserialize_edge, deserialize_node};
+use crate::storage::heap::RecordStore;
 
 use super::header::HeaderState;
 use crate::db::config::{Config, SyncMode};
+use crate::db::gc::{BackgroundGcState, GarbageCollector, GcConfig, GcStats};
 use crate::db::group_commit::{GroupCommitState, TxId};
 use crate::db::metrics::{ConcurrencyMetrics, PerformanceMetrics};
+use crate::db::timestamp_oracle::TimestampOracle;
 use crate::db::transaction::Transaction;
 
 /// Values that can be indexed for fast property-based lookups.
@@ -196,6 +199,10 @@ pub struct GraphDB {
     pub metrics: PerformanceMetrics,
     pub concurrency_metrics: Arc<ConcurrencyMetrics>,
     pub(crate) pages_with_free_slots: BTreeSet<PageId>,
+    // MVCC support
+    pub(crate) timestamp_oracle: Option<Arc<TimestampOracle>>,
+    pub(crate) gc: Option<GarbageCollector>,
+    pub(crate) bg_gc_state: Option<Arc<Mutex<BackgroundGcState>>>,
 }
 
 impl std::fmt::Debug for GraphDB {
@@ -340,6 +347,29 @@ impl GraphDB {
                 GraphError::InvalidArgument("edge cache size must be greater than zero".into())
             })?;
 
+        // Initialize MVCC components if enabled
+        let (timestamp_oracle, gc, bg_gc_state) = if config.mvcc_enabled {
+            // Restore timestamp oracle from persisted state if available
+            let oracle = if header.max_timestamp > 0 {
+                Arc::new(TimestampOracle::with_timestamp(header.max_timestamp)?)
+            } else {
+                Arc::new(TimestampOracle::new())
+            };
+            let collector = GarbageCollector::new();
+            
+            // Start background GC if configured
+            let bg_gc = if let Some(_interval_secs) = config.gc_interval_secs {
+                // Note: Background GC will be started via start_background_gc() after construction
+                None
+            } else {
+                None
+            };
+            
+            (Some(oracle), Some(collector), bg_gc)
+        } else {
+            (None, None, None)
+        };
+
         let mut db = Self {
             path: path_ref.to_path_buf(),
             pager,
@@ -366,7 +396,15 @@ impl GraphDB {
             metrics: PerformanceMetrics::new(),
             concurrency_metrics: Arc::new(ConcurrencyMetrics::new()),
             pages_with_free_slots: BTreeSet::new(),
+            timestamp_oracle,
+            gc,
+            bg_gc_state,
         };
+
+        // Update header to reflect MVCC state
+        if db.config.mvcc_enabled {
+            db.header.mvcc_enabled = true;
+        }
 
         if db.load_btree_index()? {
             info!("Loaded existing BTree index");
@@ -459,6 +497,12 @@ impl GraphDB {
 
         self.persist_btree_index()?;
         self.persist_property_indexes()?;
+        
+        // Update timestamp in header if MVCC is enabled
+        if let Some(ref oracle) = self.timestamp_oracle {
+            self.header.max_timestamp = oracle.current_timestamp();
+        }
+        
         self.write_header()?;
 
         let dirty_pages = self.take_recent_dirty_pages();
@@ -882,6 +926,138 @@ impl GraphDB {
         Ok(health)
     }
 
+    /// Runs garbage collection on MVCC version chains.
+    ///
+    /// This method scans the database for old versions that are no longer
+    /// visible to any active transaction and reclaims them.
+    ///
+    /// # Returns
+    /// Statistics about the GC run including versions examined and reclaimed.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - MVCC is not enabled
+    /// * `GraphError::Corruption` - Version chain corruption detected
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sombra::GraphDB;
+    ///
+    /// let mut db = GraphDB::open_with_config("test.db", config)?;
+    /// let stats = db.run_gc()?;
+    /// println!("Reclaimed {} versions", stats.versions_reclaimed);
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn run_gc(&mut self) -> Result<GcStats> {
+        // Ensure MVCC is enabled
+        let gc = self.gc.as_ref().ok_or_else(|| {
+            GraphError::InvalidArgument("MVCC is not enabled, cannot run GC".into())
+        })?;
+        
+        let oracle = self.timestamp_oracle.as_ref().ok_or_else(|| {
+            GraphError::InvalidArgument("MVCC is not enabled, timestamp oracle not found".into())
+        })?;
+
+        // Get all node IDs from the index to scan their version chains
+        let record_ids = self.node_index.iter().into_iter();
+
+        // Access RecordStore through pager
+        let mut record_store = RecordStore::new(&mut self.pager);
+        
+        // Run GC
+        gc.run_gc(&mut record_store, record_ids, oracle)
+    }
+
+    /// Starts background garbage collection.
+    ///
+    /// Spawns a background thread that periodically runs GC based on the
+    /// configured `gc_interval_secs`.
+    ///
+    /// # Returns
+    /// Ok(()) if background GC was started successfully.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - MVCC or background GC not configured
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sombra::{GraphDB, Config};
+    ///
+    /// let mut config = Config::default();
+    /// config.mvcc_enabled = true;
+    /// config.gc_interval_secs = Some(60); // Run GC every minute
+    /// let mut db = GraphDB::open_with_config("test.db", config)?;
+    /// db.start_background_gc()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn start_background_gc(&mut self) -> Result<()> {
+        if !self.config.mvcc_enabled {
+            return Err(GraphError::InvalidArgument(
+                "MVCC is not enabled, cannot start background GC".into(),
+            ));
+        }
+
+        if self.config.gc_interval_secs.is_none() {
+            return Err(GraphError::InvalidArgument(
+                "gc_interval_secs not configured, cannot start background GC".into(),
+            ));
+        }
+
+        if self.bg_gc_state.is_some() {
+            return Ok(()); // Already running
+        }
+
+        let oracle = self.timestamp_oracle.as_ref().ok_or_else(|| {
+            GraphError::InvalidArgument("timestamp oracle not found".into())
+        })?;
+
+        // Create GC configuration
+        let gc_config = GcConfig {
+            enabled: true,
+            interval_secs: self.config.gc_interval_secs,
+            min_versions_per_record: 1,
+            scan_batch_size: 1000,
+        };
+
+        // Create background GC state
+        let bg_gc = BackgroundGcState::spawn(
+            self.path.clone(),
+            gc_config,
+            oracle.clone(),
+        )?;
+
+        // Store bg_gc_state for later shutdown
+        self.bg_gc_state = Some(bg_gc);
+
+        Ok(())
+    }
+
+    /// Stops background garbage collection.
+    ///
+    /// Signals the background GC thread to shut down and waits for it to complete.
+    ///
+    /// # Returns
+    /// Ok(()) if background GC was stopped successfully, or was not running.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sombra::GraphDB;
+    ///
+    /// let mut db = GraphDB::open_with_config("test.db", config)?;
+    /// db.start_background_gc()?;
+    /// // ... later ...
+    /// db.stop_background_gc()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn stop_background_gc(&mut self) -> Result<()> {
+        if let Some(bg_gc) = self.bg_gc_state.take() {
+            let state = bg_gc.lock().map_err(|e| {
+                GraphError::InvalidArgument(format!("failed to lock background GC state: {}", e))
+            })?;
+            state.shutdown()?;
+        }
+        Ok(())
+    }
+
     /// Closes the database gracefully.
     ///
     /// Performs a clean shutdown by:
@@ -917,6 +1093,12 @@ impl GraphDB {
         }
 
         self.persist_btree_index()?;
+        
+        // Update timestamp in header if MVCC is enabled
+        if let Some(ref oracle) = self.timestamp_oracle {
+            self.header.max_timestamp = oracle.current_timestamp();
+        }
+        
         self.write_header()?;
 
         self.pager.checkpoint()?;

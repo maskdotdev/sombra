@@ -60,6 +60,7 @@ pub struct Transaction<'db> {
     state: TxState,
     pub dirty_pages: Vec<PageId>,
     start_time: std::time::Instant,
+    snapshot_ts: u64,
 }
 
 impl<'db> Transaction<'db> {
@@ -67,7 +68,15 @@ impl<'db> Transaction<'db> {
         db.enter_transaction(id)?;
         db.start_tracking();
         let epoch = db.increment_epoch();
-        debug!(tx_id = id, epoch = epoch, "Transaction started");
+        
+        // Allocate snapshot timestamp from oracle if MVCC is enabled
+        let snapshot_ts = if let Some(oracle) = &db.timestamp_oracle {
+            oracle.allocate_read_timestamp()
+        } else {
+            0 // Use 0 if MVCC is not enabled
+        };
+        
+        debug!(tx_id = id, epoch = epoch, snapshot_ts = snapshot_ts, "Transaction started");
         Ok(Self {
             db,
             id,
@@ -75,6 +84,7 @@ impl<'db> Transaction<'db> {
             state: TxState::Active,
             dirty_pages: Vec::new(),
             start_time: std::time::Instant::now(),
+            snapshot_ts,
         })
     }
 
@@ -88,6 +98,17 @@ impl<'db> Transaction<'db> {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Returns the snapshot timestamp for this transaction.
+    ///
+    /// This timestamp determines which versions of records are visible to this transaction
+    /// in MVCC mode. If MVCC is not enabled, returns 0.
+    ///
+    /// # Returns
+    /// The snapshot timestamp.
+    pub fn snapshot_ts(&self) -> u64 {
+        self.snapshot_ts
     }
 
     /// Returns the current state of the transaction.
@@ -356,6 +377,12 @@ impl<'db> Transaction<'db> {
         let dirty_page_count = self.dirty_pages.len();
 
         self.db.header.last_committed_tx_id = self.id;
+        
+        // Update timestamp in header if MVCC is enabled
+        if let Some(ref oracle) = self.db.timestamp_oracle {
+            self.db.header.max_timestamp = oracle.current_timestamp();
+        }
+        
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
             let _ = self.db.rollback_transaction(&self.dirty_pages);
