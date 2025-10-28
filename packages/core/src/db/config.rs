@@ -144,6 +144,12 @@ pub struct Config {
     /// This allows multiple readers and writers to work concurrently without blocking.
     pub mvcc_enabled: bool,
     
+    /// Maximum number of concurrent transactions allowed when MVCC is enabled.
+    ///
+    /// Only applies when MVCC is enabled. Controls how many transactions can
+    /// be active simultaneously. None = use default (100).
+    pub max_concurrent_transactions: Option<usize>,
+    
     /// Interval in seconds between garbage collection runs (None = disabled).
     ///
     /// Only applies when MVCC is enabled. GC reclaims old versions that are
@@ -174,6 +180,7 @@ impl Default for Config {
             compaction_threshold_percent: 50,
             compaction_batch_size: 100,
             mvcc_enabled: false,
+            max_concurrent_transactions: None,
             gc_interval_secs: None,
         }
     }
@@ -212,6 +219,7 @@ impl Config {
             compaction_threshold_percent: 50,
             compaction_batch_size: 100,
             mvcc_enabled: false,
+            max_concurrent_transactions: None,
             gc_interval_secs: None,
         }
     }
@@ -248,6 +256,7 @@ impl Config {
             compaction_threshold_percent: 40,
             compaction_batch_size: 200,
             mvcc_enabled: false,
+            max_concurrent_transactions: None,
             gc_interval_secs: None,
         }
     }
@@ -287,6 +296,7 @@ impl Config {
             compaction_threshold_percent: 50,
             compaction_batch_size: 100,
             mvcc_enabled: false,
+            max_concurrent_transactions: None,
             gc_interval_secs: None,
         }
     }
@@ -326,6 +336,7 @@ impl Config {
             compaction_threshold_percent: 60,
             compaction_batch_size: 50,
             mvcc_enabled: false,
+            max_concurrent_transactions: None,
             gc_interval_secs: None,
         }
     }
