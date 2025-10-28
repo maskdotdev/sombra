@@ -446,15 +446,20 @@ impl ConcurrentTransaction {
             .allocate_commit_timestamp();
 
         // Update all created versions with commit timestamp
-        let mut record_store = db.record_store();
-        for version_ptr in &self.created_versions {
-            use crate::storage::version_chain::update_version_commit_timestamp;
-            update_version_commit_timestamp(&mut record_store, *version_ptr, commit_ts)?;
-        }
+        {
+            let mut pager_guard = db.pager.lock().unwrap();
+            let mut record_store = crate::storage::heap::RecordStore::new(&mut *pager_guard);
+            for version_ptr in &self.created_versions {
+                use crate::storage::version_chain::update_version_commit_timestamp;
+                update_version_commit_timestamp(&mut record_store, *version_ptr, commit_ts)?;
+            }
 
-        // Register dirty pages from version updates
-        let version_dirty_pages = record_store.take_dirty_pages();
-        self.dirty_pages.extend(version_dirty_pages);
+            // Register dirty pages from version updates
+            let version_dirty_pages = record_store.take_dirty_pages();
+            drop(record_store);
+            drop(pager_guard);
+            self.dirty_pages.extend(version_dirty_pages);
+        }
 
         // Complete commit in MVCC manager
         let mvcc_tx_manager = db.mvcc_tx_manager.as_mut().ok_or_else(|| {

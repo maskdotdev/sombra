@@ -4,16 +4,17 @@ use crate::db::group_commit::{CommitRequest, ControlMessage, TxId};
 use crate::error::{acquire_lock, GraphError, Result};
 use crate::pager::PageId;
 use crate::storage::header::Header;
-use crate::storage::heap::RecordPointer;
+use crate::storage::heap::{RecordPointer, RecordStore};
 use crate::storage::version::{VersionMetadata, VersionedRecordKind};
 use std::mem;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use tracing::warn;
 
 impl GraphDB {
     pub fn commit_to_wal(&mut self, tx_id: TxId, dirty_pages: &[PageId]) -> Result<()> {
         if dirty_pages.is_empty() {
-            self.pager.commit_shadow_transaction();
+            self.pager.lock().unwrap().commit_shadow_transaction();
             return Ok(());
         }
 
@@ -22,10 +23,10 @@ impl GraphDB {
         pages.dedup();
 
         for &page_id in &pages {
-            self.pager.append_page_to_wal(page_id, tx_id)?;
+            self.pager.lock().unwrap().append_page_to_wal(page_id, tx_id)?;
         }
 
-        self.pager.append_commit_to_wal(tx_id)?;
+        self.pager.lock().unwrap().append_commit_to_wal(tx_id)?;
 
         self.transactions_since_sync += 1;
         self.transactions_since_checkpoint += 1;
@@ -65,7 +66,7 @@ impl GraphDB {
         };
 
         if should_sync {
-            self.pager.sync_wal()?;
+            self.pager.lock().unwrap().sync_wal()?;
             self.transactions_since_sync = 0;
         }
 
@@ -74,7 +75,7 @@ impl GraphDB {
             self.transactions_since_checkpoint = 0;
         }
 
-        let wal_size_bytes = self.pager.wal_size()?;
+        let wal_size_bytes = self.pager.lock().unwrap().wal_size()?;
         let wal_size_mb = wal_size_bytes / (1024 * 1024);
         let max_wal_mb = self.config.max_wal_size_mb;
         let warning_threshold_mb = self.config.wal_size_warning_threshold_mb;
@@ -96,12 +97,12 @@ impl GraphDB {
             self.transactions_since_checkpoint = 0;
         }
 
-        self.pager.commit_shadow_transaction();
+        self.pager.lock().unwrap().commit_shadow_transaction();
         Ok(())
     }
 
     pub fn rollback_transaction(&mut self, dirty_pages: &[PageId]) -> Result<()> {
-        self.pager.rollback_shadow_transaction()?;
+        self.pager.lock().unwrap().rollback_shadow_transaction()?;
 
         self.reload_header_state()?;
 
@@ -112,38 +113,45 @@ impl GraphDB {
     }
 
     fn reload_header_state(&mut self) -> Result<()> {
-        let page = self.pager.fetch_page(0)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(0)?;
         let header = match Header::read(&page.data)? {
             Some(header) => header,
-            None => Header::new(self.pager.page_size())?,
+            None => Header::new(pager_guard.page_size())?,
         };
+        drop(pager_guard);
         self.header = HeaderState::from(header);
         Ok(())
     }
 
     pub fn start_tracking(&mut self) {
-        self.recent_dirty_pages.clear();
-        self.tracking_enabled = true;
+        self.recent_dirty_pages.lock().unwrap().clear();
+        self.tracking_enabled.store(true, Ordering::Release);
     }
 
     pub fn stop_tracking(&mut self) {
-        self.tracking_enabled = false;
-        self.recent_dirty_pages.clear();
+        self.tracking_enabled.store(false, Ordering::Release);
+        self.recent_dirty_pages.lock().unwrap().clear();
     }
 
     pub fn take_recent_dirty_pages(&mut self) -> Vec<PageId> {
-        if !self.tracking_enabled || self.recent_dirty_pages.is_empty() {
+        if !self.tracking_enabled.load(Ordering::Acquire) {
             return Vec::new();
         }
-        let mut pages = mem::take(&mut self.recent_dirty_pages);
+        let mut guard = self.recent_dirty_pages.lock().unwrap();
+        if guard.is_empty() {
+            return Vec::new();
+        }
+        let mut pages = mem::take(&mut *guard);
+        drop(guard);
         pages.sort_unstable();
         pages.dedup();
         pages
     }
 
     pub(crate) fn record_page_write(&mut self, page_id: PageId) {
-        if self.tracking_enabled {
-            self.recent_dirty_pages.push(page_id);
+        if self.tracking_enabled.load(Ordering::Acquire) {
+            self.recent_dirty_pages.lock().unwrap().push(page_id);
         }
     }
 
@@ -161,7 +169,7 @@ impl GraphDB {
         if let Some(ref mut tx_manager) = self.mvcc_tx_manager {
             // Register transaction with MVCC manager
             tx_manager.begin_transaction(tx_id)?;
-            self.pager.begin_shadow_transaction();
+            self.pager.lock().unwrap().begin_shadow_transaction();
             Ok(())
         } else {
             // Legacy single-writer mode
@@ -170,7 +178,7 @@ impl GraphDB {
                     "nested transactions are not supported".into(),
                 ));
             }
-            self.pager.begin_shadow_transaction();
+            self.pager.lock().unwrap().begin_shadow_transaction();
             self.active_transaction = Some(tx_id);
             Ok(())
         }
@@ -195,10 +203,12 @@ impl GraphDB {
     }
 
     pub fn write_header(&mut self) -> Result<()> {
-        let header = self.header.to_header(self.pager.page_size())?;
-        let page = self.pager.fetch_page(0)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let header = self.header.to_header(pager_guard.page_size())?;
+        let page = pager_guard.fetch_page(0)?;
         Header::write(&header, &mut page.data)?;
         page.dirty = true;
+        drop(pager_guard);
         self.record_page_write(0);
         Ok(())
     }
@@ -228,13 +238,21 @@ impl GraphDB {
         
         // Fast path: if we have tracked version pointers, use them directly
         if !version_pointers.is_empty() {
-            let mut record_store = RecordStore::new(&mut self.pager);
-            for &pointer in version_pointers {
-                record_store.update_commit_ts(pointer, commit_ts)?;
-            }
+            let update_dirty_pages = {
+                let mut pager_guard = self.pager.lock().unwrap();
+                let mut record_store = RecordStore::new(&mut *pager_guard);
+                for &pointer in version_pointers {
+                    record_store.update_commit_ts(pointer, commit_ts)?;
+                }
+                
+                // Extract dirty pages before dropping guard
+                let dirty_pages = record_store.take_dirty_pages();
+                drop(record_store);
+                drop(pager_guard);
+                dirty_pages
+            };
             
             // Register dirty pages with GraphDB
-            let update_dirty_pages = record_store.take_dirty_pages();
             for page_id in update_dirty_pages {
                 self.record_page_write(page_id);
             }
@@ -251,7 +269,8 @@ impl GraphDB {
         
         // Scan all dirty pages for versioned records created by this transaction
         for &page_id in dirty_pages {
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
             
@@ -297,16 +316,25 @@ impl GraphDB {
                     versions_to_update.push(pointer);
                 }
             }
+            drop(pager_guard);
         }
         
         // Now update all collected versions
-        let mut record_store = RecordStore::new(&mut self.pager);
-        for pointer in versions_to_update {
-            record_store.update_commit_ts(pointer, commit_ts)?;
-        }
+        let update_dirty_pages = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut record_store = RecordStore::new(&mut *pager_guard);
+            for pointer in versions_to_update {
+                record_store.update_commit_ts(pointer, commit_ts)?;
+            }
+            
+            // Extract dirty pages before dropping guard
+            let dirty_pages = record_store.take_dirty_pages();
+            drop(record_store);
+            drop(pager_guard);
+            dirty_pages
+        };
         
         // Register dirty pages with GraphDB
-        let update_dirty_pages = record_store.take_dirty_pages();
         for page_id in update_dirty_pages {
             self.record_page_write(page_id);
         }

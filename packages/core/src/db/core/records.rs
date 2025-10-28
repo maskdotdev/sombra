@@ -13,7 +13,7 @@ use std::convert::TryFrom;
 
 impl GraphDB {
     pub fn load_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
-        if let Some(edge) = self.edge_cache.get(&edge_id) {
+        if let Some(edge) = self.edge_cache.lock().unwrap().get(&edge_id) {
             return Ok(edge.clone());
         }
 
@@ -21,7 +21,8 @@ impl GraphDB {
             .edge_index
             .get(&edge_id)
             .ok_or(GraphError::NotFound("edge"))?;
-        let page = self.pager.fetch_page(pointer.page_id)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(pointer.page_id)?;
         let record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice(pointer.slot_index as usize)?;
         let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
@@ -55,7 +56,7 @@ impl GraphDB {
             deserialize_edge(payload)?
         };
 
-        self.edge_cache.put(edge_id, edge.clone());
+        self.edge_cache.lock().unwrap().put(edge_id, edge.clone());
         Ok(edge)
     }
 
@@ -92,13 +93,16 @@ impl GraphDB {
             .clone();
 
         // Use VersionChainReader to find the visible version
-        let mut record_store = self.record_store();
+        let mut pager_guard = self.pager.lock().unwrap();
+        let mut record_store = RecordStore::new(&mut *pager_guard);
         let versioned_record = VersionChainReader::read_version_for_snapshot(
             &mut record_store,
             head_pointer,
             snapshot_ts,
             current_tx_id,
         )?;
+        drop(record_store);
+        drop(pager_guard);
 
         match versioned_record {
             Some(vr) => {
@@ -116,7 +120,7 @@ impl GraphDB {
         let mut loaded_edges: HashMap<EdgeId, Edge> = HashMap::new();
 
         for &edge_id in edge_ids {
-            if let Some(edge) = self.edge_cache.get(&edge_id) {
+            if let Some(edge) = self.edge_cache.lock().unwrap().get(&edge_id) {
                 loaded_edges.insert(edge_id, edge.clone());
             } else {
                 let pointer = *self
@@ -131,7 +135,8 @@ impl GraphDB {
         }
 
         for (page_id, edges_on_page) in edges_to_load {
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
 
             for (edge_id, pointer) in edges_on_page {
@@ -165,7 +170,7 @@ impl GraphDB {
                     deserialize_edge(payload)?
                 };
 
-                self.edge_cache.put(edge_id, edge.clone());
+                self.edge_cache.lock().unwrap().put(edge_id, edge.clone());
                 loaded_edges.insert(edge_id, edge);
             }
         }
@@ -182,7 +187,8 @@ impl GraphDB {
     }
 
     pub(crate) fn read_node_at(&mut self, pointer: RecordPointer) -> Result<Node> {
-        let page = self.pager.fetch_page(pointer.page_id)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(pointer.page_id)?;
         let record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice(pointer.slot_index as usize)?;
         let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
@@ -217,9 +223,7 @@ impl GraphDB {
         }
     }
 
-    pub(crate) fn record_store(&mut self) -> RecordStore<'_> {
-        RecordStore::new(&mut self.pager)
-    }
+    // Helper removed - RecordStore creation inlined at call sites due to Mutex
 
     pub(crate) fn insert_record(
         &mut self,
@@ -227,8 +231,16 @@ impl GraphDB {
         preferred_page: Option<PageId>,
     ) -> Result<RecordPointer> {
         if let Some(page_id) = preferred_page {
-            let mut store = self.record_store();
-            if let Some(pointer) = store.try_insert_into_page(page_id, record)? {
+            let pointer_opt = {
+                let mut pager_guard = self.pager.lock().unwrap();
+                let mut store = RecordStore::new(&mut *pager_guard);
+                let result = store.try_insert_into_page(page_id, record)?;
+                drop(store);
+                drop(pager_guard);
+                result
+            };
+            
+            if let Some(pointer) = pointer_opt {
                 self.record_page_write(pointer.page_id);
                 return Ok(pointer);
             }
@@ -236,31 +248,49 @@ impl GraphDB {
 
         // Try to reuse slots from pages with free slots
         for &page_id in self.pages_with_free_slots.clone().iter() {
-            let mut store = self.record_store();
-            if let Some(pointer) = store.try_insert_into_page(page_id, record)? {
+            let pointer_opt = {
+                let mut pager_guard = self.pager.lock().unwrap();
+                let mut store = RecordStore::new(&mut *pager_guard);
+                let result = store.try_insert_into_page(page_id, record)?;
+                drop(store);
+                drop(pager_guard);
+                result
+            };
+            
+            if let Some(pointer) = pointer_opt {
                 self.record_page_write(pointer.page_id);
-                let page = self.pager.fetch_page(page_id)?;
+                let mut pager_guard = self.pager.lock().unwrap();
+                let page = pager_guard.fetch_page(page_id)?;
                 let record_page = RecordPage::from_bytes(&mut page.data)?;
                 if !record_page.has_free_slots()? {
                     self.pages_with_free_slots.remove(&page_id);
                 }
+                drop(pager_guard);
                 return Ok(pointer);
             }
         }
 
         if let Some(page_id) = self.take_free_page()? {
-            {
-                let mut store = self.record_store();
-                if let Some(pointer) = store.try_insert_into_page(page_id, record)? {
-                    self.record_page_write(pointer.page_id);
-                    return Ok(pointer);
-                }
+            let pointer_opt = {
+                let mut pager_guard = self.pager.lock().unwrap();
+                let mut store = RecordStore::new(&mut *pager_guard);
+                let result = store.try_insert_into_page(page_id, record)?;
+                drop(store);
+                drop(pager_guard);
+                result
+            };
+            
+            if let Some(pointer) = pointer_opt {
+                self.record_page_write(pointer.page_id);
+                return Ok(pointer);
             }
+            
             self.push_free_page(page_id)?;
         }
 
-        let page_id = self.pager.allocate_page()?;
-        let page = self.pager.fetch_page(page_id)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page_id = pager_guard.allocate_page()?;
+        let page = pager_guard.fetch_page(page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         record_page.initialize()?;
         if !record_page.can_fit(record.len())? {
@@ -271,6 +301,7 @@ impl GraphDB {
         let slot = record_page.append_record(record)?;
         let byte_offset = record_page.record_offset(slot as usize)?;
         page.dirty = true;
+        drop(pager_guard);
         self.record_page_write(page_id);
         Ok(RecordPointer {
             page_id,
@@ -281,8 +312,14 @@ impl GraphDB {
 
     pub(crate) fn free_record(&mut self, pointer: RecordPointer) -> Result<()> {
         let page_id = pointer.page_id;
-        let mut store = self.record_store();
-        let page_empty = store.mark_free(pointer)?;
+        let page_empty = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut store = RecordStore::new(&mut *pager_guard);
+            let result = store.mark_free(pointer)?;
+            drop(store);
+            drop(pager_guard);
+            result
+        };
 
         if page_empty {
             self.push_free_page(page_id)?;
@@ -300,25 +337,29 @@ impl GraphDB {
         let Some(head) = self.header.free_page_head else {
             return Ok(None);
         };
-        let page = self.pager.fetch_page(head)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(head)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         let next = record_page.free_list_next()?;
         self.header.free_page_head = if next == 0 { None } else { Some(next) };
         record_page.clear()?;
         record_page.initialize()?;
         page.dirty = true;
+        drop(pager_guard);
         self.record_page_write(head);
         Ok(Some(head))
     }
 
     pub(crate) fn push_free_page(&mut self, page_id: PageId) -> Result<()> {
-        let page = self.pager.fetch_page(page_id)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         record_page.clear()?;
         let next = self.header.free_page_head.unwrap_or(0);
         record_page.set_free_list_next(next);
         self.header.free_page_head = Some(page_id);
         page.dirty = true;
+        drop(pager_guard);
         self.record_page_write(page_id);
         Ok(())
     }
@@ -329,7 +370,8 @@ impl GraphDB {
         kind: PointerKind,
         new_edge_id: EdgeId,
     ) -> Result<()> {
-        let page = self.pager.fetch_page(pointer.page_id)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(pointer.page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice_mut(pointer.slot_index as usize)?;
         let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
@@ -380,6 +422,7 @@ impl GraphDB {
         let data_end = data_start + new_payload.len();
         record[data_start..data_end].copy_from_slice(&new_payload);
         page.dirty = true;
+        drop(pager_guard);
         self.record_page_write(pointer.page_id);
         Ok(())
     }
@@ -390,7 +433,8 @@ impl GraphDB {
         kind: EdgePointerKind,
         new_edge_id: EdgeId,
     ) -> Result<()> {
-        let page = self.pager.fetch_page(pointer.page_id)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let page = pager_guard.fetch_page(pointer.page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         let record = record_page.record_slice_mut(pointer.slot_index as usize)?;
         let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
@@ -442,8 +486,9 @@ impl GraphDB {
         let data_end = data_start + new_payload.len();
         record[data_start..data_end].copy_from_slice(&new_payload);
         page.dirty = true;
+        drop(pager_guard);
         self.record_page_write(pointer.page_id);
-        self.edge_cache.pop(&edge_id);
+        self.edge_cache.lock().unwrap().pop(&edge_id);
         Ok(())
     }
 
@@ -495,7 +540,7 @@ impl GraphDB {
 
     fn recompute_last_record_page(&mut self) -> Result<()> {
         let mut last = None;
-        let page_count = self.pager.page_count();
+        let page_count = self.pager.lock().unwrap().page_count();
         if page_count <= 1 {
             self.header.last_record_page = None;
             return Ok(());
@@ -503,12 +548,15 @@ impl GraphDB {
         for page_idx in (1..page_count).rev() {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             if record_page.live_record_count()? > 0 {
                 last = Some(page_id);
+                drop(pager_guard);
                 break;
             }
+            drop(pager_guard);
         }
         self.header.last_record_page = last;
         Ok(())

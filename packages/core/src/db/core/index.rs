@@ -18,14 +18,16 @@ impl GraphDB {
             };
 
         let mut data = Vec::new();
-        let page_size = self.pager.page_size();
+        let page_size = self.pager.lock().unwrap().page_size();
         let mut current_page = index_page;
         let mut bytes_read = 0;
 
         while bytes_read < index_size {
-            let page = self.pager.fetch_page(current_page)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(current_page)?;
             let to_read = (index_size - bytes_read).min(page_size);
             data.extend_from_slice(&page.data[..to_read]);
+            drop(pager_guard);
             bytes_read += to_read;
             current_page += 1;
         }
@@ -44,7 +46,7 @@ impl GraphDB {
             return Ok(());
         }
 
-        let page_size = self.pager.page_size();
+        let page_size = self.pager.lock().unwrap().page_size();
         let pages_needed = data_size.div_ceil(page_size);
 
         let start_page = if let Some(old_page) = self.header.btree_index_page {
@@ -57,10 +59,10 @@ impl GraphDB {
                 for i in 0..old_pages {
                     self.push_free_page(old_page + i as u32)?;
                 }
-                let start = self.pager.allocate_page()?;
+                let start = self.pager.lock().unwrap().allocate_page()?;
                 for i in 1..pages_needed {
                     let expected_page = start + i as u32;
-                    let allocated = self.pager.allocate_page()?;
+                    let allocated = self.pager.lock().unwrap().allocate_page()?;
                     if allocated != expected_page {
                         return Err(GraphError::Corruption(format!(
                             "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
@@ -70,10 +72,10 @@ impl GraphDB {
                 start
             }
         } else {
-            let new_page = self.pager.allocate_page()?;
+            let new_page = self.pager.lock().unwrap().allocate_page()?;
             for i in 1..pages_needed {
                 let expected_page = new_page + i as u32;
-                let allocated = self.pager.allocate_page()?;
+                let allocated = self.pager.lock().unwrap().allocate_page()?;
                 if allocated != expected_page {
                     return Err(GraphError::Corruption(format!(
                         "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
@@ -87,13 +89,15 @@ impl GraphDB {
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
 
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let to_write = (data_size - offset).min(page_size);
             page.data[..to_write].copy_from_slice(&data[offset..offset + to_write]);
             if to_write < page_size {
                 page.data[to_write..].fill(0);
             }
             page.dirty = true;
+            drop(pager_guard);
             self.record_page_write(page_id);
             offset += to_write;
         }
@@ -104,22 +108,36 @@ impl GraphDB {
     }
 
     pub(crate) fn persist_property_indexes(&mut self) -> Result<()> {
-        let mut serializer = PropertyIndexSerializer::new(&mut self.pager);
-        let (root_page, count, written_pages) =
-            serializer.serialize_indexes(&self.property_indexes)?;
+        let (root_page, count, written_pages) = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut serializer = PropertyIndexSerializer::new(&mut *pager_guard);
+            let (root_page, count, written_pages) =
+                serializer.serialize_indexes(&self.property_indexes)?;
 
-        if root_page == 0 {
-            self.header.property_index_root_page = None;
-            self.header.property_index_count = 0;
-            return Ok(());
-        }
+            if root_page == 0 {
+                drop(serializer);
+                drop(pager_guard);
+                self.header.property_index_root_page = None;
+                self.header.property_index_count = 0;
+                return Ok(());
+            }
 
-        if let Some(old_root) = self.header.property_index_root_page {
-            let old_pages = serializer.collect_old_pages(old_root)?;
+            let old_pages = if let Some(old_root) = self.header.property_index_root_page {
+                serializer.collect_old_pages(old_root)?
+            } else {
+                Vec::new()
+            };
+            
+            drop(serializer);
+            drop(pager_guard);
+            
+            // Free old pages if any
             for page_id in old_pages {
                 self.push_free_page(page_id)?;
             }
-        }
+            
+            (root_page, count, written_pages)
+        };
 
         for page_id in written_pages {
             self.record_page_write(page_id);
@@ -140,9 +158,12 @@ impl GraphDB {
             _ => return Ok(false),
         };
 
-        let mut serializer = PropertyIndexSerializer::new(&mut self.pager);
+        let mut pager_guard = self.pager.lock().unwrap();
+        let mut serializer = PropertyIndexSerializer::new(&mut *pager_guard);
         match serializer.deserialize_indexes(root_page) {
             Ok(indexes) => {
+                drop(serializer);
+                drop(pager_guard);
                 self.property_indexes = indexes;
                 info!(
                     count = self.property_indexes.len(),
@@ -151,6 +172,8 @@ impl GraphDB {
                 Ok(true)
             }
             Err(e) => {
+                drop(serializer);
+                drop(pager_guard);
                 warn!(
                     error = ?e,
                     "Failed to load property indexes, will rebuild"
@@ -175,7 +198,7 @@ impl GraphDB {
         self.edge_index.clear();
         self.label_index.clear();
         self.property_indexes.clear();
-        self.node_cache.clear();
+        self.node_cache.lock().unwrap().clear();
         self.outgoing_adjacency.clear();
         self.incoming_adjacency.clear();
         self.outgoing_neighbors_cache.clear();
@@ -184,12 +207,12 @@ impl GraphDB {
         let mut last_record_page: Option<PageId> = None;
         let mut max_node_id = 0;
         let mut max_edge_id = 0;
-        let page_count = self.pager.page_count();
+        let page_count = self.pager.lock().unwrap().page_count();
 
         let btree_pages: std::collections::HashSet<PageId> =
             if let Some(btree_start) = self.header.btree_index_page {
                 let btree_size = self.header.btree_index_size as usize;
-                let page_size = self.pager.page_size();
+                let page_size = self.pager.lock().unwrap().page_size();
                 let btree_page_count = btree_size.div_ceil(page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
@@ -204,7 +227,8 @@ impl GraphDB {
                 continue;
             }
 
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
             if record_count == 0 {
@@ -274,6 +298,7 @@ impl GraphDB {
                     }
                 }
             }
+            drop(pager_guard);
             if live_on_page > 0 {
                 last_record_page = Some(page_id);
             }
@@ -293,14 +318,16 @@ impl GraphDB {
 
     fn try_load_btree_index(&mut self, start_page: PageId, size: usize) -> Result<()> {
         let mut data = Vec::with_capacity(size);
-        let page_size = self.pager.page_size();
+        let page_size = self.pager.lock().unwrap().page_size();
         let pages_needed = size.div_ceil(page_size);
 
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let bytes_to_copy = (size - data.len()).min(page_size);
             data.extend_from_slice(&page.data[..bytes_to_copy]);
+            drop(pager_guard);
         }
 
         self.node_index = BTreeIndex::deserialize(&data)?;
@@ -311,7 +338,7 @@ impl GraphDB {
         self.edge_index.clear();
         self.label_index.clear();
         self.property_indexes.clear();
-        self.node_cache.clear();
+        self.node_cache.lock().unwrap().clear();
         self.outgoing_adjacency.clear();
         self.incoming_adjacency.clear();
         self.outgoing_neighbors_cache.clear();
@@ -319,12 +346,12 @@ impl GraphDB {
 
         let mut last_record_page: Option<PageId> = None;
         let mut max_edge_id = 0;
-        let page_count = self.pager.page_count();
+        let page_count = self.pager.lock().unwrap().page_count();
 
         let btree_pages: std::collections::HashSet<PageId> =
             if let Some(btree_start) = self.header.btree_index_page {
                 let btree_size = self.header.btree_index_size as usize;
-                let page_size = self.pager.page_size();
+                let page_size = self.pager.lock().unwrap().page_size();
                 let btree_page_count = btree_size.div_ceil(page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
@@ -339,7 +366,8 @@ impl GraphDB {
                 continue;
             }
 
-            let page = self.pager.fetch_page(page_id)?;
+            let mut pager_guard = self.pager.lock().unwrap();
+            let page = pager_guard.fetch_page(page_id)?;
             let record_page = RecordPage::from_bytes(&mut page.data)?;
             let record_count = record_page.record_count()? as usize;
             if record_count == 0 {
@@ -407,6 +435,7 @@ impl GraphDB {
                     }
                 }
             }
+            drop(pager_guard);
             if live_on_page > 0 {
                 last_record_page = Some(page_id);
             }

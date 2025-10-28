@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{info, warn};
 
@@ -176,7 +176,8 @@ impl From<&PropertyValue> for Option<IndexableValue> {
 /// ```
 pub struct GraphDB {
     pub(crate) path: PathBuf,
-    pub(crate) pager: Pager,
+    // Wrapped in Mutex for interior mutability - allows &self access for reads
+    pub(crate) pager: Mutex<Pager>,
     pub header: HeaderState,
     pub(crate) epoch: AtomicU64,
     pub(crate) node_index: BTreeIndex,
@@ -184,15 +185,18 @@ pub struct GraphDB {
     pub(crate) label_index: HashMap<String, BTreeSet<NodeId>>,
     pub(crate) property_indexes:
         HashMap<(String, String), BTreeMap<IndexableValue, BTreeSet<NodeId>>>,
-    pub(crate) node_cache: LruCache<NodeId, Node>,
-    pub(crate) edge_cache: LruCache<EdgeId, Edge>,
+    // Wrapped in Mutex for interior mutability - LRU cache needs mutation
+    pub(crate) node_cache: Mutex<LruCache<NodeId, Node>>,
+    pub(crate) edge_cache: Mutex<LruCache<EdgeId, Edge>>,
     pub(crate) outgoing_adjacency: HashMap<NodeId, Vec<EdgeId>>,
     pub(crate) incoming_adjacency: HashMap<NodeId, Vec<EdgeId>>,
     pub(crate) outgoing_neighbors_cache: HashMap<NodeId, Vec<NodeId>>,
     pub(crate) incoming_neighbors_cache: HashMap<NodeId, Vec<NodeId>>,
     pub(crate) next_tx_id: TxId,
-    pub(crate) tracking_enabled: bool,
-    pub(crate) recent_dirty_pages: Vec<PageId>,
+    // AtomicBool for lock-free interior mutability
+    pub(crate) tracking_enabled: AtomicBool,
+    // Wrapped in Mutex for interior mutability
+    pub(crate) recent_dirty_pages: Mutex<Vec<PageId>>,
     pub active_transaction: Option<TxId>,
     pub(crate) mvcc_tx_manager: Option<MvccTransactionManager>,
     pub(crate) config: Config,
@@ -218,7 +222,7 @@ impl std::fmt::Debug for GraphDB {
             .field("header", &self.header)
             .field("epoch", &self.epoch.load(Ordering::Relaxed))
             .field("next_tx_id", &self.next_tx_id)
-            .field("tracking_enabled", &self.tracking_enabled)
+            .field("tracking_enabled", &self.tracking_enabled.load(Ordering::Relaxed))
             .field("active_transaction", &self.active_transaction)
             .field("config", &self.config)
             .field("transactions_since_sync", &self.transactions_since_sync)
@@ -400,22 +404,22 @@ impl GraphDB {
 
         let mut db = Self {
             path: path_ref.to_path_buf(),
-            pager,
+            pager: Mutex::new(pager),
             header: HeaderState::from(header),
             epoch: AtomicU64::new(0),
             node_index: BTreeIndex::new(),
             edge_index: HashMap::new(),
             label_index: HashMap::new(),
             property_indexes: HashMap::new(),
-            node_cache: LruCache::new(cache_size),
-            edge_cache: LruCache::new(edge_cache_size),
+            node_cache: Mutex::new(LruCache::new(cache_size)),
+            edge_cache: Mutex::new(LruCache::new(edge_cache_size)),
             outgoing_adjacency: HashMap::new(),
             incoming_adjacency: HashMap::new(),
             outgoing_neighbors_cache: HashMap::new(),
             incoming_neighbors_cache: HashMap::new(),
             next_tx_id,
-            tracking_enabled: false,
-            recent_dirty_pages: Vec::new(),
+            tracking_enabled: AtomicBool::new(false),
+            recent_dirty_pages: Mutex::new(Vec::new()),
             active_transaction: None,
             config,
             transactions_since_sync: 0,
@@ -498,7 +502,7 @@ impl GraphDB {
     /// * `GraphError::Io` - Disk I/O error
     pub fn flush(&mut self) -> Result<()> {
         self.write_header()?;
-        self.pager.checkpoint()
+        self.pager.lock().unwrap().checkpoint()
     }
 
     /// Checkpoints the database by flushing dirty pages and truncating the WAL.
@@ -520,7 +524,7 @@ impl GraphDB {
     /// * `GraphError::Corruption` - Index corruption detected
     pub fn checkpoint(&mut self) -> Result<()> {
         let start = std::time::Instant::now();
-        let pages_flushed = self.pager.dirty_page_count();
+        let pages_flushed = self.pager.lock().unwrap().dirty_page_count();
         info!("Starting checkpoint");
 
         self.start_tracking();
@@ -539,10 +543,10 @@ impl GraphDB {
         self.stop_tracking();
 
         for &page_id in &dirty_pages {
-            self.pager.append_page_to_wal(page_id, 0)?;
+            self.pager.lock().unwrap().append_page_to_wal(page_id, 0)?;
         }
 
-        self.pager.checkpoint()?;
+        self.pager.lock().unwrap().checkpoint()?;
 
         if !self.load_btree_index()? {
             return Err(GraphError::Corruption(
@@ -567,7 +571,7 @@ impl GraphDB {
     /// # Returns
     /// The page size in bytes.
     pub fn page_size(&self) -> usize {
-        self.pager.page_size()
+        self.pager.lock().unwrap().page_size()
     }
 
     /// Returns the filesystem path of the database.
@@ -623,10 +627,10 @@ impl GraphDB {
         let mut nodes_seen: HashSet<NodeId> = HashSet::new();
         let mut edges_seen: HashMap<EdgeId, (NodeId, NodeId)> = HashMap::new();
 
-        let page_count = self.pager.page_count();
+        let page_count = self.pager.lock().unwrap().page_count();
         for page_index in 0..page_count {
             let page_id = page_index as PageId;
-            let mut page_bytes = match self.pager.read_page_image(page_id) {
+            let mut page_bytes = match self.pager.lock().unwrap().read_page_image(page_id) {
                 Ok(data) => data,
                 Err(GraphError::Corruption(message)) => {
                     if message.contains("checksum") {
@@ -956,7 +960,7 @@ impl GraphDB {
             healthy: cache_hit_rate >= cache_threshold,
         });
 
-        let wal_size = self.pager.wal_size()?;
+        let wal_size = self.pager.lock().unwrap().wal_size()?;
         let wal_threshold = 100 * 1024 * 1024;
         health.add_check(Check::WalSize {
             bytes: wal_size,
@@ -1020,14 +1024,18 @@ impl GraphDB {
         // Get all node IDs from the index to scan their version chains
         let record_ids = self.node_index.iter().into_iter();
 
-        // Access RecordStore through pager
-        let mut record_store = RecordStore::new(&mut self.pager);
+        // Access RecordStore through pager - need to lock pager for the duration
+        let mut pager_guard = self.pager.lock().unwrap();
+        let mut record_store = RecordStore::new(&mut *pager_guard);
         
         // Run GC
         let result = gc.run_gc(&mut record_store, record_ids, oracle)?;
         
         // Register dirty pages from GC operations
         let dirty_pages = record_store.take_dirty_pages();
+        drop(record_store);
+        drop(pager_guard);
+        
         for page_id in dirty_pages {
             self.record_page_write(page_id);
         }
@@ -1175,7 +1183,7 @@ impl GraphDB {
         
         self.write_header()?;
 
-        self.pager.checkpoint()?;
+        self.pager.lock().unwrap().checkpoint()?;
 
         info!("Database closed successfully");
         Ok(())

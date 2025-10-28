@@ -4,6 +4,7 @@ use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, NodeId, NULL_EDGE_ID};
 use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_edge;
+use crate::storage::heap::RecordStore;
 
 impl GraphDB {
     pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId> {
@@ -57,24 +58,32 @@ impl GraphDB {
         let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
             
-            let mut record_store = self.record_store();
-            let pointer = store_new_version(
-                &mut record_store,
-                None,  // No previous version for new edges
-                edge_id,
-                RecordKind::Edge,
-                &payload,
-                tx_id,
-                commit_ts,
-            )?;
+            let dirty_pages = {
+                let mut pager_guard = self.pager.lock().unwrap();
+                let mut record_store = RecordStore::new(&mut *pager_guard);
+                let pointer = store_new_version(
+                    &mut record_store,
+                    None,  // No previous version for new edges
+                    edge_id,
+                    RecordKind::Edge,
+                    &payload,
+                    tx_id,
+                    commit_ts,
+                )?;
+                
+                // Collect dirty pages before dropping guards
+                let dirty_pages = record_store.take_dirty_pages();
+                drop(record_store);
+                drop(pager_guard);
+                Ok::<_, GraphError>((pointer, dirty_pages))
+            }?;
             
             // Register dirty pages with GraphDB
-            let dirty_pages = record_store.take_dirty_pages();
-            for page_id in dirty_pages {
+            for page_id in dirty_pages.1 {
                 self.record_page_write(page_id);
             }
             
-            (pointer, Some(pointer))
+            (dirty_pages.0, Some(dirty_pages.0))
         } else {
             // Legacy non-versioned record
             let record = encode_record(RecordKind::Edge, &payload)?;
@@ -101,9 +110,9 @@ impl GraphDB {
         self.outgoing_neighbors_cache.remove(&edge.source_node_id);
         self.incoming_neighbors_cache.remove(&edge.target_node_id);
 
-        self.node_cache.pop(&edge.source_node_id);
-        self.node_cache.pop(&edge.target_node_id);
-        self.edge_cache.put(edge_id, edge);
+        self.node_cache.lock().unwrap().pop(&edge.source_node_id);
+        self.node_cache.lock().unwrap().pop(&edge.target_node_id);
+        self.edge_cache.lock().unwrap().put(edge_id, edge);
 
         Ok((edge_id, version_pointer))
     }
@@ -151,9 +160,9 @@ impl GraphDB {
         self.outgoing_neighbors_cache.remove(&edge.source_node_id);
         self.incoming_neighbors_cache.remove(&edge.target_node_id);
 
-        self.node_cache.pop(&edge.source_node_id);
-        self.node_cache.pop(&edge.target_node_id);
-        self.edge_cache.pop(&edge_id);
+        self.node_cache.lock().unwrap().pop(&edge.source_node_id);
+        self.node_cache.lock().unwrap().pop(&edge.target_node_id);
+        self.edge_cache.lock().unwrap().pop(&edge_id);
 
         self.edge_index.remove(&edge_id);
         self.free_record(pointer)?;

@@ -5,6 +5,7 @@ use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_node;
 use crate::storage::version_chain::VersionChainReader;
 use crate::storage::deserialize_node;
+use crate::storage::heap::RecordStore;
 use std::collections::HashSet;
 
 impl GraphDB {
@@ -62,24 +63,32 @@ impl GraphDB {
         let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
             
-            let mut record_store = self.record_store();
-            let pointer = store_new_version(
-                &mut record_store,
-                None,  // No previous version
-                node_id,
-                RecordKind::Node,
-                &payload,
-                tx_id,
-                commit_ts,
-            )?;
+            let dirty_pages = {
+                let mut pager_guard = self.pager.lock().unwrap();
+                let mut record_store = RecordStore::new(&mut *pager_guard);
+                let pointer = store_new_version(
+                    &mut record_store,
+                    None,  // No previous version
+                    node_id,
+                    RecordKind::Node,
+                    &payload,
+                    tx_id,
+                    commit_ts,
+                )?;
+                
+                // Collect dirty pages before dropping guards
+                let dirty_pages = record_store.take_dirty_pages();
+                drop(record_store);
+                drop(pager_guard);
+                Ok::<_, GraphError>((pointer, dirty_pages))
+            }?;
             
             // Register dirty pages with GraphDB
-            let dirty_pages = record_store.take_dirty_pages();
-            for page_id in dirty_pages {
+            for page_id in dirty_pages.1 {
                 self.record_page_write(page_id);
             }
             
-            (pointer, Some(pointer))
+            (dirty_pages.0, Some(dirty_pages.0))
         } else {
             // Legacy non-versioned record
             let record = encode_record(RecordKind::Node, &payload)?;
@@ -98,7 +107,7 @@ impl GraphDB {
         }
 
         self.update_property_indexes_on_node_add(node_id)?;
-        self.node_cache.put(node_id, node.clone());
+        self.node_cache.lock().unwrap().put(node_id, node.clone());
         self.header.last_record_page = Some(pointer.page_id);
 
         Ok((node_id, version_pointer))
@@ -117,22 +126,31 @@ impl GraphDB {
         // Create new version in version chain
         use crate::storage::version_chain::store_new_version;
         
-        let mut record_store = self.record_store();
-        let new_pointer = store_new_version(
-            &mut record_store,
-            Some(prev_pointer),  // Link to previous version
-            node_id,
-            RecordKind::Node,
-            &payload,
-            tx_id,
-            commit_ts,
-        )?;
-        
-        // Register dirty pages with GraphDB
-        let dirty_pages = record_store.take_dirty_pages();
-        for page_id in dirty_pages {
-            self.record_page_write(page_id);
-        }
+        let new_pointer = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut record_store = RecordStore::new(&mut *pager_guard);
+            let new_pointer = store_new_version(
+                &mut record_store,
+                Some(prev_pointer),  // Link to previous version
+                node_id,
+                RecordKind::Node,
+                &payload,
+                tx_id,
+                commit_ts,
+            )?;
+            
+            // Collect dirty pages before dropping guards
+            let dirty_pages = record_store.take_dirty_pages();
+            drop(record_store);
+            drop(pager_guard);
+            
+            // Register dirty pages with GraphDB
+            for page_id in dirty_pages {
+                self.record_page_write(page_id);
+            }
+            
+            Ok::<_, GraphError>(new_pointer)
+        }?;
         
         // Update index to point to NEW head of version chain
         self.node_index.insert(node_id, new_pointer);
@@ -151,7 +169,7 @@ impl GraphDB {
         self.update_property_indexes_on_node_add(node_id)?;
         
         // Update cache with new version
-        self.node_cache.put(node_id, node.clone());
+        self.node_cache.lock().unwrap().put(node_id, node.clone());
         self.header.last_record_page = Some(new_pointer.page_id);
         
         Ok((node_id, Some(new_pointer)))
@@ -237,7 +255,7 @@ impl GraphDB {
 
         self.update_property_indexes_on_node_delete(node_id)?;
 
-        self.node_cache.pop(&node_id);
+        self.node_cache.lock().unwrap().pop(&node_id);
 
         self.node_index.remove(&node_id);
         self.free_record(pointer)?;
@@ -247,7 +265,7 @@ impl GraphDB {
     pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
         self.metrics.node_lookups += 1;
 
-        if let Some(node) = self.node_cache.get(&node_id) {
+        if let Some(node) = self.node_cache.lock().unwrap().get(&node_id) {
             self.metrics.cache_hits += 1;
             return Ok(Some(node.clone()));
         }
@@ -259,7 +277,7 @@ impl GraphDB {
             None => return Ok(None),
         };
         let node = self.read_node_at(pointer)?;
-        self.node_cache.put(node_id, node.clone());
+        self.node_cache.lock().unwrap().put(node_id, node.clone());
         Ok(Some(node))
     }
 
@@ -297,7 +315,8 @@ impl GraphDB {
         };
 
         // Use VersionChainReader to find the visible version
-        let mut record_store = self.record_store();
+        let mut pager_guard = self.pager.lock().unwrap();
+        let mut record_store = RecordStore::new(&mut *pager_guard);
         let versioned_record = VersionChainReader::read_version_for_snapshot(
             &mut record_store,
             head_pointer,
@@ -405,8 +424,16 @@ impl GraphDB {
             &payload,
         )?;
 
-        let mut store = self.record_store();
-        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+        let update_result = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut store = RecordStore::new(&mut *pager_guard);
+            let result = store.update_in_place(pointer, &record)?;
+            drop(store);
+            drop(pager_guard);
+            result
+        };
+
+        if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
 
             if let Some(old_val) = old_value {
@@ -419,7 +446,7 @@ impl GraphDB {
                 self.update_property_index_on_add(node_id, label, &key, &value);
             }
 
-            self.node_cache.put(node_id, node.clone());
+            self.node_cache.lock().unwrap().put(node_id, node.clone());
 
             self.header.last_committed_tx_id = tx_id;
             self.write_header()?;
@@ -447,7 +474,7 @@ impl GraphDB {
                 self.update_property_index_on_add(node_id, label, &key, &value);
             }
 
-            self.node_cache.put(node_id, node.clone());
+            self.node_cache.lock().unwrap().put(node_id, node.clone());
 
             self.header.last_record_page = Some(new_pointer.page_id);
             self.header.last_committed_tx_id = tx_id;
@@ -485,15 +512,23 @@ impl GraphDB {
             &payload,
         )?;
 
-        let mut store = self.record_store();
-        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+        let update_result = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut store = RecordStore::new(&mut *pager_guard);
+            let result = store.update_in_place(pointer, &record)?;
+            drop(store);
+            drop(pager_guard);
+            result
+        };
+
+        if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
 
             for label in &node.labels {
                 self.update_property_index_on_remove(node_id, label, key, &old_value);
             }
 
-            self.node_cache.put(node_id, node.clone());
+            self.node_cache.lock().unwrap().put(node_id, node.clone());
 
             self.header.last_committed_tx_id = tx_id;
             self.write_header()?;
@@ -515,7 +550,7 @@ impl GraphDB {
                 self.update_property_index_on_remove(node_id, label, key, &old_value);
             }
 
-            self.node_cache.put(node_id, node.clone());
+            self.node_cache.lock().unwrap().put(node_id, node.clone());
 
             self.header.last_record_page = Some(new_pointer.page_id);
             self.header.last_committed_tx_id = tx_id;
@@ -557,8 +592,16 @@ impl GraphDB {
             &payload,
         )?;
 
-        let mut store = self.record_store();
-        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+        let update_result = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut store = RecordStore::new(&mut *pager_guard);
+            let result = store.update_in_place(pointer, &record)?;
+            drop(store);
+            drop(pager_guard);
+            result
+        };
+
+        if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
         } else {
             self.free_record(pointer)?;
@@ -579,7 +622,7 @@ impl GraphDB {
             self.update_property_index_on_add(node_id, label, &key, &value);
         }
 
-        self.node_cache.put(node_id, node);
+        self.node_cache.lock().unwrap().put(node_id, node);
 
         Ok(())
     }
@@ -609,8 +652,16 @@ impl GraphDB {
             &payload,
         )?;
 
-        let mut store = self.record_store();
-        if let Some(new_pointer) = store.update_in_place(pointer, &record)? {
+        let update_result = {
+            let mut pager_guard = self.pager.lock().unwrap();
+            let mut store = RecordStore::new(&mut *pager_guard);
+            let result = store.update_in_place(pointer, &record)?;
+            drop(store);
+            drop(pager_guard);
+            result
+        };
+
+        if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
         } else {
             self.free_record(pointer)?;
@@ -625,7 +676,7 @@ impl GraphDB {
             self.update_property_index_on_remove(node_id, label, key, &old_value);
         }
 
-        self.node_cache.put(node_id, node);
+        self.node_cache.lock().unwrap().put(node_id, node);
 
         Ok(())
     }
