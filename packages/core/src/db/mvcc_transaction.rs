@@ -9,7 +9,7 @@ use crate::db::timestamp_oracle::TimestampOracle;
 use crate::error::{GraphError, Result};
 use crate::storage::version_chain::VersionTracker;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Represents an active transaction context in an MVCC system
 #[derive(Debug)]
@@ -92,7 +92,7 @@ impl TransactionContext {
 /// the records it has modified.
 pub struct MvccTransactionManager {
     /// Timestamp oracle for allocating timestamps
-    oracle: Arc<Mutex<TimestampOracle>>,
+    oracle: Arc<TimestampOracle>,
     /// Currently active transactions
     active_transactions: HashMap<TxId, TransactionContext>,
     /// Maximum number of concurrent transactions
@@ -100,10 +100,19 @@ pub struct MvccTransactionManager {
 }
 
 impl MvccTransactionManager {
-    /// Create a new MVCC transaction manager
+    /// Create a new MVCC transaction manager with a shared timestamp oracle
+    pub fn new_with_oracle(oracle: Arc<TimestampOracle>, max_concurrent: usize) -> Self {
+        Self {
+            oracle,
+            active_transactions: HashMap::new(),
+            max_concurrent_transactions: max_concurrent,
+        }
+    }
+    
+    /// Create a new MVCC transaction manager (for testing)
     pub fn new(max_concurrent: usize) -> Self {
         Self {
-            oracle: Arc::new(Mutex::new(TimestampOracle::new())),
+            oracle: Arc::new(TimestampOracle::new()),
             active_transactions: HashMap::new(),
             max_concurrent_transactions: max_concurrent,
         }
@@ -129,12 +138,7 @@ impl MvccTransactionManager {
         }
 
         // Allocate a read timestamp for this transaction
-        let snapshot_ts = {
-            let oracle = self.oracle.lock().map_err(|_| {
-                GraphError::InvalidArgument("timestamp oracle lock poisoned".into())
-            })?;
-            oracle.allocate_read_timestamp()
-        };
+        let snapshot_ts = self.oracle.allocate_read_timestamp();
 
         // Create transaction context
         let context = TransactionContext::new(tx_id, snapshot_ts);
@@ -173,12 +177,7 @@ impl MvccTransactionManager {
         context.start_commit()?;
 
         // Allocate commit timestamp
-        let commit_ts = {
-            let oracle = self.oracle.lock().map_err(|_| {
-                GraphError::InvalidArgument("timestamp oracle lock poisoned".into())
-            })?;
-            oracle.allocate_commit_timestamp()
-        };
+        let commit_ts = self.oracle.allocate_commit_timestamp();
 
         Ok(commit_ts)
     }
@@ -194,14 +193,7 @@ impl MvccTransactionManager {
         context.complete_commit(commit_ts);
 
         // Register commit with oracle
-        {
-            let oracle = self.oracle.lock().map_err(|_| {
-                GraphError::InvalidArgument("timestamp oracle lock poisoned".into())
-            })?;
-            
-            // Register this snapshot as active with the transaction ID
-            oracle.register_snapshot(snapshot_ts, tx_id)?;
-        }
+        self.oracle.register_snapshot(snapshot_ts, tx_id)?;
 
         Ok(())
     }
@@ -215,12 +207,7 @@ impl MvccTransactionManager {
 
         // If committed, unregister the snapshot from oracle
         if context.state == TransactionState::Committed {
-            let oracle = self.oracle.lock().map_err(|_| {
-                GraphError::InvalidArgument("timestamp oracle lock poisoned".into())
-            })?;
-            
-            oracle.unregister_snapshot(context.snapshot_ts)?;
-            drop(oracle);
+            self.oracle.unregister_snapshot(context.snapshot_ts)?;
         }
 
         Ok(())
@@ -245,7 +232,7 @@ impl MvccTransactionManager {
     }
 
     /// Get the timestamp oracle
-    pub fn _oracle(&self) -> Arc<Mutex<TimestampOracle>> {
+    pub fn oracle(&self) -> Arc<TimestampOracle> {
         self.oracle.clone()
     }
 
