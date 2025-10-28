@@ -90,20 +90,23 @@ impl<'a> RecordStore<'a> {
             record_page.initialize()?;
             
             // Check if we can fit the record by appending (not reusing)
-            if record_page.can_fit(record.len())? {
-                let slot = record_page.append_record(record)?;
-                let byte_offset = record_page.record_offset(slot as usize)?;
-                page.dirty = true;
-                self.mark_page_dirty(page_id);
-                
-                return Ok(RecordPointer {
-                    page_id,
-                    slot_index: slot,
-                    byte_offset,
-                });
+            match record_page.can_fit(record.len()) {
+                Ok(true) => {
+                    let slot = record_page.append_record(record)?;
+                    let byte_offset = record_page.record_offset(slot as usize)?;
+                    page.dirty = true;
+                    self.mark_page_dirty(page_id);
+                    return Ok(RecordPointer {
+                        page_id,
+                        slot_index: slot,
+                        byte_offset,
+                    });
+                }
+                Ok(false) => continue,
+                Err(_) => continue, // Try next page (likely a non-RecordPage)
             }
         }
-        
+
         // No existing page has room, allocate a new page
         let page_id = self.pager.allocate_page()?;
         let page = self.pager.fetch_page(page_id)?;

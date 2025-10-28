@@ -198,26 +198,13 @@ impl Pager {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
-        if !self.file_len.is_multiple_of(self.page_size as u64) {
-            return Err(GraphError::Corruption(
-                "underlying file length is not page aligned".into(),
-            ));
-        }
+        let page_count = if self.file_len == 0 {
+            0
+        } else {
+            (self.file_len / self.page_size as u64) as u32
+        };
+        let next_page_id = page_count;
 
-        let next_page_id = (self.file_len / self.page_size as u64) as PageId;
-        let new_size = (u64::from(next_page_id) + 1) * self.page_size as u64;
-
-        if let Some(max_size) = self.max_size_bytes {
-            if new_size > max_size {
-                warn!(
-                    current_size = self.file_len,
-                    max_size, "Database size limit exceeded"
-                );
-                return Err(GraphError::InvalidArgument(
-                    "Database size limit exceeded".into(),
-                ));
-            }
-        }
         let mut page = Page::new(next_page_id, self.page_size);
         page.dirty = true;
 
@@ -241,6 +228,10 @@ impl Pager {
         }
         self.file_len = (u64::from(next_page_id) + 1) * self.page_size as u64;
         self.invalidate_mmap();
+        
+        // Ensure newly allocated pages are tracked in shadow transaction for rollback
+        self.ensure_shadow(next_page_id)?;
+        
         Ok(next_page_id)
     }
 
@@ -595,6 +586,7 @@ impl Pager {
         } else {
             apply_page_checksum(checksum_enabled, page_size, page_id, &mut buf)?;
         }
+        
         Ok(buf)
     }
 }
@@ -661,13 +653,6 @@ fn write_page_image(
         let (payload, checksum_bytes) = split_payload_checksum(data)?;
         let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
         let computed_checksum = hash(payload);
-        eprintln!(
-            "[WRITE] page_id={} stored_checksum=0x{:08X} computed_checksum=0x{:08X} valid={}",
-            page_id,
-            stored_checksum,
-            computed_checksum,
-            stored_checksum == computed_checksum
-        );
     }
 
     let offset = page_offset(page_id, page_size)?;

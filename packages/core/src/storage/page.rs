@@ -8,6 +8,10 @@ const RECORD_COUNT_OFFSET: usize = 0;
 const FREE_SPACE_OFFSET_OFFSET: usize = 2;
 const FREE_LIST_NEXT_OFFSET: usize = 4;
 
+// Known page type magic bytes - these are NOT RecordPages
+const BTREE_INDEX_MAGIC: &[u8; 4] = b"BIDX";
+const PROPERTY_INDEX_MAGIC: &[u8; 4] = b"PIDX";
+
 #[derive(Debug)]
 pub struct RecordPage<'a> {
     data: &'a mut [u8],
@@ -26,6 +30,20 @@ impl<'a> RecordPage<'a> {
                 "page smaller than header size".into(),
             ));
         }
+
+        // Check if this page has a known non-RecordPage magic signature
+        // BTree and Property index pages start with 4-byte magic, which would
+        // be misinterpreted as record_count/free_offset if we tried to parse them
+        if data.len() >= 4 {
+            let maybe_magic = &data[0..4];
+            if maybe_magic == BTREE_INDEX_MAGIC || maybe_magic == PROPERTY_INDEX_MAGIC {
+                return Err(GraphError::InvalidArgument(
+                    format!("not a record page (magic: {:?})", 
+                        std::str::from_utf8(maybe_magic).unwrap_or("???")).into()
+                ));
+            }
+        }
+
         Ok(Self { data })
     }
 
@@ -185,6 +203,7 @@ impl<'a> RecordPage<'a> {
         let padded_len = align_to_eight(record.len());
         let space_needed = required_space(record.len());
 
+        // Log state before append
         if self.available_space()? < space_needed {
             return Err(GraphError::InvalidArgument(
                 "insufficient space for record".into(),
@@ -213,6 +232,7 @@ impl<'a> RecordPage<'a> {
         self.set_record_offset(record_idx, new_offset as u16)?;
         self.set_record_count((record_idx + 1) as u16);
         self.set_free_space_offset(new_offset as u16)?;
+        
         Ok(record_idx as u16)
     }
 
