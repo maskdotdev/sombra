@@ -87,7 +87,15 @@ impl VersionChainReader {
         let mut current_pointer = Some(head_pointer);
 
         // Traverse the version chain from newest to oldest
-        while let Some(pointer) = current_pointer {
+        while let Some(mut pointer) = current_pointer {
+            // Fix byte_offset if it's 0 (from deserialized prev_version pointer)
+            // Version metadata only stores page_id and slot_index, not byte_offset
+            // We need to reconstruct byte_offset from the slot directory
+            if pointer.byte_offset == 0 && pointer.page_id != 0 {
+                let byte_offset = record_store.get_byte_offset_for_slot(pointer.page_id, pointer.slot_index)?;
+                pointer.byte_offset = byte_offset;
+            }
+            
             let result = record_store.visit_record(pointer, |record_data| {
                 if record_data.len() < 8 {
                     return Ok((None, None)); // Invalid pointer
@@ -193,33 +201,32 @@ impl VersionChainReader {
 /// Check if a version is visible to a given snapshot timestamp
 ///
 /// A version is visible if:
-/// 1. It's alive (not deleted)
-/// 2. It was committed before or at the snapshot timestamp
-/// Check if a version is visible to a snapshot
-///
-/// A version is visible if:
-/// 1. It's not deleted
-/// 2. It was committed before or at the snapshot timestamp
-/// 3. OR it was created by the current transaction (read-your-own-writes)
+/// 1. For deleted versions: return true if deletion is committed and visible (so caller can detect deletion)
+/// 2. For alive versions: it was committed before or at the snapshot timestamp
+/// 3. OR it was created by the current transaction (read-your-own-writes/deletes)
 fn is_version_visible(
     metadata: &VersionMetadata,
     snapshot_ts: u64,
     current_tx_id: Option<TxId>,
 ) -> bool {
-    // Check if the record is deleted
-    if metadata.flags == VersionFlags::Deleted {
-        // Deleted records are not visible to any snapshot
-        return false;
-    }
-
-    // Read-your-own-writes: If this version was created by the current transaction, it's visible
+    // Read-your-own-writes/deletes: If this version was created by the current transaction
     if let Some(tx_id) = current_tx_id {
         if metadata.tx_id == tx_id {
+            // For read-your-own-writes:
+            // - Return true so the version is found (caller will check Deleted flag)
             return true;
         }
     }
 
-    // Check if the version was committed before or at the snapshot
+    // Check if the record is deleted
+    if metadata.flags == VersionFlags::Deleted {
+        // Deleted versions are "visible" only if deletion happened before or at our snapshot
+        // This signals to the caller that the record is deleted at this snapshot
+        // If deletion is in the future (commit_ts > snapshot_ts), skip this version
+        return metadata.commit_ts > 0 && metadata.commit_ts <= snapshot_ts;
+    }
+
+    // For alive versions: visible if committed before or at the snapshot
     metadata.commit_ts <= snapshot_ts || snapshot_ts == 0
 }
 
@@ -244,9 +251,10 @@ pub fn store_new_version(
     data: &[u8],
     tx_id: TxId,
     commit_ts: u64,
+    is_deleted: bool,
 ) -> Result<RecordPointer> {
-    // Create version metadata
-    let metadata = VersionMetadata::new(tx_id, commit_ts, prev_pointer, false);
+    // Create version metadata with deletion flag
+    let metadata = VersionMetadata::new(tx_id, commit_ts, prev_pointer, is_deleted);
 
     // Convert to versioned record kind
     let versioned_kind = match kind {
@@ -358,9 +366,13 @@ mod tests {
     fn test_deleted_version_not_visible() {
         let metadata = VersionMetadata::new(1, 100, None, true);
 
-        // Deleted versions are never visible
-        assert!(!is_version_visible(&metadata, 200, None));
-        assert!(!is_version_visible(&metadata, 100, None));
+        // Deleted versions are "visible" (returned to caller) if deletion happened before snapshot
+        // This allows the caller to know the record was deleted
+        assert!(is_version_visible(&metadata, 200, None)); // Deleted at 100, viewing at 200
+        assert!(is_version_visible(&metadata, 100, None)); // Deleted at 100, viewing at 100
+        
+        // But not visible before the deletion was committed
+        assert!(!is_version_visible(&metadata, 50, None)); // Viewing before deletion
     }
 
     #[test]

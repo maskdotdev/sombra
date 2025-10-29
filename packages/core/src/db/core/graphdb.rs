@@ -11,14 +11,13 @@ use tracing::{info, warn};
 
 use crate::db::cache::ConcurrentLruCache;
 use crate::error::{GraphError, Result};
-use crate::index::BTreeIndex;
+use crate::index::{BTreeIndex, VersionedIndexEntries};
 use crate::model::{Edge, EdgeId, Node, NodeId, PropertyValue};
 use crate::pager::{LockFreePageCache, PageCacheHint, PageId, Pager, PAGE_CHECKSUM_SIZE};
 use crate::storage::header::Header;
 use crate::storage::heap::RecordStore;
 use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
-use crate::storage::RecordPointer;
 use crate::storage::{deserialize_edge, deserialize_node};
 
 use super::header::HeaderState;
@@ -187,10 +186,10 @@ pub struct GraphDB {
     pub(crate) epoch: AtomicU64,
     // Phase 4: Concurrent indexes - true lock-free architecture (no double-locking)
     pub(crate) node_index: Arc<BTreeIndex>, // BTreeIndex has internal RwLock
-    pub(crate) edge_index: Arc<DashMap<EdgeId, RecordPointer>>,
-    pub(crate) label_index: Arc<DashMap<String, Arc<DashSet<NodeId>>>>, // DashSet is lock-free
+    pub(crate) edge_index: Arc<BTreeIndex>, // BTreeIndex has internal RwLock - Phase 4A MVCC support
+    pub(crate) label_index: Arc<DashMap<String, DashMap<NodeId, Arc<Mutex<VersionedIndexEntries>>>>>, // Multi-version label index
     pub(crate) property_indexes:
-        Arc<DashMap<(String, String), Arc<DashMap<IndexableValue, Arc<DashSet<NodeId>>>>>>, // Nested DashMap/DashSet
+        Arc<DashMap<(String, String), Arc<DashMap<IndexableValue, Arc<Mutex<VersionedIndexEntries>>>>>>, // Multi-version property index
     // Lock-free concurrent caches for high-performance concurrent access
     pub(crate) node_cache: Arc<ConcurrentLruCache<NodeId, Node>>,
     pub(crate) edge_cache: Arc<ConcurrentLruCache<EdgeId, Edge>>,
@@ -425,7 +424,7 @@ impl GraphDB {
             header: Mutex::new(HeaderState::from(header.clone())),
             epoch: AtomicU64::new(0),
             node_index: Arc::new(BTreeIndex::new()), // No RwLock wrapper - BTreeIndex has internal mutability
-            edge_index: Arc::new(DashMap::new()),
+            edge_index: Arc::new(BTreeIndex::new()), // Phase 4A: MVCC support for edges
             label_index: Arc::new(DashMap::new()),
             property_indexes: Arc::new(DashMap::new()),
             node_cache: Arc::new(ConcurrentLruCache::new(cache_size.get())),
@@ -497,7 +496,7 @@ impl GraphDB {
     /// tx.commit()?;
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
-    pub fn begin_transaction(&mut self) -> Result<Transaction<'_>> {
+    pub fn begin_transaction(&self) -> Result<Transaction<'_>> {
         let tx_id = self.allocate_tx_id()?;
         Transaction::new(self, tx_id)
     }
@@ -565,6 +564,11 @@ impl GraphDB {
 
         for &page_id in &dirty_pages {
             self.pager.append_page_to_wal(page_id, 0)?;
+        }
+        
+        // Append commit frame so WAL replay will apply these pages
+        if !dirty_pages.is_empty() {
+            self.pager.append_commit_to_wal(0)?;
         }
 
         self.pager.checkpoint()?;
@@ -895,7 +899,7 @@ impl GraphDB {
             }
 
             for ((page_id, slot), node_id) in &node_slots {
-                if self.node_index.get(node_id).is_none() {
+                if self.node_index.get_latest(node_id).is_none() {
                     report.index_errors += 1;
                     report.push_error(format!(
                         "node {node_id} stored at page {page_id} slot {slot} missing from node index"
@@ -903,12 +907,11 @@ impl GraphDB {
                 }
             }
 
-            for entry in self.edge_index.iter() {
-                let edge_id = entry.key();
-                let pointer = entry.value();
+            // Phase 4A: BTreeIndex iter returns Vec instead of DashMap iterator
+            for (edge_id, pointer) in self.edge_index.iter() {
                 let key = (pointer.page_id, pointer.slot_index);
                 match edge_slots.get(&key) {
-                    Some(found_id) if found_id == edge_id => {}
+                    Some(found_id) if found_id == &edge_id => {}
                     Some(found_id) => {
                         report.index_errors += 1;
                         report.push_error(format!(
@@ -927,7 +930,8 @@ impl GraphDB {
             }
 
             for ((page_id, slot), edge_id) in &edge_slots {
-                if !self.edge_index.contains_key(edge_id) {
+                // Phase 4A: Use get_latest() instead of contains_key
+                if self.edge_index.get_latest(edge_id).is_none() {
                     report.index_errors += 1;
                     report.push_error(format!(
                         "edge {edge_id} stored at page {page_id} slot {slot} missing from edge index"

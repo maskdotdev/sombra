@@ -17,9 +17,10 @@ impl GraphDB {
             return Ok(edge.clone());
         }
 
-        let pointer = *self
+        // Phase 4A: Use get_latest() to get the most recent version
+        let pointer = self
             .edge_index
-            .get(&edge_id)
+            .get_latest(&edge_id)
             .ok_or(GraphError::NotFound("edge"))?;
         let page = self.pager.fetch_page(pointer.page_id)?;
         let mut page_data = page.data.clone();
@@ -85,10 +86,10 @@ impl GraphDB {
             return self.load_edge(edge_id);
         }
 
-        // Get the head pointer from the index
-        let head_pointer = *self
+        // Phase 4A: Use get_latest() for head pointer
+        let head_pointer = self
             .edge_index
-            .get(&edge_id)
+            .get_latest(&edge_id)
             .ok_or(GraphError::NotFound("edge"))?;
 
         // Use VersionChainReader to find the visible version
@@ -111,7 +112,7 @@ impl GraphDB {
         }
     }
 
-    pub fn load_edges_batch(&mut self, edge_ids: &[EdgeId]) -> Result<Vec<Edge>> {
+    pub fn load_edges_batch(&self, edge_ids: &[EdgeId]) -> Result<Vec<Edge>> {
         use std::collections::HashMap;
 
         let mut edges_to_load: HashMap<PageId, Vec<(EdgeId, RecordPointer)>> = HashMap::new();
@@ -121,9 +122,10 @@ impl GraphDB {
             if let Some(edge) = self.edge_cache.get(&edge_id) {
                 loaded_edges.insert(edge_id, edge.clone());
             } else {
-                let pointer = *self
+                // Phase 4A: Use get_latest() to get most recent version
+                let pointer = self
                     .edge_index
-                    .get(&edge_id)
+                    .get_latest(&edge_id)
                     .ok_or(GraphError::NotFound("edge"))?;
                 edges_to_load
                     .entry(pointer.page_id)
@@ -297,7 +299,7 @@ impl GraphDB {
         })
     }
 
-    pub(crate) fn free_record(&mut self, pointer: RecordPointer) -> Result<()> {
+    pub(crate) fn free_record(&self, pointer: RecordPointer) -> Result<()> {
         let page_id = pointer.page_id;
         let page_empty = self.pager.with_pager_write(|pager| {
             let mut store = RecordStore::new(pager);
@@ -414,7 +416,7 @@ impl GraphDB {
     }
 
     fn update_edge_pointer(
-        &mut self,
+        &self,
         pointer: RecordPointer,
         kind: EdgePointerKind,
         new_edge_id: EdgeId,
@@ -480,7 +482,7 @@ impl GraphDB {
     }
 
     pub(crate) fn remove_edge_from_node_chain(
-        &mut self,
+        &self,
         node_pointer: RecordPointer,
         pointer_kind: PointerKind,
         removed_edge_id: EdgeId,
@@ -504,13 +506,13 @@ impl GraphDB {
                 PointerKind::Incoming => current_edge.next_incoming_edge_id,
             };
             if next_id == removed_edge_id {
-                let predecessor_ptr =
-                    *self
-                        .edge_index
-                        .get(&current_edge_id)
-                        .ok_or(GraphError::Corruption(
-                            "edge predecessor missing during deletion".into(),
-                        ))?;
+                // Phase 4A: Use get_latest() to get most recent version
+                let predecessor_ptr = self
+                    .edge_index
+                    .get_latest(&current_edge_id)
+                    .ok_or(GraphError::Corruption(
+                        "edge predecessor missing during deletion".into(),
+                    ))?;
                 let edge_kind = match pointer_kind {
                     PointerKind::Outgoing => EdgePointerKind::Outgoing,
                     PointerKind::Incoming => EdgePointerKind::Incoming,
@@ -525,7 +527,7 @@ impl GraphDB {
         ))
     }
 
-    fn recompute_last_record_page(&mut self) -> Result<()> {
+    fn recompute_last_record_page(&self) -> Result<()> {
         let mut last = None;
         let page_count = self.pager.page_count();
         if page_count <= 1 {

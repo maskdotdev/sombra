@@ -250,7 +250,7 @@ impl PySombraDB {
 
     fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
         let mut db = self.inner.write();
-        db.remove_node_property(node_id, &key)
+        db.remove_node_property_internal(node_id, &key)
             .map_err(graph_error_to_py)
     }
 
@@ -397,7 +397,11 @@ impl PySombraTransaction {
             let mut node = Node::new(0);
             node.labels = labels;
             node.properties = props;
-            db.add_node_internal(node).map_err(graph_error_to_py)?
+            // Allocate tx_id and commit_ts for MVCC
+            let tx_id = 1; // Simplified for non-transactional context
+            let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+            let (node_id, _version_ptr) = db.add_node_internal(node, tx_id, commit_ts).map_err(graph_error_to_py)?;
+            node_id
         };
         Ok(node_id)
     }
@@ -414,7 +418,11 @@ impl PySombraTransaction {
             let mut db = self.db.write();
             let mut edge = Edge::new(0, source_node_id, target_node_id, &label);
             edge.properties = props;
-            db.add_edge_internal(edge).map_err(graph_error_to_py)?
+            // Allocate tx_id and commit_ts for MVCC
+            let tx_id = 1; // Simplified for non-transactional context
+            let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+            let (edge_id, _version_ptr) = db.add_edge_internal(edge, tx_id, commit_ts).map_err(graph_error_to_py)?;
+            edge_id
         };
         Ok(edge_id)
     }
@@ -479,7 +487,11 @@ impl PySombraTransaction {
 
     fn delete_node(&self, node_id: u64) -> PyResult<()> {
         let mut db = self.db.write();
-        db.delete_node_internal(node_id).map_err(graph_error_to_py)
+        // Allocate tx_id and commit_ts for MVCC
+        let tx_id = 1; // Simplified for non-transactional context
+        let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+        db.delete_node_internal(node_id, tx_id, commit_ts).map_err(graph_error_to_py)?;
+        Ok(())
     }
 
     fn delete_edge(&self, edge_id: u64) -> PyResult<()> {
@@ -496,7 +508,7 @@ impl PySombraTransaction {
     ) -> PyResult<()> {
         let prop_value = py_any_to_property_value(&value)?;
         let mut db = self.db.write();
-        db.set_node_property_internal(node_id, key, prop_value)
+        db.set_node_property(node_id, key, prop_value)
             .map_err(graph_error_to_py)
     }
 
@@ -515,7 +527,10 @@ impl PySombraTransaction {
 
         let mut db = self.db.write();
         let dirty_pages = db.take_recent_dirty_pages();
-        db.header.last_committed_tx_id = self.tx_id;
+        {
+            let mut header = db.header.lock().unwrap();
+            header.last_committed_tx_id = self.tx_id;
+        }
         db.write_header().map_err(graph_error_to_py)?;
 
         let header_dirty = db.take_recent_dirty_pages();
@@ -527,7 +542,7 @@ impl PySombraTransaction {
             .map_err(graph_error_to_py)?;
 
         db.stop_tracking();
-        db.exit_transaction();
+        db.exit_transaction(self.tx_id);
 
         self.committed = true;
         Ok(())
@@ -545,7 +560,7 @@ impl PySombraTransaction {
         db.rollback_transaction(&dirty_pages)
             .map_err(graph_error_to_py)?;
         db.stop_tracking();
-        db.exit_transaction();
+        db.exit_transaction(self.tx_id);
 
         self.committed = true;
         Ok(())

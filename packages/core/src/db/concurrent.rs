@@ -186,7 +186,43 @@ impl ConcurrentGraphDB {
             created_versions: Vec::new(),
             _written_nodes: HashSet::new(),
             _written_edges: HashSet::new(),
+            label_updates: Vec::new(),
+            label_deletions: Vec::new(),
+            property_updates: Vec::new(),
+            property_deletions: Vec::new(),
         })
+    }
+
+    /// Creates a property index for fast lookups.
+    ///
+    /// Property indexes enable efficient queries using `find_nodes_by_property`.
+    /// This operation can be called concurrently with active transactions.
+    ///
+    /// # Arguments
+    /// * `label` - The node label to index
+    /// * `property_key` - The property key to index
+    ///
+    /// # Returns
+    /// Ok(()) if index was created or already exists.
+    ///
+    /// # Errors
+    /// * `GraphError::Io` - Disk I/O error during index creation
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::{ConcurrentGraphDB, Config};
+    ///
+    /// let mut config = Config::default();
+    /// config.mvcc_enabled = true;
+    /// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
+    ///
+    /// db.create_property_index("Person", "age")?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn create_property_index(&self, label: &str, property_key: &str) -> Result<()> {
+        // Delegate to GraphDB's implementation, which uses interior mutability
+        // The property_indexes field is Arc<DashMap<...>> so no mut needed
+        self.inner.create_property_index_concurrent(label, property_key)
     }
 
     /// Closes the database gracefully.
@@ -259,6 +295,14 @@ pub struct ConcurrentTransaction {
     created_versions: Vec<RecordPointer>,
     _written_nodes: HashSet<NodeId>,
     _written_edges: HashSet<EdgeId>,
+    /// Track label operations (label, node_id) for commit timestamp updates
+    label_updates: Vec<(String, NodeId)>,
+    /// Track label deletions (label, node_id) for delete timestamp updates
+    label_deletions: Vec<(String, NodeId)>,
+    /// Track property additions/updates (label, property_key, node_id, value) for commit timestamp updates
+    property_updates: Vec<(String, String, NodeId, crate::model::PropertyValue)>,
+    /// Track property deletions (label, property_key, node_id, old_value, old_pointer) for delete timestamp updates
+    property_deletions: Vec<(String, String, NodeId, crate::model::PropertyValue, crate::storage::heap::RecordPointer)>,
 }
 
 impl ConcurrentTransaction {
@@ -303,12 +347,20 @@ impl ConcurrentTransaction {
         // GraphDB now has interior mutability, no lock needed
         let db = &self.db;
 
+        // Track labels for commit timestamp update
+        let labels = node.labels.clone();
+
         // Add node with this transaction's ID and commit_ts = 0 (uncommitted)
         let (node_id, version_ptr) = db.add_node_internal(node, self.tx_id, 0)?;
 
         // Track created version for commit timestamp update
         if let Some(ptr) = version_ptr {
             self.created_versions.push(ptr);
+        }
+
+        // Track label updates for commit timestamp update
+        for label in labels {
+            self.label_updates.push((label, node_id));
         }
 
         // Track dirty pages
@@ -408,6 +460,252 @@ impl ConcurrentTransaction {
         db.load_edge_with_snapshot(edge_id, self.snapshot_ts, Some(self.tx_id))
     }
 
+    /// Deletes a node from the graph.
+    ///
+    /// The node and all its incident edges will be marked as deleted.
+    /// The deletion is not visible to other transactions until this
+    /// transaction is committed.
+    ///
+    /// # Arguments
+    /// * `node_id` - The ID of the node to delete
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - Transaction not active
+    /// * `GraphError::NotFound` - Node doesn't exist
+    /// * `GraphError::Io` - Disk I/O error
+    pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
+        if self.state != TxState::Active {
+            return Err(GraphError::InvalidArgument(
+                "transaction is not active".into(),
+            ));
+        }
+
+        // GraphDB now has interior mutability, no lock needed
+        let db = &self.db;
+
+        // Get ALL version pointers for this node
+        // When a node is deleted, we need to mark ALL version pointers in property indexes
+        // because a property value may have been set in multiple versions
+        let all_pointers = db.node_index.get(&node_id).unwrap_or_default();
+        
+        let node = db.get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.tx_id))?
+            .ok_or_else(|| GraphError::NotFound("node"))?;
+
+        // Track label deletions for delete timestamp update
+        for label in &node.labels {
+            self.label_deletions.push((label.clone(), node_id));
+        }
+
+        // Track property deletions for each label
+        // Property indexes are per (label, property_key) pair
+        // We need to track deletions for ALL version pointers, not just the latest one
+        // because property values may exist in multiple versions with the same value
+        for label in &node.labels {
+            for (property_key, property_value) in &node.properties {
+                // Add a deletion entry for each version pointer
+                for pointer in &all_pointers {
+                    self.property_deletions.push((
+                        label.clone(),
+                        property_key.clone(),
+                        node_id,
+                        property_value.clone(),
+                        *pointer
+                    ));
+                }
+            }
+        }
+
+        let tombstone_ptr = db.delete_node_internal(node_id, self.tx_id, 0)?;
+        
+        // Track the tombstone version for commit timestamp update
+        if let Some(ptr) = tombstone_ptr {
+            self.created_versions.push(ptr);
+        }
+
+        // Track dirty pages
+        let dirty = db.take_recent_dirty_pages();
+        self.dirty_pages.extend(dirty);
+
+        Ok(())
+    }
+
+    /// Updates an existing node in the graph.
+    ///
+    /// Creates a new version of the node. The update is not visible to
+    /// other transactions until this transaction is committed.
+    ///
+    /// # Arguments
+    /// * `node` - The updated node (must have a valid ID)
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - Transaction not active or node ID is 0
+    /// * `GraphError::NotFound` - Node doesn't exist
+    /// * `GraphError::Io` - Disk I/O error
+    pub fn update_node(&mut self, node: Node) -> Result<()> {
+        if self.state != TxState::Active {
+            return Err(GraphError::InvalidArgument(
+                "transaction is not active".into(),
+            ));
+        }
+
+        if node.id == 0 {
+            return Err(GraphError::InvalidArgument(
+                "cannot update node with ID 0".into(),
+            ));
+        }
+
+        // GraphDB now has interior mutability, no lock needed
+        let db = &self.db;
+
+        let node_id = node.id;
+
+        // Get the old pointer before updating (needed for property index delete tracking)
+        let prev_pointer = db.node_index.get_latest(&node_id)
+            .ok_or_else(|| GraphError::NotFound("node"))?;
+
+        // Read old node to determine which labels are new (for label index tracking)
+        let old_node = db.get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.tx_id))?
+            .ok_or_else(|| GraphError::NotFound("node"))?;
+
+        // Compute label differences (clone labels to avoid borrow conflicts)
+        use std::collections::HashSet;
+        let old_labels: HashSet<String> = old_node.labels.iter().cloned().collect();
+        let new_labels: HashSet<String> = node.labels.clone().into_iter().collect();
+
+        // Clone properties for comparison
+        use std::collections::BTreeMap;
+        let old_props: BTreeMap<String, crate::model::PropertyValue> = old_node.properties.clone();
+        let new_props: BTreeMap<String, crate::model::PropertyValue> = node.properties.clone();
+
+        // Add node with this transaction's ID and commit_ts = 0 (uncommitted)
+        // add_node_internal detects updates when node.id != 0
+        let (_node_id, version_ptr) = db.add_node_internal(node, self.tx_id, 0)?;
+
+        // Track created version for commit timestamp update
+        if let Some(ptr) = version_ptr {
+            self.created_versions.push(ptr);
+        }
+
+        // Track label updates for commit timestamp update
+        // Only track labels that were added (new labels and labels that remain)
+        // We need to track all labels that have new entries in the label index
+        for label in new_labels.difference(&old_labels) {
+            // Newly added labels
+            self.label_updates.push((label.clone(), node_id));
+        }
+        for label in old_labels.intersection(&new_labels) {
+            // Labels that remain (get new entries due to property changes)
+            self.label_updates.push((label.clone(), node_id));
+        }
+        
+        // Track label deletions for delete timestamp update
+        // These are labels that were removed from the node
+        for label in old_labels.difference(&new_labels) {
+            // Removed labels - need to update delete_ts on commit
+            self.label_deletions.push((label.clone(), node_id));
+        }
+
+        // Track property updates and deletions for each label
+        // Property indexes are per (label, property_key) pair
+        // IMPORTANT: Use prev_pointer when tracking deletions since old entries have old pointer
+        for label in new_labels.iter() {
+            // ALL properties in the new version need their commit_ts updated
+            // because update_node_version adds ALL properties with commit_ts=0
+            for (key, new_value) in &new_props {
+                self.property_updates.push((label.clone(), key.clone(), node_id, new_value.clone()));
+                
+                // Also track deletion of old value if property changed
+                if let Some(old_value) = old_props.get(key) {
+                    if old_value != new_value {
+                        // Property value changed - delete old entry
+                        self.property_deletions.push((label.clone(), key.clone(), node_id, old_value.clone(), prev_pointer));
+                    }
+                }
+            }
+            
+            // Check which properties were deleted (mark old entries as deleted)
+            for (key, old_value) in &old_props {
+                if !new_props.contains_key(key) {
+                    // Property was deleted
+                    self.property_deletions.push((label.clone(), key.clone(), node_id, old_value.clone(), prev_pointer));
+                }
+            }
+        }
+
+        // For removed labels, mark all their property entries as deleted
+        for label in old_labels.difference(&new_labels) {
+            for (key, old_value) in &old_props {
+                self.property_deletions.push((label.clone(), key.clone(), node_id, old_value.clone(), prev_pointer));
+            }
+        }
+
+        // Track dirty pages
+        let dirty = db.take_recent_dirty_pages();
+        self.dirty_pages.extend(dirty);
+
+        Ok(())
+    }
+
+    /// Retrieves all nodes with a specific label.
+    ///
+    /// Returns only the nodes visible to this transaction's snapshot.
+    ///
+    /// # Arguments
+    /// * `label` - The label to search for
+    ///
+    /// # Returns
+    /// A vector of node IDs with the specified label.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - Transaction not active
+    /// * `GraphError::Io` - Disk I/O error
+    pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeId>> {
+        if self.state != TxState::Active {
+            return Err(GraphError::InvalidArgument(
+                "transaction is not active".into(),
+            ));
+        }
+
+        // GraphDB now has interior mutability, no lock needed
+        let db = &self.db;
+
+        db.get_nodes_by_label_with_snapshot(label, self.snapshot_ts)
+    }
+
+    /// Find nodes by property value with snapshot isolation.
+    ///
+    /// Returns only nodes that have the specified property value and are
+    /// visible to this transaction's snapshot.
+    ///
+    /// # Arguments
+    /// * `label` - The node label
+    /// * `property_key` - The property key to search
+    /// * `value` - The property value to match
+    ///
+    /// # Returns
+    /// A vector of node IDs with the specified property value.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - Transaction not active
+    /// * `GraphError::Io` - Disk I/O error
+    pub fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        value: &crate::model::PropertyValue,
+    ) -> Result<Vec<NodeId>> {
+        if self.state != TxState::Active {
+            return Err(GraphError::InvalidArgument(
+                "transaction is not active".into(),
+            ));
+        }
+
+        // GraphDB now has interior mutability, no lock needed
+        let db = &self.db;
+
+        db.find_nodes_by_property_with_snapshot(label, property_key, value, self.snapshot_ts)
+    }
+
     /// Commits the transaction.
     ///
     /// Makes all changes permanent and visible to future transactions.
@@ -447,6 +745,54 @@ impl ConcurrentTransaction {
             Ok(record_store.take_dirty_pages())
         })?;
         self.dirty_pages.extend(version_dirty_pages);
+
+        // Update label index entries with commit timestamp
+        for (label, node_id) in &self.label_updates {
+            if let Some(label_map) = db.label_index.get(label) {
+                if let Some(entries) = label_map.get(node_id) {
+                    entries.lock().unwrap().update_latest_commit_ts(commit_ts);
+                }
+            }
+        }
+        
+        // Update label index entries with delete timestamp for removed labels
+        for (label, node_id) in &self.label_deletions {
+            if let Some(label_map) = db.label_index.get(label) {
+                if let Some(entries) = label_map.get(node_id) {
+                    entries.lock().unwrap().update_latest_delete_ts(commit_ts);
+                }
+            }
+        }
+
+        // Update property index entries with commit timestamp
+        for (label, property_key, node_id, value) in &self.property_updates {
+            let key = (label.clone(), property_key.clone());
+            if let Some(index) = db.property_indexes.get(&key) {
+                if let Some(indexable_value) = Option::<crate::db::core::IndexableValue>::from(value) {
+                    if let Some(entries_arc) = index.get(&indexable_value) {
+                        // Get node's record pointer (latest version)
+                        if let Some(pointer) = db.node_index.get_latest(node_id) {
+                            let mut entries = entries_arc.lock().unwrap();
+                            entries.update_commit_ts_for_pointer(pointer, commit_ts);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update property index entries with delete timestamp for removed properties
+        for (label, property_key, _node_id, value, pointer) in &self.property_deletions {
+            let key = (label.clone(), property_key.clone());
+            if let Some(index) = db.property_indexes.get(&key) {
+                if let Some(indexable_value) = Option::<crate::db::core::IndexableValue>::from(value) {
+                    if let Some(entries_arc) = index.get(&indexable_value) {
+                        // Use the stored pointer from when the property was deleted
+                        let mut entries = entries_arc.lock().unwrap();
+                        entries.update_delete_ts_for_pointer(*pointer, commit_ts);
+                    }
+                }
+            }
+        }
 
         // Complete commit in MVCC manager (now lock-free)
         let mvcc_tx_manager = db.mvcc_tx_manager.as_ref().ok_or_else(|| {

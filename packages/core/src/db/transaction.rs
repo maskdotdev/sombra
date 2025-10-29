@@ -56,7 +56,7 @@ pub enum TxState {
 /// ```
 #[derive(Debug)]
 pub struct Transaction<'db> {
-    db: &'db mut GraphDB,
+    db: &'db GraphDB,
     id: TxId,
     epoch: u64,
     state: TxState,
@@ -71,10 +71,12 @@ pub struct Transaction<'db> {
     write_edges: HashSet<EdgeId>,
     /// Version record pointers created by this transaction (for efficient commit timestamp updates)
     created_versions: Vec<RecordPointer>,
+    /// Deleted node pointers (for property index delete timestamp updates)
+    deleted_node_pointers: Vec<RecordPointer>,
 }
 
 impl<'db> Transaction<'db> {
-    pub(crate) fn new(db: &'db mut GraphDB, id: TxId) -> Result<Self> {
+    pub(crate) fn new(db: &'db GraphDB, id: TxId) -> Result<Self> {
         db.enter_transaction(id)?;
         db.start_tracking();
         let epoch = db.increment_epoch();
@@ -107,6 +109,7 @@ impl<'db> Transaction<'db> {
             write_nodes: HashSet::new(),
             write_edges: HashSet::new(),
             created_versions: Vec::new(),
+            deleted_node_pointers: Vec::new(),
         })
     }
 
@@ -274,7 +277,13 @@ impl<'db> Transaction<'db> {
     /// * `GraphError::InvalidArgument` - Transaction limits exceeded
     /// * `GraphError::NotFound` - Node doesn't exist
     pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
-        self.db.delete_node_internal(node_id)?;
+        // Capture ALL version pointers before deletion (needed for property index updates)
+        // When a node is deleted, we need to mark ALL version pointers in property indexes
+        // because a property value may have been set in multiple versions
+        let all_pointers = self.db.node_index.get(&node_id).unwrap_or_default();
+        self.deleted_node_pointers.extend(all_pointers);
+        
+        self.db.delete_node_internal(node_id, self.id, 0)?;
         self.capture_dirty_pages()?;
         // Track write for conflict detection
         self.write_nodes.insert(node_id);
@@ -330,7 +339,7 @@ impl<'db> Transaction<'db> {
             .load_edge_with_snapshot(edge_id, self.snapshot_ts, Some(self.id))
     }
 
-    pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
+    pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeId>> {
         self.db.get_nodes_by_label(label)
     }
 
@@ -348,7 +357,7 @@ impl<'db> Transaction<'db> {
     ///
     /// # Errors
     /// * `GraphError::NotFound` - Node doesn't exist
-    pub fn get_neighbors(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
+    pub fn get_neighbors(&self, node_id: NodeId) -> Result<Vec<NodeId>> {
         self.db
             .get_neighbors_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
     }
@@ -389,12 +398,47 @@ impl<'db> Transaction<'db> {
     /// * `GraphError::NotFound` - No index exists for the label/property
     /// * `GraphError::InvalidArgument` - Property type is not indexable
     pub fn find_nodes_by_property(
-        &mut self,
+        &self,
         label: &str,
         property_key: &str,
         value: &crate::model::PropertyValue,
     ) -> Result<Vec<NodeId>> {
-        self.db.find_nodes_by_property(label, property_key, value)
+        self.db.find_nodes_by_property_with_snapshot(label, property_key, value, self.snapshot_ts)
+    }
+
+    /// Removes a property from a node within this transaction.
+    ///
+    /// If the property doesn't exist, this operation succeeds without error.
+    /// The change is not visible to other transactions until this transaction
+    /// is committed.
+    ///
+    /// # Arguments
+    /// * `node_id` - The ID of the node
+    /// * `property_key` - The property key to remove
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - Transaction limits exceeded
+    /// * `GraphError::NotFound` - Node doesn't exist
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::{GraphDB, Node, PropertyValue};
+    ///
+    /// let mut db = GraphDB::open("test.db")?;
+    /// let mut tx = db.begin_transaction()?;
+    /// let mut node = Node::new(1);
+    /// node.properties.insert("age".to_string(), PropertyValue::Int(30));
+    /// let node_id = tx.add_node(node)?;
+    /// tx.remove_node_property(node_id, "age")?;
+    /// tx.commit()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn remove_node_property(&mut self, node_id: NodeId, property_key: &str) -> Result<()> {
+        self.db.remove_node_property_internal(node_id, property_key)?;
+        self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_nodes.insert(node_id);
+        Ok(())
     }
 
     /// Commits the transaction, making all changes permanent.
@@ -484,6 +528,22 @@ impl<'db> Transaction<'db> {
                 self.db.exit_transaction(self.id);
                 self.state = TxState::RolledBack;
                 return Err(err);
+            }
+
+            // Update property index commit timestamps for nodes added in this transaction
+            // AND update delete timestamps for deleted nodes
+            
+            // Update commit timestamps for added/updated nodes
+            for node_id in &self.write_nodes {
+                let _ = self.db.update_property_index_commit_ts(*node_id, commit_ts);
+            }
+            
+            // Update delete timestamps for deleted nodes
+            for pointer in &self.deleted_node_pointers {
+                if let Err(err) = self.db.update_property_index_delete_ts_by_pointer(*pointer, commit_ts) {
+                    warn!("Failed to update property index delete timestamps for pointer {:?}: {}", pointer, err);
+                    // Continue - this is an index update, not critical for consistency
+                }
             }
         }
 

@@ -22,6 +22,152 @@ fn create_mvcc_db(path: &str) -> GraphDB {
 }
 
 #[test]
+fn test_property_index_mvcc_persistence_after_reopen() {
+    let path = "test_property_index_mvcc_persist.db";
+    cleanup_test_db(path);
+
+    // Create database with MVCC enabled
+    let mut config = Config::default();
+    config.mvcc_enabled = true;
+
+    // Phase 1: Create property index and add versioned data
+    {
+        let mut db = GraphDB::open_with_config(path, config.clone()).unwrap();
+        db.create_property_index("User", "email").unwrap();
+
+        // Transaction 1: Add initial user
+        let user1_id = {
+            let mut tx = db.begin_transaction().unwrap();
+            let mut user = Node::new(1);
+            user.labels.push("User".to_string());
+            user.properties.insert(
+                "email".to_string(),
+                PropertyValue::String("alice@example.com".to_string()),
+            );
+            user.properties.insert(
+                "name".to_string(),
+                PropertyValue::String("Alice".to_string()),
+            );
+            let id = tx.add_node(user).unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // Transaction 2: Update user (creates new version)
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            let mut user = tx.get_node(user1_id).unwrap().unwrap();
+            user.properties.insert(
+                "name".to_string(),
+                PropertyValue::String("Alice Updated".to_string()),
+            );
+            tx.add_node(user).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Transaction 3: Add second user
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            let mut user = Node::new(2);
+            user.labels.push("User".to_string());
+            user.properties.insert(
+                "email".to_string(),
+                PropertyValue::String("bob@example.com".to_string()),
+            );
+            user.properties.insert(
+                "name".to_string(),
+                PropertyValue::String("Bob".to_string()),
+            );
+            tx.add_node(user).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Transaction 4: Delete alice (marks as deleted in MVCC)
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            tx.delete_node(user1_id).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Force checkpoint to persist property index
+        db.checkpoint().unwrap();
+    }
+
+    // Phase 2: Reopen database and verify property index with MVCC versions
+    {
+        let mut db = GraphDB::open_with_config(path, config).unwrap();
+
+        // Transaction 5: Query for alice - should NOT find (deleted)
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            let alice_results = tx
+                .find_nodes_by_property(
+                    "User",
+                    "email",
+                    &PropertyValue::String("alice@example.com".to_string()),
+                )
+                .unwrap();
+            assert_eq!(
+                alice_results.len(),
+                0,
+                "Alice should not be found (deleted)"
+            );
+            tx.commit().unwrap();
+        }
+
+        // Transaction 6: Query for bob - should find
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            let bob_results = tx
+                .find_nodes_by_property(
+                    "User",
+                    "email",
+                    &PropertyValue::String("bob@example.com".to_string()),
+                )
+                .unwrap();
+            assert_eq!(bob_results.len(), 1, "Bob should be found");
+
+            let bob_node = tx.get_node(bob_results[0]).unwrap().unwrap();
+            assert_eq!(
+                bob_node.properties.get("name"),
+                Some(&PropertyValue::String("Bob".to_string()))
+            );
+            tx.commit().unwrap();
+        }
+
+        // Transaction 7: Add a new user after reopen
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            let mut user = Node::new(3);
+            user.labels.push("User".to_string());
+            user.properties.insert(
+                "email".to_string(),
+                PropertyValue::String("charlie@example.com".to_string()),
+            );
+            tx.add_node(user).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Transaction 8: Verify charlie can be found
+        {
+            let mut tx = db.begin_transaction().unwrap();
+            let charlie_results = tx
+                .find_nodes_by_property(
+                    "User",
+                    "email",
+                    &PropertyValue::String("charlie@example.com".to_string()),
+                )
+                .unwrap();
+            assert_eq!(charlie_results.len(), 1, "Charlie should be found");
+            tx.commit().unwrap();
+        }
+    }
+
+    cleanup_test_db(path);
+}
+
+
+#[test]
 fn test_snapshot_isolation_basic() {
     let path = "test_snapshot_isolation_basic.db";
     let mut db = create_mvcc_db(path);

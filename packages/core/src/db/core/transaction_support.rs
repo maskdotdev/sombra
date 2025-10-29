@@ -280,7 +280,18 @@ impl GraphDB {
         for &page_id in dirty_pages {
             let page_versions = self.pager.with_pager_write(|pager| {
                 let page = pager.fetch_page(page_id)?;
-                let record_page = RecordPage::from_bytes(&mut page.data)?;
+                
+                // Try to parse as RecordPage; skip if it's an index page (BTree, Property)
+                // Dirty pages can include index pages when nodes are added/modified
+                let record_page = match RecordPage::from_bytes(&mut page.data) {
+                    Ok(rp) => rp,
+                    Err(GraphError::InvalidArgument(_)) => {
+                        // This is an index page with magic bytes (BIDX, PIDX), skip it
+                        return Ok(Vec::new());
+                    }
+                    Err(e) => return Err(e),
+                };
+                
                 let record_count = record_page.record_count()? as usize;
                 let mut pointers = Vec::new();
 

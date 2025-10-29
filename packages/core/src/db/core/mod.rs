@@ -10,5 +10,5 @@ mod records;
 mod transaction_support;
 mod traversal;
 
-pub use graphdb::{GraphDB, IntegrityOptions, IntegrityReport};
+pub use graphdb::{GraphDB, IndexableValue, IntegrityOptions, IntegrityReport};
 pub use header::HeaderState;

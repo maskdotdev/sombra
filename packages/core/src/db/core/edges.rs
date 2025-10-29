@@ -48,11 +48,11 @@ impl GraphDB {
 
         let source_ptr = self
             .node_index
-            .get(&edge.source_node_id)
+            .get_latest(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
         let target_ptr = self
             .node_index
-            .get(&edge.target_node_id)
+            .get_latest(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;
 
         let source_node = self.read_node_at(source_ptr)?;
@@ -78,6 +78,7 @@ impl GraphDB {
                     &payload,
                     tx_id,
                     commit_ts,
+                    false, // is_deleted: false for new edge creation
                 )?;
 
                 // Collect dirty pages before dropping guards
@@ -99,6 +100,7 @@ impl GraphDB {
             (pointer, None)
         };
 
+        // Phase 4A: Insert into BTreeIndex (supports version chains)
         self.edge_index.insert(edge_id, pointer);
         self.header.lock().unwrap().last_record_page = Some(pointer.page_id);
 
@@ -128,20 +130,22 @@ impl GraphDB {
         self.delete_edge_internal(edge_id)
     }
 
-    pub fn delete_edge_internal(&mut self, edge_id: EdgeId) -> Result<()> {
-        let pointer = *self
+    pub fn delete_edge_internal(&self, edge_id: EdgeId) -> Result<()> {
+        // Phase 4B: MVCC-aware deletion
+        // Get the latest version of the edge
+        let pointer = self
             .edge_index
-            .get(&edge_id)
+            .get_latest(&edge_id)
             .ok_or(GraphError::NotFound("edge"))?;
         let edge = self.load_edge(edge_id)?;
 
         let source_ptr = self
             .node_index
-            .get(&edge.source_node_id)
+            .get_latest(&edge.source_node_id)
             .ok_or(GraphError::NotFound("source node"))?;
         let target_ptr = self
             .node_index
-            .get(&edge.target_node_id)
+            .get_latest(&edge.target_node_id)
             .ok_or(GraphError::NotFound("target node"))?;
 
         self.remove_edge_from_node_chain(
@@ -171,8 +175,51 @@ impl GraphDB {
         self.node_cache.pop(&edge.target_node_id);
         self.edge_cache.pop(&edge_id);
 
-        self.edge_index.remove(&edge_id);
-        self.free_record(pointer)?;
+        if self.config.mvcc_enabled {
+            // MVCC mode: Create tombstone version instead of deleting
+            use crate::storage::version_chain::store_new_version;
+            
+            let tx_id = self.allocate_tx_id().unwrap_or(1);
+            let commit_ts = self
+                .timestamp_oracle
+                .as_ref()
+                .map(|oracle| oracle.allocate_commit_timestamp())
+                .unwrap_or(0);
+            
+            let payload = serialize_edge(&edge)?;
+            
+            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write(|pager| {
+                let mut record_store = RecordStore::new(pager);
+                
+                // store_new_version with is_deleted=true creates a tombstone
+                let tombstone_ptr = store_new_version(
+                    &mut record_store,
+                    Some(pointer), // Link to previous version
+                    edge_id,
+                    RecordKind::Edge,
+                    &payload,
+                    tx_id,
+                    commit_ts,
+                    true, // is_deleted: true to create tombstone
+                )?;
+                
+                let dirty_pages = record_store.take_dirty_pages();
+                Ok((tombstone_ptr, dirty_pages))
+            })?;
+            
+            // Register dirty pages
+            for page_id in dirty_pages {
+                self.record_page_write(page_id);
+            }
+            
+            // Update index to point to tombstone (keeps edge in index for snapshot isolation)
+            self.edge_index.insert(edge_id, tombstone_ptr);
+        } else {
+            // Non-MVCC mode: Remove from index and free storage
+            self.edge_index.remove(&edge_id);
+            self.free_record(pointer)?;
+        }
+        
         Ok(())
     }
 

@@ -1,13 +1,12 @@
 use super::graphdb::GraphDB;
 use super::property_index_persistence::PropertyIndexSerializer;
 use crate::error::{GraphError, Result};
-use crate::index::BTreeIndex;
-use crate::pager::PageId;
+use crate::index::{BTreeIndex, VersionedIndexEntries};
+use crate::pager::{PageId, PAGE_CHECKSUM_SIZE};
 use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::{deserialize_edge, deserialize_node, RecordPointer};
-use dashmap::DashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 impl GraphDB {
@@ -22,13 +21,16 @@ impl GraphDB {
 
         let mut data = Vec::new();
         let page_size = self.pager.page_size();
+        // Reserve space for page checksum (last 4 bytes of each page)
+        let usable_page_size = page_size - PAGE_CHECKSUM_SIZE;
         let mut current_page = index_page;
         let mut bytes_read = 0;
 
         while bytes_read < index_size {
             let to_read = self.pager.with_pager_write(|pager| {
                 let page = pager.fetch_page(current_page)?;
-                let to_read = (index_size - bytes_read).min(page_size);
+                // Read only from the usable area, not the checksum
+                let to_read = (index_size - bytes_read).min(usable_page_size);
                 data.extend_from_slice(&page.data[..to_read]);
                 Ok(to_read)
             })?;
@@ -38,6 +40,9 @@ impl GraphDB {
 
         self.node_index
             .replace_with(BTreeIndex::deserialize(&data)?);
+        
+        // After loading the node index, rebuild edges and other indices
+        self.rebuild_remaining_indexes()?;
         Ok(true)
     }
 
@@ -53,15 +58,31 @@ impl GraphDB {
         }
 
         let page_size = self.pager.page_size();
-        let pages_needed = data_size.div_ceil(page_size);
+        // Reserve space for page checksum (last 4 bytes of each page)
+        let usable_page_size = page_size - PAGE_CHECKSUM_SIZE;
+        let pages_needed = data_size.div_ceil(usable_page_size);
 
         let start_page = {
             let header = self.header.lock().unwrap();
             if let Some(old_page) = header.btree_index_page {
                 let old_size = header.btree_index_size as usize;
-                let old_pages = old_size.div_ceil(page_size);
+                let old_pages = old_size.div_ceil(usable_page_size);
 
                 if pages_needed <= old_pages {
+                    // Reuse existing pages, but clear any pages we won't be using
+                    if pages_needed < old_pages {
+                        drop(header); // Release lock before clearing pages
+                        for i in pages_needed..old_pages {
+                            let page_to_clear = old_page + i as u32;
+                            self.pager.with_pager_write(|pager| {
+                                let page = pager.fetch_page(page_to_clear)?;
+                                page.data.fill(0);
+                                page.dirty = true;
+                                Ok(())
+                            })?;
+                            self.push_free_page(page_to_clear)?;
+                        }
+                    }
                     old_page
                 } else {
                     drop(header); // Release lock before allocation
@@ -100,13 +121,15 @@ impl GraphDB {
         let mut offset = 0;
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
-            let to_write = (data_size - offset).min(page_size);
+            // Use usable_page_size to avoid overwriting the checksum area
+            let to_write = (data_size - offset).min(usable_page_size);
 
             self.pager.with_pager_write(|pager| {
                 let page = pager.fetch_page(page_id)?;
                 page.data[..to_write].copy_from_slice(&data[offset..offset + to_write]);
-                if to_write < page_size {
-                    page.data[to_write..].fill(0);
+                if to_write < usable_page_size {
+                    // Zero out the rest of the usable area (checksum will be added later)
+                    page.data[to_write..usable_page_size].fill(0);
                 }
                 page.dirty = true;
                 Ok(())
@@ -122,7 +145,8 @@ impl GraphDB {
     }
 
     pub(crate) fn persist_property_indexes(&self) -> Result<()> {
-        // Convert nested DashMap/DashSet to HashMap/BTreeMap/BTreeSet for serialization
+        // Convert nested DashMap structure to HashMap/BTreeMap for serialization
+        // Structure: DashMap<(label, key), Arc<DashMap<IndexableValue, Arc<Mutex<VersionedIndexEntries>>>>>
         let indexes_snapshot: std::collections::HashMap<_, _> = self
             .property_indexes
             .iter()
@@ -130,16 +154,23 @@ impl GraphDB {
                 let key = entry.key().clone();
                 let inner_map = entry.value();
 
-                // Convert DashMap<IndexableValue, DashSet<NodeId>> to BTreeMap<IndexableValue, BTreeSet<NodeId>>
-                let converted_map: std::collections::BTreeMap<_, std::collections::BTreeSet<_>> =
+                // Convert to BTreeMap for ordered serialization
+                let converted_map: std::collections::BTreeMap<_, Vec<(RecordPointer, u64, Option<u64>)>> =
                     inner_map
                         .iter()
                         .map(|inner_entry| {
                             let idx_val = inner_entry.key().clone();
-                            let node_set = inner_entry.value();
-                            let btree_set: std::collections::BTreeSet<_> =
-                                node_set.iter().map(|r| *r).collect();
-                            (idx_val, btree_set)
+                            let entries_arc = inner_entry.value();
+                            let entries = entries_arc.lock().unwrap();
+                            
+                            // Serialize each IndexEntry as (pointer, commit_ts, delete_ts)
+                            let entry_tuples: Vec<(RecordPointer, u64, Option<u64>)> = entries
+                                .entries()
+                                .iter()
+                                .map(|e| (e.pointer, e.commit_ts, e.delete_ts))
+                                .collect();
+                            
+                            (idx_val, entry_tuples)
                         })
                         .collect();
 
@@ -212,14 +243,24 @@ impl GraphDB {
                 // Convert HashMap to DashMap
                 self.property_indexes.clear();
                 for (key, value) in indexes {
-                    // Convert HashMap<IndexableValue, BTreeSet<NodeId>> to DashMap<IndexableValue, DashSet<NodeId>>
+                    // Convert HashMap<IndexableValue, Vec<(pointer, commit_ts, delete_ts)>> to 
+                    // DashMap<IndexableValue, Arc<Mutex<VersionedIndexEntries>>>
                     let dash_value = Arc::new(dashmap::DashMap::new());
-                    for (idx_val, node_set) in value {
-                        let dash_set = Arc::new(DashSet::new());
-                        for node_id in node_set {
-                            dash_set.insert(node_id);
+                    for (idx_val, entry_tuples) in value {
+                        let mut versioned_entries = VersionedIndexEntries::new();
+                        for (pointer, commit_ts, delete_ts) in entry_tuples {
+                            // Reconstruct IndexEntry - need to create with correct delete_ts
+                            // Can't use add_entry + update_delete_ts_for_pointer because that only works
+                            // when updating from Some(0) to actual timestamp, not from None
+                            if let Some(dt) = delete_ts {
+                                // Entry was deleted - use add_deleted_entry
+                                versioned_entries.add_deleted_entry(pointer, commit_ts, dt);
+                            } else {
+                                // Entry is still active
+                                versioned_entries.add_entry(pointer, commit_ts);
+                            }
                         }
-                        dash_value.insert(idx_val, dash_set);
+                        dash_value.insert(idx_val, Arc::new(Mutex::new(versioned_entries)));
                     }
                     self.property_indexes.insert(key, dash_value);
                 }
@@ -279,17 +320,43 @@ impl GraphDB {
             }
         };
 
+        // Collect property index pages to skip
+        let property_index_pages: std::collections::HashSet<PageId> = {
+            let header = self.header.lock().unwrap();
+            if let Some(root_page) = header.property_index_root_page {
+                match self.pager.with_pager_write(|pager| {
+                    let mut serializer = PropertyIndexSerializer::new(pager);
+                    serializer.collect_old_pages(root_page)
+                }) {
+                    Ok(pages) => pages.into_iter().collect(),
+                    Err(_) => std::collections::HashSet::new(),
+                }
+            } else {
+                std::collections::HashSet::new()
+            }
+        };
+
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
 
-            if btree_pages.contains(&page_id) {
+            if btree_pages.contains(&page_id) || property_index_pages.contains(&page_id) {
                 continue;
             }
 
             let (record_count, records_data) = self.pager.with_pager_write(|pager| {
                 let page = pager.fetch_page(page_id)?;
-                let record_page = RecordPage::from_bytes(&mut page.data)?;
+                
+                // Try to parse as RecordPage; skip if it's an index page
+                let record_page = match RecordPage::from_bytes(&mut page.data) {
+                    Ok(rp) => rp,
+                    Err(GraphError::InvalidArgument(_)) => {
+                        // This is an index page with magic bytes, skip it
+                        return Ok((0, Vec::new()));
+                    }
+                    Err(e) => return Err(e),
+                };
+                
                 let record_count = record_page.record_count()? as usize;
                 if record_count == 0 {
                     return Ok((0, Vec::new()));
@@ -316,7 +383,17 @@ impl GraphDB {
                     slot_index: slot as u16,
                     byte_offset,
                 };
-                let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
+                
+                // Skip records that don't have enough data for a header
+                if record.len() < RECORD_HEADER_SIZE {
+                    continue;
+                }
+                
+                // Try to parse record header; skip malformed records during rebuild
+                let header = match RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE]) {
+                    Ok(h) => h,
+                    Err(_) => continue, // Skip malformed records
+                };
                 let payload_len = header.payload_length as usize;
 
                 // Check if this is a versioned record by looking at the actual kind byte
@@ -345,10 +422,13 @@ impl GraphDB {
                         self.node_index.insert(node.id, pointer);
 
                         for label in &node.labels {
-                            self.label_index
+                            let label_map = self.label_index
                                 .entry(label.clone())
-                                .or_insert_with(|| Arc::new(DashSet::new()))
-                                .insert(node.id);
+                                .or_insert_with(dashmap::DashMap::new);
+                            let entries = label_map
+                                .entry(node.id)
+                                .or_insert_with(|| Arc::new(Mutex::new(VersionedIndexEntries::new())));
+                            entries.lock().unwrap().add_entry(pointer, 0); // commit_ts=0 for rebuild
                         }
 
                         live_on_page += 1;
@@ -437,17 +517,43 @@ impl GraphDB {
             }
         };
 
+        // Collect property index pages to skip
+        let property_index_pages: std::collections::HashSet<PageId> = {
+            let header = self.header.lock().unwrap();
+            if let Some(root_page) = header.property_index_root_page {
+                match self.pager.with_pager_write(|pager| {
+                    let mut serializer = PropertyIndexSerializer::new(pager);
+                    serializer.collect_old_pages(root_page)
+                }) {
+                    Ok(pages) => pages.into_iter().collect(),
+                    Err(_) => std::collections::HashSet::new(),
+                }
+            } else {
+                std::collections::HashSet::new()
+            }
+        };
+
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
                 .map_err(|_| GraphError::Corruption("page index exceeds u32::MAX".into()))?;
 
-            if btree_pages.contains(&page_id) {
+            if btree_pages.contains(&page_id) || property_index_pages.contains(&page_id) {
                 continue;
             }
 
             let (record_count, records_data) = self.pager.with_pager_write(|pager| {
                 let page = pager.fetch_page(page_id)?;
-                let record_page = RecordPage::from_bytes(&mut page.data)?;
+                
+                // Try to parse as RecordPage; skip if it's an index page
+                let record_page = match RecordPage::from_bytes(&mut page.data) {
+                    Ok(rp) => rp,
+                    Err(GraphError::InvalidArgument(_)) => {
+                        // This is an index page with magic bytes, skip it
+                        return Ok((0, Vec::new()));
+                    }
+                    Err(e) => return Err(e),
+                };
+                
                 let record_count = record_page.record_count()? as usize;
                 if record_count == 0 {
                     return Ok((0, Vec::new()));
@@ -474,7 +580,17 @@ impl GraphDB {
                     slot_index: slot as u16,
                     byte_offset,
                 };
-                let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
+                
+                // Skip records that don't have enough data for a header
+                if record.len() < RECORD_HEADER_SIZE {
+                    continue;
+                }
+                
+                // Try to parse record header; skip malformed records during rebuild
+                let header = match RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE]) {
+                    Ok(h) => h,
+                    Err(_) => continue, // Skip malformed records
+                };
                 let payload_len = header.payload_length as usize;
 
                 // Check if this is a versioned record by looking at the actual kind byte
@@ -501,10 +617,13 @@ impl GraphDB {
                         let node = deserialize_node(payload)?;
 
                         for label in &node.labels {
-                            self.label_index
+                            let label_map = self.label_index
                                 .entry(label.clone())
-                                .or_insert_with(|| Arc::new(DashSet::new()))
-                                .insert(node.id);
+                                .or_insert_with(dashmap::DashMap::new);
+                            let entries = label_map
+                                .entry(node.id)
+                                .or_insert_with(|| Arc::new(Mutex::new(VersionedIndexEntries::new())));
+                            entries.lock().unwrap().add_entry(pointer, 0); // commit_ts=0 for rebuild
                         }
 
                         live_on_page += 1;

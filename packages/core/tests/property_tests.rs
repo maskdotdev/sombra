@@ -425,7 +425,10 @@ fn test_remove_node_property() {
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
-    db.remove_node_property(node_id, "email").unwrap();
+    // Remove property using Transaction API
+    let mut tx = db.begin_transaction().unwrap();
+    tx.remove_node_property(node_id, "email").unwrap();
+    tx.commit().unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
     let updated_node = tx.get_node(node_id).unwrap().unwrap();
@@ -457,7 +460,10 @@ fn test_remove_nonexistent_property() {
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
-    db.remove_node_property(node_id, "nonexistent").unwrap();
+    // Remove nonexistent property using Transaction API
+    let mut tx = db.begin_transaction().unwrap();
+    tx.remove_node_property(node_id, "nonexistent").unwrap();
+    tx.commit().unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
     let node = tx.get_node(node_id).unwrap().unwrap();
@@ -577,7 +583,10 @@ fn test_property_removal_updates_index() {
     let node_id = tx.add_node(node).unwrap();
     tx.commit().unwrap();
 
-    db.remove_node_property(node_id, "price").unwrap();
+    // Remove property using Transaction API
+    let mut tx = db.begin_transaction().unwrap();
+    tx.remove_node_property(node_id, "price").unwrap();
+    tx.commit().unwrap();
 
     let mut tx = db.begin_transaction().unwrap();
     let results = tx

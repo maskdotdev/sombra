@@ -1,16 +1,17 @@
 use crate::error::{GraphError, Result};
-use crate::model::NodeId;
 use crate::pager::{PageId, Pager};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use crate::storage::RecordPointer;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, info};
 
 use super::graphdb::IndexableValue;
 
 const PROPERTY_INDEX_MAGIC: &[u8; 4] = b"PIDX";
-const PROPERTY_INDEX_VERSION: u16 = 1;
+const PROPERTY_INDEX_VERSION: u16 = 2; // Version 2 supports VersionedIndexEntries
 
-type PropertyIndexMap = HashMap<(String, String), BTreeMap<IndexableValue, BTreeSet<NodeId>>>;
-type IndexEntry = BTreeMap<IndexableValue, BTreeSet<NodeId>>;
+// Type for MVCC-aware property indexes
+type PropertyIndexMap = HashMap<(String, String), BTreeMap<IndexableValue, Vec<(RecordPointer, u64, Option<u64>)>>>;
+type IndexEntry = BTreeMap<IndexableValue, Vec<(RecordPointer, u64, Option<u64>)>>;
 
 pub struct PropertyIndexSerializer<'a> {
     pager: &'a mut Pager,
@@ -97,14 +98,28 @@ impl<'a> PropertyIndexSerializer<'a> {
         let entry_count = index.len() as u32;
         data.extend_from_slice(&entry_count.to_le_bytes());
 
-        for (indexable_value, node_ids) in index {
+        for (indexable_value, entries) in index {
             self.serialize_indexable_value(data, indexable_value)?;
 
-            let node_count = node_ids.len() as u32;
-            data.extend_from_slice(&node_count.to_le_bytes());
+            let entry_count = entries.len() as u32;
+            data.extend_from_slice(&entry_count.to_le_bytes());
 
-            for node_id in node_ids {
-                data.extend_from_slice(&node_id.to_le_bytes());
+            // Each entry: (RecordPointer, commit_ts, delete_ts)
+            // RecordPointer: (page_id: u32, slot_index: u16, byte_offset: u16)
+            // commit_ts: u64
+            // delete_ts: Option<u64> - use u64::MAX as sentinel for None
+            for (pointer, commit_ts, delete_ts) in entries {
+                // Serialize RecordPointer
+                data.extend_from_slice(&pointer.page_id.to_le_bytes());
+                data.extend_from_slice(&pointer.slot_index.to_le_bytes());
+                data.extend_from_slice(&pointer.byte_offset.to_le_bytes());
+                
+                // Serialize commit_ts
+                data.extend_from_slice(&commit_ts.to_le_bytes());
+                
+                // Serialize delete_ts (u64::MAX means None)
+                let delete_ts_value = delete_ts.unwrap_or(u64::MAX);
+                data.extend_from_slice(&delete_ts_value.to_le_bytes());
             }
         }
 
@@ -282,10 +297,10 @@ impl<'a> PropertyIndexSerializer<'a> {
             offset = new_offset;
 
             if offset + 4 > data.len() {
-                return Err(GraphError::Corruption("truncated node count".into()));
+                return Err(GraphError::Corruption("truncated entry count".into()));
             }
 
-            let node_count = u32::from_le_bytes([
+            let versioned_entry_count = u32::from_le_bytes([
                 data[offset],
                 data[offset + 1],
                 data[offset + 2],
@@ -293,13 +308,45 @@ impl<'a> PropertyIndexSerializer<'a> {
             ]);
             offset += 4;
 
-            let mut node_ids = BTreeSet::new();
-            for _ in 0..node_count {
+            let mut entries = Vec::new();
+            for _ in 0..versioned_entry_count {
+                // Deserialize RecordPointer (4 + 2 + 2 = 8 bytes)
                 if offset + 8 > data.len() {
-                    return Err(GraphError::Corruption("truncated node id".into()));
+                    return Err(GraphError::Corruption("truncated record pointer".into()));
                 }
-
-                let node_id = u64::from_le_bytes([
+                
+                let page_id = u32::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                
+                let slot_index = u16::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                ]);
+                offset += 2;
+                
+                let byte_offset = u16::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                ]);
+                offset += 2;
+                
+                let pointer = RecordPointer {
+                    page_id,
+                    slot_index,
+                    byte_offset,
+                };
+                
+                // Deserialize commit_ts (8 bytes)
+                if offset + 8 > data.len() {
+                    return Err(GraphError::Corruption("truncated commit timestamp".into()));
+                }
+                
+                let commit_ts = u64::from_le_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
@@ -310,10 +357,34 @@ impl<'a> PropertyIndexSerializer<'a> {
                     data[offset + 7],
                 ]);
                 offset += 8;
-                node_ids.insert(node_id);
+                
+                // Deserialize delete_ts (8 bytes, u64::MAX means None)
+                if offset + 8 > data.len() {
+                    return Err(GraphError::Corruption("truncated delete timestamp".into()));
+                }
+                
+                let delete_ts_value = u64::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                offset += 8;
+                
+                let delete_ts = if delete_ts_value == u64::MAX {
+                    None
+                } else {
+                    Some(delete_ts_value)
+                };
+                
+                entries.push((pointer, commit_ts, delete_ts));
             }
 
-            index.insert(indexable_value, node_ids);
+            index.insert(indexable_value, entries);
         }
 
         Ok(((label, property_key), index, offset))
@@ -480,16 +551,17 @@ mod tests {
             let mut indexes = PropertyIndexMap::new();
             let mut index = BTreeMap::new();
 
-            let mut node_set = BTreeSet::new();
-            node_set.insert(1);
-            node_set.insert(2);
-            node_set.insert(3);
-            index.insert(IndexableValue::Int(42), node_set);
+            // Create versioned entries: Vec<(RecordPointer, commit_ts, delete_ts)>
+            let mut entries_42 = Vec::new();
+            entries_42.push((RecordPointer { page_id: 1, slot_index: 0, byte_offset: 0 }, 1, None));
+            entries_42.push((RecordPointer { page_id: 1, slot_index: 1, byte_offset: 100 }, 2, None));
+            entries_42.push((RecordPointer { page_id: 1, slot_index: 2, byte_offset: 200 }, 3, None));
+            index.insert(IndexableValue::Int(42), entries_42);
 
-            let mut node_set2 = BTreeSet::new();
-            node_set2.insert(4);
-            node_set2.insert(5);
-            index.insert(IndexableValue::String("test".to_string()), node_set2);
+            let mut entries_test = Vec::new();
+            entries_test.push((RecordPointer { page_id: 2, slot_index: 0, byte_offset: 0 }, 4, None));
+            entries_test.push((RecordPointer { page_id: 2, slot_index: 1, byte_offset: 100 }, 5, None));
+            index.insert(IndexableValue::String("test".to_string()), entries_test);
 
             indexes.insert(("User".to_string(), "age".to_string()), index);
 
@@ -513,18 +585,18 @@ mod tests {
 
             assert_eq!(index.len(), 2);
 
-            let nodes = index.get(&IndexableValue::Int(42)).expect("int value");
-            assert_eq!(nodes.len(), 3);
-            assert!(nodes.contains(&1));
-            assert!(nodes.contains(&2));
-            assert!(nodes.contains(&3));
+            let entries = index.get(&IndexableValue::Int(42)).expect("int value");
+            assert_eq!(entries.len(), 3);
+            assert_eq!(entries[0].0.page_id, 1);
+            assert_eq!(entries[0].1, 1);
+            assert_eq!(entries[0].2, None);
 
-            let nodes2 = index
+            let entries2 = index
                 .get(&IndexableValue::String("test".to_string()))
                 .expect("string value");
-            assert_eq!(nodes2.len(), 2);
-            assert!(nodes2.contains(&4));
-            assert!(nodes2.contains(&5));
+            assert_eq!(entries2.len(), 2);
+            assert_eq!(entries2[0].0.page_id, 2);
+            assert_eq!(entries2[0].1, 4);
         }
     }
 
@@ -537,22 +609,22 @@ mod tests {
             let mut indexes = PropertyIndexMap::new();
 
             let mut index1 = BTreeMap::new();
-            let mut node_set1 = BTreeSet::new();
-            node_set1.insert(1);
-            node_set1.insert(2);
-            index1.insert(IndexableValue::Int(30), node_set1);
+            let mut entries1 = Vec::new();
+            entries1.push((RecordPointer { page_id: 1, slot_index: 0, byte_offset: 0 }, 1, None));
+            entries1.push((RecordPointer { page_id: 1, slot_index: 1, byte_offset: 100 }, 2, None));
+            index1.insert(IndexableValue::Int(30), entries1);
             indexes.insert(("User".to_string(), "age".to_string()), index1);
 
             let mut index2 = BTreeMap::new();
-            let mut node_set2 = BTreeSet::new();
-            node_set2.insert(1);
-            index2.insert(IndexableValue::String("John".to_string()), node_set2);
+            let mut entries2 = Vec::new();
+            entries2.push((RecordPointer { page_id: 2, slot_index: 0, byte_offset: 0 }, 1, None));
+            index2.insert(IndexableValue::String("John".to_string()), entries2);
             indexes.insert(("User".to_string(), "name".to_string()), index2);
 
             let mut index3 = BTreeMap::new();
-            let mut node_set3 = BTreeSet::new();
-            node_set3.insert(3);
-            index3.insert(IndexableValue::Bool(true), node_set3);
+            let mut entries3 = Vec::new();
+            entries3.push((RecordPointer { page_id: 3, slot_index: 0, byte_offset: 0 }, 3, None));
+            index3.insert(IndexableValue::Bool(true), entries3);
             indexes.insert(("Post".to_string(), "published".to_string()), index3);
 
             let (root_page, count, _pages) =
@@ -584,9 +656,9 @@ mod tests {
             let mut index = BTreeMap::new();
 
             for i in 0..1000 {
-                let mut node_set = BTreeSet::new();
-                node_set.insert(i);
-                index.insert(IndexableValue::Int(i as i64), node_set);
+                let mut entries = Vec::new();
+                entries.push((RecordPointer { page_id: i as u32, slot_index: 0, byte_offset: 0 }, i, None));
+                index.insert(IndexableValue::Int(i as i64), entries);
             }
 
             indexes.insert(("User".to_string(), "id".to_string()), index);
@@ -609,11 +681,12 @@ mod tests {
             assert_eq!(index.len(), 1000);
 
             for i in 0..1000 {
-                let nodes = index
+                let entries = index
                     .get(&IndexableValue::Int(i as i64))
                     .unwrap_or_else(|| panic!("value {} exists", i));
-                assert_eq!(nodes.len(), 1);
-                assert!(nodes.contains(&i));
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0.page_id, i as u32);
+                assert_eq!(entries[0].1, i);
             }
         }
     }
@@ -627,26 +700,26 @@ mod tests {
             let mut indexes = PropertyIndexMap::new();
             let mut index = BTreeMap::new();
 
-            let mut bool_set = BTreeSet::new();
-            bool_set.insert(1);
-            index.insert(IndexableValue::Bool(true), bool_set.clone());
-            index.insert(IndexableValue::Bool(false), bool_set.clone());
+            let mut bool_entries = Vec::new();
+            bool_entries.push((RecordPointer { page_id: 1, slot_index: 0, byte_offset: 0 }, 1, None));
+            index.insert(IndexableValue::Bool(true), bool_entries.clone());
+            index.insert(IndexableValue::Bool(false), bool_entries.clone());
 
-            let mut int_set = BTreeSet::new();
-            int_set.insert(2);
-            index.insert(IndexableValue::Int(0), int_set.clone());
-            index.insert(IndexableValue::Int(-999), int_set.clone());
-            index.insert(IndexableValue::Int(999), int_set.clone());
+            let mut int_entries = Vec::new();
+            int_entries.push((RecordPointer { page_id: 2, slot_index: 0, byte_offset: 0 }, 2, None));
+            index.insert(IndexableValue::Int(0), int_entries.clone());
+            index.insert(IndexableValue::Int(-999), int_entries.clone());
+            index.insert(IndexableValue::Int(999), int_entries.clone());
 
-            let mut str_set = BTreeSet::new();
-            str_set.insert(3);
-            index.insert(IndexableValue::String("".to_string()), str_set.clone());
-            index.insert(IndexableValue::String("short".to_string()), str_set.clone());
+            let mut str_entries = Vec::new();
+            str_entries.push((RecordPointer { page_id: 3, slot_index: 0, byte_offset: 0 }, 3, None));
+            index.insert(IndexableValue::String("".to_string()), str_entries.clone());
+            index.insert(IndexableValue::String("short".to_string()), str_entries.clone());
             index.insert(
                 IndexableValue::String(
                     "a very long string with lots of characters to test serialization".to_string(),
                 ),
-                str_set.clone(),
+                str_entries.clone(),
             );
 
             indexes.insert(("Test".to_string(), "prop".to_string()), index);

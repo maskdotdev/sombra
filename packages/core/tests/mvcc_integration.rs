@@ -7,6 +7,7 @@
 //! - MVCC mode enabled/disabled behavior
 //! - Backwards compatibility with non-MVCC databases
 
+use sombra::model::PropertyValue;
 use sombra::{Config, Edge, GraphDB, Node};
 use std::fs;
 

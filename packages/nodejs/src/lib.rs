@@ -271,7 +271,7 @@ impl SombraDB {
     ) -> std::result::Result<(), Error> {
         let mut db = self.inner.write();
 
-        db.remove_node_property(node_id as u64, &key).map_err(|e| {
+        db.remove_node_property_internal(node_id as u64, &key).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("Failed to remove node property: {}", e),
@@ -1038,7 +1038,11 @@ impl SombraTransaction {
             }
         }
 
-        let node_id = db.add_node_internal(node).map_err(|e| {
+        // Allocate tx_id and commit_ts for MVCC
+        let tx_id = 1; // Simplified for non-transactional context
+        let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+        
+        let (node_id, _version_ptr) = db.add_node_internal(node, tx_id, commit_ts).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("Failed to add node in transaction: {}", e),
@@ -1067,7 +1071,11 @@ impl SombraTransaction {
             }
         }
 
-        let edge_id = db.add_edge_internal(edge).map_err(|e| {
+        // Allocate tx_id and commit_ts for MVCC
+        let tx_id = 1; // Simplified for non-transactional context
+        let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+        
+        let (edge_id, _version_ptr) = db.add_edge_internal(edge, tx_id, commit_ts).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("Failed to add edge in transaction: {}", e),
@@ -1195,7 +1203,11 @@ impl SombraTransaction {
     pub fn delete_node(&mut self, node_id: f64) -> std::result::Result<(), Error> {
         let mut db = self.db.write();
 
-        db.delete_node_internal(node_id as u64).map_err(|e| {
+        // Allocate tx_id and commit_ts for MVCC
+        let tx_id = 1; // Simplified for non-transactional context
+        let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+        
+        db.delete_node_internal(node_id as u64, tx_id, commit_ts).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("Failed to delete node in transaction: {}", e),
@@ -1230,7 +1242,7 @@ impl SombraTransaction {
 
         let prop_value = PropertyValue::try_from(value)?;
 
-        db.set_node_property_internal(node_id as u64, key, prop_value)
+        db.set_node_property(node_id as u64, key, prop_value)
             .map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
@@ -1273,7 +1285,10 @@ impl SombraTransaction {
 
         let dirty_pages = db.take_recent_dirty_pages();
 
-        db.header.last_committed_tx_id = self.tx_id;
+        {
+            let mut header = db.header.lock().unwrap();
+            header.last_committed_tx_id = self.tx_id;
+        }
         db.write_header().map_err(|e| {
             Error::new(
                 Status::GenericFailure,
@@ -1294,7 +1309,7 @@ impl SombraTransaction {
         })?;
 
         db.stop_tracking();
-        db.exit_transaction();
+        db.exit_transaction(self.tx_id);
 
         self.committed = true;
         Ok(())
@@ -1318,7 +1333,7 @@ impl SombraTransaction {
         })?;
 
         db.stop_tracking();
-        db.exit_transaction();
+        db.exit_transaction(self.tx_id);
 
         self.committed = true;
         Ok(())
@@ -1986,15 +2001,16 @@ impl SombraDB {
     #[napi]
     pub fn get_header(&self) -> std::result::Result<HeaderState, Error> {
         let db = self.inner.read();
+        let header = db.header.lock().unwrap();
 
         Ok(HeaderState {
-            next_node_id: db.header.next_node_id as f64,
-            next_edge_id: db.header.next_edge_id as f64,
-            free_page_head: db.header.free_page_head.map(|p| p as f64),
-            last_record_page: db.header.last_record_page.map(|p| p as f64),
-            last_committed_tx_id: db.header.last_committed_tx_id as f64,
-            btree_index_page: db.header.btree_index_page.map(|p| p as f64),
-            btree_index_size: db.header.btree_index_size as f64,
+            next_node_id: header.next_node_id as f64,
+            next_edge_id: header.next_edge_id as f64,
+            free_page_head: header.free_page_head.map(|p| p as f64),
+            last_record_page: header.last_record_page.map(|p| p as f64),
+            last_committed_tx_id: header.last_committed_tx_id as f64,
+            btree_index_page: header.btree_index_page.map(|p| p as f64),
+            btree_index_size: header.btree_index_size as f64,
         })
     }
 }

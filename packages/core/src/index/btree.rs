@@ -10,14 +10,18 @@ const BTREE_VERSION: u16 = 1;
 const BTREE_HEADER_SIZE: usize = 8; // magic (4) + version (2) + reserved (2)
 const ENTRY_SIZE: usize = 8 + 4 + 2 + 2;
 
-/// Lock-free BTreeIndex using DashMap for concurrent reads
+/// Lock-free BTreeIndex using DashMap for concurrent reads with MVCC support
 ///
 /// This implementation uses DashMap for O(1) lock-free lookups on the hot path (get/insert/remove)
 /// while maintaining compatibility with range queries by collecting entries on-demand.
+///
+/// For MVCC support, each NodeId maps to a Vec<RecordPointer> representing the version chain.
+/// The first element in the vector is always the latest (most recent) version.
 #[derive(Debug, Clone)]
 pub struct BTreeIndex {
     // Primary storage: lock-free hash map for fast concurrent access
-    map: Arc<DashMap<NodeId, RecordPointer>>,
+    // Each key maps to a vector of version pointers (latest first)
+    map: Arc<DashMap<NodeId, Vec<RecordPointer>>>,
 }
 
 impl BTreeIndex {
@@ -27,18 +31,38 @@ impl BTreeIndex {
         }
     }
 
-    /// Insert a key-value pair (lock-free)
+    /// Insert a new version for a key (lock-free)
+    /// The new version is added to the front of the version chain (most recent)
     pub fn insert(&self, key: NodeId, value: RecordPointer) {
-        self.map.insert(key, value);
+        self.map
+            .entry(key)
+            .or_insert_with(Vec::new)
+            .insert(0, value);
     }
 
-    /// Get a value by key (lock-free read)
-    pub fn get(&self, key: &NodeId) -> Option<RecordPointer> {
-        self.map.get(key).map(|r| *r.value())
+    /// Get all versions for a key (lock-free read)
+    /// Returns a vector with the latest version first
+    pub fn get(&self, key: &NodeId) -> Option<Vec<RecordPointer>> {
+        self.map.get(key).map(|r| r.value().clone())
     }
 
-    /// Remove a key-value pair (lock-free)
-    pub fn remove(&self, key: &NodeId) -> Option<RecordPointer> {
+    /// Get the latest (most recent) version for a key (lock-free read)
+    pub fn get_latest(&self, key: &NodeId) -> Option<RecordPointer> {
+        self.map.get(key).and_then(|r| r.value().first().copied())
+    }
+    
+    /// Find a node ID by its record pointer (reverse lookup)
+    /// This is O(n*m) where n is number of nodes and m is average version chain length
+    pub fn find_by_pointer(&self, pointer: RecordPointer) -> Option<NodeId> {
+        self.map
+            .iter()
+            .find(|entry| entry.value().contains(&pointer))
+            .map(|entry| *entry.key())
+    }
+
+    /// Remove a key and all its versions (lock-free)
+    /// Returns the removed version chain
+    pub fn remove(&self, key: &NodeId) -> Option<Vec<RecordPointer>> {
         self.map.remove(key).map(|(_, v)| v)
     }
 
@@ -52,13 +76,31 @@ impl BTreeIndex {
         self.clear();
         // Clone all entries from other into self
         for entry in other.map.iter() {
-            self.map.insert(*entry.key(), *entry.value());
+            self.map.insert(*entry.key(), entry.value().clone());
         }
     }
 
     /// Get all entries as a sorted vector (for compatibility)
+    /// Returns only the latest version for each node
     pub fn iter(&self) -> Vec<(NodeId, RecordPointer)> {
-        let mut entries: Vec<_> = self.map.iter().map(|r| (*r.key(), *r.value())).collect();
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
+            .collect();
+        entries.sort_by_key(|(k, _)| *k);
+        entries
+    }
+
+    /// Get all entries with all versions as a sorted vector
+    pub fn iter_all_versions(&self) -> Vec<(NodeId, Vec<RecordPointer>)> {
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .map(|r| (*r.key(), r.value().clone()))
+            .collect();
         entries.sort_by_key(|(k, _)| *k);
         entries
     }
@@ -74,6 +116,7 @@ impl BTreeIndex {
     }
 
     /// Get entries in a range [start, end] (sorted)
+    /// Returns only the latest version for each node
     pub fn range(&self, start: NodeId, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
         if start > end {
             return Vec::new();
@@ -85,77 +128,107 @@ impl BTreeIndex {
                 let key = *r.key();
                 key >= start && key <= end
             })
-            .map(|r| (*r.key(), *r.value()))
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
             .collect();
         entries.sort_by_key(|(k, _)| *k);
         entries
     }
 
     /// Get entries from start onwards (sorted)
+    /// Returns only the latest version for each node
     pub fn range_from(&self, start: NodeId) -> Vec<(NodeId, RecordPointer)> {
         let mut entries: Vec<_> = self
             .map
             .iter()
             .filter(|r| *r.key() >= start)
-            .map(|r| (*r.key(), *r.value()))
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
             .collect();
         entries.sort_by_key(|(k, _)| *k);
         entries
     }
 
     /// Get entries up to end (sorted)
+    /// Returns only the latest version for each node
     pub fn range_to(&self, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
         let mut entries: Vec<_> = self
             .map
             .iter()
             .filter(|r| *r.key() <= end)
-            .map(|r| (*r.key(), *r.value()))
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
             .collect();
         entries.sort_by_key(|(k, _)| *k);
         entries
     }
 
     /// Get the first entry (smallest key)
+    /// Returns only the latest version
     pub fn first(&self) -> Option<(NodeId, RecordPointer)> {
         self.map
             .iter()
-            .map(|r| (*r.key(), *r.value()))
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
             .min_by_key(|(k, _)| *k)
     }
 
     /// Get the last entry (largest key)
+    /// Returns only the latest version
     pub fn last(&self) -> Option<(NodeId, RecordPointer)> {
         self.map
             .iter()
-            .map(|r| (*r.key(), *r.value()))
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
             .max_by_key(|(k, _)| *k)
     }
 
     /// Get the first N entries (sorted by key)
+    /// Returns only the latest version for each node
     pub fn first_n(&self, n: usize) -> Vec<(NodeId, RecordPointer)> {
-        let mut entries: Vec<_> = self.map.iter().map(|r| (*r.key(), *r.value())).collect();
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
+            .collect();
         entries.sort_by_key(|(k, _)| *k);
         entries.truncate(n);
         entries
     }
 
     /// Get the last N entries (sorted by key descending)
+    /// Returns only the latest version for each node
     pub fn last_n(&self, n: usize) -> Vec<(NodeId, RecordPointer)> {
-        let mut entries: Vec<_> = self.map.iter().map(|r| (*r.key(), *r.value())).collect();
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .filter_map(|r| {
+                r.value().first().map(|ptr| (*r.key(), *ptr))
+            })
+            .collect();
         entries.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
         entries.truncate(n);
         entries
     }
 
     /// Batch insert entries (lock-free)
+    /// Each entry creates a new version in the version chain
     pub fn batch_insert(&self, entries: Vec<(NodeId, RecordPointer)>) {
         for (key, value) in entries {
-            self.map.insert(key, value);
+            self.insert(key, value);
         }
     }
 
     /// Batch remove entries (lock-free)
-    pub fn batch_remove(&self, keys: &[NodeId]) -> Vec<(NodeId, RecordPointer)> {
+    /// Removes entire version chains for each key
+    pub fn batch_remove(&self, keys: &[NodeId]) -> Vec<(NodeId, Vec<RecordPointer>)> {
         let mut removed = Vec::with_capacity(keys.len());
         for key in keys {
             if let Some((_, value)) = self.map.remove(key) {
@@ -167,22 +240,45 @@ impl BTreeIndex {
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
         // Convert DashMap to sorted vector for serialization
-        let entries = self.iter(); // Already sorted
-        let len = u64::try_from(entries.len()).map_err(|_| {
-            GraphError::Corruption("Too many entries to serialize BTree index".into())
+        let entries = self.iter_all_versions(); // Get all versions
+        let num_nodes = u64::try_from(entries.len()).map_err(|_| {
+            GraphError::Corruption("Too many nodes to serialize BTree index".into())
         })?;
 
-        let mut buf = Vec::with_capacity(BTREE_HEADER_SIZE + 8 + (ENTRY_SIZE * entries.len()));
+        // Calculate total number of version entries
+        let total_versions: usize = entries.iter().map(|(_, versions)| versions.len()).sum();
+        let total_versions_u64 = u64::try_from(total_versions).map_err(|_| {
+            GraphError::Corruption("Too many versions to serialize BTree index".into())
+        })?;
+
+        // Header: magic (4) + version (2) + reserved (2) + num_nodes (8) + total_versions (8)
+        const EXTENDED_HEADER_SIZE: usize = BTREE_HEADER_SIZE + 8 + 8;
+        // Each node entry: node_id (8) + version_count (4)
+        // Each version entry: page_id (4) + slot_index (2) + byte_offset (2)
+        const VERSION_ENTRY_SIZE: usize = 4 + 2 + 2;
+        let capacity = EXTENDED_HEADER_SIZE 
+            + (entries.len() * 12) // node_id + version_count
+            + (total_versions * VERSION_ENTRY_SIZE);
+
+        let mut buf = Vec::with_capacity(capacity);
         buf.extend_from_slice(BTREE_MAGIC);
         buf.extend_from_slice(&BTREE_VERSION.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
-        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&num_nodes.to_le_bytes());
+        buf.extend_from_slice(&total_versions_u64.to_le_bytes());
 
-        for (node_id, pointer) in entries {
+        for (node_id, versions) in entries {
             buf.extend_from_slice(&node_id.to_le_bytes());
-            buf.extend_from_slice(&pointer.page_id.to_le_bytes());
-            buf.extend_from_slice(&pointer.slot_index.to_le_bytes());
-            buf.extend_from_slice(&pointer.byte_offset.to_le_bytes());
+            let version_count = u32::try_from(versions.len()).map_err(|_| {
+                GraphError::Corruption(format!("Too many versions for node {node_id}"))
+            })?;
+            buf.extend_from_slice(&version_count.to_le_bytes());
+            
+            for pointer in versions {
+                buf.extend_from_slice(&pointer.page_id.to_le_bytes());
+                buf.extend_from_slice(&pointer.slot_index.to_le_bytes());
+                buf.extend_from_slice(&pointer.byte_offset.to_le_bytes());
+            }
         }
 
         // Debug assertion: Verify the magic bytes were written correctly
@@ -200,7 +296,8 @@ impl BTreeIndex {
             return Ok(Self::new());
         }
 
-        if data.len() < BTREE_HEADER_SIZE + 8 || &data[..BTREE_MAGIC.len()] != BTREE_MAGIC {
+        const EXTENDED_HEADER_SIZE: usize = BTREE_HEADER_SIZE + 8 + 8;
+        if data.len() < EXTENDED_HEADER_SIZE || &data[..BTREE_MAGIC.len()] != BTREE_MAGIC {
             return Err(GraphError::Corruption(
                 "BTree index missing magic header".into(),
             ));
@@ -214,45 +311,48 @@ impl BTreeIndex {
         }
 
         let mut cursor = BTREE_HEADER_SIZE;
-        let len_u64 = Self::read_u64_le(data, cursor)?;
-        let len: usize = usize::try_from(len_u64).map_err(|_| {
-            GraphError::Corruption("BTree index length exceeds platform limits".into())
-        })?;
+        let num_nodes = Self::read_u64_le(data, cursor)?;
         cursor += 8;
-
-        let remaining = data.len().saturating_sub(cursor);
-        let required = len
-            .checked_mul(ENTRY_SIZE)
-            .ok_or_else(|| GraphError::Corruption("BTree index entry size overflow".into()))?;
-        if remaining < required {
-            return Err(GraphError::Corruption("BTree index data truncated".into()));
-        }
+        let _total_versions = Self::read_u64_le(data, cursor)?;
+        cursor += 8;
 
         let index = Self::new();
 
-        for i in 0..len {
-            let offset = cursor
-                .checked_add(i.saturating_mul(ENTRY_SIZE))
-                .ok_or_else(|| GraphError::Corruption("BTree index offset overflow".into()))?;
-            if offset + ENTRY_SIZE > data.len() {
+        for _node_idx in 0..num_nodes {
+            if cursor + 12 > data.len() {
                 return Err(GraphError::Corruption(
-                    "BTree index entry extends beyond buffer".into(),
+                    "BTree index node entry truncated".into(),
                 ));
             }
 
-            let node_id = Self::read_u64_le(data, offset)?;
-            let page_id = Self::read_u32_le(data, offset + 8)?;
-            let slot_index = Self::read_u16_le(data, offset + 12)?;
-            let byte_offset = Self::read_u16_le(data, offset + 14)?;
+            let node_id = Self::read_u64_le(data, cursor)?;
+            cursor += 8;
+            let version_count = Self::read_u32_le(data, cursor)?;
+            cursor += 4;
 
-            index.map.insert(
-                node_id,
-                RecordPointer {
+            let mut versions = Vec::with_capacity(version_count as usize);
+            for _ver_idx in 0..version_count {
+                if cursor + 8 > data.len() {
+                    return Err(GraphError::Corruption(
+                        "BTree index version entry truncated".into(),
+                    ));
+                }
+
+                let page_id = Self::read_u32_le(data, cursor)?;
+                cursor += 4;
+                let slot_index = Self::read_u16_le(data, cursor)?;
+                cursor += 2;
+                let byte_offset = Self::read_u16_le(data, cursor)?;
+                cursor += 2;
+
+                versions.push(RecordPointer {
                     page_id,
                     slot_index,
                     byte_offset,
-                },
-            );
+                });
+            }
+
+            index.map.insert(node_id, versions);
         }
 
         Ok(index)
@@ -326,14 +426,14 @@ mod tests {
         index.insert(1, ptr1);
         index.insert(2, ptr2);
 
-        assert_eq!(index.get(&1), Some(ptr1));
-        assert_eq!(index.get(&2), Some(ptr2));
+        assert_eq!(index.get(&1), Some(vec![ptr1]));
+        assert_eq!(index.get(&2), Some(vec![ptr2]));
         assert_eq!(index.get(&3), None);
 
         assert_eq!(index.len(), 2);
 
         let removed = index.remove(&1);
-        assert_eq!(removed, Some(ptr1));
+        assert_eq!(removed, Some(vec![ptr1]));
         assert_eq!(index.get(&1), None);
         assert_eq!(index.len(), 1);
     }
@@ -510,7 +610,8 @@ mod tests {
         bytes.extend_from_slice(BTREE_MAGIC);
         bytes.extend_from_slice(&(BTREE_VERSION + 1).to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // num_nodes
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // total_versions
 
         let err = BTreeIndex::deserialize(&bytes).expect_err("unsupported version should error");
         match err {
