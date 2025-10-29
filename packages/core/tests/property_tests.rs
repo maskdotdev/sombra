@@ -171,8 +171,8 @@ proptest! {
             }
 
             for node_id in &rolled_back_ids {
-                let result = tx.get_node(*node_id);
-                prop_assert!(result.is_err(), "Rolled back node {} should not exist", node_id);
+                let result = tx.get_node(*node_id).unwrap();
+                prop_assert!(result.is_none(), "Rolled back node {} should not exist", node_id);
             }
 
             tx.commit().unwrap();

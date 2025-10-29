@@ -48,7 +48,7 @@ pub fn detect_page_type(data: &[u8]) -> PageType {
     if data.len() < 4 {
         return PageType::Unknown;
     }
-    
+
     let maybe_magic = &data[0..4];
     if maybe_magic == BTREE_INDEX_MAGIC {
         return PageType::BTreeIndex;
@@ -56,7 +56,7 @@ pub fn detect_page_type(data: &[u8]) -> PageType {
     if maybe_magic == PROPERTY_INDEX_MAGIC {
         return PageType::PropertyIndex;
     }
-    
+
     // If we have valid-looking record page metadata, assume it's a record page
     // Otherwise, it's unknown/uninitialized
     if data.len() >= PAGE_HEADER_SIZE {
@@ -69,7 +69,7 @@ pub fn detect_page_type(data: &[u8]) -> PageType {
             }
         }
     }
-    
+
     PageType::Unknown
 }
 
@@ -109,13 +109,13 @@ impl<'a> RecordPage<'a> {
         if data.len() >= 4 {
             let maybe_magic = &data[0..4];
             if maybe_magic == BTREE_INDEX_MAGIC || maybe_magic == PROPERTY_INDEX_MAGIC {
-                return Err(GraphError::InvalidArgument(
-                    format!("not a record page (magic: {:?})", 
-                        std::str::from_utf8(maybe_magic).unwrap_or("???")).into()
-                ));
+                return Err(GraphError::InvalidArgument(format!(
+                    "not a record page (magic: {:?})",
+                    std::str::from_utf8(maybe_magic).unwrap_or("???")
+                )));
             }
         }
-        
+
         // Debug assertion: Verify this page is actually a record page
         debug_assert!(
             matches!(detect_page_type(data), PageType::Record | PageType::Unknown),
@@ -311,7 +311,7 @@ impl<'a> RecordPage<'a> {
         self.set_record_offset(record_idx, new_offset as u16)?;
         self.set_record_count((record_idx + 1) as u16);
         self.set_free_space_offset(new_offset as u16)?;
-        
+
         Ok(record_idx as u16)
     }
 
@@ -579,7 +579,7 @@ mod tests {
         let mut data = vec![0u8; 128];
         // Write BIDX magic bytes
         data[0..4].copy_from_slice(b"BIDX");
-        
+
         assert_eq!(detect_page_type(&data), PageType::BTreeIndex);
     }
 
@@ -588,7 +588,7 @@ mod tests {
         let mut data = vec![0u8; 128];
         // Write PIDX magic bytes
         data[0..4].copy_from_slice(b"PIDX");
-        
+
         assert_eq!(detect_page_type(&data), PageType::PropertyIndex);
     }
 
@@ -598,7 +598,7 @@ mod tests {
         buf.with_page(|page| {
             page.initialize().expect("initialize");
         });
-        
+
         // After initialization, should be detected as a record page
         assert_eq!(detect_page_type(&buf.data), PageType::Record);
     }
@@ -606,10 +606,10 @@ mod tests {
     #[test]
     fn detect_unknown_page() {
         // Page with suspicious record count (all 0xFF bytes)
-        let mut data = vec![0xFFu8; 128];
+        let data = vec![0xFFu8; 128];
         // This creates record_count = 0xFFFF which is > 10000, so should be Unknown
         assert_eq!(detect_page_type(&data), PageType::Unknown);
-        
+
         // Too small
         let small_data = vec![0u8; 2];
         assert_eq!(detect_page_type(&small_data), PageType::Unknown);
@@ -620,7 +620,7 @@ mod tests {
         let mut data = vec![0u8; 128];
         // Write BIDX magic bytes
         data[0..4].copy_from_slice(b"BIDX");
-        
+
         let result = RecordPage::from_bytes(&mut data);
         assert!(result.is_err());
         match result {
@@ -636,7 +636,7 @@ mod tests {
         let mut data = vec![0u8; 128];
         // Write PIDX magic bytes
         data[0..4].copy_from_slice(b"PIDX");
-        
+
         let result = RecordPage::from_bytes(&mut data);
         assert!(result.is_err());
         match result {

@@ -3,8 +3,8 @@
 //! Manual throughput benchmarks for ConcurrentGraphDB
 //! Run with: cargo run --release --bench concurrent_throughput
 
-use sombra::{ConcurrentGraphDB, Config, PropertyValue};
 use sombra::model::Node;
+use sombra::{ConcurrentGraphDB, Config, PropertyValue};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -172,8 +172,8 @@ fn bench_concurrent_throughput_mixed() {
                         read_count += 1;
                     } else {
                         let mut tx = db.begin_transaction().unwrap();
-                        let node_id = (thread_id * 1000000 + i) as u64;
-                        let mut node = Node::new(node_id);
+                        // Use 0 for auto-generated node IDs to avoid collisions
+                        let mut node = Node::new(0);
                         node.labels.push(format!("Thread{}", thread_id));
                         let _ = tx.add_node(node).unwrap();
                         tx.commit().unwrap();

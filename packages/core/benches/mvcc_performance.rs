@@ -29,7 +29,8 @@ fn create_test_graph(path: &str, node_count: usize, mvcc_enabled: bool) -> (Grap
     for i in 0..node_count {
         let mut node = Node::new(0); // 0 = auto-assign ID
         node.labels.push("TestNode".to_string());
-        node.properties.insert("index".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("index".to_string(), PropertyValue::Int(i as i64));
         let node_id = db.add_node(node).unwrap();
         node_ids.push(node_id);
     }
@@ -66,7 +67,7 @@ fn bench_transaction_throughput() {
     let path_single = temp_dir.path().join("throughput_single.db");
     let _ = std::fs::remove_file(&path_single);
     let _ = std::fs::remove_file(format!("{}.wal", path_single.to_str().unwrap()));
-    
+
     let mut config = Config::benchmark();
     config.mvcc_enabled = false;
     let mut db = GraphDB::open_with_config(path_single.to_str().unwrap(), config).unwrap();
@@ -93,7 +94,7 @@ fn bench_transaction_throughput() {
     let path_mvcc = temp_dir.path().join("throughput_mvcc.db");
     let _ = std::fs::remove_file(&path_mvcc);
     let _ = std::fs::remove_file(format!("{}.wal", path_mvcc.to_str().unwrap()));
-    
+
     let mut config = Config::benchmark();
     config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200);
@@ -117,11 +118,9 @@ fn bench_transaction_throughput() {
         mvcc_throughput
     );
 
-    let overhead_pct = ((mvcc_duration.as_secs_f64() / single_duration.as_secs_f64()) - 1.0) * 100.0;
-    println!(
-        "\n  MVCC overhead: {:>+6.1}%",
-        overhead_pct
-    );
+    let overhead_pct =
+        ((mvcc_duration.as_secs_f64() / single_duration.as_secs_f64()) - 1.0) * 100.0;
+    println!("\n  MVCC overhead: {:>+6.1}%", overhead_pct);
 }
 
 // ============================================================================
@@ -140,7 +139,9 @@ fn bench_read_latency() {
         println!("\nVersion chain depth: {}", chain_depth);
 
         // Single-writer mode (no versions)
-        let path = temp_dir.path().join(format!("read_single_{}.db", chain_depth));
+        let path = temp_dir
+            .path()
+            .join(format!("read_single_{}.db", chain_depth));
         let (mut db, node_ids) = create_test_graph(path.to_str().unwrap(), 100, false);
 
         // Create version chain by updating
@@ -148,7 +149,10 @@ fn bench_read_latency() {
             let mut tx = db.begin_transaction().unwrap();
             for &node_id in &node_ids {
                 if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                    node.properties.insert("counter".to_string(), PropertyValue::Int(chain_depth as i64));
+                    node.properties.insert(
+                        "counter".to_string(),
+                        PropertyValue::Int(chain_depth as i64),
+                    );
                     tx.add_node(node).ok(); // Creates new version
                 }
             }
@@ -166,10 +170,13 @@ fn bench_read_latency() {
             tx.commit().unwrap();
         }
         let single_duration = start.elapsed();
-        let single_avg_us = (single_duration.as_micros() as f64) / (iterations as f64 * node_ids.len() as f64);
+        let single_avg_us =
+            (single_duration.as_micros() as f64) / (iterations as f64 * node_ids.len() as f64);
 
         // MVCC mode (with version chains)
-        let path = temp_dir.path().join(format!("read_mvcc_{}.db", chain_depth));
+        let path = temp_dir
+            .path()
+            .join(format!("read_mvcc_{}.db", chain_depth));
         let (mut db, node_ids) = create_test_graph(path.to_str().unwrap(), 100, true);
 
         // Create version chain by updating
@@ -177,7 +184,10 @@ fn bench_read_latency() {
             let mut tx = db.begin_transaction().unwrap();
             for &node_id in &node_ids {
                 if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                    node.properties.insert("counter".to_string(), PropertyValue::Int(chain_depth as i64));
+                    node.properties.insert(
+                        "counter".to_string(),
+                        PropertyValue::Int(chain_depth as i64),
+                    );
                     tx.add_node(node).ok(); // Creates new version
                 }
             }
@@ -194,23 +204,15 @@ fn bench_read_latency() {
             tx.commit().unwrap();
         }
         let mvcc_duration = start.elapsed();
-        let mvcc_avg_us = (mvcc_duration.as_micros() as f64) / (iterations as f64 * node_ids.len() as f64);
+        let mvcc_avg_us =
+            (mvcc_duration.as_micros() as f64) / (iterations as f64 * node_ids.len() as f64);
 
-        println!(
-            "  Single-writer: {:>6.2}μs per read",
-            single_avg_us
-        );
-        println!(
-            "  MVCC:          {:>6.2}μs per read",
-            mvcc_avg_us
-        );
-        
+        println!("  Single-writer: {:>6.2}μs per read", single_avg_us);
+        println!("  MVCC:          {:>6.2}μs per read", mvcc_avg_us);
+
         if chain_depth > 0 {
             let overhead_pct = ((mvcc_avg_us / single_avg_us) - 1.0) * 100.0;
-            println!(
-                "  MVCC overhead: {:>+6.1}%",
-                overhead_pct
-            );
+            println!("  MVCC overhead: {:>+6.1}%", overhead_pct);
         }
     }
 }
@@ -236,7 +238,8 @@ fn bench_write_amplification() {
         let mut tx = db.begin_transaction().unwrap();
         for &node_id in &node_ids {
             if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                node.properties.insert("iteration".to_string(), PropertyValue::Int(iteration));
+                node.properties
+                    .insert("iteration".to_string(), PropertyValue::Int(iteration));
                 tx.add_node(node).ok();
             }
         }
@@ -263,7 +266,8 @@ fn bench_write_amplification() {
         let mut tx = db.begin_transaction().unwrap();
         for &node_id in &node_ids {
             if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                node.properties.insert("iteration".to_string(), PropertyValue::Int(iteration));
+                node.properties
+                    .insert("iteration".to_string(), PropertyValue::Int(iteration));
                 tx.add_node(node).ok();
             }
         }
@@ -281,13 +285,11 @@ fn bench_write_amplification() {
         mvcc_file_size as f64 / 1024.0
     );
 
-    let time_overhead = ((mvcc_duration.as_secs_f64() / single_duration.as_secs_f64()) - 1.0) * 100.0;
+    let time_overhead =
+        ((mvcc_duration.as_secs_f64() / single_duration.as_secs_f64()) - 1.0) * 100.0;
     let space_amplification = (mvcc_file_size as f64 / single_file_size as f64) - 1.0;
 
-    println!(
-        "\n  Time overhead:       {:>+6.1}%",
-        time_overhead
-    );
+    println!("\n  Time overhead:       {:>+6.1}%", time_overhead);
     println!(
         "  Space amplification: {:>+6.1}% ({:.1}x)",
         space_amplification * 100.0,
@@ -316,14 +318,17 @@ fn bench_memory_usage() {
     ];
 
     for (label, num_updates) in measurements {
-        let path = temp_dir.path().join(format!("memory_mvcc_{}.db", num_updates));
+        let path = temp_dir
+            .path()
+            .join(format!("memory_mvcc_{}.db", num_updates));
         let (mut db, node_ids) = create_test_graph(path.to_str().unwrap(), 100, true);
 
         for update_num in 0..num_updates {
             let mut tx = db.begin_transaction().unwrap();
             for &node_id in &node_ids {
                 if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                    node.properties.insert("update".to_string(), PropertyValue::Int(update_num));
+                    node.properties
+                        .insert("update".to_string(), PropertyValue::Int(update_num));
                     tx.add_node(node).ok();
                 }
             }
@@ -335,7 +340,7 @@ fn bench_memory_usage() {
         let file_size = std::fs::metadata(path.to_str().unwrap())
             .map(|m| m.len())
             .unwrap_or(0);
-        
+
         let kb_per_version = if num_updates > 0 {
             (file_size as f64) / (100.0 * num_updates as f64) / 1024.0
         } else {
@@ -347,7 +352,7 @@ fn bench_memory_usage() {
             label,
             file_size as f64 / 1024.0
         );
-        
+
         if num_updates > 0 {
             println!(
                 "               {:>7.2} KB per version (avg)",
@@ -380,7 +385,8 @@ fn bench_update_hotspots() {
         let mut tx = db.begin_transaction().unwrap();
         for &node_id in &hotspot_nodes {
             if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                node.properties.insert("counter".to_string(), PropertyValue::Int(iteration));
+                node.properties
+                    .insert("counter".to_string(), PropertyValue::Int(iteration));
                 tx.add_node(node).ok();
             }
         }
@@ -404,7 +410,8 @@ fn bench_update_hotspots() {
         let mut tx = db.begin_transaction().unwrap();
         for &node_id in &hotspot_nodes {
             if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                node.properties.insert("counter".to_string(), PropertyValue::Int(iteration));
+                node.properties
+                    .insert("counter".to_string(), PropertyValue::Int(iteration));
                 tx.add_node(node).ok();
             }
         }
@@ -417,11 +424,9 @@ fn bench_update_hotspots() {
         mvcc_duration.as_secs_f64() * 1000.0
     );
 
-    let overhead_pct = ((mvcc_duration.as_secs_f64() / single_duration.as_secs_f64()) - 1.0) * 100.0;
-    println!(
-        "\n  MVCC overhead: {:>+6.1}%",
-        overhead_pct
-    );
+    let overhead_pct =
+        ((mvcc_duration.as_secs_f64() / single_duration.as_secs_f64()) - 1.0) * 100.0;
+    println!("\n  MVCC overhead: {:>+6.1}%", overhead_pct);
 }
 
 // ============================================================================
@@ -473,10 +478,7 @@ fn bench_timestamp_overhead() {
     );
 
     let overhead_us = mvcc_avg_us - single_avg_us;
-    println!(
-        "\n  MVCC adds:     {:>+6.2}μs per transaction",
-        overhead_us
-    );
+    println!("\n  MVCC adds:     {:>+6.2}μs per transaction", overhead_us);
 }
 
 // ============================================================================
@@ -539,7 +541,8 @@ fn bench_traversal_performance() {
         let mut tx = db.begin_transaction().unwrap();
         for &node_id in &node_ids {
             if let Ok(Some(mut node)) = tx.get_node(node_id) {
-                node.properties.insert("version".to_string(), PropertyValue::Int(iteration));
+                node.properties
+                    .insert("version".to_string(), PropertyValue::Int(iteration));
                 tx.add_node(node).ok();
             }
         }

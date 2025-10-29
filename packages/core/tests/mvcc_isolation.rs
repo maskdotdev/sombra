@@ -11,7 +11,7 @@ use std::fs;
 
 fn cleanup_test_db(path: &str) {
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
 }
 
 fn create_mvcc_db(path: &str) -> GraphDB {
@@ -30,8 +30,12 @@ fn test_snapshot_isolation_basic() {
     let node_id = {
         let mut tx1 = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-        node.properties.insert("version".to_string(), PropertyValue::Int(1));
+        node.properties.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
+        node.properties
+            .insert("version".to_string(), PropertyValue::Int(1));
         let id = tx1.add_node(node).unwrap();
         tx1.commit().unwrap();
         id
@@ -41,7 +45,10 @@ fn test_snapshot_isolation_basic() {
     let tx2_snapshot = {
         let mut tx2 = db.begin_transaction().unwrap();
         let node2 = tx2.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node2.properties.get("version"), Some(&PropertyValue::Int(1)));
+        assert_eq!(
+            node2.properties.get("version"),
+            Some(&PropertyValue::Int(1))
+        );
         let snapshot = tx2.snapshot_ts();
         tx2.commit().unwrap();
         snapshot
@@ -52,8 +59,13 @@ fn test_snapshot_isolation_basic() {
         let mut tx3 = db.begin_transaction().unwrap();
         assert!(tx3.snapshot_ts() > tx2_snapshot, "tx3 has newer snapshot");
         let mut node3 = tx3.get_node(node_id).unwrap().unwrap();
-        node3.properties.insert("version".to_string(), PropertyValue::Int(2));
-        node3.properties.insert("updated_by".to_string(), PropertyValue::String("tx3".to_string()));
+        node3
+            .properties
+            .insert("version".to_string(), PropertyValue::Int(2));
+        node3.properties.insert(
+            "updated_by".to_string(),
+            PropertyValue::String("tx3".to_string()),
+        );
         tx3.add_node(node3).unwrap(); // This creates a new version
         tx3.commit().unwrap();
     }
@@ -61,10 +73,19 @@ fn test_snapshot_isolation_basic() {
     // Transaction 4: Fresh transaction should see version 2
     {
         let mut tx4 = db.begin_transaction().unwrap();
-        assert!(tx4.snapshot_ts() > tx2_snapshot, "tx4 should have newer snapshot");
+        assert!(
+            tx4.snapshot_ts() > tx2_snapshot,
+            "tx4 should have newer snapshot"
+        );
         let node4 = tx4.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node4.properties.get("version"), Some(&PropertyValue::Int(2)));
-        assert_eq!(node4.properties.get("updated_by"), Some(&PropertyValue::String("tx3".to_string())));
+        assert_eq!(
+            node4.properties.get("version"),
+            Some(&PropertyValue::Int(2))
+        );
+        assert_eq!(
+            node4.properties.get("updated_by"),
+            Some(&PropertyValue::String("tx3".to_string()))
+        );
         tx4.commit().unwrap();
     }
 
@@ -99,7 +120,10 @@ fn test_uncommitted_updates_not_visible() {
     {
         let mut tx3 = db.begin_transaction().unwrap();
         let mut node3 = tx3.get_node(node_id).unwrap().unwrap();
-        node3.properties.insert("status".to_string(), PropertyValue::String("updated".to_string()));
+        node3.properties.insert(
+            "status".to_string(),
+            PropertyValue::String("updated".to_string()),
+        );
         tx3.add_node(node3).unwrap();
         tx3.commit().unwrap();
     }
@@ -110,7 +134,10 @@ fn test_uncommitted_updates_not_visible() {
         let mut tx4 = db.begin_transaction().unwrap();
         assert!(tx4.snapshot_ts() > tx2_snapshot, "tx4 has newer snapshot");
         let node4 = tx4.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node4.properties.get("status"), Some(&PropertyValue::String("updated".to_string())));
+        assert_eq!(
+            node4.properties.get("status"),
+            Some(&PropertyValue::String("updated".to_string()))
+        );
         tx4.commit().unwrap();
     }
 
@@ -123,23 +150,29 @@ fn test_read_your_own_writes() {
     let mut db = create_mvcc_db(path);
 
     let mut tx = db.begin_transaction().unwrap();
-    
+
     // Add a node
     let mut node = Node::new(1);
-    node.properties.insert("value".to_string(), PropertyValue::Int(100));
+    node.properties
+        .insert("value".to_string(), PropertyValue::Int(100));
     let node_id = tx.add_node(node).unwrap();
 
     // Read it back in the same transaction
     let read_node = tx.get_node(node_id).unwrap().unwrap();
-    assert_eq!(read_node.properties.get("value"), Some(&PropertyValue::Int(100)));
-    
+    assert_eq!(
+        read_node.properties.get("value"),
+        Some(&PropertyValue::Int(100))
+    );
+
     tx.commit().unwrap();
 
     // In a new transaction, update and verify
     {
         let mut tx2 = db.begin_transaction().unwrap();
         let mut node2 = tx2.get_node(node_id).unwrap().unwrap();
-        node2.properties.insert("value".to_string(), PropertyValue::Int(200));
+        node2
+            .properties
+            .insert("value".to_string(), PropertyValue::Int(200));
         tx2.add_node(node2).unwrap();
         tx2.commit().unwrap();
     }
@@ -148,7 +181,10 @@ fn test_read_your_own_writes() {
     {
         let mut tx3 = db.begin_transaction().unwrap();
         let node3 = tx3.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node3.properties.get("value"), Some(&PropertyValue::Int(200)));
+        assert_eq!(
+            node3.properties.get("value"),
+            Some(&PropertyValue::Int(200))
+        );
         tx3.commit().unwrap();
     }
 
@@ -221,11 +257,11 @@ fn test_snapshot_isolation_with_labels() {
         let mut node1 = Node::new(1);
         node1.labels.push("Person".to_string());
         tx2.add_node(node1).unwrap();
-        
+
         let mut node2 = Node::new(2);
         node2.labels.push("Person".to_string());
         tx2.add_node(node2).unwrap();
-        
+
         tx2.commit().unwrap();
     }
 
@@ -254,7 +290,10 @@ fn test_snapshot_isolation_with_property_index() {
         let mut tx = db.begin_transaction().unwrap();
         let mut user = Node::new(1);
         user.labels.push("User".to_string());
-        user.properties.insert("email".to_string(), PropertyValue::String("alice@example.com".to_string()));
+        user.properties.insert(
+            "email".to_string(),
+            PropertyValue::String("alice@example.com".to_string()),
+        );
         tx.add_node(user).unwrap();
         tx.commit().unwrap();
     }
@@ -262,11 +301,13 @@ fn test_snapshot_isolation_with_property_index() {
     // Transaction 1: Query by property (bob@example.com doesn't exist yet)
     let tx1_snapshot = {
         let mut tx1 = db.begin_transaction().unwrap();
-        let users1_before = tx1.find_nodes_by_property(
-            "User", 
-            "email", 
-            &PropertyValue::String("bob@example.com".to_string())
-        ).unwrap();
+        let users1_before = tx1
+            .find_nodes_by_property(
+                "User",
+                "email",
+                &PropertyValue::String("bob@example.com".to_string()),
+            )
+            .unwrap();
         assert_eq!(users1_before.len(), 0);
         let snapshot = tx1.snapshot_ts();
         tx1.commit().unwrap();
@@ -278,7 +319,10 @@ fn test_snapshot_isolation_with_property_index() {
         let mut tx2 = db.begin_transaction().unwrap();
         let mut user = Node::new(2);
         user.labels.push("User".to_string());
-        user.properties.insert("email".to_string(), PropertyValue::String("bob@example.com".to_string()));
+        user.properties.insert(
+            "email".to_string(),
+            PropertyValue::String("bob@example.com".to_string()),
+        );
         tx2.add_node(user).unwrap();
         tx2.commit().unwrap();
     }
@@ -287,11 +331,13 @@ fn test_snapshot_isolation_with_property_index() {
     {
         let mut tx3 = db.begin_transaction().unwrap();
         assert!(tx3.snapshot_ts() > tx1_snapshot);
-        let users3 = tx3.find_nodes_by_property(
-            "User",
-            "email",
-            &PropertyValue::String("bob@example.com".to_string())
-        ).unwrap();
+        let users3 = tx3
+            .find_nodes_by_property(
+                "User",
+                "email",
+                &PropertyValue::String("bob@example.com".to_string()),
+            )
+            .unwrap();
         assert_eq!(users3.len(), 1, "Fresh transaction should find user");
         tx3.commit().unwrap();
     }
@@ -308,7 +354,8 @@ fn test_multiple_concurrent_readers() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("counter".to_string(), PropertyValue::Int(0));
+        node.properties
+            .insert("counter".to_string(), PropertyValue::Int(0));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -316,12 +363,16 @@ fn test_multiple_concurrent_readers() {
 
     // Simulate concurrent readers by starting multiple transactions sequentially
     // but all before an update commits
-    
+
     // Start reader 1
     let snapshot1 = {
         let mut tx1 = db.begin_transaction().unwrap();
         assert_eq!(
-            tx1.get_node(node_id).unwrap().unwrap().properties.get("counter"),
+            tx1.get_node(node_id)
+                .unwrap()
+                .unwrap()
+                .properties
+                .get("counter"),
             Some(&PropertyValue::Int(0))
         );
         let snapshot = tx1.snapshot_ts();
@@ -329,11 +380,15 @@ fn test_multiple_concurrent_readers() {
         snapshot
     };
 
-    // Start reader 2  
+    // Start reader 2
     let snapshot2 = {
         let mut tx2 = db.begin_transaction().unwrap();
         assert_eq!(
-            tx2.get_node(node_id).unwrap().unwrap().properties.get("counter"),
+            tx2.get_node(node_id)
+                .unwrap()
+                .unwrap()
+                .properties
+                .get("counter"),
             Some(&PropertyValue::Int(0))
         );
         let snapshot = tx2.snapshot_ts();
@@ -345,7 +400,11 @@ fn test_multiple_concurrent_readers() {
     let snapshot3 = {
         let mut tx3 = db.begin_transaction().unwrap();
         assert_eq!(
-            tx3.get_node(node_id).unwrap().unwrap().properties.get("counter"),
+            tx3.get_node(node_id)
+                .unwrap()
+                .unwrap()
+                .properties
+                .get("counter"),
             Some(&PropertyValue::Int(0))
         );
         let snapshot = tx3.snapshot_ts();
@@ -361,7 +420,8 @@ fn test_multiple_concurrent_readers() {
     {
         let mut tx_update = db.begin_transaction().unwrap();
         let mut node = tx_update.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("counter".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("counter".to_string(), PropertyValue::Int(1));
         tx_update.add_node(node).unwrap();
         tx_update.commit().unwrap();
     }
@@ -369,9 +429,17 @@ fn test_multiple_concurrent_readers() {
     // New reader should see the updated value
     {
         let mut tx_new = db.begin_transaction().unwrap();
-        assert!(tx_new.snapshot_ts() > snapshot3, "New reader has newer snapshot");
+        assert!(
+            tx_new.snapshot_ts() > snapshot3,
+            "New reader has newer snapshot"
+        );
         assert_eq!(
-            tx_new.get_node(node_id).unwrap().unwrap().properties.get("counter"),
+            tx_new
+                .get_node(node_id)
+                .unwrap()
+                .unwrap()
+                .properties
+                .get("counter"),
             Some(&PropertyValue::Int(1))
         );
         tx_new.commit().unwrap();
@@ -416,7 +484,10 @@ fn test_snapshot_with_deletes() {
         let mut tx3 = db.begin_transaction().unwrap();
         assert!(tx3.snapshot_ts() > tx1_snapshot);
         let node3 = tx3.get_node(node_id).unwrap();
-        assert!(node3.is_none(), "Fresh transaction should not see deleted node");
+        assert!(
+            node3.is_none(),
+            "Fresh transaction should not see deleted node"
+        );
         tx3.commit().unwrap();
     }
 

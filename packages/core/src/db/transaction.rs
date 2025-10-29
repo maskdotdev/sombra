@@ -78,15 +78,23 @@ impl<'db> Transaction<'db> {
         db.enter_transaction(id)?;
         db.start_tracking();
         let epoch = db.increment_epoch();
-        
+
         // Allocate snapshot timestamp from oracle if MVCC is enabled
         let snapshot_ts = if let Some(oracle) = &db.timestamp_oracle {
-            oracle.allocate_read_timestamp()
+            let ts = oracle.allocate_read_timestamp();
+            // Register snapshot for GC watermark tracking
+            oracle.register_snapshot(ts, id)?;
+            ts
         } else {
             0 // Use 0 if MVCC is not enabled
         };
-        
-        debug!(tx_id = id, epoch = epoch, snapshot_ts = snapshot_ts, "Transaction started");
+
+        debug!(
+            tx_id = id,
+            epoch = epoch,
+            snapshot_ts = snapshot_ts,
+            "Transaction started"
+        );
         Ok(Self {
             db,
             id,
@@ -307,7 +315,9 @@ impl<'db> Transaction<'db> {
     /// * `Ok(Some(Node))` - Node found
     /// * `Ok(None)` - Node doesn't exist
     pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
-        let result = self.db.get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.id))?;
+        let result = self
+            .db
+            .get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.id))?;
         // Track read for conflict detection
         if result.is_some() {
             self.read_nodes.insert(node_id);
@@ -316,7 +326,8 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn get_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
-        self.db.load_edge_with_snapshot(edge_id, self.snapshot_ts, Some(self.id))
+        self.db
+            .load_edge_with_snapshot(edge_id, self.snapshot_ts, Some(self.id))
     }
 
     pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
@@ -338,7 +349,8 @@ impl<'db> Transaction<'db> {
     /// # Errors
     /// * `GraphError::NotFound` - Node doesn't exist
     pub fn get_neighbors(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        self.db.get_neighbors_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
+        self.db
+            .get_neighbors_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
     }
 
     /// Creates a property index (not supported within transactions).
@@ -413,20 +425,22 @@ impl<'db> Transaction<'db> {
         let start = std::time::Instant::now();
         let dirty_page_count = self.dirty_pages.len();
 
-        self.db.header.last_committed_tx_id = self.id;
-        
+        // Phase 5: header wrapped in Mutex
+        self.db.header.lock().unwrap().last_committed_tx_id = self.id;
+
         // Get commit timestamp from oracle if MVCC is enabled
         let commit_ts = if let Some(ref oracle) = self.db.timestamp_oracle {
             let ts = oracle.allocate_commit_timestamp();
-            self.db.header.max_timestamp = ts;
+            self.db.header.lock().unwrap().max_timestamp = ts;
             ts
         } else {
             0
         };
-        
+
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
             let _ = self.db.rollback_transaction(&self.dirty_pages);
+            self.unregister_snapshot();
             self.db.stop_tracking();
             self.db.exit_transaction(self.id);
             self.state = TxState::RolledBack;
@@ -434,10 +448,11 @@ impl<'db> Transaction<'db> {
         }
 
         self.capture_dirty_pages()?;
-        
+
         // Optimization: Skip WAL writes for empty transactions (no modifications)
         // This is common for read-only transactions or rolled-back operations
         if self.dirty_pages.is_empty() {
+            self.unregister_snapshot();
             self.db.stop_tracking();
             self.db.exit_transaction(self.id);
             self.state = TxState::Committed;
@@ -453,23 +468,30 @@ impl<'db> Transaction<'db> {
             );
             return Ok(());
         }
-        
+
         // Update commit_ts in all version metadata created by this transaction
         // Pass the tracked version pointers for direct update (optimization)
         if commit_ts > 0 {
-            if let Err(err) = self.db.update_versions_commit_ts(self.id, commit_ts, &self.dirty_pages, &self.created_versions) {
+            if let Err(err) = self.db.update_versions_commit_ts(
+                self.id,
+                commit_ts,
+                &self.dirty_pages,
+                &self.created_versions,
+            ) {
                 let _ = self.db.rollback_transaction(&self.dirty_pages);
+                self.unregister_snapshot();
                 self.db.stop_tracking();
                 self.db.exit_transaction(self.id);
                 self.state = TxState::RolledBack;
                 return Err(err);
             }
         }
-        
+
         let pages = self.dirty_pages.clone();
         let result = self.db.commit_to_wal(self.id, &pages);
         match result {
             Ok(()) => {
+                self.unregister_snapshot();
                 self.db.stop_tracking();
                 self.db.exit_transaction(self.id);
                 self.state = TxState::Committed;
@@ -487,6 +509,7 @@ impl<'db> Transaction<'db> {
             }
             Err(err) => {
                 let _ = self.db.rollback_transaction(&pages);
+                self.unregister_snapshot();
                 self.db.stop_tracking();
                 self.db.exit_transaction(self.id);
                 self.state = TxState::RolledBack;
@@ -519,6 +542,7 @@ impl<'db> Transaction<'db> {
         self.capture_dirty_pages()?;
         let pages = self.dirty_pages.clone();
         let result = self.db.rollback_transaction(&pages);
+        self.unregister_snapshot();
         self.db.stop_tracking();
         self.db.exit_transaction(self.id);
         self.state = TxState::RolledBack;
@@ -534,12 +558,24 @@ impl<'db> Transaction<'db> {
         }
         Ok(())
     }
+
+    /// Unregisters the snapshot from the timestamp oracle
+    ///
+    /// Should be called when the transaction finishes (commit or rollback)
+    fn unregister_snapshot(&self) {
+        if self.snapshot_ts > 0 {
+            if let Some(ref oracle) = self.db.timestamp_oracle {
+                let _ = oracle.unregister_snapshot(self.snapshot_ts);
+            }
+        }
+    }
 }
 
 impl<'db> Drop for Transaction<'db> {
     fn drop(&mut self) {
-        self.db.stop_tracking();
         if self.state == TxState::Active {
+            self.unregister_snapshot();
+            self.db.stop_tracking();
             let _ = self.db.rollback_transaction(&self.dirty_pages);
             self.db.exit_transaction(self.id);
             if !std::thread::panicking() {

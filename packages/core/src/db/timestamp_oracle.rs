@@ -184,7 +184,8 @@ impl TimestampOracle {
         if snapshots.remove(&ts).is_some() {
             // Update minimum active timestamp if we removed the min
             if snapshots.is_empty() {
-                self.min_active_ts.store(self.current.load(Ordering::Acquire), Ordering::Release);
+                self.min_active_ts
+                    .store(self.current.load(Ordering::Acquire), Ordering::Release);
             } else if let Some(&min_ts) = snapshots.keys().next() {
                 self.min_active_ts.store(min_ts, Ordering::Release);
             }
@@ -214,16 +215,11 @@ impl TimestampOracle {
         // Find all snapshots with timestamp <= ts that are still active
         let active_tx_ids: std::collections::BTreeSet<u64> = snapshots
             .iter()
-            .filter(|(snapshot_ts, info)| {
-                *snapshot_ts <= &ts && info.is_active
-            })
+            .filter(|(snapshot_ts, info)| *snapshot_ts <= &ts && info.is_active)
             .map(|(_, info)| info.tx_id)
             .collect();
 
-        Ok(Snapshot {
-            ts,
-            active_tx_ids,
-        })
+        Ok(Snapshot { ts, active_tx_ids })
     }
 
     /// Returns the timestamp before which garbage collection is safe
@@ -325,12 +321,12 @@ mod tests {
         let oracle = TimestampOracle::new();
         let ts = oracle.allocate_read_timestamp();
         oracle.register_snapshot(ts, 100).unwrap();
-        
+
         let snapshot_before = oracle.get_snapshot(ts).unwrap();
         assert_eq!(snapshot_before.active_tx_ids.len(), 1);
 
         oracle.unregister_snapshot(ts).unwrap();
-        
+
         let snapshot_after = oracle.get_snapshot(ts).unwrap();
         assert_eq!(snapshot_after.active_tx_ids.len(), 0);
     }
@@ -338,7 +334,7 @@ mod tests {
     #[test]
     fn test_gc_eligible_before() {
         let oracle = TimestampOracle::new();
-        
+
         // Initially, nothing is GC-eligible (min_active_ts = 1)
         assert_eq!(oracle.gc_eligible_before(), 1);
 
@@ -356,7 +352,7 @@ mod tests {
     #[test]
     fn test_multiple_active_snapshots() {
         let oracle = TimestampOracle::new();
-        
+
         let ts1 = oracle.allocate_read_timestamp();
         let ts2 = oracle.allocate_read_timestamp();
         let ts3 = oracle.allocate_read_timestamp();
@@ -381,7 +377,7 @@ mod tests {
     fn test_set_current_timestamp() {
         let oracle = TimestampOracle::new();
         oracle.set_current_timestamp(1000).unwrap();
-        
+
         let ts = oracle.allocate_read_timestamp();
         assert_eq!(ts, 1000); // Next timestamp after 1000
     }
@@ -389,7 +385,7 @@ mod tests {
     #[test]
     fn test_get_snapshot_filters_by_timestamp() {
         let oracle = TimestampOracle::new();
-        
+
         let ts1 = 10;
         let ts2 = 20;
         let ts3 = 30;

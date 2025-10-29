@@ -12,8 +12,8 @@ fn test_edge_read_your_own_writes_within_transaction() {
     // Issue #3: Edges were created with tx_id=0, breaking read-your-own-writes
     let path = "test_edge_ryw.db";
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
     config.mvcc_enabled = true;
@@ -44,8 +44,8 @@ fn test_edge_read_your_own_writes_within_transaction() {
 
     // Cleanup
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 }
 
 #[test]
@@ -53,14 +53,14 @@ fn test_edge_isolation_between_transactions() {
     // Verify that uncommitted edges are NOT visible to other transactions
     let path = "test_edge_isolation.db";
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
     config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
-    
+
     // Create nodes in first transaction
     let (n1_id, n2_id) = {
         let mut tx1 = db.begin_transaction().unwrap();
@@ -85,13 +85,13 @@ fn test_edge_isolation_between_transactions() {
     // Start transaction 3 (don't commit tx2 yet)
     // Note: This test would need concurrent transaction support to fully test
     // For now we just verify read-your-own-writes works
-    
+
     tx2.commit().unwrap();
 
     // Cleanup
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 }
 
 #[test]
@@ -99,8 +99,8 @@ fn test_file_locking_prevents_concurrent_opens() {
     // Issue #6: No file locking allowed multiple processes to corrupt the database
     let path = "test_file_lock.db";
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
     config.mvcc_enabled = true;
@@ -111,12 +111,11 @@ fn test_file_locking_prevents_concurrent_opens() {
     // Try to open the same database again - should fail with lock error
     let result = GraphDB::open_with_config(path, config.clone());
     assert!(result.is_err(), "Second open should fail due to file lock");
-    
+
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
         err_msg.contains("already open") || err_msg.contains("lock"),
-        "Error should mention lock or already open, got: {}",
-        err_msg
+        "Error should mention lock or already open, got: {err_msg}"
     );
 
     // Drop db1 to release the lock
@@ -127,8 +126,8 @@ fn test_file_locking_prevents_concurrent_opens() {
 
     // Cleanup
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 }
 
 #[test]
@@ -136,8 +135,8 @@ fn test_edge_with_properties_read_your_own_writes() {
     // Test edge with properties to ensure complete fix
     let path = "test_edge_props_ryw.db";
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
     config.mvcc_enabled = true;
@@ -148,23 +147,35 @@ fn test_edge_with_properties_read_your_own_writes() {
     // Create two nodes
     let mut node1 = Node::new(1);
     node1.labels.push("Person".to_string());
-    node1.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+    node1.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("Alice".to_string()),
+    );
     let mut node2 = Node::new(2);
     node2.labels.push("Person".to_string());
-    node2.properties.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+    node2
+        .properties
+        .insert("name".to_string(), PropertyValue::String("Bob".to_string()));
     let n1_id = tx.add_node(node1).unwrap();
     let n2_id = tx.add_node(node2).unwrap();
 
     // Create an edge with properties
     let mut edge = Edge::new(1, n1_id, n2_id, "KNOWS");
-    edge.properties.insert("since".to_string(), PropertyValue::Int(2020));
-    edge.properties.insert("strength".to_string(), PropertyValue::String("strong".to_string()));
+    edge.properties
+        .insert("since".to_string(), PropertyValue::Int(2020));
+    edge.properties.insert(
+        "strength".to_string(),
+        PropertyValue::String("strong".to_string()),
+    );
     let edge_id = tx.add_edge(edge).unwrap();
 
     // Read back the edge and verify properties
     let retrieved_edge = tx.get_edge(edge_id).unwrap();
     assert_eq!(retrieved_edge.type_name, "KNOWS");
-    assert_eq!(retrieved_edge.properties.get("since").unwrap(), &sombra::PropertyValue::Int(2020));
+    assert_eq!(
+        retrieved_edge.properties.get("since").unwrap(),
+        &sombra::PropertyValue::Int(2020)
+    );
     assert_eq!(
         retrieved_edge.properties.get("strength").unwrap(),
         &sombra::PropertyValue::String("strong".to_string())
@@ -174,8 +185,8 @@ fn test_edge_with_properties_read_your_own_writes() {
 
     // Cleanup
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 }
 
 #[test]
@@ -183,8 +194,8 @@ fn test_auto_commit_edge_read_your_own_writes() {
     // Test that auto-committed edges (without explicit transaction) also work
     let path = "test_auto_edge_ryw.db";
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
     config.mvcc_enabled = true;
@@ -213,6 +224,6 @@ fn test_auto_commit_edge_read_your_own_writes() {
 
     // Cleanup
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 }

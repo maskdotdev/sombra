@@ -189,12 +189,12 @@ impl Header {
         data[56..60].copy_from_slice(&self.property_index_root_page.unwrap_or(0).to_le_bytes());
         data[60..64].copy_from_slice(&self.property_index_count.to_le_bytes());
         data[64..66].copy_from_slice(&self.property_index_version.to_le_bytes());
-        
+
         // MVCC fields (version 1.3+)
         data[66] = if self.mvcc_enabled { 1 } else { 0 };
         data[67..75].copy_from_slice(&self.max_timestamp.to_le_bytes());
         data[75..83].copy_from_slice(&self.oldest_snapshot_ts.to_le_bytes());
-        
+
         Ok(())
     }
 

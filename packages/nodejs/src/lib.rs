@@ -1945,23 +1945,26 @@ impl From<sombra::db::IntegrityReport> for IntegrityReport {
 #[napi]
 impl SombraDB {
     #[napi]
-    pub fn verify_integrity(&mut self, opts: IntegrityOptions) -> std::result::Result<IntegrityReport, Error> {
+    pub fn verify_integrity(
+        &mut self,
+        opts: IntegrityOptions,
+    ) -> std::result::Result<IntegrityReport, Error> {
         let mut db = self.inner.write();
-        
+
         let options = sombra::IntegrityOptions {
             checksum_only: opts.checksum_only.unwrap_or(false),
             verify_indexes: opts.verify_indexes.unwrap_or(true),
             verify_adjacency: opts.verify_adjacency.unwrap_or(true),
             max_errors: opts.max_errors.unwrap_or(16) as usize,
         };
-        
+
         let report = db.verify_integrity(options).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("Failed to verify integrity: {}", e),
             )
         })?;
-        
+
         Ok(IntegrityReport::from(report))
     }
 }
@@ -1983,7 +1986,7 @@ impl SombraDB {
     #[napi]
     pub fn get_header(&self) -> std::result::Result<HeaderState, Error> {
         let db = self.inner.read();
-        
+
         Ok(HeaderState {
             next_node_id: db.header.next_node_id as f64,
             next_edge_id: db.header.next_edge_id as f64,
@@ -2016,7 +2019,7 @@ impl SombraDB {
     #[napi]
     pub fn get_metrics(&self) -> std::result::Result<Metrics, Error> {
         let db = self.inner.read();
-        
+
         Ok(Metrics {
             cache_hits: db.metrics.cache_hits as f64,
             cache_misses: db.metrics.cache_misses as f64,

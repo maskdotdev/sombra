@@ -23,7 +23,8 @@ fn test_gc_basic_run_no_active_transactions() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -33,7 +34,8 @@ fn test_gc_basic_run_no_active_transactions() {
     for i in 2..=5 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(i as i64));
         tx.add_node(node).unwrap(); // Creates new version
         tx.commit().unwrap();
     }
@@ -43,7 +45,7 @@ fn test_gc_basic_run_no_active_transactions() {
 
     // We should have reclaimed some versions
     // Note: The exact number depends on implementation details
-    println!("GC Stats: {:?}", stats);
+    println!("GC Stats: {stats:?}");
     assert!(stats.versions_examined > 0 || stats.chains_scanned > 0);
 }
 
@@ -55,7 +57,8 @@ fn test_gc_preserves_minimum_versions() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -65,7 +68,8 @@ fn test_gc_preserves_minimum_versions() {
     for i in 2..=3 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(i as i64));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -79,7 +83,7 @@ fn test_gc_preserves_minimum_versions() {
     assert_eq!(node.properties.get("value"), Some(&PropertyValue::Int(3))); // Should have latest version
     tx.commit().unwrap();
 
-    println!("GC preserved versions, stats: {:?}", stats);
+    println!("GC preserved versions, stats: {stats:?}");
 }
 
 #[test]
@@ -90,7 +94,8 @@ fn test_gc_respects_watermark() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -99,7 +104,7 @@ fn test_gc_respects_watermark() {
     // Start a long-running read transaction
     let read_tx = db.begin_transaction().unwrap();
     let read_snapshot = read_tx.snapshot_ts();
-    
+
     // Rollback the read transaction properly (don't just drop it)
     read_tx.rollback().unwrap();
 
@@ -107,7 +112,8 @@ fn test_gc_respects_watermark() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(2));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(2));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -116,8 +122,8 @@ fn test_gc_respects_watermark() {
     // Note: Since we dropped the read transaction, GC might reclaim more
     let stats = db.run_gc().unwrap();
 
-    println!("GC with active transaction snapshot {}, stats: {:?}", read_snapshot, stats);
-    
+    println!("GC with active transaction snapshot {read_snapshot}, stats: {stats:?}");
+
     // The GC should complete without errors
     // (Exact behavior depends on watermark calculation)
 }
@@ -130,7 +136,8 @@ fn test_gc_doesnt_break_concurrent_reads() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -139,7 +146,8 @@ fn test_gc_doesnt_break_concurrent_reads() {
     for i in 2..=10 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(i as i64));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -189,7 +197,8 @@ fn test_gc_stats_accuracy() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -199,7 +208,8 @@ fn test_gc_stats_accuracy() {
     for i in 2..=5 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(i as i64));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -207,10 +217,10 @@ fn test_gc_stats_accuracy() {
     // Run GC and check stats
     let stats = db.run_gc().unwrap();
 
-    println!("GC Stats: {:?}", stats);
-    
+    println!("GC Stats: {stats:?}");
+
     // Stats should have reasonable values
-    assert!(stats.duration_ms > 0 || stats.duration_ms == 0); // Duration should be non-negative
+    assert!(stats.duration_ms >= 0); // Duration should be non-negative
     assert!(stats.versions_reclaimed <= stats.versions_reclaimable);
 }
 
@@ -225,7 +235,7 @@ fn test_gc_without_mvcc_enabled_fails() {
     // Try to run GC - should fail
     let result = db.run_gc();
     assert!(result.is_err());
-    
+
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(err_msg.contains("MVCC"));
 }
@@ -251,7 +261,8 @@ fn test_gc_with_multiple_nodes() {
     for i in 1..=5 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(i);
-        node.properties.insert("value".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(i as i64));
         let node_id = tx.add_node(node).unwrap();
         node_ids.push(node_id);
         tx.commit().unwrap();
@@ -266,7 +277,10 @@ fn test_gc_with_multiple_nodes() {
                 Some(PropertyValue::Int(v)) => *v,
                 _ => 0,
             };
-            node.properties.insert("value".to_string(), PropertyValue::Int(current_value + j * 10));
+            node.properties.insert(
+                "value".to_string(),
+                PropertyValue::Int(current_value + j * 10),
+            );
             tx.add_node(node).unwrap();
             tx.commit().unwrap();
         }
@@ -275,7 +289,7 @@ fn test_gc_with_multiple_nodes() {
     // Run GC
     let stats = db.run_gc().unwrap();
 
-    println!("GC with multiple nodes, stats: {:?}", stats);
+    println!("GC with multiple nodes, stats: {stats:?}");
 
     // Verify all nodes are still readable with correct data
     for (i, node_id) in node_ids.iter().enumerate() {
@@ -283,7 +297,10 @@ fn test_gc_with_multiple_nodes() {
         let node = tx.get_node(*node_id).unwrap().unwrap();
         // Final value should be: initial_value + (1+2+3)*10 = initial + 60
         let expected = (i as i64 + 1) + 60;
-        assert_eq!(node.properties.get("value"), Some(&PropertyValue::Int(expected)));
+        assert_eq!(
+            node.properties.get("value"),
+            Some(&PropertyValue::Int(expected))
+        );
         tx.commit().unwrap();
     }
 }

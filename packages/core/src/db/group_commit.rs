@@ -55,7 +55,7 @@ impl GroupCommitState {
 
     fn group_commit_loop(db_path: PathBuf, receiver: Receiver<ControlMessage>, timeout_ms: u64) {
         let wal_path = db_path.with_extension("wal");
-        
+
         // Adaptive timeout: start with short timeout for low latency
         let short_timeout = Duration::from_micros(100); // 100µs for single-threaded
         let long_timeout = Duration::from_millis(timeout_ms); // Full timeout for batching
@@ -80,7 +80,7 @@ impl GroupCommitState {
                             }
                         }
                     }
-                    
+
                     // Adaptive timeout: if we batched >1 commit, increase timeout
                     // to catch more batching opportunities
                     if pending_commits.len() > 1 {

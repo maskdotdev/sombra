@@ -16,7 +16,7 @@ pub struct RecordStore<'a> {
 
 impl<'a> RecordStore<'a> {
     pub fn new(pager: &'a mut Pager) -> Self {
-        Self { 
+        Self {
             pager,
             dirty_pages: Vec::new(),
         }
@@ -97,14 +97,14 @@ impl<'a> RecordStore<'a> {
     pub fn insert_new_slot(&mut self, record: &[u8]) -> Result<RecordPointer> {
         // Try to find an existing page with room to append (without slot reuse)
         let page_count = self.pager.page_count();
-        
+
         // Scan all pages starting from page 1 (skip header page 0)
         // Note: This will encounter mixed page types (RecordPages, BIDX, PIDX).
         // RecordPage::from_bytes() handles this by detecting magic bytes and
         // returning InvalidArgument for non-RecordPages, which we catch below.
         for page_id in 1..page_count as u32 {
             let page = self.pager.fetch_page(page_id)?;
-            
+
             // Try to parse as RecordPage - will fail for index pages (BIDX, PIDX)
             let mut record_page = match RecordPage::from_bytes(&mut page.data) {
                 Ok(page) => page,
@@ -115,18 +115,17 @@ impl<'a> RecordStore<'a> {
                         let detected_type = detect_page_type(&page.data);
                         debug_assert!(
                             !matches!(detected_type, PageType::Record),
-                            "Skipping page {} which appears to be a RecordPage (type: {:?})",
-                            page_id, detected_type
+                            "Skipping page {page_id} which appears to be a RecordPage (type: {detected_type:?})"
                         );
                     }
-                    continue;  // Skip non-RecordPage types
+                    continue; // Skip non-RecordPage types
                 }
             };
-            
-            if let Err(_) = record_page.initialize() {
-                continue;  // Skip if initialization fails
+
+            if record_page.initialize().is_err() {
+                continue; // Skip if initialization fails
             }
-            
+
             // Check if we can fit the record by appending (not reusing)
             match record_page.can_fit(record.len()) {
                 Ok(true) => {
@@ -151,18 +150,18 @@ impl<'a> RecordStore<'a> {
         let page = self.pager.fetch_page(page_id)?;
         let mut record_page = RecordPage::from_bytes(&mut page.data)?;
         record_page.initialize()?;
-        
+
         if !record_page.can_fit(record.len())? {
             return Err(GraphError::InvalidArgument(
                 "newly allocated page cannot fit record".into(),
             ));
         }
-        
+
         let slot = record_page.append_record(record)?;
         let byte_offset = record_page.record_offset(slot as usize)?;
         page.dirty = true;
         self.mark_page_dirty(page_id);
-        
+
         Ok(RecordPointer {
             page_id,
             slot_index: slot,
@@ -308,29 +307,28 @@ impl<'a> RecordStore<'a> {
     /// Ok(()) if successful
     pub fn update_commit_ts(&mut self, pointer: RecordPointer, commit_ts: u64) -> Result<()> {
         let page = self.pager.fetch_page(pointer.page_id)?;
-        
+
         // Access the raw page data to update commit_ts in place
         let offset = pointer.byte_offset as usize;
-        
+
         // Versioned record layout: [kind:1][reserved:3][payload_len:4][metadata:25][data:N]
         // commit_ts is at offset 8 within version_metadata (after tx_id: 8 bytes)
         // So total offset is: byte_offset + 8 (header) + 8 (tx_id offset in metadata)
         let commit_ts_offset = offset + 8 + 8;
-        
+
         // Ensure we have enough space
         if commit_ts_offset + 8 > page.data.len() - PAGE_CHECKSUM_SIZE {
             return Err(GraphError::Corruption(
                 "commit_ts offset exceeds page bounds".into(),
             ));
         }
-        
+
         // Write the commit_ts
-        page.data[commit_ts_offset..commit_ts_offset + 8]
-            .copy_from_slice(&commit_ts.to_le_bytes());
-        
+        page.data[commit_ts_offset..commit_ts_offset + 8].copy_from_slice(&commit_ts.to_le_bytes());
+
         page.dirty = true;
         self.mark_page_dirty(pointer.page_id);
-        
+
         Ok(())
     }
 
@@ -351,7 +349,7 @@ impl<'a> RecordStore<'a> {
                 None
             }
         };
-        
+
         if let Some(byte_offset) = byte_offset {
             self.mark_page_dirty(pointer.page_id);
             Ok(Some(RecordPointer {

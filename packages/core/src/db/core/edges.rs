@@ -2,6 +2,7 @@ use super::graphdb::GraphDB;
 use super::pointer_kind::PointerKind;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, NodeId, NULL_EDGE_ID};
+use crate::storage::heap::RecordStore;
 use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_edge;
 
@@ -12,7 +13,8 @@ impl GraphDB {
 
         // Allocate commit timestamp for MVCC
         let commit_ts = if self.config.mvcc_enabled {
-            self.timestamp_oracle.as_ref()
+            self.timestamp_oracle
+                .as_ref()
                 .map(|oracle| oracle.allocate_commit_timestamp())
                 .unwrap_or(0)
         } else {
@@ -21,7 +23,7 @@ impl GraphDB {
 
         let (edge_id, _version_ptr) = self.add_edge_internal(edge, tx_id, commit_ts)?;
 
-        self.header.last_committed_tx_id = tx_id;
+        self.header.lock().unwrap().last_committed_tx_id = tx_id;
         self.write_header()?;
 
         let dirty_pages = self.take_recent_dirty_pages();
@@ -31,9 +33,18 @@ impl GraphDB {
         Ok(edge_id)
     }
 
-    pub fn add_edge_internal(&mut self, mut edge: Edge, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(EdgeId, Option<crate::storage::heap::RecordPointer>)> {
-        let edge_id = self.header.next_edge_id;
-        self.header.next_edge_id += 1;
+    pub fn add_edge_internal(
+        &self,
+        mut edge: Edge,
+        tx_id: crate::db::TxId,
+        commit_ts: u64,
+    ) -> Result<(EdgeId, Option<crate::storage::heap::RecordPointer>)> {
+        let edge_id = {
+            let mut header = self.header.lock().unwrap();
+            let edge_id = header.next_edge_id;
+            header.next_edge_id += 1;
+            edge_id
+        };
 
         let source_ptr = self
             .node_index
@@ -52,39 +63,44 @@ impl GraphDB {
         edge.next_incoming_edge_id = target_node.first_incoming_edge_id;
 
         let payload = serialize_edge(&edge)?;
-        
+
         // Use store_new_version if MVCC enabled, otherwise legacy record format
         let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
-            
-            let mut record_store = self.record_store();
-            let pointer = store_new_version(
-                &mut record_store,
-                None,  // No previous version for new edges
-                edge_id,
-                RecordKind::Edge,
-                &payload,
-                tx_id,
-                commit_ts,
-            )?;
-            
+
+            let (pointer, dirty_pages) = self.pager.with_pager_write(|pager| {
+                let mut record_store = RecordStore::new(pager);
+                let pointer = store_new_version(
+                    &mut record_store,
+                    None, // No previous version for new edges
+                    edge_id,
+                    RecordKind::Edge,
+                    &payload,
+                    tx_id,
+                    commit_ts,
+                )?;
+
+                // Collect dirty pages before dropping guards
+                let dirty_pages = record_store.take_dirty_pages();
+                Ok((pointer, dirty_pages))
+            })?;
+
             // Register dirty pages with GraphDB
-            let dirty_pages = record_store.take_dirty_pages();
             for page_id in dirty_pages {
                 self.record_page_write(page_id);
             }
-            
+
             (pointer, Some(pointer))
         } else {
             // Legacy non-versioned record
             let record = encode_record(RecordKind::Edge, &payload)?;
-            let preferred = self.header.last_record_page;
+            let preferred = self.header.lock().unwrap().last_record_page;
             let pointer = self.insert_record(&record, preferred)?;
             (pointer, None)
         };
-        
+
         self.edge_index.insert(edge_id, pointer);
-        self.header.last_record_page = Some(pointer.page_id);
+        self.header.lock().unwrap().last_record_page = Some(pointer.page_id);
 
         self.update_node_pointer(source_ptr, PointerKind::Outgoing, edge_id)?;
         self.update_node_pointer(target_ptr, PointerKind::Incoming, edge_id)?;
@@ -141,10 +157,10 @@ impl GraphDB {
             edge.next_incoming_edge_id,
         )?;
 
-        if let Some(edges) = self.outgoing_adjacency.get_mut(&edge.source_node_id) {
+        if let Some(mut edges) = self.outgoing_adjacency.get_mut(&edge.source_node_id) {
             edges.retain(|&e| e != edge_id);
         }
-        if let Some(edges) = self.incoming_adjacency.get_mut(&edge.target_node_id) {
+        if let Some(mut edges) = self.incoming_adjacency.get_mut(&edge.target_node_id) {
             edges.retain(|&e| e != edge_id);
         }
 

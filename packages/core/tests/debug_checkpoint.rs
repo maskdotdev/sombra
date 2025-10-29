@@ -111,7 +111,7 @@ Checking all {node_count} nodes..."
 fn test_debug_checkpoint_issue() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("bench.db");
-    let (mut db, node_ids) = setup_code_graph_debug(path.to_str().unwrap(), 1000);
+    let (db, node_ids) = setup_code_graph_debug(path.to_str().unwrap(), 1000);
 
     // Final verification
     let mut missing = 0;
