@@ -147,6 +147,26 @@ name = "lock_contention_profile"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "delete_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "pattern_matching_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "analytics_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "shortest_path_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
 [[example]]
 name = "social_graph"
 
