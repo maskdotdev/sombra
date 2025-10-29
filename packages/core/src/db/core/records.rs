@@ -231,13 +231,21 @@ impl GraphDB {
         preferred_page: Option<PageId>,
     ) -> Result<RecordPointer> {
         if let Some(page_id) = preferred_page {
-            let pointer_opt = self.pager.with_pager_write(|pager| {
+            let (pointer_opt, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut store = RecordStore::new(pager);
-                store.try_insert_into_page(page_id, record)
+                let result = store.try_insert_into_page(page_id, record)?;
+                let dirty = if let Some(ptr) = result {
+                    vec![ptr.page_id]
+                } else {
+                    vec![]
+                };
+                Ok((result, dirty))
             })?;
 
             if let Some(pointer) = pointer_opt {
-                self.record_page_write(pointer.page_id);
+                if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+                }
                 return Ok(pointer);
             }
         }
@@ -245,13 +253,21 @@ impl GraphDB {
         // Try to reuse slots from pages with free slots
         let free_pages: Vec<u32> = self.pages_with_free_slots.iter().map(|r| *r).collect();
         for &page_id in &free_pages {
-            let pointer_opt = self.pager.with_pager_write(|pager| {
+            let (pointer_opt, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut store = RecordStore::new(pager);
-                store.try_insert_into_page(page_id, record)
+                let result = store.try_insert_into_page(page_id, record)?;
+                let dirty = if let Some(ptr) = result {
+                    vec![ptr.page_id]
+                } else {
+                    vec![]
+                };
+                Ok((result, dirty))
             })?;
 
             if let Some(pointer) = pointer_opt {
-                self.record_page_write(pointer.page_id);
+                if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+                }
                 let page = self.pager.fetch_page(page_id)?;
                 let mut page_data = page.data.clone();
                 let record_page = RecordPage::from_bytes(&mut page_data)?;
@@ -263,20 +279,28 @@ impl GraphDB {
         }
 
         if let Some(page_id) = self.take_free_page()? {
-            let pointer_opt = self.pager.with_pager_write(|pager| {
+            let (pointer_opt, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut store = RecordStore::new(pager);
-                store.try_insert_into_page(page_id, record)
+                let result = store.try_insert_into_page(page_id, record)?;
+                let dirty = if let Some(ptr) = result {
+                    vec![ptr.page_id]
+                } else {
+                    vec![]
+                };
+                Ok((result, dirty))
             })?;
 
             if let Some(pointer) = pointer_opt {
-                self.record_page_write(pointer.page_id);
+                if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+                }
                 return Ok(pointer);
             }
 
             self.push_free_page(page_id)?;
         }
 
-        let (page_id, slot, byte_offset) = self.pager.with_pager_write(|pager| {
+        let ((page_id, slot, byte_offset), dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let page_id = pager.allocate_page()?;
             let page = pager.fetch_page(page_id)?;
             let mut record_page = RecordPage::from_bytes(&mut page.data)?;
@@ -289,9 +313,11 @@ impl GraphDB {
             let slot = record_page.append_record(record)?;
             let byte_offset = record_page.record_offset(slot as usize)?;
             page.dirty = true;
-            Ok((page_id, slot, byte_offset))
+            Ok(((page_id, slot, byte_offset), vec![page_id]))
         })?;
-        self.record_page_write(page_id);
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+        }
         Ok(RecordPointer {
             page_id,
             slot_index: slot,
@@ -301,10 +327,15 @@ impl GraphDB {
 
     pub(crate) fn free_record(&self, pointer: RecordPointer) -> Result<()> {
         let page_id = pointer.page_id;
-        let page_empty = self.pager.with_pager_write(|pager| {
+        let (page_empty, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let mut store = RecordStore::new(pager);
-            store.mark_free(pointer)
+            let result = store.mark_free(pointer)?;
+            Ok((result, vec![page_id]))
         })?;
+
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+        }
 
         if page_empty {
             self.push_free_page(page_id)?;
@@ -340,6 +371,9 @@ impl GraphDB {
         let next = self.header.lock().unwrap().free_page_head.unwrap_or(0);
         self.pager.with_pager_write(|pager| {
             let page = pager.fetch_page(page_id)?;
+            // Clear the page data first to remove any existing magic bytes (e.g., BIDX, PIDX)
+            // that would cause RecordPage::from_bytes() to fail
+            page.data.fill(0);
             let mut record_page = RecordPage::from_bytes(&mut page.data)?;
             record_page.clear()?;
             record_page.set_free_list_next(next);

@@ -81,7 +81,7 @@ impl GraphDB {
         let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
 
-            let (pointer, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let (pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut record_store = RecordStore::new(pager);
                 let pointer = store_new_version(
                     &mut record_store,
@@ -94,14 +94,17 @@ impl GraphDB {
                     false, // Not deleted
                 )?;
 
-                // Collect dirty pages before dropping guards
+                // Collect dirty pages and return them for atomic invalidation
+                // Cache invalidation happens atomically while holding the pager write lock,
+                // preventing other threads from caching stale data between write and invalidation
                 let dirty_pages = record_store.take_dirty_pages();
                 Ok((pointer, dirty_pages))
             })?;
 
-            // Register dirty pages with GraphDB
-            for page_id in dirty_pages {
-                self.record_page_write(page_id);
+            // Track dirty pages for transaction support (cache already invalidated atomically)
+            if self.tracking_enabled.load(std::sync::atomic::Ordering::Acquire) {
+                let mut recent = self.recent_dirty_pages.lock().unwrap();
+                recent.extend(dirty_pages);
             }
 
             (pointer, Some(pointer))
@@ -129,6 +132,8 @@ impl GraphDB {
             entries.lock().unwrap().add_entry(pointer, commit_ts);
         }
 
+        // This call reads the node via get_node(), which uses fetch_page() and the DashMap cache
+        // Cache invalidation MUST happen before this point (done above)
         self.update_property_indexes_on_node_add(node_id)?;
         self.node_cache.put(node_id, node.clone());
         self.header.lock().unwrap().last_record_page = Some(pointer.page_id);
@@ -159,7 +164,7 @@ impl GraphDB {
         // Create new version in version chain
         use crate::storage::version_chain::store_new_version;
 
-        let (new_pointer, dirty_pages) = self.pager.with_pager_write(|pager| {
+        let (new_pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let mut record_store = RecordStore::new(pager);
             let new_pointer = store_new_version(
                 &mut record_store,
@@ -172,15 +177,16 @@ impl GraphDB {
                 false, // Not deleted
             )?;
 
-            // Collect dirty pages before dropping guards
+            // Collect dirty pages for atomic cache invalidation
             let dirty_pages = record_store.take_dirty_pages();
 
             Ok((new_pointer, dirty_pages))
         })?;
 
-        // Register dirty pages with GraphDB
-        for page_id in dirty_pages {
-            self.record_page_write(page_id);
+        // Track dirty pages for transaction support (cache already invalidated atomically)
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Acquire) {
+            let mut recent = self.recent_dirty_pages.lock().unwrap();
+            recent.extend(dirty_pages);
         }
 
         // Update index to point to NEW head of version chain
@@ -387,7 +393,7 @@ impl GraphDB {
             
             let payload = serialize_node(&node)?;
             
-            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut record_store = RecordStore::new(pager);
                 
                 // store_new_version with is_deleted=true creates a tombstone
@@ -404,12 +410,12 @@ impl GraphDB {
                 )?;
                 
                 let dirty_pages = record_store.take_dirty_pages();
-                Ok((tombstone_ptr, dirty_pages))
+                Ok((tombstone_ptr, dirty_pages.clone()))
             })?;
             
-            // Register dirty pages
-            for page_id in dirty_pages {
-                self.record_page_write(page_id);
+            // Track dirty pages for transaction if needed
+            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
             }
             
             // Update index to point to tombstone (keeps node in index for snapshot isolation)
@@ -679,13 +685,22 @@ impl GraphDB {
             &payload,
         )?;
 
-        let update_result = self.pager.with_pager_write(|pager| {
+        let (update_result, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let mut store = RecordStore::new(pager);
-            store.update_in_place(pointer, &record)
+            let result = store.update_in_place(pointer, &record)?;
+            let dirty = if let Some(ptr) = result {
+                vec![ptr.page_id]
+            } else {
+                vec![]
+            };
+            Ok((result, dirty))
         })?;
 
-        if let Some(new_pointer) = update_result {
-            self.record_page_write(new_pointer.page_id);
+        if let Some(_new_pointer) = update_result {
+            // Cache already invalidated atomically during write
+            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+            }
         } else {
             self.free_record(pointer)?;
 
@@ -737,13 +752,22 @@ impl GraphDB {
             &payload,
         )?;
 
-        let update_result = self.pager.with_pager_write(|pager| {
+        let (update_result, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let mut store = RecordStore::new(pager);
-            store.update_in_place(pointer, &record)
+            let result = store.update_in_place(pointer, &record)?;
+            let dirty = if let Some(ptr) = result {
+                vec![ptr.page_id]
+            } else {
+                vec![]
+            };
+            Ok((result, dirty))
         })?;
 
-        if let Some(new_pointer) = update_result {
-            self.record_page_write(new_pointer.page_id);
+        if let Some(_new_pointer) = update_result {
+            // Cache already invalidated atomically during write
+            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+            }
         } else {
             self.free_record(pointer)?;
 

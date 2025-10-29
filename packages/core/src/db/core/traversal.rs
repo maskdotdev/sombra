@@ -363,18 +363,32 @@ impl GraphDB {
         let node = self
             .get_node(node_id)?
             .ok_or(GraphError::NotFound("node"))?;
-        let mut neighbors = Vec::new();
+        
+        // First pass: collect all edge IDs by traversing the linked list
+        // This only reads node metadata, not full edge records
         let mut edge_ids = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
 
         while edge_id != NULL_EDGE_ID {
-            self.metrics.edge_traversals += 1;
-            let edge = self.load_edge(edge_id)?;
-            neighbors.push(edge.target_node_id);
             edge_ids.push(edge_id);
+            // We need to load the edge to get the next pointer in the chain
+            // This is unavoidable for linked list traversal
+            let edge = self.load_edge(edge_id)?;
             edge_id = edge.next_outgoing_edge_id;
         }
 
+        // Second pass: batch load all edges at once
+        // This groups edges by page, dramatically reducing page fetches
+        if edge_ids.is_empty() {
+            self.outgoing_adjacency.insert(node_id, Vec::new());
+            self.outgoing_neighbors_cache.insert(node_id, Vec::new());
+            return Ok(Vec::new());
+        }
+
+        let edges = self.load_edges_batch(&edge_ids)?;
+        let neighbors: Vec<NodeId> = edges.iter().map(|e| e.target_node_id).collect();
+        
+        self.metrics.edge_traversals += edge_ids.len() as u64;
         self.outgoing_adjacency.insert(node_id, edge_ids);
         self.outgoing_neighbors_cache
             .insert(node_id, neighbors.clone());

@@ -175,6 +175,35 @@ impl LockFreePageCache {
         f(&mut pager)
     }
 
+    /// Execute a write operation and atomically invalidate affected pages
+    ///
+    /// This method ensures that cache invalidation happens while still holding
+    /// the pager write lock, preventing other threads from caching stale data
+    /// between the write and invalidation.
+    ///
+    /// # Arguments
+    /// * `f` - Closure that performs writes and returns (result, dirty_page_ids)
+    ///
+    /// # Returns
+    /// Both the result and the list of dirty pages (for transaction tracking)
+    pub fn with_pager_write_and_invalidate<F, R>(&self, f: F) -> Result<(R, Vec<PageId>)>
+    where
+        F: FnOnce(&mut Pager) -> Result<(R, Vec<PageId>)>,
+    {
+        let mut pager = self.pager.write().unwrap();
+        let (result, dirty_pages) = f(&mut pager)?;
+        
+        // Invalidate cache while still holding the write lock
+        // This prevents race conditions where another thread might cache
+        // a page after we modify it but before we invalidate
+        for page_id in &dirty_pages {
+            self.cache.remove(page_id);
+        }
+        
+        drop(pager); // Explicitly release lock
+        Ok((result, dirty_pages))
+    }
+
     /// Get the underlying pager for read operations
     pub fn with_pager_read<F, R>(&self, f: F) -> Result<R>
     where

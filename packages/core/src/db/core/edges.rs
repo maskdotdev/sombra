@@ -68,7 +68,7 @@ impl GraphDB {
         let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
 
-            let (pointer, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let (pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut record_store = RecordStore::new(pager);
                 let pointer = store_new_version(
                     &mut record_store,
@@ -83,12 +83,12 @@ impl GraphDB {
 
                 // Collect dirty pages before dropping guards
                 let dirty_pages = record_store.take_dirty_pages();
-                Ok((pointer, dirty_pages))
+                Ok((pointer, dirty_pages.clone()))
             })?;
 
-            // Register dirty pages with GraphDB
-            for page_id in dirty_pages {
-                self.record_page_write(page_id);
+            // Track dirty pages for transaction if needed
+            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
             }
 
             (pointer, Some(pointer))
@@ -188,7 +188,7 @@ impl GraphDB {
             
             let payload = serialize_edge(&edge)?;
             
-            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
                 let mut record_store = RecordStore::new(pager);
                 
                 // store_new_version with is_deleted=true creates a tombstone
@@ -204,12 +204,12 @@ impl GraphDB {
                 )?;
                 
                 let dirty_pages = record_store.take_dirty_pages();
-                Ok((tombstone_ptr, dirty_pages))
+                Ok((tombstone_ptr, dirty_pages.clone()))
             })?;
             
-            // Register dirty pages
-            for page_id in dirty_pages {
-                self.record_page_write(page_id);
+            // Track dirty pages for transaction if needed
+            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
             }
             
             // Update index to point to tombstone (keeps edge in index for snapshot isolation)
