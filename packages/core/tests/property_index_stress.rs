@@ -214,7 +214,7 @@ fn test_nodes_persist_after_reopen_and_add() {
     }
 
     {
-        let mut db = GraphDB::open(&path).expect("reopen 2");
+        let db = GraphDB::open(&path).expect("reopen 2");
 
         println!("Session 3: Reopened database");
 
@@ -615,7 +615,7 @@ fn minimal_node_persistence() {
     }
 
     {
-        let mut db = GraphDB::open(&path).expect("reopen");
+        let db = GraphDB::open(&path).expect("reopen");
         if let Some(node) = db.get_node(node0_id).expect("get node") {
             println!("Session 2: Got node {}", node.id);
         }

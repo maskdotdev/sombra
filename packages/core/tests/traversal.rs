@@ -14,10 +14,10 @@ fn setup_star_graph(neighbor_count: usize) -> (GraphDB, u64, Vec<u64>) {
 
     let mut db = GraphDB::open_with_config(&path, Config::balanced()).unwrap();
 
-    let center = db.add_node(Node::new(9999)).unwrap();
+    let center = db.add_node(Node::new(0)).unwrap();
     let mut neighbors = Vec::new();
-    for i in 0..neighbor_count {
-        let node_id = db.add_node(Node::new(i as u64)).unwrap();
+    for _i in 0..neighbor_count {
+        let node_id = db.add_node(Node::new(0)).unwrap();
         db.add_edge(Edge::new(0, center, node_id, "connected"))
             .unwrap();
         neighbors.push(node_id);
@@ -37,8 +37,8 @@ fn setup_chain_graph(length: usize) -> (GraphDB, Vec<u64>) {
     node_ids.push(first);
 
     let mut prev_id = first;
-    for i in 1..length {
-        let node_id = db.add_node(Node::new(i as u64)).unwrap();
+    for _i in 1..length {
+        let node_id = db.add_node(Node::new(0)).unwrap();
         db.add_edge(Edge::new(0, prev_id, node_id, "next")).unwrap();
         node_ids.push(node_id);
         prev_id = node_id;
@@ -53,10 +53,10 @@ fn setup_diamond_graph() -> (GraphDB, Vec<u64>) {
 
     let mut db = GraphDB::open_with_config(&path, Config::balanced()).unwrap();
 
-    let a = db.add_node(Node::new(1)).unwrap();
-    let b = db.add_node(Node::new(2)).unwrap();
-    let c = db.add_node(Node::new(3)).unwrap();
-    let d = db.add_node(Node::new(4)).unwrap();
+    let a = db.add_node(Node::new(0)).unwrap();
+    let b = db.add_node(Node::new(0)).unwrap();
+    let c = db.add_node(Node::new(0)).unwrap();
+    let d = db.add_node(Node::new(0)).unwrap();
 
     db.add_edge(Edge::new(0, a, b, "edge")).unwrap();
     db.add_edge(Edge::new(0, a, c, "edge")).unwrap();
@@ -84,7 +84,7 @@ fn test_get_neighbors_basic() -> Result<()> {
 fn test_get_neighbors_empty() -> Result<()> {
     let (mut db, _, _) = setup_star_graph(0);
 
-    let leaf = db.add_node(Node::new(999))?;
+    let leaf = db.add_node(Node::new(0))?;
     let neighbors = db.get_neighbors(leaf)?;
     assert_eq!(neighbors.len(), 0);
 
@@ -143,7 +143,7 @@ fn test_two_hop_star_graph() -> Result<()> {
 
     let mut layer1_nodes = Vec::new();
     for i in 0..5 {
-        let node = db.add_node(Node::new(i))?;
+        let node = db.add_node(Node::new(0))?;
         db.add_edge(Edge::new(0, center, node, "edge"))?;
         layer1_nodes.push(node);
     }
@@ -151,7 +151,7 @@ fn test_two_hop_star_graph() -> Result<()> {
     let mut layer2_nodes = Vec::new();
     for (i, &l1_node) in layer1_nodes.iter().enumerate() {
         for j in 0..3 {
-            let node = db.add_node(Node::new((i * 10 + j) as u64))?;
+            let node = db.add_node(Node::new(0))?;
             db.add_edge(Edge::new(0, l1_node, node, "edge"))?;
             layer2_nodes.push(node);
         }
@@ -185,11 +185,11 @@ fn test_three_hop_no_duplicates() -> Result<()> {
 
     let mut db = GraphDB::open_with_config(&path, Config::balanced()).unwrap();
 
-    let a = db.add_node(Node::new(1))?;
-    let b = db.add_node(Node::new(2))?;
-    let c = db.add_node(Node::new(3))?;
-    let d = db.add_node(Node::new(4))?;
-    let e = db.add_node(Node::new(5))?;
+    let a = db.add_node(Node::new(0))?;
+    let b = db.add_node(Node::new(0))?;
+    let c = db.add_node(Node::new(0))?;
+    let d = db.add_node(Node::new(0))?;
+    let e = db.add_node(Node::new(0))?;
 
     db.add_edge(Edge::new(0, a, b, "edge"))?;
     db.add_edge(Edge::new(0, a, c, "edge"))?;
@@ -225,8 +225,8 @@ fn test_bfs_traversal_depth_limit() -> Result<()> {
 
     let result = db.bfs_traversal(nodes[0], 5)?;
 
-    assert_eq!(result.len(), 5);
-    for i in 0..5 {
+    assert_eq!(result.len(), 6);
+    for i in 0..6 {
         assert_eq!(result[i], (nodes[i], i));
     }
 
@@ -322,12 +322,12 @@ fn test_parallel_multi_hop_batch() -> Result<()> {
 
     let center = db.add_node(Node::new(0))?;
     let mut spokes = Vec::new();
-    for i in 0..10 {
-        let spoke = db.add_node(Node::new(i))?;
+    for _i in 0..10 {
+        let spoke = db.add_node(Node::new(0))?;
         db.add_edge(Edge::new(0, center, spoke, "edge"))?;
 
         for j in 0..5 {
-            let leaf = db.add_node(Node::new((i * 100 + j) as u64))?;
+            let leaf = db.add_node(Node::new(0))?;
             db.add_edge(Edge::new(0, spoke, leaf, "edge"))?;
         }
         spokes.push(spoke);
@@ -398,9 +398,9 @@ fn test_traversal_cycle_handling() -> Result<()> {
 
     let mut db = GraphDB::open_with_config(&path, Config::balanced()).unwrap();
 
-    let a = db.add_node(Node::new(1))?;
-    let b = db.add_node(Node::new(2))?;
-    let c = db.add_node(Node::new(3))?;
+    let a = db.add_node(Node::new(0))?;
+    let b = db.add_node(Node::new(0))?;
+    let c = db.add_node(Node::new(0))?;
 
     db.add_edge(Edge::new(0, a, b, "edge"))?;
     db.add_edge(Edge::new(0, b, c, "edge"))?;

@@ -1,8 +1,7 @@
 use crate::error::{GraphError, Result};
 use crate::model::NodeId;
 use crate::storage::RecordPointer;
-use parking_lot::RwLock;
-use std::collections::BTreeMap;
+use dashmap::DashMap;
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 
@@ -11,112 +10,155 @@ const BTREE_VERSION: u16 = 1;
 const BTREE_HEADER_SIZE: usize = 8; // magic (4) + version (2) + reserved (2)
 const ENTRY_SIZE: usize = 8 + 4 + 2 + 2;
 
+/// Lock-free BTreeIndex using DashMap for concurrent reads
+///
+/// This implementation uses DashMap for O(1) lock-free lookups on the hot path (get/insert/remove)
+/// while maintaining compatibility with range queries by collecting entries on-demand.
 #[derive(Debug, Clone)]
 pub struct BTreeIndex {
-    root: Arc<RwLock<BTreeMap<NodeId, RecordPointer>>>,
+    // Primary storage: lock-free hash map for fast concurrent access
+    map: Arc<DashMap<NodeId, RecordPointer>>,
 }
 
 impl BTreeIndex {
     pub fn new() -> Self {
         Self {
-            root: Arc::new(RwLock::new(BTreeMap::new())),
+            map: Arc::new(DashMap::new()),
         }
     }
 
-    pub fn insert(&mut self, key: NodeId, value: RecordPointer) {
-        self.root.write().insert(key, value);
+    /// Insert a key-value pair (lock-free)
+    pub fn insert(&self, key: NodeId, value: RecordPointer) {
+        self.map.insert(key, value);
     }
 
+    /// Get a value by key (lock-free read)
     pub fn get(&self, key: &NodeId) -> Option<RecordPointer> {
-        self.root.read().get(key).copied()
+        self.map.get(key).map(|r| *r.value())
     }
 
-    pub fn remove(&mut self, key: &NodeId) -> Option<RecordPointer> {
-        self.root.write().remove(key)
+    /// Remove a key-value pair (lock-free)
+    pub fn remove(&self, key: &NodeId) -> Option<RecordPointer> {
+        self.map.remove(key).map(|(_, v)| v)
     }
 
-    pub fn clear(&mut self) {
-        self.root.write().clear();
+    /// Clear all entries
+    pub fn clear(&self) {
+        self.map.clear();
     }
 
+    /// Replace the entire contents of this index with another index
+    pub fn replace_with(&self, other: BTreeIndex) {
+        self.clear();
+        // Clone all entries from other into self
+        for entry in other.map.iter() {
+            self.map.insert(*entry.key(), *entry.value());
+        }
+    }
+
+    /// Get all entries as a sorted vector (for compatibility)
     pub fn iter(&self) -> Vec<(NodeId, RecordPointer)> {
-        self.root.read().iter().map(|(&k, &v)| (k, v)).collect()
+        let mut entries: Vec<_> = self.map.iter().map(|r| (*r.key(), *r.value())).collect();
+        entries.sort_by_key(|(k, _)| *k);
+        entries
     }
 
+    /// Get the number of entries
     pub fn len(&self) -> usize {
-        self.root.read().len()
+        self.map.len()
     }
 
+    /// Check if the index is empty
     pub fn is_empty(&self) -> bool {
-        self.root.read().is_empty()
+        self.map.is_empty()
     }
 
+    /// Get entries in a range [start, end] (sorted)
     pub fn range(&self, start: NodeId, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
         if start > end {
             return Vec::new();
         }
-        self.root
-            .read()
-            .range(start..=end)
-            .map(|(&k, &v)| (k, v))
-            .collect()
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .filter(|r| {
+                let key = *r.key();
+                key >= start && key <= end
+            })
+            .map(|r| (*r.key(), *r.value()))
+            .collect();
+        entries.sort_by_key(|(k, _)| *k);
+        entries
     }
 
+    /// Get entries from start onwards (sorted)
     pub fn range_from(&self, start: NodeId) -> Vec<(NodeId, RecordPointer)> {
-        self.root
-            .read()
-            .range(start..)
-            .map(|(&k, &v)| (k, v))
-            .collect()
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .filter(|r| *r.key() >= start)
+            .map(|r| (*r.key(), *r.value()))
+            .collect();
+        entries.sort_by_key(|(k, _)| *k);
+        entries
     }
 
+    /// Get entries up to end (sorted)
     pub fn range_to(&self, end: NodeId) -> Vec<(NodeId, RecordPointer)> {
-        self.root
-            .read()
-            .range(..=end)
-            .map(|(&k, &v)| (k, v))
-            .collect()
+        let mut entries: Vec<_> = self
+            .map
+            .iter()
+            .filter(|r| *r.key() <= end)
+            .map(|r| (*r.key(), *r.value()))
+            .collect();
+        entries.sort_by_key(|(k, _)| *k);
+        entries
     }
 
+    /// Get the first entry (smallest key)
     pub fn first(&self) -> Option<(NodeId, RecordPointer)> {
-        self.root.read().first_key_value().map(|(&k, &v)| (k, v))
+        self.map
+            .iter()
+            .map(|r| (*r.key(), *r.value()))
+            .min_by_key(|(k, _)| *k)
     }
 
+    /// Get the last entry (largest key)
     pub fn last(&self) -> Option<(NodeId, RecordPointer)> {
-        self.root.read().last_key_value().map(|(&k, &v)| (k, v))
+        self.map
+            .iter()
+            .map(|r| (*r.key(), *r.value()))
+            .max_by_key(|(k, _)| *k)
     }
 
+    /// Get the first N entries (sorted by key)
     pub fn first_n(&self, n: usize) -> Vec<(NodeId, RecordPointer)> {
-        self.root
-            .read()
-            .iter()
-            .take(n)
-            .map(|(&k, &v)| (k, v))
-            .collect()
+        let mut entries: Vec<_> = self.map.iter().map(|r| (*r.key(), *r.value())).collect();
+        entries.sort_by_key(|(k, _)| *k);
+        entries.truncate(n);
+        entries
     }
 
+    /// Get the last N entries (sorted by key descending)
     pub fn last_n(&self, n: usize) -> Vec<(NodeId, RecordPointer)> {
-        self.root
-            .read()
-            .iter()
-            .rev()
-            .take(n)
-            .map(|(&k, &v)| (k, v))
-            .collect()
+        let mut entries: Vec<_> = self.map.iter().map(|r| (*r.key(), *r.value())).collect();
+        entries.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
+        entries.truncate(n);
+        entries
     }
 
-    pub fn batch_insert(&mut self, entries: Vec<(NodeId, RecordPointer)>) {
-        let mut root = self.root.write();
+    /// Batch insert entries (lock-free)
+    pub fn batch_insert(&self, entries: Vec<(NodeId, RecordPointer)>) {
         for (key, value) in entries {
-            root.insert(key, value);
+            self.map.insert(key, value);
         }
     }
 
-    pub fn batch_remove(&mut self, keys: &[NodeId]) -> Vec<(NodeId, RecordPointer)> {
-        let mut root = self.root.write();
+    /// Batch remove entries (lock-free)
+    pub fn batch_remove(&self, keys: &[NodeId]) -> Vec<(NodeId, RecordPointer)> {
         let mut removed = Vec::with_capacity(keys.len());
         for key in keys {
-            if let Some(value) = root.remove(key) {
+            if let Some((_, value)) = self.map.remove(key) {
                 removed.push((*key, value));
             }
         }
@@ -124,17 +166,19 @@ impl BTreeIndex {
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let root = self.root.read();
-        let len = u64::try_from(root.len()).map_err(|_| {
+        // Convert DashMap to sorted vector for serialization
+        let entries = self.iter(); // Already sorted
+        let len = u64::try_from(entries.len()).map_err(|_| {
             GraphError::Corruption("Too many entries to serialize BTree index".into())
         })?;
-        let mut buf = Vec::with_capacity(BTREE_HEADER_SIZE + 8 + (ENTRY_SIZE * root.len()));
+
+        let mut buf = Vec::with_capacity(BTREE_HEADER_SIZE + 8 + (ENTRY_SIZE * entries.len()));
         buf.extend_from_slice(BTREE_MAGIC);
         buf.extend_from_slice(&BTREE_VERSION.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
         buf.extend_from_slice(&len.to_le_bytes());
 
-        for (&node_id, &pointer) in root.iter() {
+        for (node_id, pointer) in entries {
             buf.extend_from_slice(&node_id.to_le_bytes());
             buf.extend_from_slice(&pointer.page_id.to_le_bytes());
             buf.extend_from_slice(&pointer.slot_index.to_le_bytes());
@@ -184,7 +228,7 @@ impl BTreeIndex {
             return Err(GraphError::Corruption("BTree index data truncated".into()));
         }
 
-        let mut root = BTreeMap::new();
+        let index = Self::new();
 
         for i in 0..len {
             let offset = cursor
@@ -201,7 +245,7 @@ impl BTreeIndex {
             let slot_index = Self::read_u16_le(data, offset + 12)?;
             let byte_offset = Self::read_u16_le(data, offset + 14)?;
 
-            root.insert(
+            index.map.insert(
                 node_id,
                 RecordPointer {
                     page_id,
@@ -211,9 +255,7 @@ impl BTreeIndex {
             );
         }
 
-        Ok(Self {
-            root: Arc::new(RwLock::new(root)),
-        })
+        Ok(index)
     }
 
     fn read_u16_le(buf: &[u8], offset: usize) -> Result<u16> {
@@ -268,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_basic_operations() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         let ptr1 = RecordPointer {
             page_id: 1,
@@ -298,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_serialization() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         index.insert(
             1,
@@ -336,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
         index.insert(
             1,
             RecordPointer {
@@ -363,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_iteration() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
         index.insert(
             3,
             RecordPointer {
@@ -396,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_large_dataset() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         for i in 0..10000 {
             index.insert(
@@ -440,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_large_serialization() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         for i in 0..1000 {
             index.insert(
@@ -505,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_range_queries() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         for i in 0..100 {
             index.insert(
@@ -537,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_first_last_operations() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         assert_eq!(index.first(), None);
         assert_eq!(index.last(), None);
@@ -569,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_ordered_iteration() {
-        let mut index = BTreeIndex::new();
+        let index = BTreeIndex::new();
 
         let test_ids = vec![50, 10, 90, 30, 70, 20, 60, 40, 80, 100];
         for id in test_ids {

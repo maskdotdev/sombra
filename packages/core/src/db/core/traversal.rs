@@ -22,17 +22,8 @@ impl GraphDB {
     }
 
     pub fn get_neighbors(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        // Use snapshot-aware version if MVCC is enabled
-        if self.config.mvcc_enabled && self.active_transaction.is_some() {
-            // Get snapshot timestamp from active transaction
-            if let Some(tx_id) = self.active_transaction {
-                if let Some(ref tx_mgr) = self.mvcc_tx_manager {
-                    if let Some(tx_ctx) = tx_mgr.get_transaction(tx_id) {
-                        return self.get_neighbors_with_snapshot(node_id, tx_ctx.snapshot_ts, Some(tx_id));
-                    }
-                }
-            }
-        }
+        // Note: This is the non-transactional version (auto-commit mode)
+        // For snapshot isolation, use the Transaction API
 
         if let Some(neighbors) = self.outgoing_neighbors_cache.get(&node_id) {
             return Ok(neighbors.clone());
@@ -59,17 +50,8 @@ impl GraphDB {
     }
 
     pub fn get_incoming_neighbors(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        // Use snapshot-aware version if MVCC is enabled
-        if self.config.mvcc_enabled && self.active_transaction.is_some() {
-            // Get snapshot timestamp from active transaction
-            if let Some(tx_id) = self.active_transaction {
-                if let Some(ref tx_mgr) = self.mvcc_tx_manager {
-                    if let Some(tx_ctx) = tx_mgr.get_transaction(tx_id) {
-                        return self.get_incoming_neighbors_with_snapshot(node_id, tx_ctx.snapshot_ts, Some(tx_id));
-                    }
-                }
-            }
-        }
+        // Note: This is the non-transactional version (auto-commit mode)
+        // For snapshot isolation, use the Transaction API
 
         if let Some(neighbors) = self.incoming_neighbors_cache.get(&node_id) {
             return Ok(neighbors.clone());
@@ -370,17 +352,8 @@ impl GraphDB {
     }
 
     fn get_neighbors_fast(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        // Use snapshot-aware version if MVCC is enabled
-        if self.config.mvcc_enabled && self.active_transaction.is_some() {
-            // Get snapshot timestamp from active transaction
-            if let Some(tx_id) = self.active_transaction {
-                if let Some(ref tx_mgr) = self.mvcc_tx_manager {
-                    if let Some(tx_ctx) = tx_mgr.get_transaction(tx_id) {
-                        return self.get_neighbors_with_snapshot(node_id, tx_ctx.snapshot_ts, Some(tx_id));
-                    }
-                }
-            }
-        }
+        // Note: This is the non-transactional version (auto-commit mode)
+        // For snapshot isolation, use the Transaction API
 
         if let Some(neighbors) = self.outgoing_neighbors_cache.get(&node_id) {
             return Ok(neighbors.clone());
@@ -431,24 +404,9 @@ impl GraphDB {
         edge_types: &[&str],
         direction: EdgeDirection,
     ) -> Result<Vec<NodeId>> {
-        // Determine snapshot context if MVCC is enabled
-        let (snapshot_ts, current_tx_id) = if self.config.mvcc_enabled && self.active_transaction.is_some() {
-            if let Some(tx_id) = self.active_transaction {
-                if let Some(ref tx_mgr) = self.mvcc_tx_manager {
-                    if let Some(tx_ctx) = tx_mgr.get_transaction(tx_id) {
-                        (Some(tx_ctx.snapshot_ts), Some(tx_id))
-                    } else {
-                        (None, None)
-                    }
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
+        // Note: This is the non-transactional version (auto-commit mode)
+        // For snapshot isolation, use the Transaction API
+        let (snapshot_ts, current_tx_id) = (None, None);
 
         let mut neighbors = Vec::new();
 
@@ -460,7 +418,8 @@ impl GraphDB {
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         neighbors.push(edge.target_node_id);
                     }
@@ -473,7 +432,8 @@ impl GraphDB {
                     .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         neighbors.push(edge.source_node_id);
                     }
@@ -487,7 +447,8 @@ impl GraphDB {
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         neighbors.push(edge.target_node_id);
                     }
@@ -495,7 +456,8 @@ impl GraphDB {
                 }
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         neighbors.push(edge.source_node_id);
                     }
@@ -532,24 +494,9 @@ impl GraphDB {
         edge_types: &[&str],
         direction: EdgeDirection,
     ) -> Result<Vec<(NodeId, Edge)>> {
-        // Determine snapshot context if MVCC is enabled
-        let (snapshot_ts, current_tx_id) = if self.config.mvcc_enabled && self.active_transaction.is_some() {
-            if let Some(tx_id) = self.active_transaction {
-                if let Some(ref tx_mgr) = self.mvcc_tx_manager {
-                    if let Some(tx_ctx) = tx_mgr.get_transaction(tx_id) {
-                        (Some(tx_ctx.snapshot_ts), Some(tx_id))
-                    } else {
-                        (None, None)
-                    }
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
+        // Note: This is the non-transactional version (auto-commit mode)
+        // For snapshot isolation, use the Transaction API
+        let (snapshot_ts, current_tx_id) = (None, None);
 
         let mut results = Vec::new();
 
@@ -561,7 +508,8 @@ impl GraphDB {
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         results.push((edge.target_node_id, edge.clone()));
                     }
@@ -574,7 +522,8 @@ impl GraphDB {
                     .ok_or(GraphError::NotFound("node"))?;
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         results.push((edge.source_node_id, edge.clone()));
                     }
@@ -588,7 +537,8 @@ impl GraphDB {
                 let mut edge_id = node.first_outgoing_edge_id;
                 while edge_id != NULL_EDGE_ID {
                     self.metrics.edge_traversals += 1;
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         results.push((edge.target_node_id, edge.clone()));
                     }
@@ -596,7 +546,8 @@ impl GraphDB {
                 }
                 let mut edge_id = node.first_incoming_edge_id;
                 while edge_id != NULL_EDGE_ID {
-                    let edge = self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
+                    let edge =
+                        self.load_edge_maybe_snapshot(edge_id, snapshot_ts, current_tx_id)?;
                     if edge_types.is_empty() || edge_types.iter().any(|&t| t == edge.type_name) {
                         results.push((edge.source_node_id, edge.clone()));
                     }
@@ -765,10 +716,10 @@ impl GraphDB {
         let node = self
             .get_node_with_snapshot(node_id, snapshot_ts, current_tx_id)?
             .ok_or(GraphError::NotFound("node"))?;
-        
+
         let mut neighbors = Vec::new();
         let mut edge_id = node.first_outgoing_edge_id;
-        
+
         while edge_id != NULL_EDGE_ID {
             self.metrics.edge_traversals += 1;
             // Try to load the edge with snapshot isolation
@@ -813,10 +764,10 @@ impl GraphDB {
         let node = self
             .get_node_with_snapshot(node_id, snapshot_ts, current_tx_id)?
             .ok_or(GraphError::NotFound("node"))?;
-        
+
         let mut neighbors = Vec::new();
         let mut edge_id = node.first_incoming_edge_id;
-        
+
         while edge_id != NULL_EDGE_ID {
             // Try to load the edge with snapshot isolation
             match self.load_edge_with_snapshot(edge_id, snapshot_ts, current_tx_id) {

@@ -1,39 +1,41 @@
 use crc32fast::hash;
-use lru::LruCache;
+use dashmap::{DashMap, DashSet};
 use rayon::ThreadPoolBuilder;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{info, warn};
 
+use crate::db::cache::ConcurrentLruCache;
 use crate::error::{GraphError, Result};
 use crate::index::BTreeIndex;
 use crate::model::{Edge, EdgeId, Node, NodeId, PropertyValue};
-use crate::pager::{PageId, Pager, PAGE_CHECKSUM_SIZE};
+use crate::pager::{LockFreePageCache, PageCacheHint, PageId, Pager, PAGE_CHECKSUM_SIZE};
 use crate::storage::header::Header;
+use crate::storage::heap::RecordStore;
 use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::RecordPointer;
 use crate::storage::{deserialize_edge, deserialize_node};
-use crate::storage::heap::RecordStore;
 
 use super::header::HeaderState;
 use crate::db::config::{Config, SyncMode};
 use crate::db::gc::{BackgroundGcState, GarbageCollector, GcConfig, GcStats};
-use crate::db::group_commit::{GroupCommitState, TxId};
+use crate::db::group_commit::GroupCommitState;
 use crate::db::metrics::{ConcurrencyMetrics, PerformanceMetrics};
 use crate::db::mvcc_transaction::MvccTransactionManager;
 use crate::db::timestamp_oracle::TimestampOracle;
 use crate::db::transaction::Transaction;
+use crate::db::write_coordinator::WriteCoordinator;
 
 /// Values that can be indexed for fast property-based lookups.
 ///
 /// Only certain property types are indexable. Float and Bytes values
 /// cannot be indexed due to their nature.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndexableValue {
     /// Boolean value
     Bool(bool),
@@ -176,36 +178,41 @@ impl From<&PropertyValue> for Option<IndexableValue> {
 /// ```
 pub struct GraphDB {
     pub(crate) path: PathBuf,
-    // Wrapped in RwLock for concurrent reads - allows multiple readers or single writer
-    pub(crate) pager: RwLock<Pager>,
-    pub header: HeaderState,
+    // Phase 3B: Lock-free page cache wrapper (replaces RwLock<Pager>)
+    pub(crate) pager: Arc<LockFreePageCache>,
+    // Lock-free page cache hint for read optimization (Phase 3B - kept for compatibility)
+    pub(crate) page_cache_hint: Arc<PageCacheHint>,
+    // Phase 5: Full interior mutability - header wrapped in Mutex
+    pub header: Mutex<HeaderState>,
     pub(crate) epoch: AtomicU64,
-    pub(crate) node_index: BTreeIndex,
-    pub(crate) edge_index: HashMap<EdgeId, RecordPointer>,
-    pub(crate) label_index: HashMap<String, BTreeSet<NodeId>>,
+    // Phase 4: Concurrent indexes - true lock-free architecture (no double-locking)
+    pub(crate) node_index: Arc<BTreeIndex>, // BTreeIndex has internal RwLock
+    pub(crate) edge_index: Arc<DashMap<EdgeId, RecordPointer>>,
+    pub(crate) label_index: Arc<DashMap<String, Arc<DashSet<NodeId>>>>, // DashSet is lock-free
     pub(crate) property_indexes:
-        HashMap<(String, String), BTreeMap<IndexableValue, BTreeSet<NodeId>>>,
-    // Wrapped in Mutex for interior mutability - LRU cache needs mutation
-    pub(crate) node_cache: Mutex<LruCache<NodeId, Node>>,
-    pub(crate) edge_cache: Mutex<LruCache<EdgeId, Edge>>,
-    pub(crate) outgoing_adjacency: HashMap<NodeId, Vec<EdgeId>>,
-    pub(crate) incoming_adjacency: HashMap<NodeId, Vec<EdgeId>>,
-    pub(crate) outgoing_neighbors_cache: HashMap<NodeId, Vec<NodeId>>,
-    pub(crate) incoming_neighbors_cache: HashMap<NodeId, Vec<NodeId>>,
-    pub(crate) next_tx_id: TxId,
+        Arc<DashMap<(String, String), Arc<DashMap<IndexableValue, Arc<DashSet<NodeId>>>>>>, // Nested DashMap/DashSet
+    // Lock-free concurrent caches for high-performance concurrent access
+    pub(crate) node_cache: Arc<ConcurrentLruCache<NodeId, Node>>,
+    pub(crate) edge_cache: Arc<ConcurrentLruCache<EdgeId, Edge>>,
+    pub(crate) outgoing_adjacency: Arc<DashMap<NodeId, Vec<EdgeId>>>,
+    pub(crate) incoming_adjacency: Arc<DashMap<NodeId, Vec<EdgeId>>>,
+    pub(crate) outgoing_neighbors_cache: Arc<DashMap<NodeId, Vec<NodeId>>>,
+    pub(crate) incoming_neighbors_cache: Arc<DashMap<NodeId, Vec<NodeId>>>,
+    pub(crate) next_tx_id: AtomicU64,
     // AtomicBool for lock-free interior mutability
     pub(crate) tracking_enabled: AtomicBool,
     // Wrapped in Mutex for interior mutability
     pub(crate) recent_dirty_pages: Mutex<Vec<PageId>>,
-    pub active_transaction: Option<TxId>,
-    pub(crate) mvcc_tx_manager: Option<MvccTransactionManager>,
+    // Phase 5: Removed active_transaction - MVCC manager handles transaction state
+    // Phase 5: Lock-free MVCC manager (no RwLock wrapper needed)
+    pub(crate) mvcc_tx_manager: Option<Arc<MvccTransactionManager>>,
     pub(crate) config: Config,
-    pub(crate) transactions_since_sync: usize,
-    pub(crate) transactions_since_checkpoint: usize,
+    pub(crate) transactions_since_sync: AtomicUsize,
+    pub(crate) transactions_since_checkpoint: AtomicUsize,
     pub(crate) group_commit_state: Option<Arc<Mutex<GroupCommitState>>>,
     pub metrics: PerformanceMetrics,
     pub concurrency_metrics: Arc<ConcurrencyMetrics>,
-    pub(crate) pages_with_free_slots: BTreeSet<PageId>,
+    pub(crate) pages_with_free_slots: Arc<DashSet<PageId>>, // DashSet is lock-free
     // MVCC support
     pub(crate) timestamp_oracle: Option<Arc<TimestampOracle>>,
     pub(crate) gc: Option<GarbageCollector>,
@@ -213,22 +220,29 @@ pub struct GraphDB {
     // File locking to prevent multi-process corruption
     #[allow(dead_code)]
     lock_file: Option<File>,
+    // Phase 4: Write coordination for WAL/checkpoint
+    pub(crate) write_coordinator: Arc<Mutex<WriteCoordinator>>,
 }
 
 impl std::fmt::Debug for GraphDB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GraphDB")
             .field("path", &self.path)
-            .field("header", &self.header)
+            .field("header", &self.header.lock().unwrap())
             .field("epoch", &self.epoch.load(Ordering::Relaxed))
-            .field("next_tx_id", &self.next_tx_id)
-            .field("tracking_enabled", &self.tracking_enabled.load(Ordering::Relaxed))
-            .field("active_transaction", &self.active_transaction)
+            .field("next_tx_id", &self.next_tx_id.load(Ordering::Relaxed))
+            .field(
+                "tracking_enabled",
+                &self.tracking_enabled.load(Ordering::Relaxed),
+            )
             .field("config", &self.config)
-            .field("transactions_since_sync", &self.transactions_since_sync)
+            .field(
+                "transactions_since_sync",
+                &self.transactions_since_sync.load(Ordering::Relaxed),
+            )
             .field(
                 "transactions_since_checkpoint",
-                &self.transactions_since_checkpoint,
+                &self.transactions_since_checkpoint.load(Ordering::Relaxed),
             )
             .finish()
     }
@@ -295,7 +309,7 @@ impl GraphDB {
             checksum_enabled = config.checksum_enabled,
             "Opening database"
         );
-        
+
         // Acquire exclusive file lock to prevent multi-process corruption
         use fs2::FileExt;
         let lock_path = path_ref.with_extension("lock");
@@ -303,16 +317,15 @@ impl GraphDB {
             .create(true)
             .write(true)
             .open(&lock_path)?;
-        
+
         lock_file.try_lock_exclusive().map_err(|e| {
             GraphError::InvalidArgument(format!(
-                "Database is already open in another process: {}. Lock file: {:?}",
-                e, lock_path
+                "Database is already open in another process: {e}. Lock file: {lock_path:?}"
             ))
         })?;
-        
+
         info!(lock_file = ?lock_path, "Acquired exclusive file lock");
-        
+
         configure_rayon_thread_pool(&config);
         let wal_sync_enabled = config.wal_sync_mode != SyncMode::Off;
         let use_mmap = config.use_mmap;
@@ -384,7 +397,7 @@ impl GraphDB {
                 Arc::new(TimestampOracle::new())
             };
             let collector = GarbageCollector::new();
-            
+
             // Start background GC if configured
             let bg_gc = if let Some(_interval_secs) = config.gc_interval_secs {
                 // Note: Background GC will be started via start_background_gc() after construction
@@ -392,52 +405,60 @@ impl GraphDB {
             } else {
                 None
             };
-            
+
             // Create MVCC transaction manager with shared oracle
             let max_concurrent = config.max_concurrent_transactions.unwrap_or(100);
-            let tx_manager = MvccTransactionManager::new_with_oracle(oracle.clone(), max_concurrent);
-            
+            let tx_manager =
+                MvccTransactionManager::new_with_oracle(oracle.clone(), max_concurrent);
+
             (Some(oracle), Some(collector), bg_gc, Some(tx_manager))
         } else {
             (None, None, None, None)
         };
 
-        let mut db = Self {
+        let db = Self {
             path: path_ref.to_path_buf(),
-            pager: RwLock::new(pager),
-            header: HeaderState::from(header),
+            // Phase 3B: Wrap pager in lock-free cache
+            pager: Arc::new(LockFreePageCache::new(pager, cache_size.get() * 2)),
+            page_cache_hint: Arc::new(PageCacheHint::new(cache_size.get() * 2)),
+            // Phase 5: Full interior mutability - header wrapped in Mutex
+            header: Mutex::new(HeaderState::from(header.clone())),
             epoch: AtomicU64::new(0),
-            node_index: BTreeIndex::new(),
-            edge_index: HashMap::new(),
-            label_index: HashMap::new(),
-            property_indexes: HashMap::new(),
-            node_cache: Mutex::new(LruCache::new(cache_size)),
-            edge_cache: Mutex::new(LruCache::new(edge_cache_size)),
-            outgoing_adjacency: HashMap::new(),
-            incoming_adjacency: HashMap::new(),
-            outgoing_neighbors_cache: HashMap::new(),
-            incoming_neighbors_cache: HashMap::new(),
-            next_tx_id,
+            node_index: Arc::new(BTreeIndex::new()), // No RwLock wrapper - BTreeIndex has internal mutability
+            edge_index: Arc::new(DashMap::new()),
+            label_index: Arc::new(DashMap::new()),
+            property_indexes: Arc::new(DashMap::new()),
+            node_cache: Arc::new(ConcurrentLruCache::new(cache_size.get())),
+            edge_cache: Arc::new(ConcurrentLruCache::new(edge_cache_size.get())),
+            outgoing_adjacency: Arc::new(DashMap::new()),
+            incoming_adjacency: Arc::new(DashMap::new()),
+            outgoing_neighbors_cache: Arc::new(DashMap::new()),
+            incoming_neighbors_cache: Arc::new(DashMap::new()),
+            next_tx_id: AtomicU64::new(next_tx_id),
             tracking_enabled: AtomicBool::new(false),
             recent_dirty_pages: Mutex::new(Vec::new()),
-            active_transaction: None,
+            // Phase 5: Removed active_transaction - MVCC manager handles transaction state
             config,
-            transactions_since_sync: 0,
-            transactions_since_checkpoint: 0,
+            transactions_since_sync: AtomicUsize::new(0),
+            transactions_since_checkpoint: AtomicUsize::new(0),
             group_commit_state,
             metrics: PerformanceMetrics::new(),
             concurrency_metrics: Arc::new(ConcurrencyMetrics::new()),
-            pages_with_free_slots: BTreeSet::new(),
+            pages_with_free_slots: Arc::new(DashSet::new()), // DashSet instead of RwLock<BTreeSet>
             timestamp_oracle,
             gc,
             bg_gc_state,
-            mvcc_tx_manager,
+            // Phase 5: Lock-free MVCC manager (no RwLock wrapper)
+            mvcc_tx_manager: mvcc_tx_manager.map(Arc::new),
             lock_file: Some(lock_file),
+            write_coordinator: Arc::new(Mutex::new(WriteCoordinator::new(HeaderState::from(
+                header,
+            )))),
         };
 
         // Update header to reflect MVCC state
         if db.config.mvcc_enabled {
-            db.header.mvcc_enabled = true;
+            db.header.lock().unwrap().mvcc_enabled = true;
         }
 
         if db.load_btree_index()? {
@@ -502,7 +523,7 @@ impl GraphDB {
     /// * `GraphError::Io` - Disk I/O error
     pub fn flush(&mut self) -> Result<()> {
         self.write_header()?;
-        self.pager.write().unwrap().checkpoint()
+        self.pager.checkpoint()
     }
 
     /// Checkpoints the database by flushing dirty pages and truncating the WAL.
@@ -522,31 +543,31 @@ impl GraphDB {
     /// # Errors
     /// * `GraphError::Io` - Disk I/O error
     /// * `GraphError::Corruption` - Index corruption detected
-    pub fn checkpoint(&mut self) -> Result<()> {
+    pub fn checkpoint(&self) -> Result<()> {
         let start = std::time::Instant::now();
-        let pages_flushed = self.pager.read().unwrap().dirty_page_count();
+        let pages_flushed = self.pager.dirty_page_count();
         info!("Starting checkpoint");
 
         self.start_tracking();
 
         self.persist_btree_index()?;
         self.persist_property_indexes()?;
-        
+
         // Update timestamp in header if MVCC is enabled
         if let Some(ref oracle) = self.timestamp_oracle {
-            self.header.max_timestamp = oracle.current_timestamp();
+            self.header.lock().unwrap().max_timestamp = oracle.current_timestamp();
         }
-        
+
         self.write_header()?;
 
         let dirty_pages = self.take_recent_dirty_pages();
         self.stop_tracking();
 
         for &page_id in &dirty_pages {
-            self.pager.write().unwrap().append_page_to_wal(page_id, 0)?;
+            self.pager.append_page_to_wal(page_id, 0)?;
         }
 
-        self.pager.write().unwrap().checkpoint()?;
+        self.pager.checkpoint()?;
 
         if !self.load_btree_index()? {
             return Err(GraphError::Corruption(
@@ -571,7 +592,7 @@ impl GraphDB {
     /// # Returns
     /// The page size in bytes.
     pub fn page_size(&self) -> usize {
-        self.pager.read().unwrap().page_size()
+        self.pager.page_size()
     }
 
     /// Returns the filesystem path of the database.
@@ -627,10 +648,10 @@ impl GraphDB {
         let mut nodes_seen: HashSet<NodeId> = HashSet::new();
         let mut edges_seen: HashMap<EdgeId, (NodeId, NodeId)> = HashMap::new();
 
-        let page_count = self.pager.read().unwrap().page_count();
+        let page_count = self.pager.page_count();
         for page_index in 0..page_count {
             let page_id = page_index as PageId;
-            let mut page_bytes = match self.pager.write().unwrap().read_page_image(page_id) {
+            let mut page_bytes = match self.pager.read_page_image(page_id) {
                 Ok(data) => data,
                 Err(GraphError::Corruption(message)) => {
                     if message.contains("checksum") {
@@ -764,11 +785,11 @@ impl GraphDB {
                     ));
                     continue;
                 }
-                
+
                 // Check if this is a versioned record by looking at the actual kind byte
                 let kind_byte = record_bytes[0];
                 let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
-                
+
                 let payload_len = header.payload_length as usize;
                 let payload = if is_versioned {
                     // For versioned records, skip the 25-byte metadata header
@@ -794,7 +815,7 @@ impl GraphDB {
                     // Legacy non-versioned record
                     &record_bytes[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
                 };
-                
+
                 let slot_u16 = slot_index as u16;
 
                 match header.kind {
@@ -882,7 +903,9 @@ impl GraphDB {
                 }
             }
 
-            for (edge_id, pointer) in &self.edge_index {
+            for entry in self.edge_index.iter() {
+                let edge_id = entry.key();
+                let pointer = entry.value();
                 let key = (pointer.page_id, pointer.slot_index);
                 match edge_slots.get(&key) {
                     Some(found_id) if found_id == edge_id => {}
@@ -960,7 +983,7 @@ impl GraphDB {
             healthy: cache_hit_rate >= cache_threshold,
         });
 
-        let wal_size = self.pager.read().unwrap().wal_size()?;
+        let wal_size = self.pager.wal_size()?;
         let wal_threshold = 100 * 1024 * 1024;
         health.add_check(Check::WalSize {
             bytes: wal_size,
@@ -1016,7 +1039,7 @@ impl GraphDB {
         let gc = self.gc.as_ref().ok_or_else(|| {
             GraphError::InvalidArgument("MVCC is not enabled, cannot run GC".into())
         })?;
-        
+
         let oracle = self.timestamp_oracle.as_ref().ok_or_else(|| {
             GraphError::InvalidArgument("MVCC is not enabled, timestamp oracle not found".into())
         })?;
@@ -1025,21 +1048,22 @@ impl GraphDB {
         let record_ids = self.node_index.iter().into_iter();
 
         // Access RecordStore through pager - need to lock pager for the duration
-        let mut pager_guard = self.pager.write().unwrap();
-        let mut record_store = RecordStore::new(&mut *pager_guard);
-        
-        // Run GC
-        let result = gc.run_gc(&mut record_store, record_ids, oracle)?;
-        
-        // Register dirty pages from GC operations
-        let dirty_pages = record_store.take_dirty_pages();
-        drop(record_store);
-        drop(pager_guard);
-        
+        let (result, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let mut record_store = RecordStore::new(pager);
+
+            // Run GC
+            let result = gc.run_gc(&mut record_store, record_ids, oracle)?;
+
+            // Register dirty pages from GC operations
+            let dirty_pages = record_store.take_dirty_pages();
+
+            Ok((result, dirty_pages))
+        })?;
+
         for page_id in dirty_pages {
             self.record_page_write(page_id);
         }
-        
+
         Ok(result)
     }
 
@@ -1082,9 +1106,10 @@ impl GraphDB {
             return Ok(()); // Already running
         }
 
-        let oracle = self.timestamp_oracle.as_ref().ok_or_else(|| {
-            GraphError::InvalidArgument("timestamp oracle not found".into())
-        })?;
+        let oracle = self
+            .timestamp_oracle
+            .as_ref()
+            .ok_or_else(|| GraphError::InvalidArgument("timestamp oracle not found".into()))?;
 
         // Create GC configuration
         let gc_config = GcConfig {
@@ -1095,11 +1120,7 @@ impl GraphDB {
         };
 
         // Create background GC state
-        let bg_gc = BackgroundGcState::spawn(
-            self.path.clone(),
-            gc_config,
-            oracle.clone(),
-        )?;
+        let bg_gc = BackgroundGcState::spawn(self.path.clone(), gc_config, oracle.clone())?;
 
         // Store bg_gc_state for later shutdown
         self.bg_gc_state = Some(bg_gc);
@@ -1127,7 +1148,7 @@ impl GraphDB {
     pub fn stop_background_gc(&mut self) -> Result<()> {
         if let Some(bg_gc) = self.bg_gc_state.take() {
             let state = bg_gc.lock().map_err(|e| {
-                GraphError::InvalidArgument(format!("failed to lock background GC state: {}", e))
+                GraphError::InvalidArgument(format!("failed to lock background GC state: {e}"))
             })?;
             state.shutdown()?;
         }
@@ -1160,30 +1181,27 @@ impl GraphDB {
     /// db.close()?; // Clean shutdown
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
-    pub fn close(mut self) -> Result<()> {
+    pub fn close(self) -> Result<()> {
         info!("Closing database gracefully");
 
         if self.is_in_transaction() {
             warn!("Active transaction detected during close, rolling back");
-            // In MVCC mode, end all active transactions
-            if let Some(ref mut tx_manager) = self.mvcc_tx_manager {
+            // In MVCC mode, end all active transactions (now lock-free)
+            if let Some(ref tx_manager) = self.mvcc_tx_manager {
                 tx_manager.end_all_transactions();
-            } else {
-                // Legacy mode: clear active_transaction
-                self.active_transaction = None;
             }
         }
 
         self.persist_btree_index()?;
-        
+
         // Update timestamp in header if MVCC is enabled
         if let Some(ref oracle) = self.timestamp_oracle {
-            self.header.max_timestamp = oracle.current_timestamp();
+            self.header.lock().unwrap().max_timestamp = oracle.current_timestamp();
         }
-        
+
         self.write_header()?;
 
-        self.pager.write().unwrap().checkpoint()?;
+        self.pager.checkpoint()?;
 
         info!("Database closed successfully");
         Ok(())

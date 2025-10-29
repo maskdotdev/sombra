@@ -21,13 +21,12 @@
 //! The tests will be re-enabled once Phase 2 Task 10 is complete.
 
 #[allow(dead_code, unused_imports, unused_variables)]
-
 use sombra::{Config, GraphDB, Node, PropertyValue};
 use std::fs;
 
 fn cleanup_test_db(path: &str) {
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
 }
 
 fn create_mvcc_db(path: &str) -> GraphDB {
@@ -47,7 +46,8 @@ fn test_version_chain_creation() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("version".to_string(), PropertyValue::Int(1));
+        node.properties
+            .insert("version".to_string(), PropertyValue::Int(1));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -57,7 +57,8 @@ fn test_version_chain_creation() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("version".to_string(), PropertyValue::Int(2));
+        node.properties
+            .insert("version".to_string(), PropertyValue::Int(2));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -66,7 +67,8 @@ fn test_version_chain_creation() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("version".to_string(), PropertyValue::Int(3));
+        node.properties
+            .insert("version".to_string(), PropertyValue::Int(3));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -94,7 +96,8 @@ fn test_version_visibility_at_different_timestamps() {
         let mut tx = db.begin_transaction().unwrap();
         let ts = tx.snapshot_ts();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::String("v1".to_string()));
+        node.properties
+            .insert("value".to_string(), PropertyValue::String("v1".to_string()));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         (id, ts)
@@ -110,7 +113,8 @@ fn test_version_visibility_at_different_timestamps() {
         let mut tx = db.begin_transaction().unwrap();
         let ts = tx.snapshot_ts();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::String("v2".to_string()));
+        node.properties
+            .insert("value".to_string(), PropertyValue::String("v2".to_string()));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
         ts
@@ -125,26 +129,36 @@ fn test_version_visibility_at_different_timestamps() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::String("v3".to_string()));
+        node.properties
+            .insert("value".to_string(), PropertyValue::String("v3".to_string()));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
 
     // snapshot1 should see v1
     let node1 = snapshot1.get_node(node_id).unwrap().unwrap();
-    assert_eq!(node1.properties.get("value"), Some(&PropertyValue::String("v1".to_string())));
+    assert_eq!(
+        node1.properties.get("value"),
+        Some(&PropertyValue::String("v1".to_string()))
+    );
     snapshot1.commit().unwrap();
 
     // snapshot2 should see v2
     let node2 = snapshot2.get_node(node_id).unwrap().unwrap();
-    assert_eq!(node2.properties.get("value"), Some(&PropertyValue::String("v2".to_string())));
+    assert_eq!(
+        node2.properties.get("value"),
+        Some(&PropertyValue::String("v2".to_string()))
+    );
     snapshot2.commit().unwrap();
 
     // Fresh snapshot should see v3
     {
         let mut tx = db.begin_transaction().unwrap();
         let node = tx.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node.properties.get("value"), Some(&PropertyValue::String("v3".to_string())));
+        assert_eq!(
+            node.properties.get("value"),
+            Some(&PropertyValue::String("v3".to_string()))
+        );
         tx.commit().unwrap();
     }
 
@@ -160,9 +174,14 @@ fn test_version_chain_with_multiple_properties() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-        node.properties.insert("age".to_string(), PropertyValue::Int(25));
-        node.properties.insert("active".to_string(), PropertyValue::Bool(true));
+        node.properties.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
+        node.properties
+            .insert("age".to_string(), PropertyValue::Int(25));
+        node.properties
+            .insert("active".to_string(), PropertyValue::Bool(true));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -172,7 +191,8 @@ fn test_version_chain_with_multiple_properties() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("age".to_string(), PropertyValue::Int(26));
+        node.properties
+            .insert("age".to_string(), PropertyValue::Int(26));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -181,9 +201,15 @@ fn test_version_chain_with_multiple_properties() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let node = tx.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node.properties.get("name"), Some(&PropertyValue::String("Alice".to_string())));
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
         assert_eq!(node.properties.get("age"), Some(&PropertyValue::Int(26)));
-        assert_eq!(node.properties.get("active"), Some(&PropertyValue::Bool(true)));
+        assert_eq!(
+            node.properties.get("active"),
+            Some(&PropertyValue::Bool(true))
+        );
         tx.commit().unwrap();
     }
 
@@ -194,14 +220,15 @@ fn test_version_chain_with_multiple_properties() {
 #[ignore = "Requires Phase 2 MVCC: write operations don't create version chains yet"]
 fn test_version_chain_persistence() {
     let path = "test_version_chain_persist.db";
-    
+
     // Create versions
     {
         let mut db = create_mvcc_db(path);
         let node_id = {
             let mut tx = db.begin_transaction().unwrap();
             let mut node = Node::new(1);
-            node.properties.insert("gen".to_string(), PropertyValue::Int(1));
+            node.properties
+                .insert("gen".to_string(), PropertyValue::Int(1));
             let id = tx.add_node(node).unwrap();
             tx.commit().unwrap();
             id
@@ -211,7 +238,8 @@ fn test_version_chain_persistence() {
         for i in 2..=5 {
             let mut tx = db.begin_transaction().unwrap();
             let mut node = tx.get_node(node_id).unwrap().unwrap();
-            node.properties.insert("gen".to_string(), PropertyValue::Int(i));
+            node.properties
+                .insert("gen".to_string(), PropertyValue::Int(i));
             tx.add_node(node).unwrap();
             tx.commit().unwrap();
         }
@@ -222,7 +250,7 @@ fn test_version_chain_persistence() {
         let mut config = Config::default();
         config.mvcc_enabled = true;
         let mut db = GraphDB::open_with_config(path, config).unwrap();
-        
+
         let mut tx = db.begin_transaction().unwrap();
         let node = tx.get_node(1).unwrap().unwrap();
         assert_eq!(node.properties.get("gen"), Some(&PropertyValue::Int(5)));
@@ -241,7 +269,8 @@ fn test_long_version_chain() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("counter".to_string(), PropertyValue::Int(0));
+        node.properties
+            .insert("counter".to_string(), PropertyValue::Int(0));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -251,7 +280,8 @@ fn test_long_version_chain() {
     for i in 1..=20 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("counter".to_string(), PropertyValue::Int(i));
+        node.properties
+            .insert("counter".to_string(), PropertyValue::Int(i));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -260,7 +290,10 @@ fn test_long_version_chain() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let node = tx.get_node(node_id).unwrap().unwrap();
-        assert_eq!(node.properties.get("counter"), Some(&PropertyValue::Int(20)));
+        assert_eq!(
+            node.properties.get("counter"),
+            Some(&PropertyValue::Int(20))
+        );
         tx.commit().unwrap();
     }
 
@@ -277,13 +310,15 @@ fn test_interleaved_version_chains() {
     let (node1_id, node2_id) = {
         let mut tx = db.begin_transaction().unwrap();
         let mut n1 = Node::new(1);
-        n1.properties.insert("value".to_string(), PropertyValue::Int(1));
+        n1.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id1 = tx.add_node(n1).unwrap();
-        
+
         let mut n2 = Node::new(2);
-        n2.properties.insert("value".to_string(), PropertyValue::Int(1));
+        n2.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id2 = tx.add_node(n2).unwrap();
-        
+
         tx.commit().unwrap();
         (id1, id2)
     };
@@ -294,7 +329,8 @@ fn test_interleaved_version_chains() {
         {
             let mut tx = db.begin_transaction().unwrap();
             let mut node = tx.get_node(node1_id).unwrap().unwrap();
-            node.properties.insert("value".to_string(), PropertyValue::Int(i));
+            node.properties
+                .insert("value".to_string(), PropertyValue::Int(i));
             tx.add_node(node).unwrap();
             tx.commit().unwrap();
         }
@@ -303,7 +339,8 @@ fn test_interleaved_version_chains() {
         {
             let mut tx = db.begin_transaction().unwrap();
             let mut node = tx.get_node(node2_id).unwrap().unwrap();
-            node.properties.insert("value".to_string(), PropertyValue::Int(i));
+            node.properties
+                .insert("value".to_string(), PropertyValue::Int(i));
             tx.add_node(node).unwrap();
             tx.commit().unwrap();
         }
@@ -314,10 +351,10 @@ fn test_interleaved_version_chains() {
         let mut tx = db.begin_transaction().unwrap();
         let node1 = tx.get_node(node1_id).unwrap().unwrap();
         let node2 = tx.get_node(node2_id).unwrap().unwrap();
-        
+
         assert_eq!(node1.properties.get("value"), Some(&PropertyValue::Int(10)));
         assert_eq!(node2.properties.get("value"), Some(&PropertyValue::Int(10)));
-        
+
         tx.commit().unwrap();
     }
 
@@ -351,7 +388,10 @@ fn test_version_chain_with_deleted_version() {
 
     // Snapshot before should still see the node
     let node_before = snapshot_before.get_node(node_id).unwrap();
-    assert!(node_before.is_some(), "Old snapshot should see non-deleted version");
+    assert!(
+        node_before.is_some(),
+        "Old snapshot should see non-deleted version"
+    );
     snapshot_before.commit().unwrap();
 
     // New snapshot should not see it

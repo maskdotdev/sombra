@@ -440,7 +440,7 @@ impl GraphDB {
             let mut set = BTreeSet::new();
             for label in &pattern.labels {
                 if let Some(ids) = self.label_index.get(label) {
-                    set.extend(ids.iter().copied());
+                    set.extend(ids.iter().map(|id_ref| *id_ref));
                 }
             }
             set

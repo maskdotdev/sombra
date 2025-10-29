@@ -1,6 +1,7 @@
+pub(crate) mod cache;
 mod compaction;
-mod config;
 mod concurrent;
+mod config;
 mod core;
 pub(crate) mod gc;
 pub(crate) mod group_commit;
@@ -10,6 +11,7 @@ pub(crate) mod mvcc_transaction;
 pub mod query;
 pub(crate) mod timestamp_oracle;
 mod transaction;
+pub(crate) mod write_coordinator;
 
 #[cfg(test)]
 mod tests;

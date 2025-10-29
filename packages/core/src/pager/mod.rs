@@ -11,8 +11,12 @@ use lru::LruCache;
 use memmap2::MmapMut;
 use tracing::{error, warn};
 
+mod lock_free_page_cache;
+mod page_cache_hint;
 mod wal;
 
+pub(crate) use lock_free_page_cache::LockFreePageCache;
+pub(crate) use page_cache_hint::PageCacheHint;
 use wal::Wal;
 
 pub const DEFAULT_PAGE_SIZE: usize = 8192;
@@ -21,7 +25,7 @@ pub const PAGE_CHECKSUM_SIZE: usize = 4;
 
 pub type PageId = u32;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Page {
     pub id: PageId,
     pub data: Vec<u8>,
@@ -183,6 +187,11 @@ impl Pager {
             .ok_or_else(|| GraphError::Corruption("Page unexpectedly evicted".into()))
     }
 
+    /// Fetch a page and return an owned copy (for lock-free cache)
+    pub fn get_page_copy(&mut self, page_id: PageId) -> Result<Page> {
+        self.fetch_page(page_id).map(|page| page.clone())
+    }
+
     fn invalidate_mmap(&mut self) {
         if self.mmap.is_some() {
             self.mmap = None;
@@ -228,10 +237,10 @@ impl Pager {
         }
         self.file_len = (u64::from(next_page_id) + 1) * self.page_size as u64;
         self.invalidate_mmap();
-        
+
         // Ensure newly allocated pages are tracked in shadow transaction for rollback
         self.ensure_shadow(next_page_id)?;
-        
+
         Ok(next_page_id)
     }
 
@@ -586,7 +595,7 @@ impl Pager {
         } else {
             apply_page_checksum(checksum_enabled, page_size, page_id, &mut buf)?;
         }
-        
+
         Ok(buf)
     }
 }
@@ -651,8 +660,8 @@ fn write_page_image(
 
     if page_id == 14 || page_id == 26 {
         let (payload, checksum_bytes) = split_payload_checksum(data)?;
-        let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
-        let computed_checksum = hash(payload);
+        let _stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
+        let _computed_checksum = hash(payload);
     }
 
     let offset = page_offset(page_id, page_size)?;

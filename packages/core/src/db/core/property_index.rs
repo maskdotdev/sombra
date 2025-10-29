@@ -1,8 +1,9 @@
 use super::graphdb::{GraphDB, IndexableValue};
 use crate::error::{GraphError, Result};
 use crate::model::{NodeId, PropertyValue};
-use std::collections::BTreeSet;
+use dashmap::DashSet;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 
 impl GraphDB {
     pub fn create_property_index(&mut self, label: &str, property_key: &str) -> Result<()> {
@@ -12,12 +13,12 @@ impl GraphDB {
             return Ok(());
         }
 
-        let mut index = std::collections::BTreeMap::new();
+        let index = dashmap::DashMap::new();
 
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(label)
-            .map(|ids| ids.iter().copied().collect())
+            .map(|ids| ids.value().iter().map(|r| *r).collect())
             .unwrap_or_default();
 
         for node_id in node_ids {
@@ -26,14 +27,14 @@ impl GraphDB {
                     if let Some(indexable_value) = Option::<IndexableValue>::from(prop_value) {
                         index
                             .entry(indexable_value)
-                            .or_insert_with(BTreeSet::new)
+                            .or_insert_with(|| Arc::new(DashSet::new()))
                             .insert(node_id);
                     }
                 }
             }
         }
 
-        self.property_indexes.insert(key, index);
+        self.property_indexes.insert(key, Arc::new(index));
         Ok(())
     }
 
@@ -55,7 +56,7 @@ impl GraphDB {
             if let Some(indexable_value) = Option::<IndexableValue>::from(value) {
                 if let Some(node_ids) = index.get(&indexable_value) {
                     self.metrics.record_property_index_hit();
-                    return Ok(node_ids.iter().copied().collect());
+                    return Ok(node_ids.iter().map(|r| *r).collect());
                 } else {
                     self.metrics.record_property_index_hit();
                     return Ok(Vec::new());
@@ -80,8 +81,11 @@ impl GraphDB {
 
         if let Some(index) = self.property_indexes.get(&key) {
             let mut results = Vec::new();
-            for (_, node_ids) in index.range(range) {
-                results.extend(node_ids.iter().copied());
+            // DashMap doesn't support range queries, so we need to iterate all entries and filter
+            for entry in index.iter() {
+                if range.contains(entry.key()) {
+                    results.extend(entry.value().iter().map(|r| *r));
+                }
             }
             self.metrics.record_property_index_hit();
             return Ok(results);
@@ -104,7 +108,7 @@ impl GraphDB {
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(label)
-            .map(|ids| ids.iter().copied().collect())
+            .map(|ids| ids.iter().map(|r| *r).collect())
             .unwrap_or_default();
 
         for node_id in node_ids {
@@ -121,7 +125,7 @@ impl GraphDB {
     }
 
     pub(crate) fn update_property_index_on_add(
-        &mut self,
+        &self,
         node_id: NodeId,
         label: &str,
         property_key: &str,
@@ -129,18 +133,18 @@ impl GraphDB {
     ) {
         let key = (label.to_string(), property_key.to_string());
 
-        if let Some(index) = self.property_indexes.get_mut(&key) {
+        if let Some(index) = self.property_indexes.get(&key) {
             if let Some(indexable_value) = Option::<IndexableValue>::from(value) {
                 index
                     .entry(indexable_value)
-                    .or_insert_with(BTreeSet::new)
+                    .or_insert_with(|| Arc::new(DashSet::new()))
                     .insert(node_id);
             }
         }
     }
 
     pub(crate) fn update_property_index_on_remove(
-        &mut self,
+        &self,
         node_id: NodeId,
         label: &str,
         property_key: &str,
@@ -148,9 +152,9 @@ impl GraphDB {
     ) {
         let key = (label.to_string(), property_key.to_string());
 
-        if let Some(index) = self.property_indexes.get_mut(&key) {
+        if let Some(index) = self.property_indexes.get(&key) {
             if let Some(indexable_value) = Option::<IndexableValue>::from(value) {
-                if let Some(node_set) = index.get_mut(&indexable_value) {
+                if let Some(node_set) = index.get(&indexable_value) {
                     node_set.remove(&node_id);
                     if node_set.is_empty() {
                         index.remove(&indexable_value);
@@ -160,7 +164,7 @@ impl GraphDB {
         }
     }
 
-    pub(crate) fn update_property_indexes_on_node_add(&mut self, node_id: NodeId) -> Result<()> {
+    pub(crate) fn update_property_indexes_on_node_add(&self, node_id: NodeId) -> Result<()> {
         let node = self
             .get_node(node_id)?
             .ok_or(GraphError::NotFound("node"))?;

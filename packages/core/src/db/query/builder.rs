@@ -62,8 +62,8 @@ pub struct QueryResult {
 /// Chainable builder for composing query plans executed against [`GraphDB`].
 ///
 /// The builder records operations in the order they are declared and replays
-/// them during [`get_ids`](Self::get_ids) or [`get_nodes`](Self::get_nodes). 
-/// This allows ergonomic construction of queries without immediately borrowing 
+/// them during [`get_ids`](Self::get_ids) or [`get_nodes`](Self::get_nodes).
+/// This allows ergonomic construction of queries without immediately borrowing
 /// the database for each step.
 ///
 /// # Examples

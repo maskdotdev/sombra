@@ -10,8 +10,8 @@ use std::fs;
 
 fn cleanup_test_db(path: &str) {
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}.wal", path));
-    let _ = fs::remove_file(format!("{}.lock", path));
+    let _ = fs::remove_file(format!("{path}.wal"));
+    let _ = fs::remove_file(format!("{path}.lock"));
 }
 
 #[test]
@@ -28,7 +28,8 @@ fn test_node_updates_create_new_versions() {
     let node_id = {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = Node::new(1);
-        node.properties.insert("value".to_string(), PropertyValue::Int(100));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(100));
         let id = tx.add_node(node).unwrap();
         tx.commit().unwrap();
         id
@@ -38,7 +39,8 @@ fn test_node_updates_create_new_versions() {
     for i in 1..=5 {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(100 + i * 10));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(100 + i * 10));
         tx.add_node(node).unwrap(); // Creates new version
         tx.commit().unwrap();
     }
@@ -72,11 +74,15 @@ fn test_multiple_nodes_independent_updates() {
     let (node1_id, node2_id) = {
         let mut tx = db.begin_transaction().unwrap();
         let mut n1 = Node::new(1);
-        n1.properties.insert("id".to_string(), PropertyValue::String("node1".to_string()));
-        n1.properties.insert("value".to_string(), PropertyValue::Int(1));
+        n1.properties
+            .insert("id".to_string(), PropertyValue::String("node1".to_string()));
+        n1.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let mut n2 = Node::new(2);
-        n2.properties.insert("id".to_string(), PropertyValue::String("node2".to_string()));
-        n2.properties.insert("value".to_string(), PropertyValue::Int(1));
+        n2.properties
+            .insert("id".to_string(), PropertyValue::String("node2".to_string()));
+        n2.properties
+            .insert("value".to_string(), PropertyValue::Int(1));
         let id1 = tx.add_node(n1).unwrap();
         let id2 = tx.add_node(n2).unwrap();
         tx.commit().unwrap();
@@ -87,7 +93,8 @@ fn test_multiple_nodes_independent_updates() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node1_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(10));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(10));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -96,7 +103,8 @@ fn test_multiple_nodes_independent_updates() {
     {
         let mut tx = db.begin_transaction().unwrap();
         let mut node = tx.get_node(node2_id).unwrap().unwrap();
-        node.properties.insert("value".to_string(), PropertyValue::Int(20));
+        node.properties
+            .insert("value".to_string(), PropertyValue::Int(20));
         tx.add_node(node).unwrap();
         tx.commit().unwrap();
     }
@@ -129,7 +137,8 @@ fn test_version_chain_after_db_reopen() {
         let id = {
             let mut tx = db.begin_transaction().unwrap();
             let mut node = Node::new(1);
-            node.properties.insert("value".to_string(), PropertyValue::Int(1));
+            node.properties
+                .insert("value".to_string(), PropertyValue::Int(1));
             let id = tx.add_node(node).unwrap();
             tx.commit().unwrap();
             id
@@ -139,7 +148,8 @@ fn test_version_chain_after_db_reopen() {
         for i in 2..=5 {
             let mut tx = db.begin_transaction().unwrap();
             let mut node = tx.get_node(id).unwrap().unwrap();
-            node.properties.insert("value".to_string(), PropertyValue::Int(i));
+            node.properties
+                .insert("value".to_string(), PropertyValue::Int(i));
             tx.add_node(node).unwrap();
             tx.commit().unwrap();
         }
@@ -181,7 +191,8 @@ fn test_read_your_own_writes_with_updates() {
 
     // Create a node
     let mut node = Node::new(1);
-    node.properties.insert("value".to_string(), PropertyValue::Int(1));
+    node.properties
+        .insert("value".to_string(), PropertyValue::Int(1));
     let node_id = tx.add_node(node).unwrap();
 
     // Read it back (read-your-own-writes)
@@ -190,7 +201,8 @@ fn test_read_your_own_writes_with_updates() {
 
     // Update it
     let mut node = tx.get_node(node_id).unwrap().unwrap();
-    node.properties.insert("value".to_string(), PropertyValue::Int(2));
+    node.properties
+        .insert("value".to_string(), PropertyValue::Int(2));
     tx.add_node(node).unwrap();
 
     // Read updated value (read-your-own-writes)

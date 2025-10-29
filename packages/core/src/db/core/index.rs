@@ -6,165 +6,223 @@ use crate::pager::PageId;
 use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
 use crate::storage::{deserialize_edge, deserialize_node, RecordPointer};
-use std::convert::TryFrom;
+use dashmap::DashSet;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 impl GraphDB {
-    pub(crate) fn load_btree_index(&mut self) -> Result<bool> {
-        let (index_page, index_size) =
-            match (self.header.btree_index_page, self.header.btree_index_size) {
+    pub(crate) fn load_btree_index(&self) -> Result<bool> {
+        let (index_page, index_size) = {
+            let header = self.header.lock().unwrap();
+            match (header.btree_index_page, header.btree_index_size) {
                 (Some(page), size) if size > 0 => (page, size as usize),
                 _ => return Ok(false),
-            };
+            }
+        };
 
         let mut data = Vec::new();
-        let page_size = self.pager.read().unwrap().page_size();
+        let page_size = self.pager.page_size();
         let mut current_page = index_page;
         let mut bytes_read = 0;
 
         while bytes_read < index_size {
-            let mut pager_guard = self.pager.write().unwrap();
-            let page = pager_guard.fetch_page(current_page)?;
-            let to_read = (index_size - bytes_read).min(page_size);
-            data.extend_from_slice(&page.data[..to_read]);
-            drop(pager_guard);
+            let to_read = self.pager.with_pager_write(|pager| {
+                let page = pager.fetch_page(current_page)?;
+                let to_read = (index_size - bytes_read).min(page_size);
+                data.extend_from_slice(&page.data[..to_read]);
+                Ok(to_read)
+            })?;
             bytes_read += to_read;
             current_page += 1;
         }
 
-        self.node_index = BTreeIndex::deserialize(&data)?;
+        self.node_index
+            .replace_with(BTreeIndex::deserialize(&data)?);
         Ok(true)
     }
 
-    pub(crate) fn persist_btree_index(&mut self) -> Result<()> {
+    pub(crate) fn persist_btree_index(&self) -> Result<()> {
         let data = self.node_index.serialize()?;
         let data_size = data.len();
 
         if data_size == 0 {
-            self.header.btree_index_page = None;
-            self.header.btree_index_size = 0;
+            let mut header = self.header.lock().unwrap();
+            header.btree_index_page = None;
+            header.btree_index_size = 0;
             return Ok(());
         }
 
-        let page_size = self.pager.read().unwrap().page_size();
+        let page_size = self.pager.page_size();
         let pages_needed = data_size.div_ceil(page_size);
 
-        let start_page = if let Some(old_page) = self.header.btree_index_page {
-            let old_size = self.header.btree_index_size as usize;
-            let old_pages = old_size.div_ceil(page_size);
+        let start_page = {
+            let header = self.header.lock().unwrap();
+            if let Some(old_page) = header.btree_index_page {
+                let old_size = header.btree_index_size as usize;
+                let old_pages = old_size.div_ceil(page_size);
 
-            if pages_needed <= old_pages {
-                old_page
-            } else {
-                for i in 0..old_pages {
-                    self.push_free_page(old_page + i as u32)?;
+                if pages_needed <= old_pages {
+                    old_page
+                } else {
+                    drop(header); // Release lock before allocation
+                    for i in 0..old_pages {
+                        self.push_free_page(old_page + i as u32)?;
+                    }
+                    let start = self.pager.with_pager_write(|pager| pager.allocate_page())?;
+                    for i in 1..pages_needed {
+                        let expected_page = start + i as u32;
+                        let allocated =
+                            self.pager.with_pager_write(|pager| pager.allocate_page())?;
+                        if allocated != expected_page {
+                            return Err(GraphError::Corruption(format!(
+                                "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
+                            )));
+                        }
+                    }
+                    start
                 }
-                let start = self.pager.write().unwrap().allocate_page()?;
+            } else {
+                drop(header); // Release lock before allocation
+                let new_page = self.pager.with_pager_write(|pager| pager.allocate_page())?;
                 for i in 1..pages_needed {
-                    let expected_page = start + i as u32;
-                    let allocated = self.pager.write().unwrap().allocate_page()?;
+                    let expected_page = new_page + i as u32;
+                    let allocated = self.pager.with_pager_write(|pager| pager.allocate_page())?;
                     if allocated != expected_page {
                         return Err(GraphError::Corruption(format!(
                             "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
                         )));
                     }
                 }
-                start
+                new_page
             }
-        } else {
-            let new_page = self.pager.write().unwrap().allocate_page()?;
-            for i in 1..pages_needed {
-                let expected_page = new_page + i as u32;
-                let allocated = self.pager.write().unwrap().allocate_page()?;
-                if allocated != expected_page {
-                    return Err(GraphError::Corruption(format!(
-                        "Expected contiguous page allocation: got {allocated}, expected {expected_page}"
-                    )));
-                }
-            }
-            new_page
         };
 
         let mut offset = 0;
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
-
-            let mut pager_guard = self.pager.write().unwrap();
-            let page = pager_guard.fetch_page(page_id)?;
             let to_write = (data_size - offset).min(page_size);
-            page.data[..to_write].copy_from_slice(&data[offset..offset + to_write]);
-            if to_write < page_size {
-                page.data[to_write..].fill(0);
-            }
-            page.dirty = true;
-            drop(pager_guard);
+
+            self.pager.with_pager_write(|pager| {
+                let page = pager.fetch_page(page_id)?;
+                page.data[..to_write].copy_from_slice(&data[offset..offset + to_write]);
+                if to_write < page_size {
+                    page.data[to_write..].fill(0);
+                }
+                page.dirty = true;
+                Ok(())
+            })?;
             self.record_page_write(page_id);
             offset += to_write;
         }
 
-        self.header.btree_index_page = Some(start_page);
-        self.header.btree_index_size = data_size as u32;
+        let mut header = self.header.lock().unwrap();
+        header.btree_index_page = Some(start_page);
+        header.btree_index_size = data_size as u32;
         Ok(())
     }
 
-    pub(crate) fn persist_property_indexes(&mut self) -> Result<()> {
-        let (root_page, count, written_pages) = {
-            let mut pager_guard = self.pager.write().unwrap();
-            let mut serializer = PropertyIndexSerializer::new(&mut *pager_guard);
-            let (root_page, count, written_pages) =
-                serializer.serialize_indexes(&self.property_indexes)?;
+    pub(crate) fn persist_property_indexes(&self) -> Result<()> {
+        // Convert nested DashMap/DashSet to HashMap/BTreeMap/BTreeSet for serialization
+        let indexes_snapshot: std::collections::HashMap<_, _> = self
+            .property_indexes
+            .iter()
+            .map(|entry| {
+                let key = entry.key().clone();
+                let inner_map = entry.value();
 
-            if root_page == 0 {
-                drop(serializer);
-                drop(pager_guard);
-                self.header.property_index_root_page = None;
-                self.header.property_index_count = 0;
-                return Ok(());
-            }
+                // Convert DashMap<IndexableValue, DashSet<NodeId>> to BTreeMap<IndexableValue, BTreeSet<NodeId>>
+                let converted_map: std::collections::BTreeMap<_, std::collections::BTreeSet<_>> =
+                    inner_map
+                        .iter()
+                        .map(|inner_entry| {
+                            let idx_val = inner_entry.key().clone();
+                            let node_set = inner_entry.value();
+                            let btree_set: std::collections::BTreeSet<_> =
+                                node_set.iter().map(|r| *r).collect();
+                            (idx_val, btree_set)
+                        })
+                        .collect();
 
-            let old_pages = if let Some(old_root) = self.header.property_index_root_page {
-                serializer.collect_old_pages(old_root)?
-            } else {
-                Vec::new()
-            };
-            
-            drop(serializer);
-            drop(pager_guard);
-            
-            // Free old pages if any
-            for page_id in old_pages {
-                self.push_free_page(page_id)?;
-            }
-            
-            (root_page, count, written_pages)
-        };
+                (key, converted_map)
+            })
+            .collect();
+
+        let (root_page, count, written_pages, old_pages) =
+            self.pager.with_pager_write(|pager| {
+                let mut serializer = PropertyIndexSerializer::new(pager);
+                let (root_page, count, written_pages) =
+                    serializer.serialize_indexes(&indexes_snapshot)?;
+
+                if root_page == 0 {
+                    return Ok((0, 0, Vec::new(), Vec::new()));
+                }
+
+                let old_pages = {
+                    let header = self.header.lock().unwrap();
+                    if let Some(old_root) = header.property_index_root_page {
+                        serializer.collect_old_pages(old_root)?
+                    } else {
+                        Vec::new()
+                    }
+                };
+
+                Ok((root_page, count, written_pages, old_pages))
+            })?;
+
+        if root_page == 0 {
+            let mut header = self.header.lock().unwrap();
+            header.property_index_root_page = None;
+            header.property_index_count = 0;
+            return Ok(());
+        }
+
+        // Free old pages if any
+        for page_id in old_pages {
+            self.push_free_page(page_id)?;
+        }
 
         for page_id in written_pages {
             self.record_page_write(page_id);
         }
 
-        self.header.property_index_root_page = Some(root_page);
-        self.header.property_index_count = count;
-        self.header.property_index_version = 1;
+        let mut header = self.header.lock().unwrap();
+        header.property_index_root_page = Some(root_page);
+        header.property_index_count = count;
+        header.property_index_version = 1;
 
         info!(root_page, count, "Persisted property indexes");
 
         Ok(())
     }
 
-    pub(crate) fn load_property_indexes(&mut self) -> Result<bool> {
-        let root_page = match self.header.property_index_root_page {
-            Some(page) if page > 0 => page,
-            _ => return Ok(false),
+    pub(crate) fn load_property_indexes(&self) -> Result<bool> {
+        let root_page = {
+            let header = self.header.lock().unwrap();
+            match header.property_index_root_page {
+                Some(page) if page > 0 => page,
+                _ => return Ok(false),
+            }
         };
 
-        let mut pager_guard = self.pager.write().unwrap();
-        let mut serializer = PropertyIndexSerializer::new(&mut *pager_guard);
-        match serializer.deserialize_indexes(root_page) {
+        match self.pager.with_pager_write(|pager| {
+            let mut serializer = PropertyIndexSerializer::new(pager);
+            serializer.deserialize_indexes(root_page)
+        }) {
             Ok(indexes) => {
-                drop(serializer);
-                drop(pager_guard);
-                self.property_indexes = indexes;
+                // Convert HashMap to DashMap
+                self.property_indexes.clear();
+                for (key, value) in indexes {
+                    // Convert HashMap<IndexableValue, BTreeSet<NodeId>> to DashMap<IndexableValue, DashSet<NodeId>>
+                    let dash_value = Arc::new(dashmap::DashMap::new());
+                    for (idx_val, node_set) in value {
+                        let dash_set = Arc::new(DashSet::new());
+                        for node_id in node_set {
+                            dash_set.insert(node_id);
+                        }
+                        dash_value.insert(idx_val, dash_set);
+                    }
+                    self.property_indexes.insert(key, dash_value);
+                }
                 info!(
                     count = self.property_indexes.len(),
                     "Loaded property indexes from disk"
@@ -172,8 +230,6 @@ impl GraphDB {
                 Ok(true)
             }
             Err(e) => {
-                drop(serializer);
-                drop(pager_guard);
                 warn!(
                     error = ?e,
                     "Failed to load property indexes, will rebuild"
@@ -183,12 +239,14 @@ impl GraphDB {
         }
     }
 
-    pub(crate) fn rebuild_indexes(&mut self) -> Result<()> {
-        if let Some(index_page) = self.header.btree_index_page {
-            if self
-                .try_load_btree_index(index_page, self.header.btree_index_size as usize)
-                .is_ok()
-            {
+    pub(crate) fn rebuild_indexes(&self) -> Result<()> {
+        let (index_page, index_size) = {
+            let header = self.header.lock().unwrap();
+            (header.btree_index_page, header.btree_index_size as usize)
+        };
+
+        if let Some(index_page) = index_page {
+            if self.try_load_btree_index(index_page, index_size).is_ok() {
                 self.rebuild_remaining_indexes()?;
                 return Ok(());
             }
@@ -198,7 +256,7 @@ impl GraphDB {
         self.edge_index.clear();
         self.label_index.clear();
         self.property_indexes.clear();
-        self.node_cache.lock().unwrap().clear();
+        self.node_cache.clear();
         self.outgoing_adjacency.clear();
         self.incoming_adjacency.clear();
         self.outgoing_neighbors_cache.clear();
@@ -207,17 +265,19 @@ impl GraphDB {
         let mut last_record_page: Option<PageId> = None;
         let mut max_node_id = 0;
         let mut max_edge_id = 0;
-        let page_count = self.pager.read().unwrap().page_count();
+        let page_count = self.pager.page_count();
 
-        let btree_pages: std::collections::HashSet<PageId> =
-            if let Some(btree_start) = self.header.btree_index_page {
-                let btree_size = self.header.btree_index_size as usize;
-                let page_size = self.pager.read().unwrap().page_size();
+        let btree_pages: std::collections::HashSet<PageId> = {
+            let header = self.header.lock().unwrap();
+            if let Some(btree_start) = header.btree_index_page {
+                let btree_size = header.btree_index_size as usize;
+                let page_size = self.pager.page_size();
                 let btree_page_count = btree_size.div_ceil(page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
                 std::collections::HashSet::new()
-            };
+            }
+        };
 
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
@@ -227,29 +287,42 @@ impl GraphDB {
                 continue;
             }
 
-            let mut pager_guard = self.pager.write().unwrap();
-            let page = pager_guard.fetch_page(page_id)?;
-            let record_page = RecordPage::from_bytes(&mut page.data)?;
-            let record_count = record_page.record_count()? as usize;
+            let (record_count, records_data) = self.pager.with_pager_write(|pager| {
+                let page = pager.fetch_page(page_id)?;
+                let record_page = RecordPage::from_bytes(&mut page.data)?;
+                let record_count = record_page.record_count()? as usize;
+                if record_count == 0 {
+                    return Ok((0, Vec::new()));
+                }
+
+                // Collect all record data we need
+                let mut records = Vec::new();
+                for slot in 0..record_count {
+                    let byte_offset = record_page.record_offset(slot)?;
+                    let record = record_page.record_slice(slot)?.to_vec();
+                    records.push((slot, byte_offset, record));
+                }
+                Ok((record_count, records))
+            })?;
+
             if record_count == 0 {
                 continue;
             }
+
             let mut live_on_page = 0usize;
-            for slot in 0..record_count {
-                let byte_offset = record_page.record_offset(slot)?;
+            for (slot, byte_offset, record) in records_data {
                 let pointer = RecordPointer {
                     page_id,
                     slot_index: slot as u16,
                     byte_offset,
                 };
-                let record = record_page.record_slice(slot)?;
                 let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
                 let payload_len = header.payload_length as usize;
-                
+
                 // Check if this is a versioned record by looking at the actual kind byte
                 let kind_byte = record[0];
                 let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
-                
+
                 let payload = if is_versioned {
                     // For versioned records, skip the 25-byte metadata header
                     const VERSION_METADATA_SIZE: usize = 25;
@@ -263,7 +336,7 @@ impl GraphDB {
                     // Legacy non-versioned record
                     &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
                 };
-                
+
                 match header.kind {
                     RecordKind::Free => continue,
                     RecordKind::Node => {
@@ -274,7 +347,7 @@ impl GraphDB {
                         for label in &node.labels {
                             self.label_index
                                 .entry(label.clone())
-                                .or_default()
+                                .or_insert_with(|| Arc::new(DashSet::new()))
                                 .insert(node.id);
                         }
 
@@ -298,47 +371,51 @@ impl GraphDB {
                     }
                 }
             }
-            drop(pager_guard);
             if live_on_page > 0 {
                 last_record_page = Some(page_id);
             }
         }
 
-        if max_node_id >= self.header.next_node_id {
-            self.header.next_node_id = max_node_id + 1;
+        {
+            let mut header = self.header.lock().unwrap();
+            if max_node_id >= header.next_node_id {
+                header.next_node_id = max_node_id + 1;
+            }
+            if max_edge_id >= header.next_edge_id {
+                header.next_edge_id = max_edge_id + 1;
+            }
+            header.last_record_page = last_record_page;
         }
-        if max_edge_id >= self.header.next_edge_id {
-            self.header.next_edge_id = max_edge_id + 1;
-        }
-        self.header.last_record_page = last_record_page;
 
         self.populate_neighbors_cache()?;
         Ok(())
     }
 
-    fn try_load_btree_index(&mut self, start_page: PageId, size: usize) -> Result<()> {
+    fn try_load_btree_index(&self, start_page: PageId, size: usize) -> Result<()> {
         let mut data = Vec::with_capacity(size);
-        let page_size = self.pager.read().unwrap().page_size();
+        let page_size = self.pager.page_size();
         let pages_needed = size.div_ceil(page_size);
 
         for i in 0..pages_needed {
             let page_id = start_page + i as u32;
-            let mut pager_guard = self.pager.write().unwrap();
-            let page = pager_guard.fetch_page(page_id)?;
-            let bytes_to_copy = (size - data.len()).min(page_size);
-            data.extend_from_slice(&page.data[..bytes_to_copy]);
-            drop(pager_guard);
+            self.pager.with_pager_write(|pager| {
+                let page = pager.fetch_page(page_id)?;
+                let bytes_to_copy = (size - data.len()).min(page_size);
+                data.extend_from_slice(&page.data[..bytes_to_copy]);
+                Ok(())
+            })?;
         }
 
-        self.node_index = BTreeIndex::deserialize(&data)?;
+        self.node_index
+            .replace_with(BTreeIndex::deserialize(&data)?);
         Ok(())
     }
 
-    fn rebuild_remaining_indexes(&mut self) -> Result<()> {
+    fn rebuild_remaining_indexes(&self) -> Result<()> {
         self.edge_index.clear();
         self.label_index.clear();
         self.property_indexes.clear();
-        self.node_cache.lock().unwrap().clear();
+        self.node_cache.clear();
         self.outgoing_adjacency.clear();
         self.incoming_adjacency.clear();
         self.outgoing_neighbors_cache.clear();
@@ -346,17 +423,19 @@ impl GraphDB {
 
         let mut last_record_page: Option<PageId> = None;
         let mut max_edge_id = 0;
-        let page_count = self.pager.read().unwrap().page_count();
+        let page_count = self.pager.page_count();
 
-        let btree_pages: std::collections::HashSet<PageId> =
-            if let Some(btree_start) = self.header.btree_index_page {
-                let btree_size = self.header.btree_index_size as usize;
-                let page_size = self.pager.read().unwrap().page_size();
+        let btree_pages: std::collections::HashSet<PageId> = {
+            let header = self.header.lock().unwrap();
+            if let Some(btree_start) = header.btree_index_page {
+                let btree_size = header.btree_index_size as usize;
+                let page_size = self.pager.page_size();
                 let btree_page_count = btree_size.div_ceil(page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
                 std::collections::HashSet::new()
-            };
+            }
+        };
 
         for page_idx in 1..page_count {
             let page_id = PageId::try_from(page_idx)
@@ -366,29 +445,42 @@ impl GraphDB {
                 continue;
             }
 
-            let mut pager_guard = self.pager.write().unwrap();
-            let page = pager_guard.fetch_page(page_id)?;
-            let record_page = RecordPage::from_bytes(&mut page.data)?;
-            let record_count = record_page.record_count()? as usize;
+            let (record_count, records_data) = self.pager.with_pager_write(|pager| {
+                let page = pager.fetch_page(page_id)?;
+                let record_page = RecordPage::from_bytes(&mut page.data)?;
+                let record_count = record_page.record_count()? as usize;
+                if record_count == 0 {
+                    return Ok((0, Vec::new()));
+                }
+
+                // Collect all record data we need
+                let mut records = Vec::new();
+                for slot in 0..record_count {
+                    let byte_offset = record_page.record_offset(slot)?;
+                    let record = record_page.record_slice(slot)?.to_vec();
+                    records.push((slot, byte_offset, record));
+                }
+                Ok((record_count, records))
+            })?;
+
             if record_count == 0 {
                 continue;
             }
+
             let mut live_on_page = 0usize;
-            for slot in 0..record_count {
-                let byte_offset = record_page.record_offset(slot)?;
+            for (slot, byte_offset, record) in records_data {
                 let pointer = RecordPointer {
                     page_id,
                     slot_index: slot as u16,
                     byte_offset,
                 };
-                let record = record_page.record_slice(slot)?;
                 let header = RecordHeader::from_bytes(&record[..RECORD_HEADER_SIZE])?;
                 let payload_len = header.payload_length as usize;
-                
+
                 // Check if this is a versioned record by looking at the actual kind byte
                 let kind_byte = record[0];
                 let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
-                
+
                 let payload = if is_versioned {
                     // For versioned records, skip the 25-byte metadata header
                     const VERSION_METADATA_SIZE: usize = 25;
@@ -402,7 +494,7 @@ impl GraphDB {
                     // Legacy non-versioned record
                     &record[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
                 };
-                
+
                 match header.kind {
                     RecordKind::Free => continue,
                     RecordKind::Node => {
@@ -411,7 +503,7 @@ impl GraphDB {
                         for label in &node.labels {
                             self.label_index
                                 .entry(label.clone())
-                                .or_default()
+                                .or_insert_with(|| Arc::new(DashSet::new()))
                                 .insert(node.id);
                         }
 
@@ -435,36 +527,40 @@ impl GraphDB {
                     }
                 }
             }
-            drop(pager_guard);
             if live_on_page > 0 {
                 last_record_page = Some(page_id);
             }
         }
 
-        if max_edge_id >= self.header.next_edge_id {
-            self.header.next_edge_id = max_edge_id + 1;
+        {
+            let mut header = self.header.lock().unwrap();
+            if max_edge_id >= header.next_edge_id {
+                header.next_edge_id = max_edge_id + 1;
+            }
+            header.last_record_page = last_record_page;
         }
-        self.header.last_record_page = last_record_page;
 
         self.populate_neighbors_cache()?;
         Ok(())
     }
 
-    fn populate_neighbors_cache(&mut self) -> Result<()> {
-        let outgoing_clone = self.outgoing_adjacency.clone();
-        for (node_id, edge_ids) in outgoing_clone {
+    fn populate_neighbors_cache(&self) -> Result<()> {
+        for entry in self.outgoing_adjacency.iter() {
+            let node_id = *entry.key();
+            let edge_ids = entry.value();
             let mut neighbors = Vec::with_capacity(edge_ids.len());
-            for edge_id in edge_ids {
+            for &edge_id in edge_ids.iter() {
                 let edge = self.load_edge(edge_id)?;
                 neighbors.push(edge.target_node_id);
             }
             self.outgoing_neighbors_cache.insert(node_id, neighbors);
         }
 
-        let incoming_clone = self.incoming_adjacency.clone();
-        for (node_id, edge_ids) in incoming_clone {
+        for entry in self.incoming_adjacency.iter() {
+            let node_id = *entry.key();
+            let edge_ids = entry.value();
             let mut neighbors = Vec::with_capacity(edge_ids.len());
-            for edge_id in edge_ids {
+            for &edge_id in edge_ids.iter() {
                 let edge = self.load_edge(edge_id)?;
                 neighbors.push(edge.source_node_id);
             }

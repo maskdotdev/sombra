@@ -59,7 +59,7 @@ fn test_exact_benchmark_scenario() {
         );
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench.db");
-        let (mut db, node_ids) = setup_code_graph(path.to_str().unwrap(), node_count);
+        let (db, node_ids) = setup_code_graph(path.to_str().unwrap(), node_count);
 
         println!(
             "  Setup {} nodes, first 10 IDs: {:?}",

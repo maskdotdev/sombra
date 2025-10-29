@@ -1,8 +1,8 @@
 #![allow(clippy::uninlined_format_args)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use sombra::{ConcurrentGraphDB, Config, GraphDB, PropertyValue};
 use sombra::model::{Edge, Node};
+use sombra::{ConcurrentGraphDB, Config, GraphDB, PropertyValue};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -35,7 +35,8 @@ fn populate_db(db: &mut GraphDB, node_count: usize) -> Vec<u64> {
     for i in 0..node_count {
         let mut node = Node::new(i as u64);
         node.labels.push("User".to_string());
-        node.properties.insert("id".to_string(), PropertyValue::Int(i as i64));
+        node.properties
+            .insert("id".to_string(), PropertyValue::Int(i as i64));
         let node_id = db.add_node(node).unwrap();
         node_ids.push(node_id);
     }

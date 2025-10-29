@@ -137,19 +137,19 @@ pub struct Config {
 
     /// Maximum number of pages to compact in a single run.
     pub compaction_batch_size: usize,
-    
+
     /// Enable Multi-Version Concurrency Control (MVCC) for transactions.
     ///
     /// When enabled, transactions use snapshot isolation with version chains.
     /// This allows multiple readers and writers to work concurrently without blocking.
     pub mvcc_enabled: bool,
-    
+
     /// Maximum number of concurrent transactions allowed when MVCC is enabled.
     ///
     /// Only applies when MVCC is enabled. Controls how many transactions can
     /// be active simultaneously. None = use default (100).
     pub max_concurrent_transactions: Option<usize>,
-    
+
     /// Interval in seconds between garbage collection runs (None = disabled).
     ///
     /// Only applies when MVCC is enabled. GC reclaims old versions that are

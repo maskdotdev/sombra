@@ -145,7 +145,7 @@ fn cmd_inspect_info(db_path: &str) -> Result<()> {
     print_field("File Size", format_bytes(file_size));
     print_field("Page Size", format!("{DEFAULT_PAGE_SIZE} bytes"));
 
-    let header_state = &db.header;
+    let header_state = db.header.lock().unwrap();
 
     print_section("Graph Statistics");
     print_field("Total Nodes", header_state.next_node_id);
@@ -281,7 +281,7 @@ fn cmd_inspect_header(db_path: &str) -> Result<()> {
     let config = Config::balanced();
     let db = GraphDB::open_with_config(db_path, config)?;
 
-    let header_state = &db.header;
+    let header_state = db.header.lock().unwrap();
 
     print_section("Header Fields");
     print_field("next_node_id", header_state.next_node_id);
@@ -368,7 +368,7 @@ fn cmd_repair_checkpoint(db_path: &str) -> Result<()> {
     println!("  Performing checkpoint...");
 
     let config = Config::balanced();
-    let mut db = GraphDB::open_with_config(db_path, config)?;
+    let db = GraphDB::open_with_config(db_path, config)?;
     db.checkpoint()?;
 
     drop(db);
@@ -412,7 +412,7 @@ fn cmd_repair_vacuum(db_path: &str) -> Result<()> {
     println!();
 
     let config = Config::balanced();
-    let mut db = GraphDB::open_with_config(db_path, config)?;
+    let db = GraphDB::open_with_config(db_path, config)?;
 
     db.checkpoint()?;
 

@@ -1,12 +1,14 @@
 use super::graphdb::GraphDB;
 use crate::error::{GraphError, Result};
 use crate::model::{Node, NodeId, NULL_EDGE_ID};
+use crate::storage::deserialize_node;
+use crate::storage::heap::RecordStore;
 use crate::storage::record::{encode_record, RecordKind};
 use crate::storage::serialize_node;
 use crate::storage::version_chain::VersionChainReader;
-use crate::storage::deserialize_node;
-use crate::storage::heap::RecordStore;
+use dashmap::DashSet;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 impl GraphDB {
     pub fn add_node(&mut self, node: Node) -> Result<NodeId> {
@@ -16,7 +18,8 @@ impl GraphDB {
         // Call add_node_internal with tx_id and commit_ts
         // Note: commit_ts is allocated here since this is auto-committed
         let commit_ts = if self.config.mvcc_enabled {
-            self.timestamp_oracle.as_ref()
+            self.timestamp_oracle
+                .as_ref()
                 .map(|oracle| oracle.allocate_commit_timestamp())
                 .unwrap_or(0)
         } else {
@@ -25,7 +28,7 @@ impl GraphDB {
 
         let (node_id, _version_ptr) = self.add_node_internal(node, tx_id, commit_ts)?;
 
-        self.header.last_committed_tx_id = tx_id;
+        self.header.lock().unwrap().last_committed_tx_id = tx_id;
         self.write_header()?;
 
         let dirty_pages = self.take_recent_dirty_pages();
@@ -35,10 +38,15 @@ impl GraphDB {
         Ok(node_id)
     }
 
-    pub fn add_node_internal(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
+    pub fn add_node_internal(
+        &self,
+        node: Node,
+        tx_id: crate::db::TxId,
+        commit_ts: u64,
+    ) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
         // Detect if this is an update (node has ID and exists) or new node creation
         let is_update = node.id != 0 && self.node_index.get(&node.id).is_some();
-        
+
         if is_update {
             // Update existing node - create new version in version chain
             self.update_node_version(node, tx_id, commit_ts)
@@ -49,50 +57,56 @@ impl GraphDB {
     }
 
     /// Create a new node with a new ID (not an update)
-    fn create_new_node(&mut self, mut node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
-        let node_id = self.header.next_node_id;
-        self.header.next_node_id += 1;
+    fn create_new_node(
+        &self,
+        mut node: Node,
+        tx_id: crate::db::TxId,
+        commit_ts: u64,
+    ) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
+        let node_id = {
+            let mut header = self.header.lock().unwrap();
+            let node_id = header.next_node_id;
+            header.next_node_id += 1;
+            node_id
+        };
 
         node.id = node_id;
         node.first_outgoing_edge_id = NULL_EDGE_ID;
         node.first_incoming_edge_id = NULL_EDGE_ID;
 
         let payload = serialize_node(&node)?;
-        
+
         // Use store_new_version if MVCC enabled, otherwise legacy record format
         let (pointer, version_pointer) = if self.config.mvcc_enabled {
             use crate::storage::version_chain::store_new_version;
-            
-            let dirty_pages = {
-                let mut pager_guard = self.pager.write().unwrap();
-                let mut record_store = RecordStore::new(&mut *pager_guard);
+
+            let (pointer, dirty_pages) = self.pager.with_pager_write(|pager| {
+                let mut record_store = RecordStore::new(pager);
                 let pointer = store_new_version(
                     &mut record_store,
-                    None,  // No previous version
+                    None, // No previous version
                     node_id,
                     RecordKind::Node,
                     &payload,
                     tx_id,
                     commit_ts,
                 )?;
-                
+
                 // Collect dirty pages before dropping guards
                 let dirty_pages = record_store.take_dirty_pages();
-                drop(record_store);
-                drop(pager_guard);
-                Ok::<_, GraphError>((pointer, dirty_pages))
-            }?;
-            
+                Ok((pointer, dirty_pages))
+            })?;
+
             // Register dirty pages with GraphDB
-            for page_id in dirty_pages.1 {
+            for page_id in dirty_pages {
                 self.record_page_write(page_id);
             }
-            
-            (dirty_pages.0, Some(dirty_pages.0))
+
+            (pointer, Some(pointer))
         } else {
             // Legacy non-versioned record
             let record = encode_record(RecordKind::Node, &payload)?;
-            let preferred = self.header.last_record_page;
+            let preferred = self.header.lock().unwrap().last_record_page;
             let pointer = self.insert_record(&record, preferred)?;
             (pointer, None)
         };
@@ -102,67 +116,71 @@ impl GraphDB {
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
-                .or_default()
+                .or_insert_with(|| Arc::new(DashSet::new()))
                 .insert(node_id);
         }
 
         self.update_property_indexes_on_node_add(node_id)?;
-        self.node_cache.lock().unwrap().put(node_id, node.clone());
-        self.header.last_record_page = Some(pointer.page_id);
+        self.node_cache.put(node_id, node.clone());
+        self.header.lock().unwrap().last_record_page = Some(pointer.page_id);
 
         Ok((node_id, version_pointer))
     }
 
     /// Update an existing node by creating a new version in the version chain
-    fn update_node_version(&mut self, node: Node, tx_id: crate::db::TxId, commit_ts: u64) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
+    fn update_node_version(
+        &self,
+        node: Node,
+        tx_id: crate::db::TxId,
+        commit_ts: u64,
+    ) -> Result<(NodeId, Option<crate::storage::heap::RecordPointer>)> {
         let node_id = node.id;
-        
+
         // Get pointer to current version (head of version chain)
-        let prev_pointer = self.node_index.get(&node_id)
-            .ok_or_else(|| GraphError::NotFound("node"))?;
-        
+        let prev_pointer = self
+            .node_index
+            .get(&node_id)
+            .ok_or(GraphError::NotFound("node"))?;
+
         // Read the old node version to compute diffs for index updates
         let old_node = self.read_node_at(prev_pointer)?;
-        
+
         let payload = serialize_node(&node)?;
-        
+
         // Create new version in version chain
         use crate::storage::version_chain::store_new_version;
-        
-        let new_pointer = {
-            let mut pager_guard = self.pager.write().unwrap();
-            let mut record_store = RecordStore::new(&mut *pager_guard);
+
+        let (new_pointer, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let mut record_store = RecordStore::new(pager);
             let new_pointer = store_new_version(
                 &mut record_store,
-                Some(prev_pointer),  // Link to previous version
+                Some(prev_pointer), // Link to previous version
                 node_id,
                 RecordKind::Node,
                 &payload,
                 tx_id,
                 commit_ts,
             )?;
-            
+
             // Collect dirty pages before dropping guards
             let dirty_pages = record_store.take_dirty_pages();
-            drop(record_store);
-            drop(pager_guard);
-            
-            // Register dirty pages with GraphDB
-            for page_id in dirty_pages {
-                self.record_page_write(page_id);
-            }
-            
-            Ok::<_, GraphError>(new_pointer)
-        }?;
-        
+
+            Ok((new_pointer, dirty_pages))
+        })?;
+
+        // Register dirty pages with GraphDB
+        for page_id in dirty_pages {
+            self.record_page_write(page_id);
+        }
+
         // Update index to point to NEW head of version chain
         self.node_index.insert(node_id, new_pointer);
-        
+
         // Update label indexes: remove old labels, add new labels
         use std::collections::HashSet;
         let old_labels: HashSet<_> = old_node.labels.iter().collect();
         let new_labels: HashSet<_> = node.labels.iter().collect();
-        
+
         // Remove labels that are no longer present
         for label in old_labels.difference(&new_labels) {
             if let Some(node_set) = self.label_index.get_mut(*label) {
@@ -172,51 +190,57 @@ impl GraphDB {
                 }
             }
         }
-        
+
         // Add new labels
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
-                .or_default()
+                .or_insert_with(|| Arc::new(DashSet::new()))
                 .insert(node_id);
         }
-        
+
         // Update property indexes: remove old properties, add new properties
         for label in &old_node.labels {
             for (property_key, property_value) in &old_node.properties {
                 // Only remove if the property changed or label changed
-                let should_remove = !node.labels.contains(label) 
+                let should_remove = !node.labels.contains(label)
                     || node.properties.get(property_key) != Some(property_value);
-                
+
                 if should_remove {
-                    self.update_property_index_on_remove(node_id, label, property_key, property_value);
+                    self.update_property_index_on_remove(
+                        node_id,
+                        label,
+                        property_key,
+                        property_value,
+                    );
                 }
             }
         }
-        
+
         // Add new property index entries
         for label in &node.labels {
             for (property_key, property_value) in &node.properties {
                 self.update_property_index_on_add(node_id, label, property_key, property_value);
             }
         }
-        
+
         // Update cache with new version
-        self.node_cache.lock().unwrap().put(node_id, node.clone());
-        self.header.last_record_page = Some(new_pointer.page_id);
-        
+        self.node_cache.put(node_id, node.clone());
+        self.header.lock().unwrap().last_record_page = Some(new_pointer.page_id);
+
         Ok((node_id, Some(new_pointer)))
     }
 
     pub fn add_nodes_bulk(&mut self, nodes: Vec<Node>) -> Result<Vec<NodeId>> {
         let mut node_ids = Vec::with_capacity(nodes.len());
-        
+
         // Allocate a single transaction ID for the bulk operation
         let tx_id = self.allocate_tx_id()?;
-        
+
         // Allocate commit timestamp if MVCC enabled
         let commit_ts = if self.config.mvcc_enabled {
-            self.timestamp_oracle.as_ref()
+            self.timestamp_oracle
+                .as_ref()
                 .map(|oracle| oracle.allocate_commit_timestamp())
                 .unwrap_or(0)
         } else {
@@ -288,29 +312,32 @@ impl GraphDB {
 
         self.update_property_indexes_on_node_delete(node_id)?;
 
-        self.node_cache.lock().unwrap().pop(&node_id);
+        self.node_cache.pop(&node_id);
 
         self.node_index.remove(&node_id);
         self.free_record(pointer)?;
         Ok(())
     }
 
-    pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
-        self.metrics.node_lookups += 1;
+    pub fn get_node(&self, node_id: NodeId) -> Result<Option<Node>> {
+        // TODO: Re-enable metrics with interior mutability (AtomicU64)
+        // self.metrics.node_lookups += 1;
 
-        if let Some(node) = self.node_cache.lock().unwrap().get(&node_id) {
-            self.metrics.cache_hits += 1;
+        if let Some(node) = self.node_cache.get(&node_id) {
+            // TODO: Re-enable metrics with interior mutability (AtomicU64)
+            // self.metrics.cache_hits += 1;
             return Ok(Some(node.clone()));
         }
 
-        self.metrics.cache_misses += 1;
+        // TODO: Re-enable metrics with interior mutability (AtomicU64)
+        // self.metrics.cache_misses += 1;
 
         let pointer = match self.node_index.get(&node_id) {
             Some(p) => p,
             None => return Ok(None),
         };
         let node = self.read_node_at(pointer)?;
-        self.node_cache.lock().unwrap().put(node_id, node.clone());
+        self.node_cache.put(node_id, node.clone());
         Ok(Some(node))
     }
 
@@ -329,12 +356,13 @@ impl GraphDB {
     /// * `Ok(None)` - Node doesn't exist or is not visible at snapshot
     /// * `Err(_)` - Error reading the node
     pub fn get_node_with_snapshot(
-        &mut self,
+        &self,
         node_id: NodeId,
         snapshot_ts: u64,
         current_tx_id: Option<crate::db::TxId>,
     ) -> Result<Option<Node>> {
-        self.metrics.node_lookups += 1;
+        // TODO: Re-enable metrics with interior mutability (AtomicU64)
+        // self.metrics.node_lookups += 1;
 
         // If MVCC is not enabled, fall back to regular get_node
         if !self.config.mvcc_enabled {
@@ -343,19 +371,20 @@ impl GraphDB {
 
         // Get the head pointer from the index
         let head_pointer = match self.node_index.get(&node_id) {
-            Some(p) => p.clone(),
+            Some(p) => p,
             None => return Ok(None),
         };
 
         // Use VersionChainReader to find the visible version
-        let mut pager_guard = self.pager.write().unwrap();
-        let mut record_store = RecordStore::new(&mut *pager_guard);
-        let versioned_record = VersionChainReader::read_version_for_snapshot(
-            &mut record_store,
-            head_pointer,
-            snapshot_ts,
-            current_tx_id,
-        )?;
+        let versioned_record = self.pager.with_pager_write(|pager| {
+            let mut record_store = RecordStore::new(pager);
+            VersionChainReader::read_version_for_snapshot(
+                &mut record_store,
+                head_pointer,
+                snapshot_ts,
+                current_tx_id,
+            )
+        })?;
 
         match versioned_record {
             Some(vr) => {
@@ -372,7 +401,7 @@ impl GraphDB {
         Ok(self
             .label_index
             .get(label)
-            .map(|nodes| nodes.iter().cloned().collect())
+            .map(|nodes| nodes.value().iter().map(|r| *r).collect())
             .unwrap_or_default())
     }
 
@@ -448,7 +477,6 @@ impl GraphDB {
         let mut node = self.read_node_at(pointer)?;
 
         let old_value = node.properties.get(&key).cloned();
-
         node.properties.insert(key.clone(), value.clone());
 
         let payload = crate::storage::serialize_node(&node)?;
@@ -457,68 +485,43 @@ impl GraphDB {
             &payload,
         )?;
 
-        let update_result = {
-            let mut pager_guard = self.pager.write().unwrap();
-            let mut store = RecordStore::new(&mut *pager_guard);
-            let result = store.update_in_place(pointer, &record)?;
-            drop(store);
-            drop(pager_guard);
-            result
-        };
+        let update_result = self.pager.with_pager_write(|pager| {
+            let mut store = RecordStore::new(pager);
+            store.update_in_place(pointer, &record)
+        })?;
 
         if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
-
-            if let Some(old_val) = old_value {
-                for label in &node.labels {
-                    self.update_property_index_on_remove(node_id, label, &key, &old_val);
-                }
-            }
-
-            for label in &node.labels {
-                self.update_property_index_on_add(node_id, label, &key, &value);
-            }
-
-            self.node_cache.lock().unwrap().put(node_id, node.clone());
-
-            self.header.last_committed_tx_id = tx_id;
-            self.write_header()?;
-
-            let dirty_pages = self.take_recent_dirty_pages();
-            self.commit_to_wal(tx_id, &dirty_pages)?;
-            self.stop_tracking();
-
-            Ok(())
         } else {
             self.free_record(pointer)?;
 
-            let preferred = self.header.last_record_page;
+            let preferred = self.header.lock().unwrap().last_record_page;
             let new_pointer = self.insert_record(&record, preferred)?;
-
             self.node_index.insert(node_id, new_pointer);
-
-            if let Some(old_val) = old_value {
-                for label in &node.labels {
-                    self.update_property_index_on_remove(node_id, label, &key, &old_val);
-                }
-            }
-
-            for label in &node.labels {
-                self.update_property_index_on_add(node_id, label, &key, &value);
-            }
-
-            self.node_cache.lock().unwrap().put(node_id, node.clone());
-
-            self.header.last_record_page = Some(new_pointer.page_id);
-            self.header.last_committed_tx_id = tx_id;
-            self.write_header()?;
-
-            let dirty_pages = self.take_recent_dirty_pages();
-            self.commit_to_wal(tx_id, &dirty_pages)?;
-            self.stop_tracking();
-
-            Ok(())
+            self.header.lock().unwrap().last_record_page = Some(new_pointer.page_id);
         }
+
+        if let Some(old_val) = old_value {
+            for label in &node.labels {
+                self.update_property_index_on_remove(node_id, label, &key, &old_val);
+            }
+        }
+
+        for label in &node.labels {
+            self.update_property_index_on_add(node_id, label, &key, &value);
+        }
+
+        self.node_cache.put(node_id, node);
+
+        // Auto-commit: write header, commit to WAL, stop tracking
+        self.header.lock().unwrap().last_committed_tx_id = tx_id;
+        self.write_header()?;
+
+        let dirty_pages = self.take_recent_dirty_pages();
+        self.commit_to_wal(tx_id, &dirty_pages)?;
+        self.stop_tracking();
+
+        Ok(())
     }
 
     pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()> {
@@ -545,117 +548,35 @@ impl GraphDB {
             &payload,
         )?;
 
-        let update_result = {
-            let mut pager_guard = self.pager.write().unwrap();
-            let mut store = RecordStore::new(&mut *pager_guard);
-            let result = store.update_in_place(pointer, &record)?;
-            drop(store);
-            drop(pager_guard);
-            result
-        };
-
-        if let Some(new_pointer) = update_result {
-            self.record_page_write(new_pointer.page_id);
-
-            for label in &node.labels {
-                self.update_property_index_on_remove(node_id, label, key, &old_value);
-            }
-
-            self.node_cache.lock().unwrap().put(node_id, node.clone());
-
-            self.header.last_committed_tx_id = tx_id;
-            self.write_header()?;
-
-            let dirty_pages = self.take_recent_dirty_pages();
-            self.commit_to_wal(tx_id, &dirty_pages)?;
-            self.stop_tracking();
-
-            Ok(())
-        } else {
-            self.free_record(pointer)?;
-
-            let preferred = self.header.last_record_page;
-            let new_pointer = self.insert_record(&record, preferred)?;
-
-            self.node_index.insert(node_id, new_pointer);
-
-            for label in &node.labels {
-                self.update_property_index_on_remove(node_id, label, key, &old_value);
-            }
-
-            self.node_cache.lock().unwrap().put(node_id, node.clone());
-
-            self.header.last_record_page = Some(new_pointer.page_id);
-            self.header.last_committed_tx_id = tx_id;
-            self.write_header()?;
-
-            let dirty_pages = self.take_recent_dirty_pages();
-            self.commit_to_wal(tx_id, &dirty_pages)?;
-            self.stop_tracking();
-
-            Ok(())
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_node_property_internal(
-        &mut self,
-        node_id: NodeId,
-        key: String,
-        value: crate::model::PropertyValue,
-    ) -> Result<()> {
-        if !self.is_in_transaction() {
-            return Err(GraphError::InvalidArgument(
-                "set_node_property_internal must be called within a transaction".into(),
-            ));
-        }
-
-        let pointer = self
-            .node_index
-            .get(&node_id)
-            .ok_or(GraphError::NotFound("node"))?;
-        let mut node = self.read_node_at(pointer)?;
-
-        let old_value = node.properties.get(&key).cloned();
-        node.properties.insert(key.clone(), value.clone());
-
-        let payload = crate::storage::serialize_node(&node)?;
-        let record = crate::storage::record::encode_record(
-            crate::storage::record::RecordKind::Node,
-            &payload,
-        )?;
-
-        let update_result = {
-            let mut pager_guard = self.pager.write().unwrap();
-            let mut store = RecordStore::new(&mut *pager_guard);
-            let result = store.update_in_place(pointer, &record)?;
-            drop(store);
-            drop(pager_guard);
-            result
-        };
+        let update_result = self.pager.with_pager_write(|pager| {
+            let mut store = RecordStore::new(pager);
+            store.update_in_place(pointer, &record)
+        })?;
 
         if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
         } else {
             self.free_record(pointer)?;
 
-            let preferred = self.header.last_record_page;
+            let preferred = self.header.lock().unwrap().last_record_page;
             let new_pointer = self.insert_record(&record, preferred)?;
             self.node_index.insert(node_id, new_pointer);
-            self.header.last_record_page = Some(new_pointer.page_id);
-        }
-
-        if let Some(old_val) = old_value {
-            for label in &node.labels {
-                self.update_property_index_on_remove(node_id, label, &key, &old_val);
-            }
+            self.header.lock().unwrap().last_record_page = Some(new_pointer.page_id);
         }
 
         for label in &node.labels {
-            self.update_property_index_on_add(node_id, label, &key, &value);
+            self.update_property_index_on_remove(node_id, label, key, &old_value);
         }
 
-        self.node_cache.lock().unwrap().put(node_id, node);
+        self.node_cache.put(node_id, node);
+
+        // Auto-commit: write header, commit to WAL, stop tracking
+        self.header.lock().unwrap().last_committed_tx_id = tx_id;
+        self.write_header()?;
+
+        let dirty_pages = self.take_recent_dirty_pages();
+        self.commit_to_wal(tx_id, &dirty_pages)?;
+        self.stop_tracking();
 
         Ok(())
     }
@@ -685,31 +606,27 @@ impl GraphDB {
             &payload,
         )?;
 
-        let update_result = {
-            let mut pager_guard = self.pager.write().unwrap();
-            let mut store = RecordStore::new(&mut *pager_guard);
-            let result = store.update_in_place(pointer, &record)?;
-            drop(store);
-            drop(pager_guard);
-            result
-        };
+        let update_result = self.pager.with_pager_write(|pager| {
+            let mut store = RecordStore::new(pager);
+            store.update_in_place(pointer, &record)
+        })?;
 
         if let Some(new_pointer) = update_result {
             self.record_page_write(new_pointer.page_id);
         } else {
             self.free_record(pointer)?;
 
-            let preferred = self.header.last_record_page;
+            let preferred = self.header.lock().unwrap().last_record_page;
             let new_pointer = self.insert_record(&record, preferred)?;
             self.node_index.insert(node_id, new_pointer);
-            self.header.last_record_page = Some(new_pointer.page_id);
+            self.header.lock().unwrap().last_record_page = Some(new_pointer.page_id);
         }
 
         for label in &node.labels {
             self.update_property_index_on_remove(node_id, label, key, &old_value);
         }
 
-        self.node_cache.lock().unwrap().put(node_id, node);
+        self.node_cache.put(node_id, node);
 
         Ok(())
     }

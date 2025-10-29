@@ -8,11 +8,12 @@ use crate::db::group_commit::TxId;
 use crate::db::timestamp_oracle::TimestampOracle;
 use crate::error::{GraphError, Result};
 use crate::storage::version_chain::VersionTracker;
-use std::collections::{HashMap, HashSet};
+use dashmap::DashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Represents an active transaction context in an MVCC system
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransactionContext {
     /// Unique transaction ID
     pub tx_id: TxId,
@@ -93,8 +94,8 @@ impl TransactionContext {
 pub struct MvccTransactionManager {
     /// Timestamp oracle for allocating timestamps
     oracle: Arc<TimestampOracle>,
-    /// Currently active transactions
-    active_transactions: HashMap<TxId, TransactionContext>,
+    /// Currently active transactions (lock-free concurrent access)
+    active_transactions: Arc<DashMap<TxId, TransactionContext>>,
     /// Maximum number of concurrent transactions
     max_concurrent_transactions: usize,
 }
@@ -104,16 +105,16 @@ impl MvccTransactionManager {
     pub fn new_with_oracle(oracle: Arc<TimestampOracle>, max_concurrent: usize) -> Self {
         Self {
             oracle,
-            active_transactions: HashMap::new(),
+            active_transactions: Arc::new(DashMap::new()),
             max_concurrent_transactions: max_concurrent,
         }
     }
-    
+
     /// Create a new MVCC transaction manager (for testing)
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             oracle: Arc::new(TimestampOracle::new()),
-            active_transactions: HashMap::new(),
+            active_transactions: Arc::new(DashMap::new()),
             max_concurrent_transactions: max_concurrent,
         }
     }
@@ -128,7 +129,7 @@ impl MvccTransactionManager {
     ///
     /// # Errors
     /// * Returns error if maximum concurrent transactions exceeded
-    pub fn begin_transaction(&mut self, tx_id: TxId) -> Result<TransactionContext> {
+    pub fn begin_transaction(&self, tx_id: TxId) -> Result<TransactionContext> {
         // Check if we've hit the concurrent transaction limit
         if self.active_transactions.len() >= self.max_concurrent_transactions {
             return Err(GraphError::InvalidArgument(format!(
@@ -142,8 +143,8 @@ impl MvccTransactionManager {
 
         // Create transaction context
         let context = TransactionContext::new(tx_id, snapshot_ts);
-        
-        // Register as active
+
+        // Register as active (lock-free insert)
         self.active_transactions.insert(tx_id, context);
 
         // Return a clone
@@ -158,20 +159,27 @@ impl MvccTransactionManager {
     }
 
     /// Get a transaction context by ID
-    pub fn get_transaction(&self, tx_id: TxId) -> Option<&TransactionContext> {
-        self.active_transactions.get(&tx_id)
+    pub fn get_transaction(&self, tx_id: TxId) -> Option<TransactionContext> {
+        self.active_transactions
+            .get(&tx_id)
+            .map(|r| r.value().clone())
     }
 
     /// Get a mutable transaction context by ID
-    pub fn _get_transaction_mut(&mut self, tx_id: TxId) -> Option<&mut TransactionContext> {
+    pub fn _get_transaction_mut(
+        &self,
+        tx_id: TxId,
+    ) -> Option<dashmap::mapref::one::RefMut<TxId, TransactionContext>> {
         self.active_transactions.get_mut(&tx_id)
     }
 
     /// Start preparing a transaction for commit
     ///
     /// This allocates a commit timestamp for the transaction
-    pub fn prepare_commit(&mut self, tx_id: TxId) -> Result<u64> {
-        let context = self.active_transactions.get_mut(&tx_id)
+    pub fn prepare_commit(&self, tx_id: TxId) -> Result<u64> {
+        let mut context = self
+            .active_transactions
+            .get_mut(&tx_id)
             .ok_or_else(|| GraphError::InvalidArgument("transaction not found".into()))?;
 
         context.start_commit()?;
@@ -185,8 +193,10 @@ impl MvccTransactionManager {
     /// Complete a transaction commit
     ///
     /// This makes the transaction's changes visible to future snapshots
-    pub fn complete_commit(&mut self, tx_id: TxId, commit_ts: u64) -> Result<()> {
-        let context = self.active_transactions.get_mut(&tx_id)
+    pub fn complete_commit(&self, tx_id: TxId, commit_ts: u64) -> Result<()> {
+        let mut context = self
+            .active_transactions
+            .get_mut(&tx_id)
             .ok_or_else(|| GraphError::InvalidArgument("transaction not found".into()))?;
 
         let snapshot_ts = context.snapshot_ts;
@@ -201,8 +211,10 @@ impl MvccTransactionManager {
     /// End a transaction (commit or rollback)
     ///
     /// This removes the transaction from the active set
-    pub fn end_transaction(&mut self, tx_id: TxId) -> Result<()> {
-        let context = self.active_transactions.remove(&tx_id)
+    pub fn end_transaction(&self, tx_id: TxId) -> Result<()> {
+        let (_key, context) = self
+            .active_transactions
+            .remove(&tx_id)
             .ok_or_else(|| GraphError::InvalidArgument("transaction not found".into()))?;
 
         // If committed, unregister the snapshot from oracle
@@ -219,16 +231,16 @@ impl MvccTransactionManager {
     /// which versions can be safely reclaimed
     pub fn _oldest_active_snapshot(&self) -> Option<u64> {
         self.active_transactions
-            .values()
-            .map(|ctx| ctx.snapshot_ts)
+            .iter()
+            .map(|entry| entry.snapshot_ts)
             .min()
     }
 
     /// Check if a timestamp is visible to any active transaction
     pub fn _is_timestamp_visible(&self, ts: u64) -> bool {
         self.active_transactions
-            .values()
-            .any(|ctx| ctx.snapshot_ts <= ts)
+            .iter()
+            .any(|entry| entry.snapshot_ts <= ts)
     }
 
     /// Get the timestamp oracle
@@ -243,12 +255,19 @@ impl MvccTransactionManager {
 
     /// Get all active transaction IDs
     pub fn active_tx_ids(&self) -> Vec<TxId> {
-        self.active_transactions.keys().copied().collect()
+        self.active_transactions
+            .iter()
+            .map(|entry| *entry.key())
+            .collect()
     }
 
     /// End all active transactions (used during database close)
-    pub fn end_all_transactions(&mut self) {
-        let tx_ids: Vec<TxId> = self.active_transactions.keys().copied().collect();
+    pub fn end_all_transactions(&self) {
+        let tx_ids: Vec<TxId> = self
+            .active_transactions
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
         for tx_id in tx_ids {
             let _ = self.end_transaction(tx_id);
         }
@@ -261,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_transaction_lifecycle() {
-        let mut manager = MvccTransactionManager::new(100);
-        
+        let manager = MvccTransactionManager::new(100);
+
         let tx_id = 1;
         let context = manager.begin_transaction(tx_id).unwrap();
         assert_eq!(context.tx_id, tx_id);
@@ -273,13 +292,13 @@ mod tests {
         let commit_ts = manager.prepare_commit(tx_id).unwrap();
         assert!(commit_ts > context.snapshot_ts);
 
-        // Complete commit  
+        // Complete commit
         manager.complete_commit(tx_id, commit_ts).unwrap();
-        
+
         let updated_context = manager.get_transaction(tx_id).unwrap();
         assert_eq!(updated_context.state, TransactionState::Committed);
         assert_eq!(updated_context.commit_ts, commit_ts);
-        
+
         // End the transaction
         manager.end_transaction(tx_id).unwrap();
         assert!(manager.get_transaction(tx_id).is_none());
@@ -287,8 +306,8 @@ mod tests {
 
     #[test]
     fn test_multiple_concurrent_transactions() {
-        let mut manager = MvccTransactionManager::new(10);
-        
+        let manager = MvccTransactionManager::new(10);
+
         let tx1 = manager.begin_transaction(1).unwrap();
         let tx2 = manager.begin_transaction(2).unwrap();
         let tx3 = manager.begin_transaction(3).unwrap();
@@ -296,7 +315,7 @@ mod tests {
         // Verify all have different snapshot timestamps
         let timestamps: Vec<u64> = vec![tx1.snapshot_ts, tx2.snapshot_ts, tx3.snapshot_ts];
         assert_eq!(timestamps.len(), 3);
-        
+
         // All timestamps should be monotonically increasing
         for i in 0..timestamps.len() - 1 {
             assert!(timestamps[i] < timestamps[i + 1]);
@@ -307,11 +326,11 @@ mod tests {
 
     #[test]
     fn test_concurrent_transaction_limit() {
-        let mut manager = MvccTransactionManager::new(2);
-        
+        let manager = MvccTransactionManager::new(2);
+
         manager.begin_transaction(1).unwrap();
         manager.begin_transaction(2).unwrap();
-        
+
         // Third transaction should fail
         let result = manager.begin_transaction(3);
         assert!(result.is_err());
@@ -319,14 +338,13 @@ mod tests {
 
     #[test]
     fn test_written_records_tracking() {
-        let mut manager = MvccTransactionManager::new(100);
-        
+        let manager = MvccTransactionManager::new(100);
+
         let tx_id = 1;
         let mut context = manager.begin_transaction(tx_id).unwrap();
-        
+
         assert!(!context.has_written(10));
         context.mark_written(10);
         assert!(context.has_written(10));
     }
 }
-

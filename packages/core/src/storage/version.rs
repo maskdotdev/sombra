@@ -102,16 +102,16 @@ impl VersionMetadata {
         let mut buf = vec![0u8; VERSION_METADATA_SIZE];
         buf[0..8].copy_from_slice(&self.tx_id.to_le_bytes());
         buf[8..16].copy_from_slice(&self.commit_ts.to_le_bytes());
-        
+
         // Encode prev_version: u64::MAX if None, otherwise serialize pointer
         let prev_ts = self.prev_version.map_or(u64::MAX, |ptr| {
             // Encode as: page_id as u32 << 32 | slot_index as u32
             ((ptr.page_id as u64) << 32) | (ptr.slot_index as u64)
         });
         buf[16..24].copy_from_slice(&prev_ts.to_le_bytes());
-        
+
         buf[24] = self.flags.to_byte();
-        
+
         buf
     }
 
@@ -127,18 +127,15 @@ impl VersionMetadata {
         }
 
         let tx_id = u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
 
         let commit_ts = u64::from_le_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
         ]);
 
         let prev_ts = u64::from_le_bytes([
-            bytes[16], bytes[17], bytes[18], bytes[19],
-            bytes[20], bytes[21], bytes[22], bytes[23],
+            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
         ]);
 
         let flags = VersionFlags::from_byte(bytes[24]);
@@ -231,7 +228,7 @@ mod tests {
     fn test_version_metadata_serialization() {
         let metadata = VersionMetadata::new(100, 200, None, false);
         let bytes = metadata.to_bytes();
-        
+
         let deserialized = VersionMetadata::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized.tx_id, 100);
         assert_eq!(deserialized.commit_ts, 200);
@@ -248,20 +245,23 @@ mod tests {
         };
         let metadata = VersionMetadata::new(100, 200, Some(prev_ptr), false);
         let bytes = metadata.to_bytes();
-        
+
         let deserialized = VersionMetadata::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.prev_version, Some(RecordPointer {
-            page_id: 5,
-            slot_index: 10,
-            byte_offset: 0, // Not restored
-        }));
+        assert_eq!(
+            deserialized.prev_version,
+            Some(RecordPointer {
+                page_id: 5,
+                slot_index: 10,
+                byte_offset: 0, // Not restored
+            })
+        );
     }
 
     #[test]
     fn test_version_metadata_deleted() {
         let metadata = VersionMetadata::new(100, 200, None, true);
         assert!(metadata.is_deleted());
-        
+
         let bytes = metadata.to_bytes();
         let deserialized = VersionMetadata::from_bytes(&bytes).unwrap();
         assert!(deserialized.is_deleted());

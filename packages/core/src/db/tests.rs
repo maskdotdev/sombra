@@ -125,7 +125,7 @@ fn transaction_commit_persists_changes() {
         tx.commit().expect("commit transaction");
     }
 
-    let mut db = GraphDB::open(&path).expect("reopen db");
+    let db = GraphDB::open(&path).expect("reopen db");
     let node = db
         .get_node(1)
         .expect("read committed node")
@@ -177,7 +177,7 @@ fn rollback_restores_state() {
     }
 
     drop(db);
-    let mut reopened = GraphDB::open(&path).expect("reopen db");
+    let reopened = GraphDB::open(&path).expect("reopen db");
     let node = reopened
         .get_node(1)
         .expect("node committed after rollback")
@@ -779,4 +779,68 @@ fn property_index_persists_across_checkpoint_and_reopen() {
             .expect("find nonexistent age");
         assert_eq!(nonexistent_nodes.len(), 0);
     }
+}
+
+#[test]
+fn cache_invalidation_after_write() {
+    // Test that the lock-free page cache properly invalidates entries after writes
+    let temp_file = create_temp_db("cache_invalidation");
+    let mut db = GraphDB::open(&temp_file).expect("open db");
+
+    // Create first node and commit
+    let mut tx = db.begin_transaction().expect("begin transaction");
+    let mut node_a = Node::new(0);
+    node_a.labels.push("First".to_string());
+    let a_id = tx.add_node(node_a).expect("add node a");
+    tx.commit().expect("commit transaction");
+    db.checkpoint().expect("checkpoint");
+
+    // Verify first node exists
+    let node = db.get_node(a_id).expect("get node").expect("node exists");
+    assert_eq!(node.labels, vec!["First".to_string()]);
+
+    // Add second node - this was failing before the cache invalidation fix
+    let mut tx = db.begin_transaction().expect("begin transaction");
+    let mut node_b = Node::new(0);
+    node_b.labels.push("Second".to_string());
+    let b_id = tx.add_node(node_b).expect("add node b");
+    tx.commit().expect("commit transaction");
+    db.checkpoint().expect("checkpoint");
+
+    // Verify both nodes exist and have correct data
+    let node_a = db
+        .get_node(a_id)
+        .expect("get node a")
+        .expect("node a exists");
+    assert_eq!(node_a.labels, vec!["First".to_string()]);
+
+    let node_b = db
+        .get_node(b_id)
+        .expect("get node b")
+        .expect("node b exists");
+    assert_eq!(node_b.labels, vec!["Second".to_string()]);
+
+    // Add multiple nodes to stress test cache invalidation
+    for i in 0..10 {
+        let mut tx = db.begin_transaction().expect("begin transaction");
+        let mut node = Node::new(0);
+        node.labels.push(format!("Node{}", i));
+        tx.add_node(node).expect("add node");
+        tx.commit().expect("commit transaction");
+    }
+
+    db.checkpoint().expect("checkpoint");
+
+    // Verify all nodes are retrievable
+    let node_a = db
+        .get_node(a_id)
+        .expect("get node a")
+        .expect("node a exists");
+    assert_eq!(node_a.labels, vec!["First".to_string()]);
+
+    let node_b = db
+        .get_node(b_id)
+        .expect("get node b")
+        .expect("node b exists");
+    assert_eq!(node_b.labels, vec!["Second".to_string()]);
 }

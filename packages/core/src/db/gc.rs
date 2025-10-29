@@ -134,7 +134,7 @@ impl GarbageCollector {
     ) -> Result<bool> {
         // Try to visit the record - if it fails, consider it non-versioned
         let result = record_store.visit_record(pointer, |record_data| {
-            if record_data.len() < 1 {
+            if record_data.is_empty() {
                 debug!(
                     page_id = pointer.page_id,
                     slot_index = pointer.slot_index,
@@ -143,7 +143,7 @@ impl GarbageCollector {
                 return Ok(false);
             }
             let kind_byte = record_data[0];
-            
+
             // Try to parse the kind - if it fails, the record is invalid
             match VersionedRecordKind::from_byte(kind_byte) {
                 Ok(kind) => {
@@ -169,7 +169,7 @@ impl GarbageCollector {
                 }
             }
         });
-        
+
         // If visit_record itself fails (e.g., freed slot), consider it non-versioned
         match result {
             Ok(is_versioned) => Ok(is_versioned),
@@ -202,11 +202,10 @@ impl GarbageCollector {
         record_store: &mut RecordStore,
         pointer: RecordPointer,
     ) -> Result<RecordPointer> {
-        use crate::storage::page::RecordPage;
-        
         // Fetch the page and recalculate byte_offset from slot directory
-        let byte_offset = record_store.get_byte_offset_for_slot(pointer.page_id, pointer.slot_index)?;
-        
+        let byte_offset =
+            record_store.get_byte_offset_for_slot(pointer.page_id, pointer.slot_index)?;
+
         Ok(RecordPointer {
             page_id: pointer.page_id,
             slot_index: pointer.slot_index,
@@ -239,7 +238,7 @@ impl GarbageCollector {
         // First check if this is a versioned record
         // Non-versioned records (legacy or non-MVCC databases) should be skipped
         let is_versioned = self.is_record_versioned(record_store, head_pointer)?;
-        
+
         debug!(
             record_id = record_id,
             is_versioned = is_versioned,
@@ -247,7 +246,7 @@ impl GarbageCollector {
             slot_index = head_pointer.slot_index,
             "Checked record version status in scan_version_chain"
         );
-        
+
         if !is_versioned {
             debug!(
                 record_id = record_id,
@@ -281,7 +280,7 @@ impl GarbageCollector {
 
             // Read the version metadata
             let metadata_opt = self.read_version_metadata(record_store, pointer)?;
-            
+
             // If None, we've reached a non-versioned record at the end of the chain
             let metadata = match metadata_opt {
                 Some(m) => m,
@@ -294,7 +293,7 @@ impl GarbageCollector {
                     break; // End of version chain
                 }
             };
-            
+
             debug!(
                 record_id = record_id,
                 version = version_count,
@@ -402,22 +401,22 @@ impl GarbageCollector {
                 record_len = record_data.len(),
                 "read_version_metadata: visiting record"
             );
-            
+
             if record_data.len() < 8 {
                 return Err(GraphError::Corruption("record too short".into()));
             }
 
             let kind_byte = record_data[0];
-            
+
             debug!(
                 page_id = pointer.page_id,
                 slot_index = pointer.slot_index,
                 kind_byte = kind_byte,
                 "read_version_metadata: got kind byte"
             );
-            
+
             let kind = VersionedRecordKind::from_byte(kind_byte)?;
-            
+
             debug!(
                 page_id = pointer.page_id,
                 slot_index = pointer.slot_index,
@@ -582,11 +581,8 @@ impl GarbageCollector {
         info!(gc_watermark = gc_watermark, "Starting GC cycle");
 
         // Phase 1: Scan for reclaimable versions
-        let (reclaimable, chains_scanned, versions_examined) = self.scan_for_reclaimable_versions(
-            record_store,
-            record_ids,
-            timestamp_oracle,
-        )?;
+        let (reclaimable, chains_scanned, versions_examined) =
+            self.scan_for_reclaimable_versions(record_store, record_ids, timestamp_oracle)?;
 
         let versions_reclaimable = reclaimable.len();
 
@@ -773,7 +769,7 @@ impl BackgroundGcState {
 
         // TODO (Task 16): Implement actual version chain compaction
         // For now, we just log that GC would run here
-        
+
         Ok(())
     }
 }

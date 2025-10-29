@@ -26,6 +26,7 @@ base64 = { version = "0.22", optional = true }
 tokio = { version = "1.0", features = ["full"], optional = true }
 chrono = "0.4"
 lru = "0.12"
+dashmap = "5.5"
 memmap2 = "0.9"
 parking_lot = "0.12"
 tracing = "0.1"
@@ -139,13 +140,11 @@ required-features = ["benchmarks"]
 [[bench]]
 name = "concurrent_throughput"
 harness = false
+required-features = ["benchmarks"]
 
 [[bench]]
-name = "concurrent_api_benchmark"
-harness = true
-
-[[example]]
-name = "performance_metrics_demo"
+name = "lock_contention_profile"
+harness = false
 required-features = ["benchmarks"]
 
 [[example]]
