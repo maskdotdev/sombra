@@ -54,7 +54,7 @@ fn transaction_rollback_no_wal_traces() -> Result<()> {
     // No data should be recoverable
     {
         let db = GraphDB::open(&path)?;
-        assert!(db.get_node(node_id).is_err());
+        assert!(db.get_node(node_id)?.is_none());
     }
 
     Ok(())
@@ -202,13 +202,13 @@ fn crash_simulation_uncommitted_tx_lost() -> Result<()> {
     // On recovery, uncommitted transaction should be lost
     {
         let db = GraphDB::open(&path)?;
-        assert!(db.get_node(node_id).is_err());
+        assert!(db.get_node(node_id)?.is_none());
     }
 
     // On recovery, uncommitted transaction should be lost
     {
         let db = GraphDB::open(&path)?;
-        assert!(db.get_node(node_id).is_err());
+        assert!(db.get_node(node_id)?.is_none());
     }
 
     Ok(())
