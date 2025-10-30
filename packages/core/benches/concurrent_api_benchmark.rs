@@ -12,12 +12,11 @@ use tempfile::TempDir;
 // Setup Utilities
 // ============================================================================
 
-fn setup_graphdb(path: &str, mvcc_enabled: bool) -> GraphDB {
+fn setup_graphdb(path: &str) -> GraphDB {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(format!("{}.wal", path));
 
-    let mut config = Config::balanced();
-    config.mvcc_enabled = mvcc_enabled;
+    let config = Config::balanced();
     GraphDB::open_with_config(path, config).unwrap()
 }
 
@@ -26,7 +25,6 @@ fn setup_concurrent_db(path: &str) -> ConcurrentGraphDB {
     let _ = std::fs::remove_file(format!("{}.wal", path));
 
     let mut config = Config::balanced();
-    config.mvcc_enabled = true;
     ConcurrentGraphDB::open_with_config(path, config).unwrap()
 }
 
@@ -63,32 +61,17 @@ fn bench_node_creation_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("node_creation_overhead");
     group.throughput(Throughput::Elements(1));
 
-    // Baseline: GraphDB without MVCC
+    // GraphDB (single-threaded access with MVCC)
     let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().join("baseline.db");
-    let mut db_baseline = setup_graphdb(path.to_str().unwrap(), false);
+    let path = temp_dir.path().join("graphdb.db");
+    let mut db_graphdb = setup_graphdb(path.to_str().unwrap());
 
-    group.bench_function("graphdb_no_mvcc", |b| {
+    group.bench_function("graphdb", |b| {
         let mut counter = 0u64;
         b.iter(|| {
             let mut node = Node::new(counter);
             node.labels.push("Test".to_string());
-            let _ = black_box(db_baseline.add_node(node).unwrap());
-            counter += 1;
-        });
-    });
-
-    // GraphDB with MVCC (single-threaded)
-    let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().join("mvcc.db");
-    let mut db_mvcc = setup_graphdb(path.to_str().unwrap(), true);
-
-    group.bench_function("graphdb_with_mvcc", |b| {
-        let mut counter = 0u64;
-        b.iter(|| {
-            let mut node = Node::new(counter);
-            node.labels.push("Test".to_string());
-            let _ = black_box(db_mvcc.add_node(node).unwrap());
+            let _ = black_box(db_graphdb.add_node(node).unwrap());
             counter += 1;
         });
     });
@@ -119,14 +102,9 @@ fn bench_node_read_overhead(c: &mut Criterion) {
 
     // Setup databases with 1000 nodes
     let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().join("baseline.db");
-    let mut db_baseline = setup_graphdb(path.to_str().unwrap(), false);
-    let node_ids_baseline = populate_db(&mut db_baseline, 1000);
-
-    let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().join("mvcc.db");
-    let mut db_mvcc = setup_graphdb(path.to_str().unwrap(), true);
-    let node_ids_mvcc = populate_db(&mut db_mvcc, 1000);
+    let path = temp_dir.path().join("graphdb.db");
+    let mut db_graphdb = setup_graphdb(path.to_str().unwrap());
+    let node_ids_graphdb = populate_db(&mut db_graphdb, 1000);
 
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("concurrent.db");
@@ -140,20 +118,11 @@ fn bench_node_read_overhead(c: &mut Criterion) {
     }
     tx_setup.commit().unwrap();
 
-    group.bench_function("graphdb_no_mvcc", |b| {
+    group.bench_function("graphdb", |b| {
         let mut idx = 0;
         b.iter(|| {
-            let node_id = node_ids_baseline[idx % node_ids_baseline.len()];
-            let _ = black_box(db_baseline.get_node(node_id).unwrap());
-            idx += 1;
-        });
-    });
-
-    group.bench_function("graphdb_with_mvcc", |b| {
-        let mut idx = 0;
-        b.iter(|| {
-            let node_id = node_ids_mvcc[idx % node_ids_mvcc.len()];
-            let _ = black_box(db_mvcc.get_node(node_id).unwrap());
+            let node_id = node_ids_graphdb[idx % node_ids_graphdb.len()];
+            let _ = black_box(db_graphdb.get_node(node_id).unwrap());
             idx += 1;
         });
     });

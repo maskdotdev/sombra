@@ -20,7 +20,6 @@ fn create_test_db(path: &str) -> GraphDB {
     let _ = std::fs::remove_file(format!("{}.wal", path));
 
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
 
     GraphDB::open_with_config(path, config).unwrap()
 }

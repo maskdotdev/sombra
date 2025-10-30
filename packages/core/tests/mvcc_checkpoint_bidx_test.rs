@@ -16,7 +16,6 @@ fn test_mvcc_checkpoint_with_btree_pages() -> Result<()> {
 
     // Use MVCC config like the benchmark
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200);
     config.gc_interval_secs = None; // Disable GC for consistent benchmarks
 
@@ -59,7 +58,6 @@ fn test_mvcc_checkpoint_after_updates() -> Result<()> {
     let path = tmp.path().to_path_buf();
 
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200);
     config.gc_interval_secs = None;
 

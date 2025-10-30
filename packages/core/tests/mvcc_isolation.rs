@@ -17,7 +17,6 @@ fn cleanup_test_db(path: &str) {
 fn create_mvcc_db(path: &str) -> GraphDB {
     cleanup_test_db(path);
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     GraphDB::open_with_config(path, config).unwrap()
 }
 
@@ -28,7 +27,6 @@ fn test_property_index_mvcc_persistence_after_reopen() {
 
     // Create database with MVCC enabled
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     // Phase 1: Create property index and add versioned data
     {

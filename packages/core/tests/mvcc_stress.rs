@@ -18,7 +18,6 @@ fn cleanup_test_db(path: &str) {
 fn create_mvcc_db(path: &str) -> GraphDB {
     cleanup_test_db(path);
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200); // Higher limit for stress tests
     GraphDB::open_with_config(path, config).unwrap()
 }

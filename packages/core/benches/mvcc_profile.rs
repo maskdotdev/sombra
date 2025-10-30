@@ -26,7 +26,6 @@ fn profile_write_path() {
     let path = temp_dir.path().join("profile_writes.db");
 
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200);
     config.gc_interval_secs = None;
 
@@ -62,7 +61,6 @@ fn profile_read_path() {
     let path = temp_dir.path().join("profile_reads.db");
 
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200);
     config.gc_interval_secs = None;
 

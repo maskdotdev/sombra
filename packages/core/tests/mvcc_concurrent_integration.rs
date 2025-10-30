@@ -13,7 +13,6 @@ fn create_concurrent_db() -> ConcurrentGraphDB {
     let path = dir.path().join("test.db");
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(100);
 
     ConcurrentGraphDB::open_with_config(&path, config).unwrap()

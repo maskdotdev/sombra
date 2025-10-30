@@ -21,7 +21,6 @@ fn test_node_updates_create_new_versions() {
     cleanup_test_db(path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 
     // Create initial node
@@ -67,7 +66,6 @@ fn test_multiple_nodes_independent_updates() {
     cleanup_test_db(path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 
     // Create two nodes
@@ -130,7 +128,6 @@ fn test_version_chain_after_db_reopen() {
 
     let node_id = {
         let mut config = Config::default();
-        config.mvcc_enabled = true;
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
         // Create node with initial value
@@ -160,7 +157,6 @@ fn test_version_chain_after_db_reopen() {
     // Reopen database
     {
         let mut config = Config::default();
-        config.mvcc_enabled = true;
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
         // Should see latest version
@@ -184,7 +180,6 @@ fn test_read_your_own_writes_with_updates() {
     cleanup_test_db(path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 
     let mut tx = db.begin_transaction().unwrap();

@@ -26,7 +26,6 @@ fn run_concurrency_stress(duration: Duration) -> StressStats {
     let path = dir.path().join("concurrency_stress.db");
 
     let mut config = Config::balanced();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(512);
 
     let db = ConcurrentGraphDB::open_with_config(&path, config)

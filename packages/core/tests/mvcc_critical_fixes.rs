@@ -16,7 +16,6 @@ fn test_edge_read_your_own_writes_within_transaction() {
     let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
     let mut tx = db.begin_transaction().unwrap();
@@ -57,7 +56,6 @@ fn test_edge_isolation_between_transactions() {
     let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 
@@ -103,7 +101,6 @@ fn test_file_locking_prevents_concurrent_opens() {
     let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     // Open database in this process
     let _db1 = GraphDB::open_with_config(path, config.clone()).unwrap();
@@ -139,7 +136,6 @@ fn test_edge_with_properties_read_your_own_writes() {
     let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
     let mut tx = db.begin_transaction().unwrap();
@@ -198,7 +194,6 @@ fn test_auto_commit_edge_read_your_own_writes() {
     let _ = fs::remove_file(format!("{path}.lock"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 

@@ -14,7 +14,6 @@ fn test_mvcc_property_index_snapshot_isolation() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 
@@ -107,7 +106,6 @@ fn test_mvcc_property_index_concurrent_updates() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 
@@ -163,7 +161,6 @@ fn test_mvcc_property_index_add_remove_properties() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 
@@ -338,7 +335,6 @@ fn test_mvcc_property_index_node_deletion() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 
@@ -420,7 +416,6 @@ fn test_mvcc_label_index_concurrent_updates() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 
@@ -461,7 +456,6 @@ fn test_mvcc_label_index_add_remove_labels() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 
@@ -550,7 +544,6 @@ fn test_mvcc_label_index_node_deletion() {
     let _ = fs::remove_file(test_db_path);
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let db = ConcurrentGraphDB::open_with_config(test_db_path, config).unwrap();
 

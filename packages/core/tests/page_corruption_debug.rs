@@ -10,7 +10,6 @@ fn test_page_corruption_scenario() {
     let path = temp_dir.path().join("corruption_test.db");
 
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
     config.max_concurrent_transactions = Some(200);
     config.gc_interval_secs = None;
 
@@ -76,7 +75,6 @@ fn test_mixed_page_types_with_indexes() {
     let path = temp_dir.path().join("mixed_pages_test.db");
 
     let mut config = Config::benchmark();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path.to_str().unwrap(), config).unwrap();
 

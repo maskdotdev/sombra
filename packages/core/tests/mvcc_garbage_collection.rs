@@ -30,7 +30,6 @@ fn cleanup_test_db(path: &str) {
 fn create_mvcc_db(path: &str) -> GraphDB {
     cleanup_test_db(path);
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.gc_interval_secs = Some(1); // Fast GC for testing
     GraphDB::open_with_config(path, config).unwrap()
 }
@@ -196,7 +195,6 @@ fn test_gc_interval_configuration() {
     let path = "test_gc_interval.db";
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.gc_interval_secs = Some(5);
 
     cleanup_test_db(path);
@@ -264,7 +262,6 @@ fn test_max_version_chain_length() {
     let path = "test_max_chain_length.db";
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     // TODO: Add max_version_chain_length to Config
     // config.max_version_chain_length = 5;
 
@@ -339,7 +336,6 @@ fn test_snapshot_retention_policy() {
     let path = "test_snapshot_retention.db";
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     // TODO: Add snapshot_retention_secs to Config
     // config.snapshot_retention_secs = 10; // Keep versions for 10 seconds
 

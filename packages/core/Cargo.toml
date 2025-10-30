@@ -113,27 +113,7 @@ name = "btree_benchmark"
 harness = false
 
 [[bench]]
-name = "mvcc_performance"
-harness = false
-required-features = ["benchmarks"]
-
-[[bench]]
-name = "mvcc_criterion"
-harness = false
-required-features = ["benchmarks"]
-
-[[bench]]
-name = "mvcc_simple_criterion"
-harness = false
-required-features = ["benchmarks"]
-
-[[bench]]
 name = "mvcc_profile"
-harness = false
-required-features = ["benchmarks"]
-
-[[bench]]
-name = "mvcc_detailed_profile"
 harness = false
 required-features = ["benchmarks"]
 

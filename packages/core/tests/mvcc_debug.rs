@@ -14,7 +14,6 @@ fn test_simple_snapshot_isolation() {
     cleanup_test_db(path);
     
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     let db = GraphDB::open_with_config(path, config).unwrap();
 
     // Transaction 1: Create node with value=100

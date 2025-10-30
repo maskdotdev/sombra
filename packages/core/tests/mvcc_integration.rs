@@ -40,7 +40,6 @@ fn test_empty_transaction_optimization() {
     // Test with MVCC enabled
     {
         let mut config = Config::default();
-        config.mvcc_enabled = true;
 
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
@@ -57,7 +56,6 @@ fn test_empty_transaction_optimization() {
     // Test read-only transaction
     {
         let mut config = Config::default();
-        config.mvcc_enabled = true;
 
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
@@ -77,22 +75,21 @@ fn test_empty_transaction_optimization() {
 }
 
 #[test]
-fn test_mvcc_enabled_allocates_snapshot_timestamp() {
+fn test_mvcc_allocates_snapshot_timestamp() {
     let path = "test_mvcc_enabled.db";
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
     let mut tx1 = db.begin_transaction().unwrap();
 
-    // With MVCC enabled, snapshot_ts should be > 0
+    // MVCC is always enabled - snapshot_ts should be > 0
     let ts1 = tx1.snapshot_ts();
     assert!(
         ts1 > 0,
-        "Snapshot timestamp should be > 0 when MVCC is enabled"
+        "Snapshot timestamp should be > 0 with MVCC"
     );
 
     let node = Node::new(1);
@@ -119,7 +116,6 @@ fn test_mvcc_timestamp_persists_across_reopen() {
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let last_ts = {
         let mut db = GraphDB::open_with_config(path, config.clone()).unwrap();
@@ -163,7 +159,6 @@ fn test_mvcc_rollback_unregisters_snapshot() {
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 
@@ -196,7 +191,6 @@ fn test_mvcc_multiple_concurrent_snapshots() {
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 
@@ -264,7 +258,6 @@ fn test_backwards_compatibility_non_mvcc_database() {
     // Reopen with MVCC enabled - should work (forward compatibility)
     {
         let mut config = Config::default();
-        config.mvcc_enabled = true;
 
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
@@ -288,7 +281,6 @@ fn test_mvcc_config_options() {
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.gc_interval_secs = Some(120);
     // TODO: Add max_version_chain_length and snapshot_retention_secs to Config
     // config.max_version_chain_length = 200;
@@ -310,7 +302,6 @@ fn test_mvcc_timestamp_oracle_initialization() {
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     // First open - should initialize timestamp oracle
     {
@@ -350,7 +341,6 @@ fn test_edge_mvcc_version_tracking() {
     let _ = fs::remove_file(format!("{path}-wal"));
 
     let mut config = Config::default();
-    config.mvcc_enabled = true;
 
     let mut db = GraphDB::open_with_config(path, config).unwrap();
 

@@ -20,7 +20,6 @@ fn setup_concurrent_db(path: &str) -> ConcurrentGraphDB {
     let _ = std::fs::remove_file(format!("{}.wal", path));
 
     let mut config = Config::balanced();
-    config.mvcc_enabled = true;
     ConcurrentGraphDB::open_with_config(path, config).unwrap()
 }
 
