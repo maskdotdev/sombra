@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.4...sombrajs-v0.6.0) (2025-10-30)
+
+
+### Features
+
+* **mvcc:** implement version chains with BTree checksum fix ([cd5854e](https://github.com/maskdotdev/sombra/commit/cd5854ed93e401846403eeb834a5f3c0f789e3bd))
+
 ## [0.5.4](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.5.3...sombrajs-v0.5.4) (2025-10-27)
 
 
