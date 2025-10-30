@@ -11,7 +11,7 @@ use std::fs;
 
 #[test]
 fn test_mvcc_allocates_snapshot_timestamp() {
-    let path = "test_mvcc_enabled.db";
+    let path = "test_mvcc.db";
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{path}.wal"));
 
@@ -159,13 +159,14 @@ fn test_backwards_compatibility_non_mvcc_database() {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{path}.wal"));
 
-    // Create database with MVCC disabled
+    // Create database and add data
     {
-        let config = Config::default(); // MVCC disabled by default
+        let config = Config::default();
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        assert_eq!(tx.snapshot_ts(), 0);
+        // MVCC is always on - snapshot timestamps are always allocated
+        assert!(tx.snapshot_ts() > 0);
 
         let node = Node::new(1);
         tx.add_node(node).unwrap();
@@ -176,31 +177,16 @@ fn test_backwards_compatibility_non_mvcc_database() {
         tx.commit().unwrap();
     }
 
-    // Reopen with MVCC still disabled - should work
+    // Reopen and verify data persists
     {
         let config = Config::default();
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        assert_eq!(tx.snapshot_ts(), 0);
+        assert!(tx.snapshot_ts() > 0);
 
         let node = tx.get_node(1).unwrap();
         assert!(node.is_some());
-
-        tx.commit().unwrap();
-    }
-
-    // Reopen with MVCC enabled - should work (forward compatibility)
-    {
-        let mut config = Config::default();
-
-        let mut db = GraphDB::open_with_config(path, config).unwrap();
-
-        let mut tx = db.begin_transaction().unwrap();
-        assert!(tx.snapshot_ts() > 0, "MVCC should work on old database");
-
-        let node = tx.get_node(1).unwrap();
-        assert!(node.is_some(), "Should be able to read old data");
 
         tx.commit().unwrap();
     }

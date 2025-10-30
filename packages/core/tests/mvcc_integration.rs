@@ -1,22 +1,14 @@
-//! Integration tests for MVCC (Multi-Version Concurrency Control) Phase 1
+//! Integration tests for MVCC (Multi-Version Concurrency Control)
 //!
 //! These tests verify that the MVCC infrastructure components are properly
 //! integrated into GraphDB, including:
 //! - Timestamp oracle initialization and restoration
 //! - Transaction snapshot timestamp allocation
-//! - MVCC mode enabled/disabled behavior
-//! - Backwards compatibility with non-MVCC databases
+//! - Backwards compatibility with legacy databases
 
 use sombra::model::PropertyValue;
 use sombra::{Config, Edge, GraphDB, Node};
 use std::fs;
-
-#[test]
-fn test_mvcc_disabled_by_default() {
-    let path = "test_mvcc_disabled.db";
-    let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{path}-wal"));
-}
 
 #[test]
 fn test_empty_transaction_optimization() {
@@ -24,7 +16,7 @@ fn test_empty_transaction_optimization() {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{path}-wal"));
 
-    // Test with MVCC disabled
+    // Test read-only transactions
     {
         let config = Config::default();
         let mut db = GraphDB::open_with_config(path, config).unwrap();
@@ -37,7 +29,7 @@ fn test_empty_transaction_optimization() {
         // WAL should not grow for empty transactions
     }
 
-    // Test with MVCC enabled
+    // Test multiple empty transactions
     {
         let mut config = Config::default();
 
@@ -53,7 +45,7 @@ fn test_empty_transaction_optimization() {
         // All should succeed without WAL writes
     }
 
-    // Test read-only transaction
+    // Test read-only transaction with actual reads
     {
         let mut config = Config::default();
 
@@ -76,7 +68,7 @@ fn test_empty_transaction_optimization() {
 
 #[test]
 fn test_mvcc_allocates_snapshot_timestamp() {
-    let path = "test_mvcc_enabled.db";
+    let path = "test_mvcc.db";
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{path}-wal"));
 
@@ -224,13 +216,14 @@ fn test_backwards_compatibility_non_mvcc_database() {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(format!("{path}.wal"));
 
-    // Create database with MVCC disabled
+    // Create database and add data
     {
-        let config = Config::default(); // MVCC disabled by default
+        let config = Config::default();
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        assert_eq!(tx.snapshot_ts(), 0);
+        // MVCC is always on - snapshot timestamps are always allocated
+        assert!(tx.snapshot_ts() > 0);
 
         let node = Node::new(1);
         tx.add_node(node).unwrap();
@@ -241,31 +234,16 @@ fn test_backwards_compatibility_non_mvcc_database() {
         tx.commit().unwrap();
     }
 
-    // Reopen with MVCC still disabled - should work
+    // Reopen and verify data persists
     {
         let config = Config::default();
         let mut db = GraphDB::open_with_config(path, config).unwrap();
 
         let mut tx = db.begin_transaction().unwrap();
-        assert_eq!(tx.snapshot_ts(), 0);
+        assert!(tx.snapshot_ts() > 0);
 
         let node = tx.get_node(1).unwrap();
         assert!(node.is_some());
-
-        tx.commit().unwrap();
-    }
-
-    // Reopen with MVCC enabled - should work (forward compatibility)
-    {
-        let mut config = Config::default();
-
-        let mut db = GraphDB::open_with_config(path, config).unwrap();
-
-        let mut tx = db.begin_transaction().unwrap();
-        assert!(tx.snapshot_ts() > 0, "MVCC should work on old database");
-
-        let node = tx.get_node(1).unwrap();
-        assert!(node.is_some(), "Should be able to read old data");
 
         tx.commit().unwrap();
     }

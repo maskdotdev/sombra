@@ -1,10 +1,10 @@
 #![allow(clippy::uninlined_format_args)]
 
-/// Test to reproduce checkpoint BIDX page error with MVCC enabled
+/// Test to reproduce checkpoint BIDX page error
 /// 
 /// Error from mvcc_performance.rs benchmark:
 /// InvalidArgument("not a record page (magic: \"BIDX\")")
-/// Occurs during `db.checkpoint()` with MVCC enabled
+/// Occurs during `db.checkpoint()`
 
 use sombra::{GraphDB, Node, Edge, PropertyValue, Result, Config};
 use tempfile::NamedTempFile;

@@ -182,8 +182,8 @@ impl Header {
         data[64..66].copy_from_slice(&self.property_index_version.to_le_bytes());
 
         // MVCC fields (version 1.3+) - always enabled
-        // Reserve byte 66 for future use (was mvcc_enabled flag)
-        data[66] = 1; // Always 1 to indicate MVCC is enabled
+        // Byte 66: Reserved for future use (historically stored mvcc_enabled flag, now always on)
+        data[66] = 1;
         data[67..75].copy_from_slice(&self.max_timestamp.to_le_bytes());
         data[75..83].copy_from_slice(&self.oldest_snapshot_ts.to_le_bytes());
 

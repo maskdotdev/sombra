@@ -25,7 +25,7 @@ fn test_property_index_mvcc_persistence_after_reopen() {
     let path = "test_property_index_mvcc_persist.db";
     cleanup_test_db(path);
 
-    // Create database with MVCC enabled
+    // Create database
     let mut config = Config::default();
 
     // Phase 1: Create property index and add versioned data
