@@ -335,8 +335,7 @@ fn bench_memory_usage() {
             tx.commit().unwrap();
         }
 
-        // Skip checkpoint for now due to BIDX page issue
-        // db.checkpoint().unwrap();
+        db.checkpoint().unwrap();
 
         let file_size = std::fs::metadata(path.to_str().unwrap())
             .map(|m| m.len())

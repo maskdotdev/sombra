@@ -27,6 +27,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct VersionTracker {
     /// Maps record ID to pointer of current version being written
+    #[allow(dead_code)]
     pub current_versions: HashMap<u64, RecordPointer>,
 }
 
@@ -39,11 +40,13 @@ impl VersionTracker {
     }
 
     /// Track a new version being written
+    #[allow(dead_code)]
     pub fn track_version(&mut self, record_id: u64, pointer: RecordPointer) {
         self.current_versions.insert(record_id, pointer);
     }
 
     /// Get the current version pointer for a record
+    #[allow(dead_code)]
     pub fn get_current_version(&self, record_id: u64) -> Option<RecordPointer> {
         self.current_versions.get(&record_id).copied()
     }
@@ -53,6 +56,7 @@ impl VersionTracker {
 #[derive(Debug, Clone)]
 pub struct VersionedRecord {
     /// Pointer to this version in storage
+    #[allow(dead_code)]
     pub pointer: RecordPointer,
     /// The version metadata
     pub metadata: VersionMetadata,
@@ -190,6 +194,7 @@ impl VersionChainReader {
     ///
     /// This is typically stored in an index that maps record IDs to their
     /// latest version pointers.
+    #[allow(dead_code)]
     pub fn get_latest_version_pointer(
         index: &HashMap<u64, RecordPointer>,
         record_id: u64,

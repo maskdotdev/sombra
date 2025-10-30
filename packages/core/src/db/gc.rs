@@ -105,6 +105,7 @@ impl GarbageCollector {
     /// # Arguments
     /// * `min_versions_per_record` - Minimum versions to keep (must be >= 1)
     /// * `scan_batch_size` - Number of versions to scan per batch
+    #[allow(dead_code)]
     pub fn with_settings(min_versions_per_record: usize, scan_batch_size: usize) -> Result<Self> {
         if min_versions_per_record == 0 {
             return Err(GraphError::InvalidArgument(
@@ -621,6 +622,7 @@ impl Default for GarbageCollector {
 
 /// Messages for controlling background GC
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum GcMessage {
     /// Trigger an immediate GC run
     Trigger,
@@ -636,8 +638,10 @@ pub struct GcConfig {
     /// Interval between GC runs in seconds (None = disabled)
     pub interval_secs: Option<u64>,
     /// Minimum versions to keep per record
+    #[allow(dead_code)]
     pub min_versions_per_record: usize,
     /// Batch size for scanning version chains
+    #[allow(dead_code)]
     pub scan_batch_size: usize,
 }
 
@@ -705,6 +709,7 @@ impl BackgroundGcState {
     }
 
     /// Triggers an immediate GC run
+    #[allow(dead_code)]
     pub fn trigger_gc(&self) -> Result<()> {
         self.sender
             .send(GcMessage::Trigger)

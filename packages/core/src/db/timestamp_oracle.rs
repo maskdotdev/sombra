@@ -32,15 +32,19 @@ use tracing::{debug, trace};
 #[derive(Debug, Clone)]
 pub struct SnapshotInfo {
     /// The timestamp when this snapshot was created
+    #[allow(dead_code)]
     pub ts: u64,
     /// Transaction ID that created this snapshot
+    #[allow(dead_code)]
     pub tx_id: u64,
     /// Whether this snapshot is still active (transaction not yet committed/aborted)
+    #[allow(dead_code)]
     pub is_active: bool,
 }
 
 /// Snapshot structure containing active transaction IDs
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Snapshot {
     /// The timestamp of this snapshot
     pub ts: u64,
@@ -206,6 +210,7 @@ impl TimestampOracle {
     ///
     /// # Returns
     /// A `Snapshot` containing the timestamp and active transaction IDs
+    #[allow(dead_code)]
     pub fn get_snapshot(&self, ts: u64) -> Result<Snapshot> {
         let snapshots = self
             .active_snapshots
@@ -250,6 +255,7 @@ impl TimestampOracle {
     ///
     /// # Errors
     /// Returns an error if `ts` is 0 (reserved value)
+    #[allow(dead_code)]
     pub fn set_current_timestamp(&self, ts: u64) -> Result<()> {
         if ts == 0 {
             return Err(GraphError::InvalidArgument(
@@ -268,6 +274,7 @@ impl TimestampOracle {
     ///
     /// # Returns
     /// A vector of all currently active snapshot informations
+    #[allow(dead_code)]
     pub fn active_snapshot_infos(&self) -> Result<Vec<SnapshotInfo>> {
         let snapshots = self
             .active_snapshots

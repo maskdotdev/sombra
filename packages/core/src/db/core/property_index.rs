@@ -444,6 +444,7 @@ impl GraphDB {
 
     /// Updates property index delete timestamps for a deleted node.
     /// This should be called at transaction commit time with the actual commit timestamp.
+    #[allow(dead_code)]
     pub(crate) fn update_property_index_delete_ts(&self, node_id: NodeId, delete_ts: u64) -> Result<()> {
         // Get the node's pointer - it might still be in the index even though marked as deleted
         let pointer = self

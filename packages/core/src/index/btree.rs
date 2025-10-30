@@ -8,6 +8,7 @@ use std::sync::Arc;
 const BTREE_MAGIC: &[u8; 4] = b"BIDX";
 const BTREE_VERSION: u16 = 1;
 const BTREE_HEADER_SIZE: usize = 8; // magic (4) + version (2) + reserved (2)
+#[allow(dead_code)]
 const ENTRY_SIZE: usize = 8 + 4 + 2 + 2;
 
 /// Lock-free BTreeIndex using DashMap for concurrent reads with MVCC support

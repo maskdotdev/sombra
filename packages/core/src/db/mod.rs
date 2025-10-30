@@ -11,7 +11,6 @@ pub(crate) mod mvcc_transaction;
 pub mod query;
 pub(crate) mod timestamp_oracle;
 mod transaction;
-pub(crate) mod write_coordinator;
 
 #[cfg(test)]
 mod tests;

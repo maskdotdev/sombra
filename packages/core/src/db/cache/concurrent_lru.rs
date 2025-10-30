@@ -96,16 +96,19 @@ where
     }
 
     /// Returns the current number of entries in the cache
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.size.load(Ordering::Relaxed)
     }
 
     /// Returns true if the cache is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the capacity of the cache
+    #[allow(dead_code)]
     pub fn cap(&self) -> usize {
         self.capacity
     }

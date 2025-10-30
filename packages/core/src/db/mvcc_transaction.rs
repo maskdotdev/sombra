@@ -16,12 +16,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct TransactionContext {
     /// Unique transaction ID
+    #[allow(dead_code)]
     pub tx_id: TxId,
     /// Snapshot timestamp (read timestamp)
     pub snapshot_ts: u64,
     /// Commit timestamp (0 until committed)
     pub commit_ts: u64,
     /// Set of records written by this transaction
+    #[allow(dead_code)]
     pub written_records: HashSet<u64>,
     /// Version tracker for this transaction
     pub _version_tracker: VersionTracker,
@@ -30,6 +32,7 @@ pub struct TransactionContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TransactionState {
     /// Transaction is active and accepting operations
     Active,
@@ -54,16 +57,19 @@ impl TransactionContext {
     }
 
     /// Mark a record as written by this transaction
+    #[allow(dead_code)]
     pub fn mark_written(&mut self, record_id: u64) {
         self.written_records.insert(record_id);
     }
 
     /// Check if a record was written by this transaction
+    #[allow(dead_code)]
     pub fn has_written(&self, record_id: u64) -> bool {
         self.written_records.contains(&record_id)
     }
 
     /// Begin commit preparation
+    #[allow(dead_code)]
     pub fn start_commit(&mut self) -> Result<()> {
         if self.state != TransactionState::Active {
             return Err(GraphError::InvalidArgument(
@@ -111,6 +117,7 @@ impl MvccTransactionManager {
     }
 
     /// Create a new MVCC transaction manager (for testing)
+    #[allow(dead_code)]
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             oracle: Arc::new(TimestampOracle::new()),
@@ -159,6 +166,7 @@ impl MvccTransactionManager {
     }
 
     /// Get a transaction context by ID
+    #[allow(dead_code)]
     pub fn get_transaction(&self, tx_id: TxId) -> Option<TransactionContext> {
         self.active_transactions
             .get(&tx_id)
@@ -176,6 +184,7 @@ impl MvccTransactionManager {
     /// Start preparing a transaction for commit
     ///
     /// This allocates a commit timestamp for the transaction
+    #[allow(dead_code)]
     pub fn prepare_commit(&self, tx_id: TxId) -> Result<u64> {
         let mut context = self
             .active_transactions
@@ -244,6 +253,7 @@ impl MvccTransactionManager {
     }
 
     /// Get the timestamp oracle
+    #[allow(dead_code)]
     pub fn oracle(&self) -> Arc<TimestampOracle> {
         self.oracle.clone()
     }
@@ -254,6 +264,7 @@ impl MvccTransactionManager {
     }
 
     /// Get all active transaction IDs
+    #[allow(dead_code)]
     pub fn active_tx_ids(&self) -> Vec<TxId> {
         self.active_transactions
             .iter()

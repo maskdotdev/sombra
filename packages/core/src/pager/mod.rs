@@ -12,11 +12,9 @@ use memmap2::MmapMut;
 use tracing::{error, warn};
 
 mod lock_free_page_cache;
-mod page_cache_hint;
 mod wal;
 
 pub(crate) use lock_free_page_cache::LockFreePageCache;
-pub(crate) use page_cache_hint::PageCacheHint;
 use wal::Wal;
 
 pub const DEFAULT_PAGE_SIZE: usize = 8192;
@@ -53,6 +51,7 @@ pub struct Pager {
     checksum_enabled: bool,
     shadow_pages: HashMap<PageId, Vec<u8>>,
     shadow_file_len: Option<u64>,
+    #[allow(dead_code)]
     max_size_bytes: Option<u64>,
 }
 

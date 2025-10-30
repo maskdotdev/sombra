@@ -313,7 +313,9 @@ impl GraphDB {
             if let Some(btree_start) = header.btree_index_page {
                 let btree_size = header.btree_index_size as usize;
                 let page_size = self.pager.page_size();
-                let btree_page_count = btree_size.div_ceil(page_size);
+                // Use usable page size (minus checksum) to match persist_btree_index calculation
+                let usable_page_size = page_size - PAGE_CHECKSUM_SIZE;
+                let btree_page_count = btree_size.div_ceil(usable_page_size);
                 (btree_start..btree_start + btree_page_count as u32).collect()
             } else {
                 std::collections::HashSet::new()
@@ -510,8 +512,11 @@ impl GraphDB {
             if let Some(btree_start) = header.btree_index_page {
                 let btree_size = header.btree_index_size as usize;
                 let page_size = self.pager.page_size();
-                let btree_page_count = btree_size.div_ceil(page_size);
-                (btree_start..btree_start + btree_page_count as u32).collect()
+                // Use usable page size (minus checksum) to match persist_btree_index calculation
+                let usable_page_size = page_size - PAGE_CHECKSUM_SIZE;
+                let btree_page_count = btree_size.div_ceil(usable_page_size);
+                let pages: std::collections::HashSet<PageId> = (btree_start..btree_start + btree_page_count as u32).collect();
+                pages
             } else {
                 std::collections::HashSet::new()
             }

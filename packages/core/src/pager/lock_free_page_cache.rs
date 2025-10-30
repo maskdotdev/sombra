@@ -68,6 +68,7 @@ impl LockFreePageCache {
     }
 
     /// Write a page - acquires write lock and invalidates cache
+    #[allow(dead_code)]
     pub fn write_page(&self, page_id: PageId, data: &[u8]) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
 
@@ -83,18 +84,21 @@ impl LockFreePageCache {
     }
 
     /// Allocate a new page
+    #[allow(dead_code)]
     pub fn allocate_page(&self) -> Result<PageId> {
         let mut pager = self.pager.write().unwrap();
         pager.allocate_page()
     }
 
     /// Flush dirty pages to disk
+    #[allow(dead_code)]
     pub fn flush(&self) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.flush()
     }
 
     /// Sync WAL to disk
+    #[allow(dead_code)]
     pub fn sync_wal(&self) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.sync_wal()
@@ -125,42 +129,49 @@ impl LockFreePageCache {
     }
 
     /// Flush specific pages
+    #[allow(dead_code)]
     pub fn flush_pages(&self, page_ids: &[PageId], tx_id: u64) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.flush_pages(page_ids, tx_id)
     }
 
     /// Ensure shadow page exists
+    #[allow(dead_code)]
     pub fn ensure_shadow(&self, page_id: PageId) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.ensure_shadow(page_id)
     }
 
     /// Begin shadow transaction
+    #[allow(dead_code)]
     pub fn begin_shadow_transaction(&self) {
         let mut pager = self.pager.write().unwrap();
         pager.begin_shadow_transaction()
     }
 
     /// Commit shadow transaction
+    #[allow(dead_code)]
     pub fn commit_shadow_transaction(&self) {
         let mut pager = self.pager.write().unwrap();
         pager.commit_shadow_transaction()
     }
 
     /// Rollback shadow transaction
+    #[allow(dead_code)]
     pub fn rollback_shadow_transaction(&self) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.rollback_shadow_transaction()
     }
 
     /// Restore pages
+    #[allow(dead_code)]
     pub fn restore_pages(&self, page_ids: &[PageId]) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.restore_pages(page_ids)
     }
 
     /// Append to WAL
+    #[allow(dead_code)]
     pub fn append_to_wal(&self, page_id: PageId, tx_id: u64, page_bytes: &[u8]) -> Result<()> {
         let mut pager = self.pager.write().unwrap();
         pager.append_to_wal(page_id, tx_id, page_bytes)
@@ -205,6 +216,7 @@ impl LockFreePageCache {
     }
 
     /// Get the underlying pager for read operations
+    #[allow(dead_code)]
     pub fn with_pager_read<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&Pager) -> Result<R>,
@@ -214,6 +226,7 @@ impl LockFreePageCache {
     }
 
     /// Clear the cache (useful for testing)
+    #[allow(dead_code)]
     pub fn clear_cache(&self) {
         self.cache.clear();
     }
@@ -227,6 +240,7 @@ impl LockFreePageCache {
     }
 
     /// Get cache statistics
+    #[allow(dead_code)]
     pub fn cache_size(&self) -> usize {
         self.cache.len()
     }

@@ -13,7 +13,7 @@ use crate::db::cache::ConcurrentLruCache;
 use crate::error::{GraphError, Result};
 use crate::index::{BTreeIndex, VersionedIndexEntries};
 use crate::model::{Edge, EdgeId, Node, NodeId, PropertyValue};
-use crate::pager::{LockFreePageCache, PageCacheHint, PageId, Pager, PAGE_CHECKSUM_SIZE};
+use crate::pager::{LockFreePageCache, PageId, Pager, PAGE_CHECKSUM_SIZE};
 use crate::storage::header::Header;
 use crate::storage::heap::RecordStore;
 use crate::storage::page::RecordPage;
@@ -28,7 +28,6 @@ use crate::db::metrics::{ConcurrencyMetrics, PerformanceMetrics};
 use crate::db::mvcc_transaction::MvccTransactionManager;
 use crate::db::timestamp_oracle::TimestampOracle;
 use crate::db::transaction::Transaction;
-use crate::db::write_coordinator::WriteCoordinator;
 
 /// Values that can be indexed for fast property-based lookups.
 ///
@@ -179,8 +178,6 @@ pub struct GraphDB {
     pub(crate) path: PathBuf,
     // Phase 3B: Lock-free page cache wrapper (replaces RwLock<Pager>)
     pub(crate) pager: Arc<LockFreePageCache>,
-    // Lock-free page cache hint for read optimization (Phase 3B - kept for compatibility)
-    pub(crate) page_cache_hint: Arc<PageCacheHint>,
     // Phase 5: Full interior mutability - header wrapped in Mutex
     pub header: Mutex<HeaderState>,
     pub(crate) epoch: AtomicU64,
@@ -219,8 +216,6 @@ pub struct GraphDB {
     // File locking to prevent multi-process corruption
     #[allow(dead_code)]
     lock_file: Option<File>,
-    // Phase 4: Write coordination for WAL/checkpoint
-    pub(crate) write_coordinator: Arc<Mutex<WriteCoordinator>>,
 }
 
 impl std::fmt::Debug for GraphDB {
@@ -419,7 +414,6 @@ impl GraphDB {
             path: path_ref.to_path_buf(),
             // Phase 3B: Wrap pager in lock-free cache
             pager: Arc::new(LockFreePageCache::new(pager, cache_size.get() * 2)),
-            page_cache_hint: Arc::new(PageCacheHint::new(cache_size.get() * 2)),
             // Phase 5: Full interior mutability - header wrapped in Mutex
             header: Mutex::new(HeaderState::from(header.clone())),
             epoch: AtomicU64::new(0),
@@ -450,9 +444,6 @@ impl GraphDB {
             // Phase 5: Lock-free MVCC manager (no RwLock wrapper)
             mvcc_tx_manager: mvcc_tx_manager.map(Arc::new),
             lock_file: Some(lock_file),
-            write_coordinator: Arc::new(Mutex::new(WriteCoordinator::new(HeaderState::from(
-                header,
-            )))),
         };
 
         // Update header to reflect MVCC state

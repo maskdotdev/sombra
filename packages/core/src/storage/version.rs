@@ -45,6 +45,7 @@ impl VersionFlags {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_deleted(self) -> bool {
         self == VersionFlags::Deleted
     }
@@ -159,11 +160,13 @@ impl VersionMetadata {
     }
 
     /// Checks if this version is deleted
+    #[allow(dead_code)]
     pub fn is_deleted(&self) -> bool {
         self.flags.is_deleted()
     }
 
     /// Checks if this version is committed
+    #[allow(dead_code)]
     pub fn is_committed(&self) -> bool {
         self.commit_ts != 0
     }
@@ -209,6 +212,7 @@ impl VersionedRecordKind {
     }
 
     /// Gets the corresponding base record kind
+    #[allow(dead_code)]
     pub fn base_kind(self) -> crate::storage::record::RecordKind {
         use crate::storage::record::RecordKind;
         match self {

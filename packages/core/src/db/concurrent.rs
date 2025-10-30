@@ -744,6 +744,12 @@ impl ConcurrentTransaction {
             // Register dirty pages from version updates
             Ok(record_store.take_dirty_pages())
         })?;
+        
+        // Invalidate cache entries for modified pages
+        for &page_id in &version_dirty_pages {
+            db.record_page_write(page_id);
+        }
+        
         self.dirty_pages.extend(version_dirty_pages);
 
         // Update label index entries with commit timestamp
@@ -908,11 +914,11 @@ mod tests {
                 let db = db.clone();
                 let ids = Arc::clone(&created_ids);
                 s.spawn(move || {
-                    let mut tx = db.begin_transaction().unwrap();
+                    let mut tx = db.begin_transaction().expect(&format!("Thread {} failed to begin transaction", i));
                     let mut node = Node::new(0); // ID will be assigned by DB
                     node.labels.push(format!("Node{}", i));
-                    let node_id = tx.add_node(node).unwrap();
-                    tx.commit().unwrap();
+                    let node_id = tx.add_node(node).expect(&format!("Thread {} failed to add node", i));
+                    tx.commit().expect(&format!("Thread {} failed to commit", i));
 
                     // Track the created ID
                     ids.lock().unwrap().push(node_id);
