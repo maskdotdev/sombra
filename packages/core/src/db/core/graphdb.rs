@@ -199,9 +199,8 @@ pub struct GraphDB {
     pub(crate) tracking_enabled: AtomicBool,
     // Wrapped in Mutex for interior mutability
     pub(crate) recent_dirty_pages: Mutex<Vec<PageId>>,
-    // Phase 5: Removed active_transaction - MVCC manager handles transaction state
-    // Phase 5: Lock-free MVCC manager (no RwLock wrapper needed)
-    pub(crate) mvcc_tx_manager: Option<Arc<MvccTransactionManager>>,
+    // MVCC transaction manager - always present
+    pub(crate) mvcc_tx_manager: Arc<MvccTransactionManager>,
     pub(crate) config: Config,
     pub(crate) transactions_since_sync: AtomicUsize,
     pub(crate) transactions_since_checkpoint: AtomicUsize,
@@ -209,9 +208,9 @@ pub struct GraphDB {
     pub metrics: PerformanceMetrics,
     pub concurrency_metrics: Arc<ConcurrencyMetrics>,
     pub(crate) pages_with_free_slots: Arc<DashSet<PageId>>, // DashSet is lock-free
-    // MVCC support
-    pub(crate) timestamp_oracle: Option<Arc<TimestampOracle>>,
-    pub(crate) gc: Option<GarbageCollector>,
+    // MVCC support - always present
+    pub(crate) timestamp_oracle: Arc<TimestampOracle>,
+    pub(crate) gc: GarbageCollector,
     pub(crate) bg_gc_state: Option<Arc<Mutex<BackgroundGcState>>>,
     // File locking to prevent multi-process corruption
     #[allow(dead_code)]
@@ -382,33 +381,20 @@ impl GraphDB {
                 GraphError::InvalidArgument("edge cache size must be greater than zero".into())
             })?;
 
-        // Initialize MVCC components if enabled
-        let (timestamp_oracle, gc, bg_gc_state, mvcc_tx_manager) = if config.mvcc_enabled {
-            // Restore timestamp oracle from persisted state if available
-            let oracle = if header.max_timestamp > 0 {
-                Arc::new(TimestampOracle::with_timestamp(header.max_timestamp)?)
-            } else {
-                Arc::new(TimestampOracle::new())
-            };
-            let collector = GarbageCollector::new();
-
-            // Start background GC if configured
-            let bg_gc = if let Some(_interval_secs) = config.gc_interval_secs {
-                // Note: Background GC will be started via start_background_gc() after construction
-                None
-            } else {
-                None
-            };
-
-            // Create MVCC transaction manager with shared oracle
-            let max_concurrent = config.max_concurrent_transactions.unwrap_or(100);
-            let tx_manager =
-                MvccTransactionManager::new_with_oracle(oracle.clone(), max_concurrent);
-
-            (Some(oracle), Some(collector), bg_gc, Some(tx_manager))
+        // Initialize MVCC components - always enabled
+        let oracle = if header.max_timestamp > 0 {
+            Arc::new(TimestampOracle::with_timestamp(header.max_timestamp)?)
         } else {
-            (None, None, None, None)
+            Arc::new(TimestampOracle::new())
         };
+        let collector = GarbageCollector::new();
+
+        // Background GC will be started via start_background_gc() if configured
+        let bg_gc_state = None;
+
+        // Create MVCC transaction manager with shared oracle
+        let max_concurrent = config.max_concurrent_transactions.unwrap_or(100);
+        let mvcc_tx_manager = MvccTransactionManager::new_with_oracle(oracle.clone(), max_concurrent);
 
         let db = Self {
             path: path_ref.to_path_buf(),
@@ -438,18 +424,12 @@ impl GraphDB {
             metrics: PerformanceMetrics::new(),
             concurrency_metrics: Arc::new(ConcurrencyMetrics::new()),
             pages_with_free_slots: Arc::new(DashSet::new()), // DashSet instead of RwLock<BTreeSet>
-            timestamp_oracle,
-            gc,
+            timestamp_oracle: oracle,
+            gc: collector,
             bg_gc_state,
-            // Phase 5: Lock-free MVCC manager (no RwLock wrapper)
-            mvcc_tx_manager: mvcc_tx_manager.map(Arc::new),
+            mvcc_tx_manager: Arc::new(mvcc_tx_manager),
             lock_file: Some(lock_file),
         };
-
-        // Update header to reflect MVCC state
-        if db.config.mvcc_enabled {
-            db.header.lock().unwrap().mvcc_enabled = true;
-        }
 
         if db.load_btree_index()? {
             info!("Loaded existing BTree index");
@@ -543,10 +523,8 @@ impl GraphDB {
         self.persist_btree_index()?;
         self.persist_property_indexes()?;
 
-        // Update timestamp in header if MVCC is enabled
-        if let Some(ref oracle) = self.timestamp_oracle {
-            self.header.lock().unwrap().max_timestamp = oracle.current_timestamp();
-        }
+        // Update timestamp in header
+        self.header.lock().unwrap().max_timestamp = self.timestamp_oracle.current_timestamp();
 
         self.write_header()?;
 
@@ -1030,15 +1008,6 @@ impl GraphDB {
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn run_gc(&mut self) -> Result<GcStats> {
-        // Ensure MVCC is enabled
-        let gc = self.gc.as_ref().ok_or_else(|| {
-            GraphError::InvalidArgument("MVCC is not enabled, cannot run GC".into())
-        })?;
-
-        let oracle = self.timestamp_oracle.as_ref().ok_or_else(|| {
-            GraphError::InvalidArgument("MVCC is not enabled, timestamp oracle not found".into())
-        })?;
-
         // Get all node IDs from the index to scan their version chains
         let record_ids = self.node_index.iter().into_iter();
 
@@ -1047,7 +1016,7 @@ impl GraphDB {
             let mut record_store = RecordStore::new(pager);
 
             // Run GC
-            let result = gc.run_gc(&mut record_store, record_ids, oracle)?;
+            let result = self.gc.run_gc(&mut record_store, record_ids, &self.timestamp_oracle)?;
 
             // Register dirty pages from GC operations
             let dirty_pages = record_store.take_dirty_pages();
@@ -1078,19 +1047,12 @@ impl GraphDB {
     /// use sombra::{GraphDB, Config};
     ///
     /// let mut config = Config::default();
-    /// config.mvcc_enabled = true;
     /// config.gc_interval_secs = Some(60); // Run GC every minute
     /// let mut db = GraphDB::open_with_config("test.db", config)?;
     /// db.start_background_gc()?;
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn start_background_gc(&mut self) -> Result<()> {
-        if !self.config.mvcc_enabled {
-            return Err(GraphError::InvalidArgument(
-                "MVCC is not enabled, cannot start background GC".into(),
-            ));
-        }
-
         if self.config.gc_interval_secs.is_none() {
             return Err(GraphError::InvalidArgument(
                 "gc_interval_secs not configured, cannot start background GC".into(),
@@ -1101,11 +1063,6 @@ impl GraphDB {
             return Ok(()); // Already running
         }
 
-        let oracle = self
-            .timestamp_oracle
-            .as_ref()
-            .ok_or_else(|| GraphError::InvalidArgument("timestamp oracle not found".into()))?;
-
         // Create GC configuration
         let gc_config = GcConfig {
             enabled: true,
@@ -1115,7 +1072,7 @@ impl GraphDB {
         };
 
         // Create background GC state
-        let bg_gc = BackgroundGcState::spawn(self.path.clone(), gc_config, oracle.clone())?;
+        let bg_gc = BackgroundGcState::spawn(self.path.clone(), gc_config, self.timestamp_oracle.clone())?;
 
         // Store bg_gc_state for later shutdown
         self.bg_gc_state = Some(bg_gc);
@@ -1181,18 +1138,14 @@ impl GraphDB {
 
         if self.is_in_transaction() {
             warn!("Active transaction detected during close, rolling back");
-            // In MVCC mode, end all active transactions (now lock-free)
-            if let Some(ref tx_manager) = self.mvcc_tx_manager {
-                tx_manager.end_all_transactions();
-            }
+            // End all active transactions
+            self.mvcc_tx_manager.end_all_transactions();
         }
 
         self.persist_btree_index()?;
 
-        // Update timestamp in header if MVCC is enabled
-        if let Some(ref oracle) = self.timestamp_oracle {
-            self.header.lock().unwrap().max_timestamp = oracle.current_timestamp();
-        }
+        // Update timestamp in header
+        self.header.lock().unwrap().max_timestamp = self.timestamp_oracle.current_timestamp();
 
         self.write_header()?;
 

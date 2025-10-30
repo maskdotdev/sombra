@@ -674,8 +674,12 @@ impl GraphDB {
             let edge_ids = entry.value();
             let mut neighbors = Vec::with_capacity(edge_ids.len());
             for &edge_id in edge_ids.iter() {
-                let edge = self.load_edge(edge_id)?;
-                neighbors.push(edge.target_node_id);
+                // Skip deleted edges (they return NotFound due to tombstone check)
+                match self.load_edge(edge_id) {
+                    Ok(edge) => neighbors.push(edge.target_node_id),
+                    Err(GraphError::NotFound(_)) => continue, // Skip tombstoned edges
+                    Err(e) => return Err(e),
+                }
             }
             self.outgoing_neighbors_cache.insert(node_id, neighbors);
         }
@@ -685,8 +689,12 @@ impl GraphDB {
             let edge_ids = entry.value();
             let mut neighbors = Vec::with_capacity(edge_ids.len());
             for &edge_id in edge_ids.iter() {
-                let edge = self.load_edge(edge_id)?;
-                neighbors.push(edge.source_node_id);
+                // Skip deleted edges (they return NotFound due to tombstone check)
+                match self.load_edge(edge_id) {
+                    Ok(edge) => neighbors.push(edge.source_node_id),
+                    Err(GraphError::NotFound(_)) => continue, // Skip tombstoned edges
+                    Err(e) => return Err(e),
+                }
             }
             self.incoming_neighbors_cache.insert(node_id, neighbors);
         }

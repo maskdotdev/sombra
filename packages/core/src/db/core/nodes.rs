@@ -4,7 +4,8 @@ use crate::index::VersionedIndexEntries;
 use crate::model::{Node, NodeId, NULL_EDGE_ID};
 use crate::storage::deserialize_node;
 use crate::storage::heap::RecordStore;
-use crate::storage::record::{encode_record, RecordKind};
+use crate::storage::page::RecordPage;
+use crate::storage::record::RecordKind;
 use crate::storage::serialize_node;
 use crate::storage::version_chain::VersionChainReader;
 use dashmap::DashMap;
@@ -18,14 +19,8 @@ impl GraphDB {
 
         // Call add_node_internal with tx_id and commit_ts
         // Note: commit_ts is allocated here since this is auto-committed
-        let commit_ts = if self.config.mvcc_enabled {
-            self.timestamp_oracle
-                .as_ref()
-                .map(|oracle| oracle.allocate_commit_timestamp())
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let commit_ts = self.timestamp_oracle
+            .allocate_commit_timestamp();
 
         let (node_id, _version_ptr) = self.add_node_internal(node, tx_id, commit_ts)?;
 
@@ -77,44 +72,36 @@ impl GraphDB {
 
         let payload = serialize_node(&node)?;
 
-        // Use store_new_version if MVCC enabled, otherwise legacy record format
-        let (pointer, version_pointer) = if self.config.mvcc_enabled {
-            use crate::storage::version_chain::store_new_version;
+        // Create new version with MVCC support
+        use crate::storage::version_chain::store_new_version;
 
-            let (pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
-                let mut record_store = RecordStore::new(pager);
-                let pointer = store_new_version(
-                    &mut record_store,
-                    None, // No previous version
-                    node_id,
-                    RecordKind::Node,
-                    &payload,
-                    tx_id,
-                    commit_ts,
-                    false, // Not deleted
-                )?;
+        let (pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
+            let mut record_store = RecordStore::new(pager);
+            let pointer = store_new_version(
+                &mut record_store,
+                None, // No previous version
+                node_id,
+                RecordKind::Node,
+                &payload,
+                tx_id,
+                commit_ts,
+                false, // Not deleted
+            )?;
 
-                // Collect dirty pages and return them for atomic invalidation
-                // Cache invalidation happens atomically while holding the pager write lock,
-                // preventing other threads from caching stale data between write and invalidation
-                let dirty_pages = record_store.take_dirty_pages();
-                Ok((pointer, dirty_pages))
-            })?;
+            // Collect dirty pages and return them for atomic invalidation
+            // Cache invalidation happens atomically while holding the pager write lock,
+            // preventing other threads from caching stale data between write and invalidation
+            let dirty_pages = record_store.take_dirty_pages();
+            Ok((pointer, dirty_pages))
+        })?;
 
-            // Track dirty pages for transaction support (cache already invalidated atomically)
-            if self.tracking_enabled.load(std::sync::atomic::Ordering::Acquire) {
-                let mut recent = self.recent_dirty_pages.lock().unwrap();
-                recent.extend(dirty_pages);
-            }
+        // Track dirty pages for transaction support (cache already invalidated atomically)
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Acquire) {
+            let mut recent = self.recent_dirty_pages.lock().unwrap();
+            recent.extend(dirty_pages);
+        }
 
-            (pointer, Some(pointer))
-        } else {
-            // Legacy non-versioned record
-            let record = encode_record(RecordKind::Node, &payload)?;
-            let preferred = self.header.lock().unwrap().last_record_page;
-            let pointer = self.insert_record(&record, preferred)?;
-            (pointer, None)
-        };
+        let version_pointer = Some(pointer);
 
         self.node_index.insert(node_id, pointer);
 
@@ -275,15 +262,9 @@ impl GraphDB {
         // Allocate a single transaction ID for the bulk operation
         let tx_id = self.allocate_tx_id()?;
 
-        // Allocate commit timestamp if MVCC enabled
-        let commit_ts = if self.config.mvcc_enabled {
-            self.timestamp_oracle
-                .as_ref()
-                .map(|oracle| oracle.allocate_commit_timestamp())
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        // Allocate commit timestamp for MVCC
+        let commit_ts = self.timestamp_oracle
+            .allocate_commit_timestamp();
 
         for node in nodes {
             // Use add_node_internal which handles both create and update
@@ -296,11 +277,7 @@ impl GraphDB {
 
     pub fn delete_nodes_bulk(&mut self, node_ids: &[NodeId]) -> Result<()> {
         let tx_id = self.allocate_tx_id()?;
-        let commit_ts = self
-            .timestamp_oracle
-            .as_ref()
-            .map(|oracle| oracle.allocate_commit_timestamp())
-            .unwrap_or(0);
+        let commit_ts = self.timestamp_oracle.allocate_commit_timestamp();
         
         for &node_id in node_ids {
             self.delete_node_internal(node_id, tx_id, commit_ts)?;
@@ -312,11 +289,7 @@ impl GraphDB {
 
     pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
         let tx_id = self.allocate_tx_id()?;
-        let commit_ts = self
-            .timestamp_oracle
-            .as_ref()
-            .map(|oracle| oracle.allocate_commit_timestamp())
-            .unwrap_or(0);
+        let commit_ts = self.timestamp_oracle.allocate_commit_timestamp();
         
         self.delete_node_internal(node_id, tx_id, commit_ts)?;
         Ok(())
@@ -359,26 +332,15 @@ impl GraphDB {
             self.delete_edge_internal(edge_id)?;
         }
 
-        // Mark label index entries as deleted (for MVCC)
-        // For non-MVCC mode, we can safely remove them
+        // Mark label index entries as deleted (MVCC tombstone approach)
         for label in &node.labels {
             if let Some(label_map) = self.label_index.get(label) {
-                if self.config.mvcc_enabled {
-                    // Mark as deleted at current timestamp
-                    if let Some(entries) = label_map.get(&node_id) {
-                        let delete_ts = self
-                            .timestamp_oracle
-                            .as_ref()
-                            .map(|oracle| oracle.allocate_commit_timestamp())
-                            .unwrap_or(0);
-                        entries.lock().unwrap().mark_deleted(delete_ts);
-                    }
-                } else {
-                    // Non-MVCC: remove immediately
-                    label_map.remove(&node_id);
-                    if label_map.is_empty() {
-                        self.label_index.remove(label);
-                    }
+                // Mark as deleted at current timestamp
+                if let Some(entries) = label_map.get(&node_id) {
+                    let delete_ts = self
+                        .timestamp_oracle
+                        .allocate_commit_timestamp();
+                    entries.lock().unwrap().mark_deleted(delete_ts);
                 }
             }
         }
@@ -387,47 +349,40 @@ impl GraphDB {
 
         self.node_cache.pop(&node_id);
 
-        // In MVCC mode, create a tombstone version to mark the node as deleted
-        if self.config.mvcc_enabled {
-            use crate::storage::version_chain::store_new_version;
+        // Create a tombstone version to mark the node as deleted (MVCC)
+        use crate::storage::version_chain::store_new_version;
+        
+        let payload = serialize_node(&node)?;
+        
+        let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
+            let mut record_store = RecordStore::new(pager);
             
-            let payload = serialize_node(&node)?;
+            // store_new_version with is_deleted=true creates a tombstone
+            // Use tx_id and commit_ts from parameters (commit_ts will be 0 for pending)
+            let tombstone_ptr = store_new_version(
+                &mut record_store,
+                Some(pointer), // Link to previous version
+                node_id,
+                RecordKind::Node,
+                &payload,
+                tx_id,
+                commit_ts,
+                true, // is_deleted: true to create tombstone
+            )?;
             
-            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
-                let mut record_store = RecordStore::new(pager);
-                
-                // store_new_version with is_deleted=true creates a tombstone
-                // Use tx_id and commit_ts from parameters (commit_ts will be 0 for pending)
-                let tombstone_ptr = store_new_version(
-                    &mut record_store,
-                    Some(pointer), // Link to previous version
-                    node_id,
-                    RecordKind::Node,
-                    &payload,
-                    tx_id,
-                    commit_ts,
-                    true, // is_deleted: true to create tombstone
-                )?;
-                
-                let dirty_pages = record_store.take_dirty_pages();
-                Ok((tombstone_ptr, dirty_pages.clone()))
-            })?;
-            
-            // Track dirty pages for transaction if needed
-            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
-            }
-            
-            // Update index to point to tombstone (keeps node in index for snapshot isolation)
-            self.node_index.insert(node_id, tombstone_ptr);
-            
-            Ok(Some(tombstone_ptr))
-        } else {
-            // Non-MVCC mode: Remove from index and free storage
-            self.node_index.remove(&node_id);
-            self.free_record(pointer)?;
-            Ok(None)
+            let dirty_pages = record_store.take_dirty_pages();
+            Ok((tombstone_ptr, dirty_pages.clone()))
+        })?;
+        
+        // Track dirty pages for transaction if needed
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
         }
+        
+        // Update index to point to tombstone (keeps node in index for snapshot isolation)
+        self.node_index.insert(node_id, tombstone_ptr);
+        
+        Ok(Some(tombstone_ptr))
     }
 
     pub fn get_node(&self, node_id: NodeId) -> Result<Option<Node>> {
@@ -447,6 +402,34 @@ impl GraphDB {
             Some(p) => p,
             None => return Ok(None),
         };
+        
+        // With MVCC, check if the latest version is a tombstone (deleted)
+        let page = self.pager.fetch_page(pointer.page_id)?;
+        let mut page_data = page.data.clone();
+        let record_page = RecordPage::from_bytes(&mut page_data)?;
+        let record = record_page.record_slice(pointer.slot_index as usize)?;
+        
+        // Check if this is a versioned record
+        let kind_byte = record[0];
+        let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+        
+        if is_versioned {
+            // Read version metadata to check for deletion flag
+            use crate::storage::version::VersionMetadata;
+            const RECORD_HEADER_SIZE: usize = 8;
+            if record.len() < RECORD_HEADER_SIZE + 25 {
+                return Err(crate::error::GraphError::Corruption(
+                    "versioned record too small".into(),
+                ));
+            }
+            let metadata = VersionMetadata::from_bytes(&record[RECORD_HEADER_SIZE..])?;
+            use crate::storage::version::VersionFlags;
+            if metadata.flags == VersionFlags::Deleted {
+                // Latest version is deleted
+                return Ok(None);
+            }
+        }
+        
         let node = self.read_node_at(pointer)?;
         self.node_cache.put(node_id, node.clone());
         Ok(Some(node))
@@ -474,11 +457,6 @@ impl GraphDB {
     ) -> Result<Option<Node>> {
         // TODO: Re-enable metrics with interior mutability (AtomicU64)
         // self.metrics.node_lookups += 1;
-
-        // If MVCC is not enabled, fall back to regular get_node
-        if !self.config.mvcc_enabled {
-            return self.get_node(node_id);
-        }
 
         // Get all version pointers from the index (latest first)
         let version_pointers = match self.node_index.get(&node_id) {
@@ -536,11 +514,7 @@ impl GraphDB {
                         let has_active = {
                             let entries_guard = entries.lock().unwrap();
                             // For backward compatibility, use current timestamp
-                            let snapshot_ts = self
-                                .timestamp_oracle
-                                .as_ref()
-                                .map(|oracle| oracle.current_timestamp())
-                                .unwrap_or(u64::MAX);
+                            let snapshot_ts = self.timestamp_oracle.current_timestamp();
                             entries_guard.is_visible_at(snapshot_ts)
                         };
                         
@@ -573,11 +547,6 @@ impl GraphDB {
         label: &str,
         snapshot_ts: u64,
     ) -> Result<Vec<NodeId>> {
-        // If MVCC is not enabled, fall back to regular get_nodes_by_label
-        if !self.config.mvcc_enabled {
-            return self.get_nodes_by_label(label);
-        }
-
         Ok(self
             .label_index
             .get(label)

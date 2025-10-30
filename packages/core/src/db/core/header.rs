@@ -16,7 +16,6 @@ pub struct HeaderState {
     pub property_index_root_page: Option<PageId>,
     pub property_index_count: u32,
     pub property_index_version: u16,
-    pub mvcc_enabled: bool,
     pub max_timestamp: u64,
     pub oldest_snapshot_ts: u64,
 }
@@ -34,7 +33,6 @@ impl From<Header> for HeaderState {
             property_index_root_page: header.property_index_root_page,
             property_index_count: header.property_index_count,
             property_index_version: header.property_index_version,
-            mvcc_enabled: header.mvcc_enabled,
             max_timestamp: header.max_timestamp,
             oldest_snapshot_ts: header.oldest_snapshot_ts,
         }
@@ -54,7 +52,6 @@ impl HeaderState {
         header.property_index_root_page = self.property_index_root_page;
         header.property_index_count = self.property_index_count;
         header.property_index_version = self.property_index_version;
-        header.mvcc_enabled = self.mvcc_enabled;
         header.max_timestamp = self.max_timestamp;
         header.oldest_snapshot_ts = self.oldest_snapshot_ts;
         Ok(header)

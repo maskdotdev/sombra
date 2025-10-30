@@ -188,9 +188,7 @@ impl GraphDB {
 
     pub fn enter_transaction(&self, tx_id: TxId) -> Result<()> {
         // Register transaction with MVCC manager (lock-free)
-        if let Some(ref tx_manager) = self.mvcc_tx_manager {
-            tx_manager.begin_transaction(tx_id)?;
-        }
+        self.mvcc_tx_manager.begin_transaction(tx_id)?;
         self.pager.with_pager_write(|pager| {
             pager.begin_shadow_transaction();
             Ok(())
@@ -200,17 +198,11 @@ impl GraphDB {
 
     pub fn exit_transaction(&self, tx_id: TxId) {
         // End the transaction in the MVCC manager
-        if let Some(ref tx_manager) = self.mvcc_tx_manager {
-            let _ = tx_manager.end_transaction(tx_id);
-        }
+        let _ = self.mvcc_tx_manager.end_transaction(tx_id);
     }
 
     pub(crate) fn is_in_transaction(&self) -> bool {
-        if let Some(ref tx_manager) = self.mvcc_tx_manager {
-            tx_manager.active_count() > 0
-        } else {
-            false
-        }
+        self.mvcc_tx_manager.active_count() > 0
     }
 
     pub fn write_header(&self) -> Result<()> {

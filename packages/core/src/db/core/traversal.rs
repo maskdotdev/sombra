@@ -723,11 +723,6 @@ impl GraphDB {
         snapshot_ts: u64,
         current_tx_id: Option<crate::db::TxId>,
     ) -> Result<Vec<NodeId>> {
-        // If MVCC is not enabled, fall back to regular get_neighbors
-        if !self.config.mvcc_enabled {
-            return self.get_neighbors(node_id);
-        }
-
         let node = self
             .get_node_with_snapshot(node_id, snapshot_ts, current_tx_id)?
             .ok_or(GraphError::NotFound("node"))?;
@@ -772,11 +767,6 @@ impl GraphDB {
         snapshot_ts: u64,
         current_tx_id: Option<crate::db::TxId>,
     ) -> Result<Vec<NodeId>> {
-        // If MVCC is not enabled, fall back to regular get_incoming_neighbors
-        if !self.config.mvcc_enabled {
-            return self.get_incoming_neighbors(node_id);
-        }
-
         let node = self
             .get_node_with_snapshot(node_id, snapshot_ts, current_tx_id)?
             .ok_or(GraphError::NotFound("node"))?;

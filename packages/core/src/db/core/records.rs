@@ -17,7 +17,7 @@ impl GraphDB {
             return Ok(edge.clone());
         }
 
-        // Phase 4A: Use get_latest() to get the most recent version
+        // Use get_latest() to get the most recent committed version
         let pointer = self
             .edge_index
             .get_latest(&edge_id)
@@ -40,13 +40,26 @@ impl GraphDB {
         let payload_len = header.payload_length as usize;
 
         let edge = if is_versioned {
-            // For versioned records, skip the 25-byte metadata header
+            // For versioned records, check for tombstone first
             // Layout: [RecordHeader: 8][VersionMetadata: 25][Payload: N]
-            // payload_len includes metadata, so actual data starts at offset 33
             const VERSION_METADATA_SIZE: usize = 25;
             if payload_len < VERSION_METADATA_SIZE {
                 return Err(GraphError::Corruption("versioned record too small".into()));
             }
+            
+            // Read version metadata to check deletion flag
+            use crate::storage::version::VersionMetadata;
+            let metadata_start = RECORD_HEADER_SIZE;
+            let metadata_end = metadata_start + VERSION_METADATA_SIZE;
+            let metadata_bytes = &record[metadata_start..metadata_end];
+            let metadata = VersionMetadata::from_bytes(metadata_bytes)?;
+            
+            // If this version is deleted, return NotFound
+            if metadata.flags.is_deleted() {
+                return Err(GraphError::NotFound("edge"));
+            }
+            
+            // payload_len includes metadata, so actual data starts at offset 33
             let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
             let data_end = RECORD_HEADER_SIZE + payload_len;
             let payload = &record[data_start..data_end];
@@ -81,11 +94,6 @@ impl GraphDB {
         snapshot_ts: u64,
         current_tx_id: Option<crate::db::TxId>,
     ) -> Result<Edge> {
-        // If MVCC is not enabled, fall back to regular load_edge
-        if !self.config.mvcc_enabled {
-            return self.load_edge(edge_id);
-        }
-
         // Phase 4A: Use get_latest() for head pointer
         let head_pointer = self
             .edge_index
@@ -155,11 +163,24 @@ impl GraphDB {
                 let payload_len = header.payload_length as usize;
 
                 let edge = if is_versioned {
-                    // For versioned records, skip the 25-byte metadata header
+                    // For versioned records, check for tombstone first
                     const VERSION_METADATA_SIZE: usize = 25;
                     if payload_len < VERSION_METADATA_SIZE {
                         return Err(GraphError::Corruption("versioned record too small".into()));
                     }
+                    
+                    // Read version metadata to check deletion flag
+                    use crate::storage::version::VersionMetadata;
+                    let metadata_start = RECORD_HEADER_SIZE;
+                    let metadata_end = metadata_start + VERSION_METADATA_SIZE;
+                    let metadata_bytes = &record[metadata_start..metadata_end];
+                    let metadata = VersionMetadata::from_bytes(metadata_bytes)?;
+                    
+                    // If this version is deleted, skip this edge
+                    if metadata.flags.is_deleted() {
+                        continue; // Skip deleted edges in batch load
+                    }
+                    
                     let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
                     let data_end = RECORD_HEADER_SIZE + payload_len;
                     let payload = &record[data_start..data_end];

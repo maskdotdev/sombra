@@ -125,6 +125,10 @@ impl GraphDB {
                     let node_ids: Vec<NodeId> = entries
                         .entries()
                         .iter()
+                        .filter(|entry| {
+                            // Skip entries that have been deleted
+                            entry.delete_ts.is_none()
+                        })
                         .filter_map(|entry| {
                             // Convert RecordPointer to NodeId via reverse lookup
                             self.node_index.find_by_pointer(entry.pointer)
@@ -165,12 +169,6 @@ impl GraphDB {
         value: &PropertyValue,
         snapshot_ts: u64,
     ) -> Result<Vec<NodeId>> {
-        
-        // If MVCC is not enabled, fall back to regular find_nodes_by_property
-        if !self.config.mvcc_enabled {
-            return self.find_nodes_by_property(label, property_key, value);
-        }
-
         let key = (label.to_string(), property_key.to_string());
 
         if let Some(index) = self.property_indexes.get(&key) {

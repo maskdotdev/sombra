@@ -8,8 +8,7 @@
 //! ```rust
 //! use sombra::{ConcurrentGraphDB, Node, Config};
 //!
-//! let mut config = Config::default();
-//! config.mvcc_enabled = true;
+//! let config = Config::default();
 //! let db = ConcurrentGraphDB::open_with_config("my.db", config)?;
 //!
 //! // Multiple threads can create transactions concurrently
@@ -68,13 +67,15 @@ use crate::storage::RecordPointer;
 ///
 /// **Phase 5 Complete**: Full interior mutability enables true lock-free concurrent access!
 ///
-/// # Example
-///
-/// ```rust
-/// use sombra::{ConcurrentGraphDB, Config, Node};
-///
-/// let mut config = Config::default();
-/// config.mvcc_enabled = true;
+    /// # Example
+    ///
+    /// ```rust
+    /// use sombra::{ConcurrentGraphDB, Config, Node};
+    ///
+    /// let config = Config::default();
+    /// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
+    ///
+/// let config = Config::default();
 ///
 /// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
 /// let db2 = db.clone(); // Can be cloned and shared across threads
@@ -92,8 +93,6 @@ pub struct ConcurrentGraphDB {
 impl ConcurrentGraphDB {
     /// Opens a concurrent database with default configuration.
     ///
-    /// This will enable MVCC automatically.
-    ///
     /// # Arguments
     /// * `path` - Filesystem path to the database file
     ///
@@ -105,8 +104,7 @@ impl ConcurrentGraphDB {
     /// * `GraphError::Corruption` - Database file is corrupted
     /// * `GraphError::InvalidArgument` - Database already open in another process
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut config = Config::default();
-        config.mvcc_enabled = true;
+        let config = Config::default();
         Self::open_with_config(path, config)
     }
 
@@ -114,7 +112,7 @@ impl ConcurrentGraphDB {
     ///
     /// # Arguments
     /// * `path` - Filesystem path to the database file
-    /// * `config` - Database configuration (must have `mvcc_enabled = true`)
+    /// * `config` - Database configuration
     ///
     /// # Returns
     /// A new `ConcurrentGraphDB` instance.
@@ -122,14 +120,8 @@ impl ConcurrentGraphDB {
     /// # Errors
     /// * `GraphError::Io` - Cannot create/open file
     /// * `GraphError::Corruption` - Database file is corrupted
-    /// * `GraphError::InvalidArgument` - MVCC not enabled or database already open
+    /// * `GraphError::InvalidArgument` - Database already open
     pub fn open_with_config(path: impl AsRef<Path>, config: Config) -> Result<Self> {
-        if !config.mvcc_enabled {
-            return Err(GraphError::InvalidArgument(
-                "MVCC must be enabled for concurrent database access".into(),
-            ));
-        }
-
         let db = GraphDB::open_with_config(path, config)?;
         Ok(Self {
             inner: Arc::new(db),
@@ -151,8 +143,7 @@ impl ConcurrentGraphDB {
     /// ```rust
     /// use sombra::{ConcurrentGraphDB, Config};
     ///
-    /// let mut config = Config::default();
-    /// config.mvcc_enabled = true;
+    /// let config = Config::default();
     /// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
     ///
     /// // Multiple concurrent transactions
@@ -167,15 +158,9 @@ impl ConcurrentGraphDB {
         // Allocate transaction ID (uses atomic operations internally)
         let tx_id = db.allocate_tx_id()?;
 
-        // Get MVCC transaction manager
-        let mvcc_tx_manager = db
-            .mvcc_tx_manager
-            .as_ref()
-            .ok_or_else(|| GraphError::InvalidArgument("MVCC not enabled".into()))?;
-
         // Begin MVCC transaction to get snapshot timestamp
         // Phase 5: MvccTransactionManager is now lock-free (no RwLock wrapper)
-        let context = mvcc_tx_manager.begin_transaction(tx_id)?;
+        let context = db.mvcc_tx_manager.begin_transaction(tx_id)?;
 
         Ok(ConcurrentTransaction {
             db: Arc::clone(&self.inner),
@@ -212,8 +197,7 @@ impl ConcurrentGraphDB {
     /// ```rust
     /// use sombra::{ConcurrentGraphDB, Config};
     ///
-    /// let mut config = Config::default();
-    /// config.mvcc_enabled = true;
+    /// let config = Config::default();
     /// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
     ///
     /// db.create_property_index("Person", "age")?;
@@ -271,15 +255,14 @@ pub enum TxState {
 /// Transactions must be explicitly committed. Dropping a transaction
 /// without committing will panic (unless the thread is already panicking).
 ///
-/// # Example
-///
-/// ```rust
-/// use sombra::{ConcurrentGraphDB, Config, Node};
-///
-/// let mut config = Config::default();
-/// config.mvcc_enabled = true;
-/// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
-///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sombra::{ConcurrentGraphDB, Config, Node};
+    ///
+    /// let config = Config::default();
+    /// let db = ConcurrentGraphDB::open_with_config("test.db", config)?;
+    ///
 /// let mut tx = db.begin_transaction()?;
 /// let node_id = tx.add_node(Node::new(1))?;
 /// let retrieved = tx.get_node(node_id)?;
@@ -727,11 +710,7 @@ impl ConcurrentTransaction {
         let db = &self.db;
 
         // Allocate commit timestamp
-        let commit_ts = db
-            .timestamp_oracle
-            .as_ref()
-            .ok_or_else(|| GraphError::InvalidArgument("timestamp oracle not found".into()))?
-            .allocate_commit_timestamp();
+        let commit_ts = db.timestamp_oracle.allocate_commit_timestamp();
 
         // Update all created versions with commit timestamp
         let version_dirty_pages = db.pager.with_pager_write(|pager| {
@@ -800,13 +779,9 @@ impl ConcurrentTransaction {
             }
         }
 
-        // Complete commit in MVCC manager (now lock-free)
-        let mvcc_tx_manager = db.mvcc_tx_manager.as_ref().ok_or_else(|| {
-            GraphError::InvalidArgument("MVCC transaction manager not found".into())
-        })?;
-        // Phase 5: MvccTransactionManager is now lock-free (no RwLock wrapper)
-        mvcc_tx_manager.complete_commit(self.tx_id, commit_ts)?;
-        mvcc_tx_manager.end_transaction(self.tx_id)?;
+        // Complete commit in MVCC manager
+        db.mvcc_tx_manager.complete_commit(self.tx_id, commit_ts)?;
+        db.mvcc_tx_manager.end_transaction(self.tx_id)?;
 
         // Update header (Phase 5: header wrapped in Mutex)
         db.header.lock().unwrap().last_committed_tx_id = self.tx_id;
@@ -843,8 +818,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
 
-        let mut config = Config::default();
-        config.mvcc_enabled = true;
+        let config = Config::default();
 
         let db = ConcurrentGraphDB::open_with_config(&path, config).unwrap();
 
@@ -875,8 +849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
 
-        let mut config = Config::default();
-        config.mvcc_enabled = true;
+        let config = Config::default();
 
         let db = ConcurrentGraphDB::open_with_config(&path, config).unwrap();
 
@@ -900,8 +873,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
 
-        let mut config = Config::default();
-        config.mvcc_enabled = true;
+        let config = Config::default();
 
         let db = ConcurrentGraphDB::open_with_config(&path, config).unwrap();
 

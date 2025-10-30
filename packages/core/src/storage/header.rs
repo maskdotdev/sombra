@@ -23,8 +23,7 @@ pub struct Header {
     pub property_index_root_page: Option<PageId>,
     pub property_index_count: u32,
     pub property_index_version: u16,
-    // MVCC fields (version 1.3+)
-    pub mvcc_enabled: bool,
+    // MVCC fields (version 1.3+) - always enabled
     pub max_timestamp: u64,
     pub oldest_snapshot_ts: u64,
 }
@@ -45,7 +44,6 @@ impl Header {
             property_index_root_page: None,
             property_index_count: 0,
             property_index_version: 1,
-            mvcc_enabled: false,
             max_timestamp: 0,
             oldest_snapshot_ts: 0,
         })
@@ -122,13 +120,7 @@ impl Header {
             0
         };
 
-        // MVCC fields (version 1.3+)
-        let mvcc_enabled = if data.len() >= 67 {
-            data[66] != 0
-        } else {
-            false
-        };
-
+        // MVCC fields (version 1.3+) - always enabled now
         let max_timestamp = if data.len() >= 75 {
             Self::read_u64(data, 67, 75)?
         } else {
@@ -161,7 +153,6 @@ impl Header {
             property_index_root_page,
             property_index_count,
             property_index_version,
-            mvcc_enabled,
             max_timestamp,
             oldest_snapshot_ts,
         }))
@@ -190,8 +181,9 @@ impl Header {
         data[60..64].copy_from_slice(&self.property_index_count.to_le_bytes());
         data[64..66].copy_from_slice(&self.property_index_version.to_le_bytes());
 
-        // MVCC fields (version 1.3+)
-        data[66] = if self.mvcc_enabled { 1 } else { 0 };
+        // MVCC fields (version 1.3+) - always enabled
+        // Reserve byte 66 for future use (was mvcc_enabled flag)
+        data[66] = 1; // Always 1 to indicate MVCC is enabled
         data[67..75].copy_from_slice(&self.max_timestamp.to_le_bytes());
         data[75..83].copy_from_slice(&self.oldest_snapshot_ts.to_le_bytes());
 

@@ -81,15 +81,10 @@ impl<'db> Transaction<'db> {
         db.start_tracking();
         let epoch = db.increment_epoch();
 
-        // Allocate snapshot timestamp from oracle if MVCC is enabled
-        let snapshot_ts = if let Some(oracle) = &db.timestamp_oracle {
-            let ts = oracle.allocate_read_timestamp();
-            // Register snapshot for GC watermark tracking
-            oracle.register_snapshot(ts, id)?;
-            ts
-        } else {
-            0 // Use 0 if MVCC is not enabled
-        };
+        // Allocate snapshot timestamp from oracle
+        let snapshot_ts = db.timestamp_oracle.allocate_read_timestamp();
+        // Register snapshot for GC watermark tracking
+        db.timestamp_oracle.register_snapshot(snapshot_ts, id)?;
 
         debug!(
             tx_id = id,
@@ -472,14 +467,9 @@ impl<'db> Transaction<'db> {
         // Phase 5: header wrapped in Mutex
         self.db.header.lock().unwrap().last_committed_tx_id = self.id;
 
-        // Get commit timestamp from oracle if MVCC is enabled
-        let commit_ts = if let Some(ref oracle) = self.db.timestamp_oracle {
-            let ts = oracle.allocate_commit_timestamp();
-            self.db.header.lock().unwrap().max_timestamp = ts;
-            ts
-        } else {
-            0
-        };
+        // Get commit timestamp from oracle
+        let commit_ts = self.db.timestamp_oracle.allocate_commit_timestamp();
+        self.db.header.lock().unwrap().max_timestamp = commit_ts;
 
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
@@ -624,9 +614,7 @@ impl<'db> Transaction<'db> {
     /// Should be called when the transaction finishes (commit or rollback)
     fn unregister_snapshot(&self) {
         if self.snapshot_ts > 0 {
-            if let Some(ref oracle) = self.db.timestamp_oracle {
-                let _ = oracle.unregister_snapshot(self.snapshot_ts);
-            }
+            let _ = self.db.timestamp_oracle.unregister_snapshot(self.snapshot_ts);
         }
     }
 }

@@ -3,7 +3,7 @@ use super::pointer_kind::PointerKind;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, NodeId, NULL_EDGE_ID};
 use crate::storage::heap::RecordStore;
-use crate::storage::record::{encode_record, RecordKind};
+use crate::storage::record::RecordKind;
 use crate::storage::serialize_edge;
 
 impl GraphDB {
@@ -12,14 +12,8 @@ impl GraphDB {
         self.start_tracking();
 
         // Allocate commit timestamp for MVCC
-        let commit_ts = if self.config.mvcc_enabled {
-            self.timestamp_oracle
-                .as_ref()
-                .map(|oracle| oracle.allocate_commit_timestamp())
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let commit_ts = self.timestamp_oracle
+            .allocate_commit_timestamp();
 
         let (edge_id, _version_ptr) = self.add_edge_internal(edge, tx_id, commit_ts)?;
 
@@ -64,41 +58,33 @@ impl GraphDB {
 
         let payload = serialize_edge(&edge)?;
 
-        // Use store_new_version if MVCC enabled, otherwise legacy record format
-        let (pointer, version_pointer) = if self.config.mvcc_enabled {
-            use crate::storage::version_chain::store_new_version;
+        // Create new version with MVCC support
+        use crate::storage::version_chain::store_new_version;
 
-            let (pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
-                let mut record_store = RecordStore::new(pager);
-                let pointer = store_new_version(
-                    &mut record_store,
-                    None, // No previous version for new edges
-                    edge_id,
-                    RecordKind::Edge,
-                    &payload,
-                    tx_id,
-                    commit_ts,
-                    false, // is_deleted: false for new edge creation
-                )?;
+        let (pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
+            let mut record_store = RecordStore::new(pager);
+            let pointer = store_new_version(
+                &mut record_store,
+                None, // No previous version for new edges
+                edge_id,
+                RecordKind::Edge,
+                &payload,
+                tx_id,
+                commit_ts,
+                false, // is_deleted: false for new edge creation
+            )?;
 
-                // Collect dirty pages before dropping guards
-                let dirty_pages = record_store.take_dirty_pages();
-                Ok((pointer, dirty_pages.clone()))
-            })?;
+            // Collect dirty pages before dropping guards
+            let dirty_pages = record_store.take_dirty_pages();
+            Ok((pointer, dirty_pages.clone()))
+        })?;
 
-            // Track dirty pages for transaction if needed
-            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
-            }
+        // Track dirty pages for transaction if needed
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+        }
 
-            (pointer, Some(pointer))
-        } else {
-            // Legacy non-versioned record
-            let record = encode_record(RecordKind::Edge, &payload)?;
-            let preferred = self.header.lock().unwrap().last_record_page;
-            let pointer = self.insert_record(&record, preferred)?;
-            (pointer, None)
-        };
+        let version_pointer = Some(pointer);
 
         // Phase 4A: Insert into BTreeIndex (supports version chains)
         self.edge_index.insert(edge_id, pointer);
@@ -175,50 +161,40 @@ impl GraphDB {
         self.node_cache.pop(&edge.target_node_id);
         self.edge_cache.pop(&edge_id);
 
-        if self.config.mvcc_enabled {
-            // MVCC mode: Create tombstone version instead of deleting
-            use crate::storage::version_chain::store_new_version;
+        // Create tombstone version for MVCC snapshot isolation
+        use crate::storage::version_chain::store_new_version;
+        
+        let tx_id = self.allocate_tx_id().unwrap_or(1);
+        let commit_ts = self.timestamp_oracle.allocate_commit_timestamp();
+        
+        let payload = serialize_edge(&edge)?;
+        
+        let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
+            let mut record_store = RecordStore::new(pager);
             
-            let tx_id = self.allocate_tx_id().unwrap_or(1);
-            let commit_ts = self
-                .timestamp_oracle
-                .as_ref()
-                .map(|oracle| oracle.allocate_commit_timestamp())
-                .unwrap_or(0);
+            // store_new_version with is_deleted=true creates a tombstone
+            let tombstone_ptr = store_new_version(
+                &mut record_store,
+                Some(pointer), // Link to previous version
+                edge_id,
+                RecordKind::Edge,
+                &payload,
+                tx_id,
+                commit_ts,
+                true, // is_deleted: true to create tombstone
+            )?;
             
-            let payload = serialize_edge(&edge)?;
-            
-            let (tombstone_ptr, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
-                let mut record_store = RecordStore::new(pager);
-                
-                // store_new_version with is_deleted=true creates a tombstone
-                let tombstone_ptr = store_new_version(
-                    &mut record_store,
-                    Some(pointer), // Link to previous version
-                    edge_id,
-                    RecordKind::Edge,
-                    &payload,
-                    tx_id,
-                    commit_ts,
-                    true, // is_deleted: true to create tombstone
-                )?;
-                
-                let dirty_pages = record_store.take_dirty_pages();
-                Ok((tombstone_ptr, dirty_pages.clone()))
-            })?;
-            
-            // Track dirty pages for transaction if needed
-            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
-            }
-            
-            // Update index to point to tombstone (keeps edge in index for snapshot isolation)
-            self.edge_index.insert(edge_id, tombstone_ptr);
-        } else {
-            // Non-MVCC mode: Remove from index and free storage
-            self.edge_index.remove(&edge_id);
-            self.free_record(pointer)?;
+            let dirty_pages = record_store.take_dirty_pages();
+            Ok((tombstone_ptr, dirty_pages.clone()))
+        })?;
+        
+        // Track dirty pages for transaction if needed
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
         }
+        
+        // Update index to point to tombstone (keeps edge in index for snapshot isolation)
+        self.edge_index.insert(edge_id, tombstone_ptr);
         
         Ok(())
     }
