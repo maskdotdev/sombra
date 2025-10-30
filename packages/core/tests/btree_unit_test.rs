@@ -6,7 +6,7 @@ use sombra::storage::RecordPointer;
 
 #[test]
 fn test_btree_serialize_1000_entries() {
-    let mut index = BTreeIndex::new();
+    let index = BTreeIndex::new();
 
     // Insert 1000 entries
     for i in 1..=1000 {

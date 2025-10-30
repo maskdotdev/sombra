@@ -124,7 +124,7 @@ impl PySombraDB {
 
     fn begin_transaction(&self) -> PyResult<PySombraTransaction> {
         let tx_id = {
-            let mut db = self.inner.write();
+            let db = self.inner.write();
             let tx_id = db.allocate_tx_id().map_err(graph_error_to_py)?;
             db.enter_transaction(tx_id).map_err(graph_error_to_py)?;
             db.start_tracking();
@@ -169,14 +169,14 @@ impl PySombraDB {
 
     fn get_edge(&self, py: Python<'_>, edge_id: u64) -> PyResult<PySombraEdge> {
         let edge = {
-            let mut db = self.inner.write();
+            let db = self.inner.write();
             db.load_edge(edge_id).map_err(graph_error_to_py)?
         };
         PySombraEdge::from_edge(py, edge)
     }
 
     fn get_outgoing_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.inner.write();
+        let db = self.inner.write();
         let node = db
             .get_node(node_id)
             .map_err(graph_error_to_py)?
@@ -192,7 +192,7 @@ impl PySombraDB {
     }
 
     fn get_incoming_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.inner.write();
+        let db = self.inner.write();
         let node = db
             .get_node(node_id)
             .map_err(graph_error_to_py)?
@@ -209,7 +209,7 @@ impl PySombraDB {
 
     fn get_node(&self, py: Python<'_>, node_id: u64) -> PyResult<PySombraNode> {
         let node = {
-            let mut db = self.inner.write();
+            let db = self.inner.write();
             db.get_node(node_id)
                 .map_err(graph_error_to_py)?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?
@@ -219,7 +219,7 @@ impl PySombraDB {
 
     fn get_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.inner.write();
+            let db = self.inner.write();
             db.get_neighbors(node_id).map_err(graph_error_to_py)?
         };
         Ok(neighbors)
@@ -249,8 +249,8 @@ impl PySombraDB {
     }
 
     fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
-        let mut db = self.inner.write();
-        db.remove_node_property(node_id, &key)
+        let db = self.inner.write();
+        db.remove_node_property_internal(node_id, &key)
             .map_err(graph_error_to_py)
     }
 
@@ -260,13 +260,13 @@ impl PySombraDB {
     }
 
     fn checkpoint(&self) -> PyResult<()> {
-        let mut db = self.inner.write();
+        let db = self.inner.write();
         db.checkpoint().map_err(graph_error_to_py)
     }
 
     fn get_incoming_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.inner.write();
+            let db = self.inner.write();
             db.get_incoming_neighbors(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -305,7 +305,7 @@ impl PySombraDB {
 
     fn get_nodes_by_label(&self, label: &str) -> PyResult<Vec<u64>> {
         let node_ids = {
-            let mut db = self.inner.write();
+            let db = self.inner.write();
             db.get_nodes_by_label(label).map_err(graph_error_to_py)?
         };
         Ok(node_ids)
@@ -393,11 +393,15 @@ impl PySombraTransaction {
     ) -> PyResult<u64> {
         let props = extract_properties(properties)?;
         let node_id = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             let mut node = Node::new(0);
             node.labels = labels;
             node.properties = props;
-            db.add_node_internal(node).map_err(graph_error_to_py)?
+            // Allocate tx_id and commit_ts for MVCC
+            let tx_id = 1; // Simplified for non-transactional context
+            let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+            let (node_id, _version_ptr) = db.add_node_internal(node, tx_id, commit_ts).map_err(graph_error_to_py)?;
+            node_id
         };
         Ok(node_id)
     }
@@ -411,24 +415,28 @@ impl PySombraTransaction {
     ) -> PyResult<u64> {
         let props = extract_properties(properties)?;
         let edge_id = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             let mut edge = Edge::new(0, source_node_id, target_node_id, &label);
             edge.properties = props;
-            db.add_edge_internal(edge).map_err(graph_error_to_py)?
+            // Allocate tx_id and commit_ts for MVCC
+            let tx_id = 1; // Simplified for non-transactional context
+            let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+            let (edge_id, _version_ptr) = db.add_edge_internal(edge, tx_id, commit_ts).map_err(graph_error_to_py)?;
+            edge_id
         };
         Ok(edge_id)
     }
 
     fn get_edge(&self, py: Python<'_>, edge_id: u64) -> PyResult<PySombraEdge> {
         let edge = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             db.load_edge(edge_id).map_err(graph_error_to_py)?
         };
         PySombraEdge::from_edge(py, edge)
     }
 
     fn get_outgoing_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.db.write();
+        let db = self.db.write();
         let node = db
             .get_node(node_id)
             .map_err(graph_error_to_py)?
@@ -444,7 +452,7 @@ impl PySombraTransaction {
     }
 
     fn get_incoming_edges(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let mut db = self.db.write();
+        let db = self.db.write();
         let node = db
             .get_node(node_id)
             .map_err(graph_error_to_py)?
@@ -461,7 +469,7 @@ impl PySombraTransaction {
 
     fn get_node(&self, py: Python<'_>, node_id: u64) -> PyResult<PySombraNode> {
         let node = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             db.get_node(node_id)
                 .map_err(graph_error_to_py)?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?
@@ -471,19 +479,23 @@ impl PySombraTransaction {
 
     fn get_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             db.get_neighbors(node_id).map_err(graph_error_to_py)?
         };
         Ok(neighbors)
     }
 
     fn delete_node(&self, node_id: u64) -> PyResult<()> {
-        let mut db = self.db.write();
-        db.delete_node_internal(node_id).map_err(graph_error_to_py)
+        let db = self.db.write();
+        // Allocate tx_id and commit_ts for MVCC
+        let tx_id = 1; // Simplified for non-transactional context
+        let commit_ts = 0; // Will be set by the internal method if MVCC enabled
+        db.delete_node_internal(node_id, tx_id, commit_ts).map_err(graph_error_to_py)?;
+        Ok(())
     }
 
     fn delete_edge(&self, edge_id: u64) -> PyResult<()> {
-        let mut db = self.db.write();
+        let db = self.db.write();
         db.delete_edge_internal(edge_id).map_err(graph_error_to_py)
     }
 
@@ -496,12 +508,12 @@ impl PySombraTransaction {
     ) -> PyResult<()> {
         let prop_value = py_any_to_property_value(&value)?;
         let mut db = self.db.write();
-        db.set_node_property_internal(node_id, key, prop_value)
+        db.set_node_property(node_id, key, prop_value)
             .map_err(graph_error_to_py)
     }
 
     fn remove_node_property(&self, node_id: u64, key: String) -> PyResult<()> {
-        let mut db = self.db.write();
+        let db = self.db.write();
         db.remove_node_property_internal(node_id, &key)
             .map_err(graph_error_to_py)
     }
@@ -513,9 +525,12 @@ impl PySombraTransaction {
             ));
         }
 
-        let mut db = self.db.write();
+        let db = self.db.write();
         let dirty_pages = db.take_recent_dirty_pages();
-        db.header.last_committed_tx_id = self.tx_id;
+        {
+            let mut header = db.header.lock().unwrap();
+            header.last_committed_tx_id = self.tx_id;
+        }
         db.write_header().map_err(graph_error_to_py)?;
 
         let header_dirty = db.take_recent_dirty_pages();
@@ -527,7 +542,7 @@ impl PySombraTransaction {
             .map_err(graph_error_to_py)?;
 
         db.stop_tracking();
-        db.exit_transaction();
+        db.exit_transaction(self.tx_id);
 
         self.committed = true;
         Ok(())
@@ -540,12 +555,12 @@ impl PySombraTransaction {
             ));
         }
 
-        let mut db = self.db.write();
+        let db = self.db.write();
         let dirty_pages = db.take_recent_dirty_pages();
         db.rollback_transaction(&dirty_pages)
             .map_err(graph_error_to_py)?;
         db.stop_tracking();
-        db.exit_transaction();
+        db.exit_transaction(self.tx_id);
 
         self.committed = true;
         Ok(())
@@ -553,7 +568,7 @@ impl PySombraTransaction {
 
     fn get_incoming_neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let neighbors = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             db.get_incoming_neighbors(node_id)
                 .map_err(graph_error_to_py)?
         };
@@ -592,7 +607,7 @@ impl PySombraTransaction {
 
     fn get_nodes_by_label(&self, label: &str) -> PyResult<Vec<u64>> {
         let node_ids = {
-            let mut db = self.db.write();
+            let db = self.db.write();
             db.get_nodes_by_label(label).map_err(graph_error_to_py)?
         };
         Ok(node_ids)

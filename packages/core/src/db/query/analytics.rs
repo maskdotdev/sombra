@@ -37,14 +37,15 @@ impl GraphDB {
     pub fn count_nodes_by_label(&self) -> HashMap<String, usize> {
         self.label_index
             .iter()
-            .map(|(label, nodes)| (label.clone(), nodes.len()))
+            .map(|entry| (entry.key().clone(), entry.value().len()))
             .collect()
     }
 
     pub fn count_edges_by_type(&mut self) -> Result<HashMap<String, usize>> {
         let mut counts: HashMap<String, usize> = HashMap::new();
 
-        let edge_ids: Vec<_> = self.edge_index.keys().copied().collect();
+        // BTreeIndex::iter() returns Vec<(EdgeId, RecordPointer)>
+        let edge_ids: Vec<_> = self.edge_index.iter().into_iter().map(|(id, _)| id).collect();
         for edge_id in edge_ids {
             let edge = self.load_edge(edge_id)?;
             *counts.entry(edge.type_name.clone()).or_insert(0) += 1;
@@ -206,7 +207,8 @@ impl GraphDB {
     pub fn count_edges_with_type(&mut self, edge_type: &str) -> Result<usize> {
         let mut count = 0;
 
-        let edge_ids: Vec<_> = self.edge_index.keys().copied().collect();
+        // BTreeIndex::iter() returns Vec<(EdgeId, RecordPointer)>
+        let edge_ids: Vec<_> = self.edge_index.iter().into_iter().map(|(id, _)| id).collect();
         for edge_id in edge_ids {
             let edge = self.load_edge(edge_id)?;
             if edge.type_name == edge_type {
@@ -221,7 +223,7 @@ impl GraphDB {
         let mut stats: Vec<(String, usize)> = self
             .label_index
             .iter()
-            .map(|(label, nodes)| (label.clone(), nodes.len()))
+            .map(|entry| (entry.key().clone(), entry.value().len()))
             .collect();
 
         stats.sort_by(|a, b| b.1.cmp(&a.1));

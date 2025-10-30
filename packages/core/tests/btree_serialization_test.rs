@@ -93,7 +93,7 @@ fn test_btree_serialization_after_reopen() {
             page_cache_size: 100,
             ..Config::balanced()
         };
-        let mut db = GraphDB::open_with_config(&path_str, config).unwrap();
+        let db = GraphDB::open_with_config(&path_str, config).unwrap();
 
         println!("Database reopened");
 

@@ -26,11 +26,13 @@ base64 = { version = "0.22", optional = true }
 tokio = { version = "1.0", features = ["full"], optional = true }
 chrono = "0.4"
 lru = "0.12"
+dashmap = "5.5"
 memmap2 = "0.9"
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rayon = "1.7"
+fs2 = "0.4"
 
 [features]
 default = ["cli"]
@@ -110,8 +112,39 @@ harness = false
 name = "btree_benchmark"
 harness = false
 
-[[example]]
-name = "performance_metrics_demo"
+[[bench]]
+name = "mvcc_profile"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "concurrent_throughput"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "lock_contention_profile"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "delete_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "pattern_matching_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "analytics_benchmark"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "shortest_path_benchmark"
+harness = false
 required-features = ["benchmarks"]
 
 [[example]]
@@ -127,3 +160,4 @@ name = "transaction_handling"
 proptest = "1.0"
 tempfile = "3.10"
 rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }

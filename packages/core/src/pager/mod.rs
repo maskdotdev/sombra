@@ -11,8 +11,10 @@ use lru::LruCache;
 use memmap2::MmapMut;
 use tracing::{error, warn};
 
+mod lock_free_page_cache;
 mod wal;
 
+pub(crate) use lock_free_page_cache::LockFreePageCache;
 use wal::Wal;
 
 pub const DEFAULT_PAGE_SIZE: usize = 8192;
@@ -21,7 +23,7 @@ pub const PAGE_CHECKSUM_SIZE: usize = 4;
 
 pub type PageId = u32;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Page {
     pub id: PageId,
     pub data: Vec<u8>,
@@ -49,6 +51,7 @@ pub struct Pager {
     checksum_enabled: bool,
     shadow_pages: HashMap<PageId, Vec<u8>>,
     shadow_file_len: Option<u64>,
+    #[allow(dead_code)]
     max_size_bytes: Option<u64>,
 }
 
@@ -183,6 +186,11 @@ impl Pager {
             .ok_or_else(|| GraphError::Corruption("Page unexpectedly evicted".into()))
     }
 
+    /// Fetch a page and return an owned copy (for lock-free cache)
+    pub fn get_page_copy(&mut self, page_id: PageId) -> Result<Page> {
+        self.fetch_page(page_id).map(|page| page.clone())
+    }
+
     fn invalidate_mmap(&mut self) {
         if self.mmap.is_some() {
             self.mmap = None;
@@ -198,26 +206,13 @@ impl Pager {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
-        if !self.file_len.is_multiple_of(self.page_size as u64) {
-            return Err(GraphError::Corruption(
-                "underlying file length is not page aligned".into(),
-            ));
-        }
+        let page_count = if self.file_len == 0 {
+            0
+        } else {
+            (self.file_len / self.page_size as u64) as u32
+        };
+        let next_page_id = page_count;
 
-        let next_page_id = (self.file_len / self.page_size as u64) as PageId;
-        let new_size = (u64::from(next_page_id) + 1) * self.page_size as u64;
-
-        if let Some(max_size) = self.max_size_bytes {
-            if new_size > max_size {
-                warn!(
-                    current_size = self.file_len,
-                    max_size, "Database size limit exceeded"
-                );
-                return Err(GraphError::InvalidArgument(
-                    "Database size limit exceeded".into(),
-                ));
-            }
-        }
         let mut page = Page::new(next_page_id, self.page_size);
         page.dirty = true;
 
@@ -241,6 +236,10 @@ impl Pager {
         }
         self.file_len = (u64::from(next_page_id) + 1) * self.page_size as u64;
         self.invalidate_mmap();
+
+        // Ensure newly allocated pages are tracked in shadow transaction for rollback
+        self.ensure_shadow(next_page_id)?;
+
         Ok(next_page_id)
     }
 
@@ -595,6 +594,7 @@ impl Pager {
         } else {
             apply_page_checksum(checksum_enabled, page_size, page_id, &mut buf)?;
         }
+
         Ok(buf)
     }
 }
@@ -659,15 +659,8 @@ fn write_page_image(
 
     if page_id == 14 || page_id == 26 {
         let (payload, checksum_bytes) = split_payload_checksum(data)?;
-        let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
-        let computed_checksum = hash(payload);
-        eprintln!(
-            "[WRITE] page_id={} stored_checksum=0x{:08X} computed_checksum=0x{:08X} valid={}",
-            page_id,
-            stored_checksum,
-            computed_checksum,
-            stored_checksum == computed_checksum
-        );
+        let _stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
+        let _computed_checksum = hash(payload);
     }
 
     let offset = page_offset(page_id, page_size)?;

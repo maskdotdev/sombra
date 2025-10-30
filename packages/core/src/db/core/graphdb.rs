@@ -1,34 +1,39 @@
 use crc32fast::hash;
-use lru::LruCache;
+use dashmap::{DashMap, DashSet};
 use rayon::ThreadPoolBuilder;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{info, warn};
 
+use crate::db::cache::ConcurrentLruCache;
 use crate::error::{GraphError, Result};
-use crate::index::BTreeIndex;
+use crate::index::{BTreeIndex, VersionedIndexEntries};
 use crate::model::{Edge, EdgeId, Node, NodeId, PropertyValue};
-use crate::pager::{PageId, Pager, PAGE_CHECKSUM_SIZE};
+use crate::pager::{LockFreePageCache, PageId, Pager, PAGE_CHECKSUM_SIZE};
 use crate::storage::header::Header;
+use crate::storage::heap::RecordStore;
 use crate::storage::page::RecordPage;
 use crate::storage::record::{RecordHeader, RecordKind, RECORD_HEADER_SIZE};
-use crate::storage::RecordPointer;
 use crate::storage::{deserialize_edge, deserialize_node};
 
 use super::header::HeaderState;
 use crate::db::config::{Config, SyncMode};
-use crate::db::group_commit::{GroupCommitState, TxId};
+use crate::db::gc::{BackgroundGcState, GarbageCollector, GcConfig, GcStats};
+use crate::db::group_commit::GroupCommitState;
 use crate::db::metrics::{ConcurrencyMetrics, PerformanceMetrics};
+use crate::db::mvcc_transaction::MvccTransactionManager;
+use crate::db::timestamp_oracle::TimestampOracle;
 use crate::db::transaction::Transaction;
 
 /// Values that can be indexed for fast property-based lookups.
 ///
 /// Only certain property types are indexable. Float and Bytes values
 /// cannot be indexed due to their nature.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndexableValue {
     /// Boolean value
     Bool(bool),
@@ -171,47 +176,66 @@ impl From<&PropertyValue> for Option<IndexableValue> {
 /// ```
 pub struct GraphDB {
     pub(crate) path: PathBuf,
-    pub(crate) pager: Pager,
-    pub header: HeaderState,
+    // Phase 3B: Lock-free page cache wrapper (replaces RwLock<Pager>)
+    pub(crate) pager: Arc<LockFreePageCache>,
+    // Phase 5: Full interior mutability - header wrapped in Mutex
+    pub header: Mutex<HeaderState>,
     pub(crate) epoch: AtomicU64,
-    pub(crate) node_index: BTreeIndex,
-    pub(crate) edge_index: HashMap<EdgeId, RecordPointer>,
-    pub(crate) label_index: HashMap<String, BTreeSet<NodeId>>,
+    // Phase 4: Concurrent indexes - true lock-free architecture (no double-locking)
+    pub(crate) node_index: Arc<BTreeIndex>, // BTreeIndex has internal RwLock
+    pub(crate) edge_index: Arc<BTreeIndex>, // BTreeIndex has internal RwLock - Phase 4A MVCC support
+    pub(crate) label_index: Arc<DashMap<String, DashMap<NodeId, Arc<Mutex<VersionedIndexEntries>>>>>, // Multi-version label index
     pub(crate) property_indexes:
-        HashMap<(String, String), BTreeMap<IndexableValue, BTreeSet<NodeId>>>,
-    pub(crate) node_cache: LruCache<NodeId, Node>,
-    pub(crate) edge_cache: LruCache<EdgeId, Edge>,
-    pub(crate) outgoing_adjacency: HashMap<NodeId, Vec<EdgeId>>,
-    pub(crate) incoming_adjacency: HashMap<NodeId, Vec<EdgeId>>,
-    pub(crate) outgoing_neighbors_cache: HashMap<NodeId, Vec<NodeId>>,
-    pub(crate) incoming_neighbors_cache: HashMap<NodeId, Vec<NodeId>>,
-    pub(crate) next_tx_id: TxId,
-    pub(crate) tracking_enabled: bool,
-    pub(crate) recent_dirty_pages: Vec<PageId>,
-    pub active_transaction: Option<TxId>,
+        Arc<DashMap<(String, String), Arc<DashMap<IndexableValue, Arc<Mutex<VersionedIndexEntries>>>>>>, // Multi-version property index
+    // Lock-free concurrent caches for high-performance concurrent access
+    pub(crate) node_cache: Arc<ConcurrentLruCache<NodeId, Node>>,
+    pub(crate) edge_cache: Arc<ConcurrentLruCache<EdgeId, Edge>>,
+    pub(crate) outgoing_adjacency: Arc<DashMap<NodeId, Vec<EdgeId>>>,
+    pub(crate) incoming_adjacency: Arc<DashMap<NodeId, Vec<EdgeId>>>,
+    pub(crate) outgoing_neighbors_cache: Arc<DashMap<NodeId, Vec<NodeId>>>,
+    pub(crate) incoming_neighbors_cache: Arc<DashMap<NodeId, Vec<NodeId>>>,
+    pub(crate) next_tx_id: AtomicU64,
+    // AtomicBool for lock-free interior mutability
+    pub(crate) tracking_enabled: AtomicBool,
+    // Wrapped in Mutex for interior mutability
+    pub(crate) recent_dirty_pages: Mutex<Vec<PageId>>,
+    // MVCC transaction manager - always present
+    pub(crate) mvcc_tx_manager: Arc<MvccTransactionManager>,
     pub(crate) config: Config,
-    pub(crate) transactions_since_sync: usize,
-    pub(crate) transactions_since_checkpoint: usize,
+    pub(crate) transactions_since_sync: AtomicUsize,
+    pub(crate) transactions_since_checkpoint: AtomicUsize,
     pub(crate) group_commit_state: Option<Arc<Mutex<GroupCommitState>>>,
     pub metrics: PerformanceMetrics,
     pub concurrency_metrics: Arc<ConcurrencyMetrics>,
-    pub(crate) pages_with_free_slots: BTreeSet<PageId>,
+    pub(crate) pages_with_free_slots: Arc<DashSet<PageId>>, // DashSet is lock-free
+    // MVCC support - always present
+    pub(crate) timestamp_oracle: Arc<TimestampOracle>,
+    pub(crate) gc: GarbageCollector,
+    pub(crate) bg_gc_state: Option<Arc<Mutex<BackgroundGcState>>>,
+    // File locking to prevent multi-process corruption
+    #[allow(dead_code)]
+    lock_file: Option<File>,
 }
 
 impl std::fmt::Debug for GraphDB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GraphDB")
             .field("path", &self.path)
-            .field("header", &self.header)
+            .field("header", &self.header.lock().unwrap())
             .field("epoch", &self.epoch.load(Ordering::Relaxed))
-            .field("next_tx_id", &self.next_tx_id)
-            .field("tracking_enabled", &self.tracking_enabled)
-            .field("active_transaction", &self.active_transaction)
+            .field("next_tx_id", &self.next_tx_id.load(Ordering::Relaxed))
+            .field(
+                "tracking_enabled",
+                &self.tracking_enabled.load(Ordering::Relaxed),
+            )
             .field("config", &self.config)
-            .field("transactions_since_sync", &self.transactions_since_sync)
+            .field(
+                "transactions_since_sync",
+                &self.transactions_since_sync.load(Ordering::Relaxed),
+            )
             .field(
                 "transactions_since_checkpoint",
-                &self.transactions_since_checkpoint,
+                &self.transactions_since_checkpoint.load(Ordering::Relaxed),
             )
             .finish()
     }
@@ -278,6 +302,23 @@ impl GraphDB {
             checksum_enabled = config.checksum_enabled,
             "Opening database"
         );
+
+        // Acquire exclusive file lock to prevent multi-process corruption
+        use fs2::FileExt;
+        let lock_path = path_ref.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+
+        lock_file.try_lock_exclusive().map_err(|e| {
+            GraphError::InvalidArgument(format!(
+                "Database is already open in another process: {e}. Lock file: {lock_path:?}"
+            ))
+        })?;
+
+        info!(lock_file = ?lock_path, "Acquired exclusive file lock");
+
         configure_rayon_thread_pool(&config);
         let wal_sync_enabled = config.wal_sync_mode != SyncMode::Off;
         let use_mmap = config.use_mmap;
@@ -340,32 +381,54 @@ impl GraphDB {
                 GraphError::InvalidArgument("edge cache size must be greater than zero".into())
             })?;
 
-        let mut db = Self {
+        // Initialize MVCC components - always enabled
+        let oracle = if header.max_timestamp > 0 {
+            Arc::new(TimestampOracle::with_timestamp(header.max_timestamp)?)
+        } else {
+            Arc::new(TimestampOracle::new())
+        };
+        let collector = GarbageCollector::new();
+
+        // Background GC will be started via start_background_gc() if configured
+        let bg_gc_state = None;
+
+        // Create MVCC transaction manager with shared oracle
+        let max_concurrent = config.max_concurrent_transactions.unwrap_or(100);
+        let mvcc_tx_manager = MvccTransactionManager::new_with_oracle(oracle.clone(), max_concurrent);
+
+        let db = Self {
             path: path_ref.to_path_buf(),
-            pager,
-            header: HeaderState::from(header),
+            // Phase 3B: Wrap pager in lock-free cache
+            pager: Arc::new(LockFreePageCache::new(pager, cache_size.get() * 2)),
+            // Phase 5: Full interior mutability - header wrapped in Mutex
+            header: Mutex::new(HeaderState::from(header.clone())),
             epoch: AtomicU64::new(0),
-            node_index: BTreeIndex::new(),
-            edge_index: HashMap::new(),
-            label_index: HashMap::new(),
-            property_indexes: HashMap::new(),
-            node_cache: LruCache::new(cache_size),
-            edge_cache: LruCache::new(edge_cache_size),
-            outgoing_adjacency: HashMap::new(),
-            incoming_adjacency: HashMap::new(),
-            outgoing_neighbors_cache: HashMap::new(),
-            incoming_neighbors_cache: HashMap::new(),
-            next_tx_id,
-            tracking_enabled: false,
-            recent_dirty_pages: Vec::new(),
-            active_transaction: None,
+            node_index: Arc::new(BTreeIndex::new()), // No RwLock wrapper - BTreeIndex has internal mutability
+            edge_index: Arc::new(BTreeIndex::new()), // Phase 4A: MVCC support for edges
+            label_index: Arc::new(DashMap::new()),
+            property_indexes: Arc::new(DashMap::new()),
+            node_cache: Arc::new(ConcurrentLruCache::new(cache_size.get())),
+            edge_cache: Arc::new(ConcurrentLruCache::new(edge_cache_size.get())),
+            outgoing_adjacency: Arc::new(DashMap::new()),
+            incoming_adjacency: Arc::new(DashMap::new()),
+            outgoing_neighbors_cache: Arc::new(DashMap::new()),
+            incoming_neighbors_cache: Arc::new(DashMap::new()),
+            next_tx_id: AtomicU64::new(next_tx_id),
+            tracking_enabled: AtomicBool::new(false),
+            recent_dirty_pages: Mutex::new(Vec::new()),
+            // Phase 5: Removed active_transaction - MVCC manager handles transaction state
             config,
-            transactions_since_sync: 0,
-            transactions_since_checkpoint: 0,
+            transactions_since_sync: AtomicUsize::new(0),
+            transactions_since_checkpoint: AtomicUsize::new(0),
             group_commit_state,
             metrics: PerformanceMetrics::new(),
             concurrency_metrics: Arc::new(ConcurrencyMetrics::new()),
-            pages_with_free_slots: BTreeSet::new(),
+            pages_with_free_slots: Arc::new(DashSet::new()), // DashSet instead of RwLock<BTreeSet>
+            timestamp_oracle: oracle,
+            gc: collector,
+            bg_gc_state,
+            mvcc_tx_manager: Arc::new(mvcc_tx_manager),
+            lock_file: Some(lock_file),
         };
 
         if db.load_btree_index()? {
@@ -404,7 +467,7 @@ impl GraphDB {
     /// tx.commit()?;
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
-    pub fn begin_transaction(&mut self) -> Result<Transaction<'_>> {
+    pub fn begin_transaction(&self) -> Result<Transaction<'_>> {
         let tx_id = self.allocate_tx_id()?;
         Transaction::new(self, tx_id)
     }
@@ -450,7 +513,7 @@ impl GraphDB {
     /// # Errors
     /// * `GraphError::Io` - Disk I/O error
     /// * `GraphError::Corruption` - Index corruption detected
-    pub fn checkpoint(&mut self) -> Result<()> {
+    pub fn checkpoint(&self) -> Result<()> {
         let start = std::time::Instant::now();
         let pages_flushed = self.pager.dirty_page_count();
         info!("Starting checkpoint");
@@ -459,6 +522,10 @@ impl GraphDB {
 
         self.persist_btree_index()?;
         self.persist_property_indexes()?;
+
+        // Update timestamp in header
+        self.header.lock().unwrap().max_timestamp = self.timestamp_oracle.current_timestamp();
+
         self.write_header()?;
 
         let dirty_pages = self.take_recent_dirty_pages();
@@ -466,6 +533,11 @@ impl GraphDB {
 
         for &page_id in &dirty_pages {
             self.pager.append_page_to_wal(page_id, 0)?;
+        }
+        
+        // Append commit frame so WAL replay will apply these pages
+        if !dirty_pages.is_empty() {
+            self.pager.append_commit_to_wal(0)?;
         }
 
         self.pager.checkpoint()?;
@@ -686,7 +758,37 @@ impl GraphDB {
                     ));
                     continue;
                 }
-                let payload = &record_bytes[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len];
+
+                // Check if this is a versioned record by looking at the actual kind byte
+                let kind_byte = record_bytes[0];
+                let is_versioned = kind_byte == 0x03 || kind_byte == 0x04; // VersionedNode or VersionedEdge
+
+                let payload_len = header.payload_length as usize;
+                let payload = if is_versioned {
+                    // For versioned records, skip the 25-byte metadata header
+                    const VERSION_METADATA_SIZE: usize = 25;
+                    if payload_len < VERSION_METADATA_SIZE {
+                        report.record_errors += 1;
+                        report.push_error(format!(
+                            "page {page_id} slot {slot_index} versioned record too small"
+                        ));
+                        continue;
+                    }
+                    let data_start = RECORD_HEADER_SIZE + VERSION_METADATA_SIZE;
+                    let data_end = RECORD_HEADER_SIZE + payload_len;
+                    if data_end > record_bytes.len() {
+                        report.record_errors += 1;
+                        report.push_error(format!(
+                            "page {page_id} slot {slot_index} payload exceeds slot bounds"
+                        ));
+                        continue;
+                    }
+                    &record_bytes[data_start..data_end]
+                } else {
+                    // Legacy non-versioned record
+                    &record_bytes[RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + payload_len]
+                };
+
                 let slot_u16 = slot_index as u16;
 
                 match header.kind {
@@ -766,7 +868,7 @@ impl GraphDB {
             }
 
             for ((page_id, slot), node_id) in &node_slots {
-                if self.node_index.get(node_id).is_none() {
+                if self.node_index.get_latest(node_id).is_none() {
                     report.index_errors += 1;
                     report.push_error(format!(
                         "node {node_id} stored at page {page_id} slot {slot} missing from node index"
@@ -774,10 +876,11 @@ impl GraphDB {
                 }
             }
 
-            for (edge_id, pointer) in &self.edge_index {
+            // Phase 4A: BTreeIndex iter returns Vec instead of DashMap iterator
+            for (edge_id, pointer) in self.edge_index.iter() {
                 let key = (pointer.page_id, pointer.slot_index);
                 match edge_slots.get(&key) {
-                    Some(found_id) if found_id == edge_id => {}
+                    Some(found_id) if found_id == &edge_id => {}
                     Some(found_id) => {
                         report.index_errors += 1;
                         report.push_error(format!(
@@ -796,7 +899,8 @@ impl GraphDB {
             }
 
             for ((page_id, slot), edge_id) in &edge_slots {
-                if !self.edge_index.contains_key(edge_id) {
+                // Phase 4A: Use get_latest() instead of contains_key
+                if self.edge_index.get_latest(edge_id).is_none() {
                     report.index_errors += 1;
                     report.push_error(format!(
                         "edge {edge_id} stored at page {page_id} slot {slot} missing from edge index"
@@ -882,6 +986,127 @@ impl GraphDB {
         Ok(health)
     }
 
+    /// Runs garbage collection on MVCC version chains.
+    ///
+    /// This method scans the database for old versions that are no longer
+    /// visible to any active transaction and reclaims them.
+    ///
+    /// # Returns
+    /// Statistics about the GC run including versions examined and reclaimed.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - MVCC is not enabled
+    /// * `GraphError::Corruption` - Version chain corruption detected
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sombra::GraphDB;
+    ///
+    /// let mut db = GraphDB::open_with_config("test.db", config)?;
+    /// let stats = db.run_gc()?;
+    /// println!("Reclaimed {} versions", stats.versions_reclaimed);
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn run_gc(&mut self) -> Result<GcStats> {
+        // Get all node IDs from the index to scan their version chains
+        let record_ids = self.node_index.iter().into_iter();
+
+        // Access RecordStore through pager - need to lock pager for the duration
+        let (result, dirty_pages) = self.pager.with_pager_write(|pager| {
+            let mut record_store = RecordStore::new(pager);
+
+            // Run GC
+            let result = self.gc.run_gc(&mut record_store, record_ids, &self.timestamp_oracle)?;
+
+            // Register dirty pages from GC operations
+            let dirty_pages = record_store.take_dirty_pages();
+
+            Ok((result, dirty_pages))
+        })?;
+
+        for page_id in dirty_pages {
+            self.record_page_write(page_id);
+        }
+
+        Ok(result)
+    }
+
+    /// Starts background garbage collection.
+    ///
+    /// Spawns a background thread that periodically runs GC based on the
+    /// configured `gc_interval_secs`.
+    ///
+    /// # Returns
+    /// Ok(()) if background GC was started successfully.
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - MVCC or background GC not configured
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sombra::{GraphDB, Config};
+    ///
+    /// let mut config = Config::default();
+    /// config.gc_interval_secs = Some(60); // Run GC every minute
+    /// let mut db = GraphDB::open_with_config("test.db", config)?;
+    /// db.start_background_gc()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn start_background_gc(&mut self) -> Result<()> {
+        if self.config.gc_interval_secs.is_none() {
+            return Err(GraphError::InvalidArgument(
+                "gc_interval_secs not configured, cannot start background GC".into(),
+            ));
+        }
+
+        if self.bg_gc_state.is_some() {
+            return Ok(()); // Already running
+        }
+
+        // Create GC configuration
+        let gc_config = GcConfig {
+            enabled: true,
+            interval_secs: self.config.gc_interval_secs,
+            min_versions_per_record: 1,
+            scan_batch_size: 1000,
+        };
+
+        // Create background GC state
+        let bg_gc = BackgroundGcState::spawn(self.path.clone(), gc_config, self.timestamp_oracle.clone())?;
+
+        // Store bg_gc_state for later shutdown
+        self.bg_gc_state = Some(bg_gc);
+
+        Ok(())
+    }
+
+    /// Stops background garbage collection.
+    ///
+    /// Signals the background GC thread to shut down and waits for it to complete.
+    ///
+    /// # Returns
+    /// Ok(()) if background GC was stopped successfully, or was not running.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use sombra::GraphDB;
+    ///
+    /// let mut db = GraphDB::open_with_config("test.db", config)?;
+    /// db.start_background_gc()?;
+    /// // ... later ...
+    /// db.stop_background_gc()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn stop_background_gc(&mut self) -> Result<()> {
+        if let Some(bg_gc) = self.bg_gc_state.take() {
+            let state = bg_gc.lock().map_err(|e| {
+                GraphError::InvalidArgument(format!("failed to lock background GC state: {e}"))
+            })?;
+            state.shutdown()?;
+        }
+        Ok(())
+    }
+
     /// Closes the database gracefully.
     ///
     /// Performs a clean shutdown by:
@@ -908,15 +1133,20 @@ impl GraphDB {
     /// db.close()?; // Clean shutdown
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
-    pub fn close(mut self) -> Result<()> {
+    pub fn close(self) -> Result<()> {
         info!("Closing database gracefully");
 
         if self.is_in_transaction() {
             warn!("Active transaction detected during close, rolling back");
-            self.exit_transaction();
+            // End all active transactions
+            self.mvcc_tx_manager.end_all_transactions();
         }
 
         self.persist_btree_index()?;
+
+        // Update timestamp in header
+        self.header.lock().unwrap().max_timestamp = self.timestamp_oracle.current_timestamp();
+
         self.write_header()?;
 
         self.pager.checkpoint()?;

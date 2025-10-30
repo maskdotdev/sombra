@@ -439,8 +439,8 @@ impl GraphDB {
         } else {
             let mut set = BTreeSet::new();
             for label in &pattern.labels {
-                if let Some(ids) = self.label_index.get(label) {
-                    set.extend(ids.iter().copied());
+                if let Some(label_map) = self.label_index.get(label) {
+                    set.extend(label_map.iter().map(|entry| *entry.key()));
                 }
             }
             set

@@ -13,6 +13,7 @@ This package contains the core graph database implementation for Sombra. It prov
 - **Property Graph Model**: Nodes, edges, and flexible properties
 - **Single File Storage**: SQLite-style database files
 - **ACID Transactions**: Full transactional support with rollback
+- **MVCC (Multi-Version Concurrency Control)**: Snapshot isolation for concurrent reads/writes
 - **Write-Ahead Logging**: Crash-safe operations
 - **Page-Based Storage**: Efficient memory-mapped I/O
 - **B-tree Primary Index**: Memory-efficient indexing with better cache locality
@@ -46,6 +47,43 @@ tx.commit()?;
 
 let neighbors = db.get_neighbors(user)?;
 println!("User {} authored {} posts", user, neighbors.len());
+```
+
+### Concurrent Transactions
+
+All transactions use MVCC snapshot isolation for concurrent read-write access:
+
+```rust
+use sombra::db::{Config, GraphDB};
+
+let mut db = GraphDB::open("my_graph.db")?;
+
+// Concurrent transactions with snapshot isolation
+let tx1 = db.begin_transaction()?; // Gets snapshot at T1
+let tx2 = db.begin_transaction()?; // Gets snapshot at T2
+
+// tx1 and tx2 see consistent snapshots
+// Writes don't block reads
+```
+
+**Performance Characteristics**:
+- Timestamp allocation overhead: ~357μs per transaction
+- Visibility check overhead: ~3.6μs per read
+- Storage overhead: ~33% for update-heavy workloads
+- Benefits: Non-blocking reads, snapshot isolation
+
+See `MVCC_IMPLEMENTATION_STATUS.md` for detailed performance benchmarks.
+
+## Benchmarks
+
+Run performance benchmarks:
+
+```bash
+# Standard benchmarks (read, write, traversal)
+cargo bench --features benchmarks
+
+# MVCC performance comparison
+cargo bench --bench mvcc_performance --features benchmarks
 ```
 
 ## Documentation

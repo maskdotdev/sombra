@@ -8,7 +8,7 @@ use crate::pager::PageId;
 const MAGIC: &[u8; 8] = b"GRPHITE\0";
 const HEADER_REGION_SIZE: usize = 96;
 const VERSION_MAJOR: u16 = 1;
-const VERSION_MINOR: u16 = 2;
+const VERSION_MINOR: u16 = 3;
 
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -23,6 +23,9 @@ pub struct Header {
     pub property_index_root_page: Option<PageId>,
     pub property_index_count: u32,
     pub property_index_version: u16,
+    // MVCC fields (version 1.3+) - always enabled
+    pub max_timestamp: u64,
+    pub oldest_snapshot_ts: u64,
 }
 
 impl Header {
@@ -41,6 +44,8 @@ impl Header {
             property_index_root_page: None,
             property_index_count: 0,
             property_index_version: 1,
+            max_timestamp: 0,
+            oldest_snapshot_ts: 0,
         })
     }
 
@@ -115,6 +120,19 @@ impl Header {
             0
         };
 
+        // MVCC fields (version 1.3+) - always enabled now
+        let max_timestamp = if data.len() >= 75 {
+            Self::read_u64(data, 67, 75)?
+        } else {
+            0
+        };
+
+        let oldest_snapshot_ts = if data.len() >= 83 {
+            Self::read_u64(data, 75, 83)?
+        } else {
+            0
+        };
+
         Ok(Some(Self {
             page_size,
             next_node_id,
@@ -135,6 +153,8 @@ impl Header {
             property_index_root_page,
             property_index_count,
             property_index_version,
+            max_timestamp,
+            oldest_snapshot_ts,
         }))
     }
 
@@ -160,6 +180,13 @@ impl Header {
         data[56..60].copy_from_slice(&self.property_index_root_page.unwrap_or(0).to_le_bytes());
         data[60..64].copy_from_slice(&self.property_index_count.to_le_bytes());
         data[64..66].copy_from_slice(&self.property_index_version.to_le_bytes());
+
+        // MVCC fields (version 1.3+) - always enabled
+        // Byte 66: Reserved for future use (historically stored mvcc_enabled flag, now always on)
+        data[66] = 1;
+        data[67..75].copy_from_slice(&self.max_timestamp.to_le_bytes());
+        data[75..83].copy_from_slice(&self.oldest_snapshot_ts.to_le_bytes());
+
         Ok(())
     }
 

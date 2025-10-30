@@ -1,6 +1,6 @@
 use crate::error::{GraphError, Result};
 use crate::pager::{PageId, Pager, PAGE_CHECKSUM_SIZE};
-use crate::storage::page::RecordPage;
+use crate::storage::page::{detect_page_type, PageType, RecordPage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecordPointer {
@@ -11,11 +11,27 @@ pub struct RecordPointer {
 
 pub struct RecordStore<'a> {
     pager: &'a mut Pager,
+    dirty_pages: Vec<PageId>,
 }
 
 impl<'a> RecordStore<'a> {
     pub fn new(pager: &'a mut Pager) -> Self {
-        Self { pager }
+        Self {
+            pager,
+            dirty_pages: Vec::new(),
+        }
+    }
+
+    /// Get the list of pages that were dirtied by this RecordStore
+    pub fn take_dirty_pages(&mut self) -> Vec<PageId> {
+        std::mem::take(&mut self.dirty_pages)
+    }
+
+    /// Mark a page as dirty and track it
+    fn mark_page_dirty(&mut self, page_id: PageId) {
+        if !self.dirty_pages.contains(&page_id) {
+            self.dirty_pages.push(page_id);
+        }
     }
 
     pub fn insert(
@@ -41,6 +57,111 @@ impl<'a> RecordStore<'a> {
         let slot = record_page.append_record(record)?;
         let byte_offset = record_page.record_offset(slot as usize)?;
         page.dirty = true;
+        self.mark_page_dirty(page_id);
+        Ok(RecordPointer {
+            page_id,
+            slot_index: slot,
+            byte_offset,
+        })
+    }
+
+    /// Insert a record into a NEW slot without reusing freed slots
+    ///
+    /// This is crucial for MVCC version chains where each version must be stored
+    /// in a separate location. Regular `insert()` may reuse freed slots which would
+    /// break version chain integrity.
+    ///
+    /// This method will try to append to existing pages first, but will NOT reuse
+    /// freed slots. Only if no page has room will it allocate a new page.
+    ///
+    /// # Page Type Handling
+    ///
+    /// This method scans all pages in the database looking for RecordPages with
+    /// available space. The database may contain different page types:
+    /// - **RecordPages**: Store node/edge data and version records
+    /// - **BTree index pages**: Store node ID indexes (magic: "BIDX")
+    /// - **Property index pages**: Store property value indexes (magic: "PIDX")
+    ///
+    /// When we encounter non-RecordPage types during scanning, `RecordPage::from_bytes()`
+    /// detects their magic bytes and returns `InvalidArgument` (not `Corruption`).
+    /// We catch these errors and skip to the next page, which is the correct behavior
+    /// since we only want to append records to RecordPages.
+    ///
+    /// See `src/storage/page.rs` for details on magic byte detection.
+    ///
+    /// # Arguments
+    /// * `record` - The record data to store
+    ///
+    /// # Returns
+    /// * Pointer to the newly allocated slot
+    pub fn insert_new_slot(&mut self, record: &[u8]) -> Result<RecordPointer> {
+        // Try to find an existing page with room to append (without slot reuse)
+        let page_count = self.pager.page_count();
+
+        // Scan all pages starting from page 1 (skip header page 0)
+        // Note: This will encounter mixed page types (RecordPages, BIDX, PIDX).
+        // RecordPage::from_bytes() handles this by detecting magic bytes and
+        // returning InvalidArgument for non-RecordPages, which we catch below.
+        for page_id in 1..page_count as u32 {
+            let page = self.pager.fetch_page(page_id)?;
+
+            // Try to parse as RecordPage - will fail for index pages (BIDX, PIDX)
+            let mut record_page = match RecordPage::from_bytes(&mut page.data) {
+                Ok(page) => page,
+                Err(_) => {
+                    // Debug assertion: Verify we're skipping a non-RecordPage
+                    #[cfg(debug_assertions)]
+                    {
+                        let detected_type = detect_page_type(&page.data);
+                        debug_assert!(
+                            !matches!(detected_type, PageType::Record),
+                            "Skipping page {page_id} which appears to be a RecordPage (type: {detected_type:?})"
+                        );
+                    }
+                    continue; // Skip non-RecordPage types
+                }
+            };
+
+            if record_page.initialize().is_err() {
+                continue; // Skip if initialization fails
+            }
+
+            // Check if we can fit the record by appending (not reusing)
+            match record_page.can_fit(record.len()) {
+                Ok(true) => {
+                    let slot = record_page.append_record(record)?;
+                    let byte_offset = record_page.record_offset(slot as usize)?;
+                    page.dirty = true;
+                    self.mark_page_dirty(page_id);
+                    return Ok(RecordPointer {
+                        page_id,
+                        slot_index: slot,
+                        byte_offset,
+                    });
+                }
+                Ok(false) => continue,
+                // InvalidArgument errors indicate page is full or has issues
+                Err(_) => continue,
+            }
+        }
+
+        // No existing page has room, allocate a new page
+        let page_id = self.pager.allocate_page()?;
+        let page = self.pager.fetch_page(page_id)?;
+        let mut record_page = RecordPage::from_bytes(&mut page.data)?;
+        record_page.initialize()?;
+
+        if !record_page.can_fit(record.len())? {
+            return Err(GraphError::InvalidArgument(
+                "newly allocated page cannot fit record".into(),
+            ));
+        }
+
+        let slot = record_page.append_record(record)?;
+        let byte_offset = record_page.record_offset(slot as usize)?;
+        page.dirty = true;
+        self.mark_page_dirty(page_id);
+
         Ok(RecordPointer {
             page_id,
             slot_index: slot,
@@ -103,6 +224,7 @@ impl<'a> RecordStore<'a> {
         }
         let result = f(&mut slice[..record_len])?;
         page.dirty = true;
+        self.mark_page_dirty(pointer.page_id);
         Ok(result)
     }
 
@@ -119,6 +241,7 @@ impl<'a> RecordStore<'a> {
             if record_page.try_reuse_slot(slot, record)? {
                 let byte_offset = record_page.record_offset(slot)?;
                 page.dirty = true;
+                self.mark_page_dirty(page_id);
                 return Ok(Some(RecordPointer {
                     page_id,
                     slot_index: slot as u16,
@@ -130,6 +253,7 @@ impl<'a> RecordStore<'a> {
             let slot = record_page.append_record(record)?;
             let byte_offset = record_page.record_offset(slot as usize)?;
             page.dirty = true;
+            self.mark_page_dirty(page_id);
             Ok(Some(RecordPointer {
                 page_id,
                 slot_index: slot,
@@ -146,7 +270,66 @@ impl<'a> RecordStore<'a> {
         record_page.mark_slot_free(pointer.slot_index as usize)?;
         let live = record_page.live_record_count()?;
         page.dirty = true;
+        self.mark_page_dirty(pointer.page_id);
         Ok(live == 0)
+    }
+
+    /// Gets the byte_offset for a given slot from the page's slot directory
+    ///
+    /// This is used to recalculate byte_offset when traversing MVCC version chains,
+    /// since prev_version pointers only store page_id and slot_index (byte_offset=0).
+    ///
+    /// # Arguments
+    /// * `page_id` - The page ID
+    /// * `slot_index` - The slot index
+    ///
+    /// # Returns
+    /// The byte offset from the page's slot directory
+    pub fn get_byte_offset_for_slot(&mut self, page_id: PageId, slot_index: u16) -> Result<u16> {
+        let page = self.pager.fetch_page(page_id)?;
+        let record_page = RecordPage::from_bytes(&mut page.data)?;
+        record_page.record_offset(slot_index as usize)
+    }
+
+    /// Updates the commit_ts field in version metadata for a record
+    ///
+    /// This is used during transaction commit to update all versions created by
+    /// the transaction from commit_ts=0 (uncommitted) to the actual commit timestamp.
+    ///
+    /// The commit_ts field is at bytes 8-15 in the version metadata, which appears
+    /// after the 1-byte record kind byte in versioned records.
+    ///
+    /// # Arguments
+    /// * `pointer` - Pointer to the versioned record
+    /// * `commit_ts` - The commit timestamp to set
+    ///
+    /// # Returns
+    /// Ok(()) if successful
+    pub fn update_commit_ts(&mut self, pointer: RecordPointer, commit_ts: u64) -> Result<()> {
+        let page = self.pager.fetch_page(pointer.page_id)?;
+
+        // Access the raw page data to update commit_ts in place
+        let offset = pointer.byte_offset as usize;
+
+        // Versioned record layout: [kind:1][reserved:3][payload_len:4][metadata:25][data:N]
+        // commit_ts is at offset 8 within version_metadata (after tx_id: 8 bytes)
+        // So total offset is: byte_offset + 8 (header) + 8 (tx_id offset in metadata)
+        let commit_ts_offset = offset + 8 + 8;
+
+        // Ensure we have enough space
+        if commit_ts_offset + 8 > page.data.len() - PAGE_CHECKSUM_SIZE {
+            return Err(GraphError::Corruption(
+                "commit_ts offset exceeds page bounds".into(),
+            ));
+        }
+
+        // Write the commit_ts
+        page.data[commit_ts_offset..commit_ts_offset + 8].copy_from_slice(&commit_ts.to_le_bytes());
+
+        page.dirty = true;
+        self.mark_page_dirty(pointer.page_id);
+
+        Ok(())
     }
 
     pub fn update_in_place(
@@ -154,12 +337,21 @@ impl<'a> RecordStore<'a> {
         pointer: RecordPointer,
         new_record: &[u8],
     ) -> Result<Option<RecordPointer>> {
-        let page = self.pager.fetch_page(pointer.page_id)?;
-        let mut record_page = RecordPage::from_bytes(&mut page.data)?;
+        let byte_offset = {
+            let page = self.pager.fetch_page(pointer.page_id)?;
+            let mut record_page = RecordPage::from_bytes(&mut page.data)?;
 
-        if record_page.try_update_slot(pointer.slot_index as usize, new_record)? {
-            page.dirty = true;
-            let byte_offset = record_page.record_offset(pointer.slot_index as usize)?;
+            if record_page.try_update_slot(pointer.slot_index as usize, new_record)? {
+                page.dirty = true;
+                let byte_offset = record_page.record_offset(pointer.slot_index as usize)?;
+                Some(byte_offset)
+            } else {
+                None
+            }
+        };
+
+        if let Some(byte_offset) = byte_offset {
+            self.mark_page_dirty(pointer.page_id);
             Ok(Some(RecordPointer {
                 page_id: pointer.page_id,
                 slot_index: pointer.slot_index,
@@ -223,13 +415,18 @@ impl<'a> RecordStore<'a> {
 
         // If no live records, the page can be cleared
         if live_records.is_empty() {
-            let page = self.pager.fetch_page(page_id)?;
-            let mut record_page = RecordPage::from_bytes(&mut page.data)?;
-            let bytes_before = record_page.available_space()?;
-            record_page.clear()?;
-            record_page.initialize()?;
-            page.dirty = true;
-            let bytes_after = record_page.available_space()?;
+            let bytes_before;
+            let bytes_after;
+            {
+                let page = self.pager.fetch_page(page_id)?;
+                let mut record_page = RecordPage::from_bytes(&mut page.data)?;
+                bytes_before = record_page.available_space()?;
+                record_page.clear()?;
+                record_page.initialize()?;
+                page.dirty = true;
+                bytes_after = record_page.available_space()?;
+            }
+            self.mark_page_dirty(page_id);
             return Ok(bytes_after.saturating_sub(bytes_before));
         }
 
@@ -257,6 +454,7 @@ impl<'a> RecordStore<'a> {
             }
 
             page.dirty = true;
+            self.mark_page_dirty(page_id);
         }
 
         // Calculate space after compaction

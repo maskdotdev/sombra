@@ -25,7 +25,7 @@ fn transaction_commit_wal_only() -> Result<()> {
 
     // Data should be recoverable from WAL after reopening
     {
-        let mut db = GraphDB::open(&path)?;
+        let db = GraphDB::open(&path)?;
         let node = db.get_node(node_id)?.expect("node should exist");
         assert_eq!(node.id, node_id);
     }
@@ -38,10 +38,11 @@ fn transaction_rollback_no_wal_traces() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path().to_path_buf();
 
+    let node_id;
     {
         let mut db = GraphDB::open(&path)?;
         let mut tx = db.begin_transaction()?;
-        tx.add_node(Node::new(0))?;
+        node_id = tx.add_node(Node::new(0))?;
         tx.rollback()?;
 
         // After rollback, WAL should be minimal (just header)
@@ -52,8 +53,8 @@ fn transaction_rollback_no_wal_traces() -> Result<()> {
 
     // No data should be recoverable
     {
-        let mut db = GraphDB::open(&path)?;
-        assert!(db.get_node(1).is_err());
+        let db = GraphDB::open(&path)?;
+        assert!(db.get_node(node_id)?.is_none());
     }
 
     Ok(())
@@ -86,14 +87,14 @@ fn multi_transaction_isolation() -> Result<()> {
 
     // At this point, both should be visible since WAL is replayed on open
     {
-        let mut db = GraphDB::open(&path)?;
+        let db = GraphDB::open(&path)?;
         assert!(db.get_node(tx1_node_id).is_ok());
         assert!(db.get_node(tx2_node_id).is_ok());
     }
 
     // After checkpoint, both should still be visible
     {
-        let mut db = GraphDB::open(&path)?;
+        let db = GraphDB::open(&path)?;
         db.checkpoint()?;
         assert!(db.get_node(tx1_node_id).is_ok());
         assert!(db.get_node(tx2_node_id).is_ok());
@@ -200,14 +201,14 @@ fn crash_simulation_uncommitted_tx_lost() -> Result<()> {
 
     // On recovery, uncommitted transaction should be lost
     {
-        let mut db = GraphDB::open(&path)?;
-        assert!(db.get_node(node_id).is_err());
+        let db = GraphDB::open(&path)?;
+        assert!(db.get_node(node_id)?.is_none());
     }
 
     // On recovery, uncommitted transaction should be lost
     {
-        let mut db = GraphDB::open(&path)?;
-        assert!(db.get_node(node_id).is_err());
+        let db = GraphDB::open(&path)?;
+        assert!(db.get_node(node_id)?.is_none());
     }
 
     Ok(())
@@ -235,7 +236,7 @@ fn large_transaction_dirty_page_tracking() -> Result<()> {
 
     // Verify all data is recoverable
     {
-        let mut db = GraphDB::open(&path)?;
+        let db = GraphDB::open(&path)?;
         // Check how many nodes were actually created
         let mut found_nodes = 0;
         for i in 1..=50 {

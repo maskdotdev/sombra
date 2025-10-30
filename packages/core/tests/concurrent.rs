@@ -72,7 +72,7 @@ fn concurrent_edge_creation() -> Result<()> {
 
     // Create a central hub node first
     let mut db = GraphDB::open(&path)?;
-    let hub_id = db.add_node(Node::new(9999))?;
+    let hub_id = db.add_node(Node::new(0))?;
 
     let db = Arc::new(Mutex::new(db));
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
@@ -88,7 +88,8 @@ fn concurrent_edge_creation() -> Result<()> {
             let mut edge_ids = Vec::new();
 
             for i in 0..OPERATIONS_PER_THREAD {
-                let node = Node::new((thread_id * OPERATIONS_PER_THREAD + i) as u64);
+                // Use id=0 so DB will assign a new unique ID
+                let node = Node::new(0);
                 let node_id = db_clone.lock().add_node(node)?;
 
                 let edge = Edge::new(0, hub_id, node_id, "connect");

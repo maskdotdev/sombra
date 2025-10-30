@@ -3,6 +3,8 @@ use super::group_commit::TxId;
 use crate::error::{GraphError, Result};
 use crate::model::{Edge, EdgeId, Node, NodeId};
 use crate::pager::PageId;
+use crate::storage::heap::RecordPointer;
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
 /// The state of a transaction.
@@ -54,20 +56,42 @@ pub enum TxState {
 /// ```
 #[derive(Debug)]
 pub struct Transaction<'db> {
-    db: &'db mut GraphDB,
+    db: &'db GraphDB,
     id: TxId,
     epoch: u64,
     state: TxState,
     pub dirty_pages: Vec<PageId>,
     start_time: std::time::Instant,
+    snapshot_ts: u64,
+    /// Set of node IDs read by this transaction (for conflict detection)
+    read_nodes: HashSet<NodeId>,
+    /// Set of node IDs written by this transaction (for conflict detection)
+    write_nodes: HashSet<NodeId>,
+    /// Set of edge IDs written by this transaction (for conflict detection)
+    write_edges: HashSet<EdgeId>,
+    /// Version record pointers created by this transaction (for efficient commit timestamp updates)
+    created_versions: Vec<RecordPointer>,
+    /// Deleted node pointers (for property index delete timestamp updates)
+    deleted_node_pointers: Vec<RecordPointer>,
 }
 
 impl<'db> Transaction<'db> {
-    pub(crate) fn new(db: &'db mut GraphDB, id: TxId) -> Result<Self> {
+    pub(crate) fn new(db: &'db GraphDB, id: TxId) -> Result<Self> {
         db.enter_transaction(id)?;
         db.start_tracking();
         let epoch = db.increment_epoch();
-        debug!(tx_id = id, epoch = epoch, "Transaction started");
+
+        // Allocate snapshot timestamp from oracle
+        let snapshot_ts = db.timestamp_oracle.allocate_read_timestamp();
+        // Register snapshot for GC watermark tracking
+        db.timestamp_oracle.register_snapshot(snapshot_ts, id)?;
+
+        debug!(
+            tx_id = id,
+            epoch = epoch,
+            snapshot_ts = snapshot_ts,
+            "Transaction started"
+        );
         Ok(Self {
             db,
             id,
@@ -75,6 +99,12 @@ impl<'db> Transaction<'db> {
             state: TxState::Active,
             dirty_pages: Vec::new(),
             start_time: std::time::Instant::now(),
+            snapshot_ts,
+            read_nodes: HashSet::new(),
+            write_nodes: HashSet::new(),
+            write_edges: HashSet::new(),
+            created_versions: Vec::new(),
+            deleted_node_pointers: Vec::new(),
         })
     }
 
@@ -88,6 +118,17 @@ impl<'db> Transaction<'db> {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Returns the snapshot timestamp for this transaction.
+    ///
+    /// This timestamp determines which versions of records are visible to this transaction
+    /// in MVCC mode. If MVCC is not enabled, returns 0.
+    ///
+    /// # Returns
+    /// The snapshot timestamp.
+    pub fn snapshot_ts(&self) -> u64 {
+        self.snapshot_ts
     }
 
     /// Returns the current state of the transaction.
@@ -165,8 +206,15 @@ impl<'db> Transaction<'db> {
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn add_node(&mut self, node: Node) -> Result<NodeId> {
-        let node_id = self.db.add_node_internal(node)?;
+        // Pass transaction ID and commit_ts=0 (will be set at commit time)
+        let (node_id, version_ptr) = self.db.add_node_internal(node, self.id, 0)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_nodes.insert(node_id);
+        // Track version pointer for efficient commit timestamp updates
+        if let Some(ptr) = version_ptr {
+            self.created_versions.push(ptr);
+        }
         Ok(node_id)
     }
 
@@ -199,8 +247,15 @@ impl<'db> Transaction<'db> {
     /// # Ok::<(), sombra::GraphError>(())
     /// ```
     pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId> {
-        let edge_id = self.db.add_edge_internal(edge)?;
+        // Pass transaction ID and commit_ts=0 (will be set at commit time)
+        let (edge_id, version_ptr) = self.db.add_edge_internal(edge, self.id, 0)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_edges.insert(edge_id);
+        // Track version pointer for efficient commit timestamp updates
+        if let Some(ptr) = version_ptr {
+            self.created_versions.push(ptr);
+        }
         Ok(edge_id)
     }
 
@@ -217,8 +272,16 @@ impl<'db> Transaction<'db> {
     /// * `GraphError::InvalidArgument` - Transaction limits exceeded
     /// * `GraphError::NotFound` - Node doesn't exist
     pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
-        self.db.delete_node_internal(node_id)?;
+        // Capture ALL version pointers before deletion (needed for property index updates)
+        // When a node is deleted, we need to mark ALL version pointers in property indexes
+        // because a property value may have been set in multiple versions
+        let all_pointers = self.db.node_index.get(&node_id).unwrap_or_default();
+        self.deleted_node_pointers.extend(all_pointers);
+        
+        self.db.delete_node_internal(node_id, self.id, 0)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_nodes.insert(node_id);
         Ok(())
     }
 
@@ -236,6 +299,8 @@ impl<'db> Transaction<'db> {
     pub fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         self.db.delete_edge_internal(edge_id)?;
         self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_edges.insert(edge_id);
         Ok(())
     }
 
@@ -254,14 +319,22 @@ impl<'db> Transaction<'db> {
     /// * `Ok(Some(Node))` - Node found
     /// * `Ok(None)` - Node doesn't exist
     pub fn get_node(&mut self, node_id: NodeId) -> Result<Option<Node>> {
-        self.db.get_node(node_id)
+        let result = self
+            .db
+            .get_node_with_snapshot(node_id, self.snapshot_ts, Some(self.id))?;
+        // Track read for conflict detection
+        if result.is_some() {
+            self.read_nodes.insert(node_id);
+        }
+        Ok(result)
     }
 
     pub fn get_edge(&mut self, edge_id: EdgeId) -> Result<Edge> {
-        self.db.load_edge(edge_id)
+        self.db
+            .load_edge_with_snapshot(edge_id, self.snapshot_ts, Some(self.id))
     }
 
-    pub fn get_nodes_by_label(&mut self, label: &str) -> Result<Vec<NodeId>> {
+    pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeId>> {
         self.db.get_nodes_by_label(label)
     }
 
@@ -279,8 +352,9 @@ impl<'db> Transaction<'db> {
     ///
     /// # Errors
     /// * `GraphError::NotFound` - Node doesn't exist
-    pub fn get_neighbors(&mut self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        self.db.get_neighbors(node_id)
+    pub fn get_neighbors(&self, node_id: NodeId) -> Result<Vec<NodeId>> {
+        self.db
+            .get_neighbors_with_snapshot(node_id, self.snapshot_ts, Some(self.id))
     }
 
     /// Creates a property index (not supported within transactions).
@@ -319,12 +393,47 @@ impl<'db> Transaction<'db> {
     /// * `GraphError::NotFound` - No index exists for the label/property
     /// * `GraphError::InvalidArgument` - Property type is not indexable
     pub fn find_nodes_by_property(
-        &mut self,
+        &self,
         label: &str,
         property_key: &str,
         value: &crate::model::PropertyValue,
     ) -> Result<Vec<NodeId>> {
-        self.db.find_nodes_by_property(label, property_key, value)
+        self.db.find_nodes_by_property_with_snapshot(label, property_key, value, self.snapshot_ts)
+    }
+
+    /// Removes a property from a node within this transaction.
+    ///
+    /// If the property doesn't exist, this operation succeeds without error.
+    /// The change is not visible to other transactions until this transaction
+    /// is committed.
+    ///
+    /// # Arguments
+    /// * `node_id` - The ID of the node
+    /// * `property_key` - The property key to remove
+    ///
+    /// # Errors
+    /// * `GraphError::InvalidArgument` - Transaction limits exceeded
+    /// * `GraphError::NotFound` - Node doesn't exist
+    ///
+    /// # Example
+    /// ```rust
+    /// use sombra::{GraphDB, Node, PropertyValue};
+    ///
+    /// let mut db = GraphDB::open("test.db")?;
+    /// let mut tx = db.begin_transaction()?;
+    /// let mut node = Node::new(1);
+    /// node.properties.insert("age".to_string(), PropertyValue::Int(30));
+    /// let node_id = tx.add_node(node)?;
+    /// tx.remove_node_property(node_id, "age")?;
+    /// tx.commit()?;
+    /// # Ok::<(), sombra::GraphError>(())
+    /// ```
+    pub fn remove_node_property(&mut self, node_id: NodeId, property_key: &str) -> Result<()> {
+        self.db.remove_node_property_internal(node_id, property_key)?;
+        self.capture_dirty_pages()?;
+        // Track write for conflict detection
+        self.write_nodes.insert(node_id);
+        Ok(())
     }
 
     /// Commits the transaction, making all changes permanent.
@@ -355,37 +464,104 @@ impl<'db> Transaction<'db> {
         let start = std::time::Instant::now();
         let dirty_page_count = self.dirty_pages.len();
 
-        self.db.header.last_committed_tx_id = self.id;
+        // Phase 5: header wrapped in Mutex
+        self.db.header.lock().unwrap().last_committed_tx_id = self.id;
+
+        // Get commit timestamp from oracle
+        let commit_ts = self.db.timestamp_oracle.allocate_commit_timestamp();
+        self.db.header.lock().unwrap().max_timestamp = commit_ts;
+
         let write_header_result = self.db.write_header();
         if let Err(err) = write_header_result {
             let _ = self.db.rollback_transaction(&self.dirty_pages);
+            self.unregister_snapshot();
             self.db.stop_tracking();
-            self.db.exit_transaction();
+            self.db.exit_transaction(self.id);
             self.state = TxState::RolledBack;
             return Err(err);
         }
 
         self.capture_dirty_pages()?;
+
+        // Optimization: Skip WAL writes for empty transactions (no modifications)
+        // This is common for read-only transactions or rolled-back operations
+        if self.dirty_pages.is_empty() {
+            self.unregister_snapshot();
+            self.db.stop_tracking();
+            self.db.exit_transaction(self.id);
+            self.state = TxState::Committed;
+            let duration = start.elapsed();
+            info!(
+                tx_id = self.id,
+                dirty_pages = 0,
+                duration_ms = duration.as_millis(),
+                read_nodes = self.read_nodes.len(),
+                write_nodes = 0,
+                write_edges = 0,
+                "Empty transaction committed (no WAL write)"
+            );
+            return Ok(());
+        }
+
+        // Update commit_ts in all version metadata created by this transaction
+        // Pass the tracked version pointers for direct update (optimization)
+        if commit_ts > 0 {
+            if let Err(err) = self.db.update_versions_commit_ts(
+                self.id,
+                commit_ts,
+                &self.dirty_pages,
+                &self.created_versions,
+            ) {
+                let _ = self.db.rollback_transaction(&self.dirty_pages);
+                self.unregister_snapshot();
+                self.db.stop_tracking();
+                self.db.exit_transaction(self.id);
+                self.state = TxState::RolledBack;
+                return Err(err);
+            }
+
+            // Update property index commit timestamps for nodes added in this transaction
+            // AND update delete timestamps for deleted nodes
+            
+            // Update commit timestamps for added/updated nodes
+            for node_id in &self.write_nodes {
+                let _ = self.db.update_property_index_commit_ts(*node_id, commit_ts);
+            }
+            
+            // Update delete timestamps for deleted nodes
+            for pointer in &self.deleted_node_pointers {
+                if let Err(err) = self.db.update_property_index_delete_ts_by_pointer(*pointer, commit_ts) {
+                    warn!("Failed to update property index delete timestamps for pointer {:?}: {}", pointer, err);
+                    // Continue - this is an index update, not critical for consistency
+                }
+            }
+        }
+
         let pages = self.dirty_pages.clone();
         let result = self.db.commit_to_wal(self.id, &pages);
         match result {
             Ok(()) => {
+                self.unregister_snapshot();
                 self.db.stop_tracking();
-                self.db.exit_transaction();
+                self.db.exit_transaction(self.id);
                 self.state = TxState::Committed;
                 let duration = start.elapsed();
                 info!(
                     tx_id = self.id,
                     dirty_pages = dirty_page_count,
                     duration_ms = duration.as_millis(),
+                    read_nodes = self.read_nodes.len(),
+                    write_nodes = self.write_nodes.len(),
+                    write_edges = self.write_edges.len(),
                     "Transaction committed"
                 );
                 Ok(())
             }
             Err(err) => {
                 let _ = self.db.rollback_transaction(&pages);
+                self.unregister_snapshot();
                 self.db.stop_tracking();
-                self.db.exit_transaction();
+                self.db.exit_transaction(self.id);
                 self.state = TxState::RolledBack;
                 Err(err)
             }
@@ -416,8 +592,9 @@ impl<'db> Transaction<'db> {
         self.capture_dirty_pages()?;
         let pages = self.dirty_pages.clone();
         let result = self.db.rollback_transaction(&pages);
+        self.unregister_snapshot();
         self.db.stop_tracking();
-        self.db.exit_transaction();
+        self.db.exit_transaction(self.id);
         self.state = TxState::RolledBack;
         warn!(tx_id = self.id, "Transaction rolled back");
         result
@@ -431,14 +608,24 @@ impl<'db> Transaction<'db> {
         }
         Ok(())
     }
+
+    /// Unregisters the snapshot from the timestamp oracle
+    ///
+    /// Should be called when the transaction finishes (commit or rollback)
+    fn unregister_snapshot(&self) {
+        if self.snapshot_ts > 0 {
+            let _ = self.db.timestamp_oracle.unregister_snapshot(self.snapshot_ts);
+        }
+    }
 }
 
 impl<'db> Drop for Transaction<'db> {
     fn drop(&mut self) {
-        self.db.stop_tracking();
         if self.state == TxState::Active {
+            self.unregister_snapshot();
+            self.db.stop_tracking();
             let _ = self.db.rollback_transaction(&self.dirty_pages);
-            self.db.exit_transaction();
+            self.db.exit_transaction(self.id);
             if !std::thread::panicking() {
                 panic!("transaction {} dropped without commit or rollback", self.id);
             }

@@ -137,6 +137,17 @@ pub struct Config {
 
     /// Maximum number of pages to compact in a single run.
     pub compaction_batch_size: usize,
+
+    /// Maximum number of concurrent transactions allowed.
+    ///
+    /// Controls how many transactions can be active simultaneously.
+    /// None = use default (100).
+    pub max_concurrent_transactions: Option<usize>,
+
+    /// Interval in seconds between garbage collection runs (None = disabled).
+    ///
+    /// GC reclaims old versions that are no longer visible to any active transaction.
+    pub gc_interval_secs: Option<u64>,
 }
 
 impl Default for Config {
@@ -161,6 +172,8 @@ impl Default for Config {
             compaction_interval_secs: Some(300),
             compaction_threshold_percent: 50,
             compaction_batch_size: 100,
+            max_concurrent_transactions: None,
+            gc_interval_secs: None,
         }
     }
 }
@@ -197,6 +210,8 @@ impl Config {
             compaction_interval_secs: Some(300),
             compaction_threshold_percent: 50,
             compaction_batch_size: 100,
+            max_concurrent_transactions: None,
+            gc_interval_secs: None,
         }
     }
 
@@ -231,6 +246,8 @@ impl Config {
             compaction_interval_secs: Some(600),
             compaction_threshold_percent: 40,
             compaction_batch_size: 200,
+            max_concurrent_transactions: None,
+            gc_interval_secs: None,
         }
     }
 
@@ -268,6 +285,8 @@ impl Config {
             compaction_interval_secs: None,
             compaction_threshold_percent: 50,
             compaction_batch_size: 100,
+            max_concurrent_transactions: None,
+            gc_interval_secs: None,
         }
     }
 
@@ -305,6 +324,8 @@ impl Config {
             compaction_interval_secs: Some(180),
             compaction_threshold_percent: 60,
             compaction_batch_size: 50,
+            max_concurrent_transactions: None,
+            gc_interval_secs: None,
         }
     }
 }
