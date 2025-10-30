@@ -5,11 +5,10 @@
 use sombra::{Config, GraphDB, Node, PropertyValue};
 use tempfile::NamedTempFile;
 
-/// Helper function to create a test database with MVCC enabled
+/// Helper function to create a test database
 fn create_test_db() -> (GraphDB, NamedTempFile) {
     let temp_file = NamedTempFile::new().unwrap();
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.gc_interval_secs = None; // Disable background GC for manual testing
     let db = GraphDB::open_with_config(temp_file.path(), config).unwrap();
     (db, temp_file)
@@ -167,7 +166,6 @@ fn test_background_gc_start_stop() {
     // Create a test database with background GC enabled
     let temp_file = NamedTempFile::new().unwrap();
     let mut config = Config::default();
-    config.mvcc_enabled = true;
     config.gc_interval_secs = Some(60); // Enable background GC with 60s interval
     let mut db = GraphDB::open_with_config(temp_file.path(), config).unwrap();
 
@@ -222,22 +220,6 @@ fn test_gc_stats_accuracy() {
     // Stats should have reasonable values
     assert!(stats.duration_ms >= 0); // Duration should be non-negative
     assert!(stats.versions_reclaimed <= stats.versions_reclaimable);
-}
-
-#[test]
-fn test_gc_without_mvcc_enabled_fails() {
-    // Create database without MVCC
-    let temp_file = NamedTempFile::new().unwrap();
-    let mut config = Config::default();
-    config.mvcc_enabled = false; // Disable MVCC
-    let mut db = GraphDB::open_with_config(temp_file.path(), config).unwrap();
-
-    // Try to run GC - should fail
-    let result = db.run_gc();
-    assert!(result.is_err());
-
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("MVCC"));
 }
 
 #[test]

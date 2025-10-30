@@ -49,18 +49,14 @@ let neighbors = db.get_neighbors(user)?;
 println!("User {} authored {} posts", user, neighbors.len());
 ```
 
-### MVCC Mode (Concurrent Transactions)
+### Concurrent Transactions
 
-Enable MVCC for snapshot isolation and concurrent read-write transactions:
+All transactions use MVCC snapshot isolation for concurrent read-write access:
 
 ```rust
 use sombra::db::{Config, GraphDB};
 
-let mut config = Config::default();
-config.mvcc_enabled = true;
-config.max_concurrent_transactions = Some(100);
-
-let mut db = GraphDB::open_with_config("my_graph.db", config)?;
+let mut db = GraphDB::open("my_graph.db")?;
 
 // Concurrent transactions with snapshot isolation
 let tx1 = db.begin_transaction()?; // Gets snapshot at T1
@@ -70,9 +66,9 @@ let tx2 = db.begin_transaction()?; // Gets snapshot at T2
 // Writes don't block reads
 ```
 
-**Performance Trade-offs**:
-- MVCC adds ~357μs per transaction (timestamp allocation)
-- Reads are ~3.6μs slower (visibility checks)
+**Performance Characteristics**:
+- Timestamp allocation overhead: ~357μs per transaction
+- Visibility check overhead: ~3.6μs per read
 - Storage overhead: ~33% for update-heavy workloads
 - Benefits: Non-blocking reads, snapshot isolation
 

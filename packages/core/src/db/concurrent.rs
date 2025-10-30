@@ -50,10 +50,9 @@ use crate::storage::RecordPointer;
 /// `ConcurrentGraphDB` implements `Clone` and can be safely shared across
 /// threads. Internal synchronization ensures data consistency.
 ///
-/// # MVCC Requirement
+/// # MVCC Support
 ///
-/// This wrapper requires MVCC to be enabled in the database configuration.
-/// Attempting to use it without MVCC will result in an error.
+/// All transactions use MVCC snapshot isolation for consistency.
 ///
 /// # Performance Note
 ///

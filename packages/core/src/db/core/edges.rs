@@ -164,7 +164,7 @@ impl GraphDB {
         // Create tombstone version for MVCC snapshot isolation
         use crate::storage::version_chain::store_new_version;
         
-        let tx_id = self.allocate_tx_id().unwrap_or(1);
+        let tx_id = self.allocate_tx_id()?;
         let commit_ts = self.timestamp_oracle.allocate_commit_timestamp();
         
         let payload = serialize_edge(&edge)?;

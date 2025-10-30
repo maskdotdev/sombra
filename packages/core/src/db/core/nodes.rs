@@ -637,6 +637,7 @@ impl GraphDB {
         value: crate::model::PropertyValue,
     ) -> Result<()> {
         let tx_id = self.allocate_tx_id()?;
+        let commit_ts = self.timestamp_oracle.allocate_commit_timestamp();
         self.start_tracking();
 
         let pointer = self
@@ -649,44 +650,44 @@ impl GraphDB {
         node.properties.insert(key.clone(), value.clone());
 
         let payload = crate::storage::serialize_node(&node)?;
-        let record = crate::storage::record::encode_record(
-            crate::storage::record::RecordKind::Node,
-            &payload,
-        )?;
 
-        let (update_result, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
+        // Use MVCC version chain instead of update_in_place
+        use crate::storage::version_chain::store_new_version;
+        
+        let (new_pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let mut store = RecordStore::new(pager);
-            let result = store.update_in_place(pointer, &record)?;
-            let dirty = if let Some(ptr) = result {
-                vec![ptr.page_id]
-            } else {
-                vec![]
-            };
-            Ok((result, dirty))
+            let new_pointer = store_new_version(
+                &mut store,
+                Some(pointer), // Link to previous version
+                node_id,
+                crate::storage::record::RecordKind::Node,
+                &payload,
+                tx_id,
+                commit_ts,
+                false, // Not deleted
+            )?;
+            let dirty = store.take_dirty_pages();
+            Ok((new_pointer, dirty))
         })?;
 
-        if let Some(_new_pointer) = update_result {
-            // Cache already invalidated atomically during write
-            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+        // Update node index to point to new version
+        self.node_index.insert(node_id, new_pointer);
+
+        // Cache already invalidated atomically during write
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
+        }
+
+        // Update property indexes
+        if let Some(old) = old_value {
+            for label in &node.labels {
+                self.update_property_index_on_remove(node_id, label, &key, &old);
+                self.update_property_index_on_add(node_id, label, &key, &value);
             }
         } else {
-            self.free_record(pointer)?;
-
-            let preferred = self.header.lock().unwrap().last_record_page;
-            let new_pointer = self.insert_record(&record, preferred)?;
-            self.node_index.insert(node_id, new_pointer);
-            self.header.lock().unwrap().last_record_page = Some(new_pointer.page_id);
-        }
-
-        if let Some(old_val) = old_value {
             for label in &node.labels {
-                self.update_property_index_on_remove(node_id, label, &key, &old_val);
+                self.update_property_index_on_add(node_id, label, &key, &value);
             }
-        }
-
-        for label in &node.labels {
-            self.update_property_index_on_add(node_id, label, &key, &value);
         }
 
         self.node_cache.put(node_id, node);
@@ -704,6 +705,9 @@ impl GraphDB {
 
     #[allow(dead_code)]
     pub fn remove_node_property_internal(&self, node_id: NodeId, key: &str) -> Result<()> {
+        let tx_id = self.allocate_tx_id()?;
+        let commit_ts = self.timestamp_oracle.allocate_commit_timestamp();
+        
         let pointer = self
             .node_index
             .get_latest(&node_id)
@@ -716,36 +720,35 @@ impl GraphDB {
         };
 
         let payload = crate::storage::serialize_node(&node)?;
-        let record = crate::storage::record::encode_record(
-            crate::storage::record::RecordKind::Node,
-            &payload,
-        )?;
 
-        let (update_result, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
+        // Use MVCC version chain instead of update_in_place
+        use crate::storage::version_chain::store_new_version;
+        
+        let (new_pointer, dirty_pages) = self.pager.with_pager_write_and_invalidate(|pager| {
             let mut store = RecordStore::new(pager);
-            let result = store.update_in_place(pointer, &record)?;
-            let dirty = if let Some(ptr) = result {
-                vec![ptr.page_id]
-            } else {
-                vec![]
-            };
-            Ok((result, dirty))
+            let new_pointer = store_new_version(
+                &mut store,
+                Some(pointer), // Link to previous version
+                node_id,
+                crate::storage::record::RecordKind::Node,
+                &payload,
+                tx_id,
+                commit_ts,
+                false, // Not deleted
+            )?;
+            let dirty = store.take_dirty_pages();
+            Ok((new_pointer, dirty))
         })?;
 
-        if let Some(_new_pointer) = update_result {
-            // Cache already invalidated atomically during write
-            if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
-            }
-        } else {
-            self.free_record(pointer)?;
+        // Update node index to point to new version
+        self.node_index.insert(node_id, new_pointer);
 
-            let preferred = self.header.lock().unwrap().last_record_page;
-            let new_pointer = self.insert_record(&record, preferred)?;
-            self.node_index.insert(node_id, new_pointer);
-            self.header.lock().unwrap().last_record_page = Some(new_pointer.page_id);
+        // Cache already invalidated atomically during write
+        if self.tracking_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            self.recent_dirty_pages.lock().unwrap().extend(dirty_pages);
         }
 
+        // Remove from property index
         for label in &node.labels {
             self.update_property_index_on_remove(node_id, label, key, &old_value);
         }
