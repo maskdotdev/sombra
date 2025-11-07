@@ -1,0 +1,12 @@
+[package]
+name = "sombra-checksum"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+crc32fast.workspace = true

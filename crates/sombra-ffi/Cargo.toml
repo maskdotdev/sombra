@@ -1,0 +1,23 @@
+[package]
+name = "sombra-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+sombra-catalog = { workspace = true }
+sombra-pager = { workspace = true }
+sombra-query = { workspace = true }
+sombra-storage = { workspace = true }
+sombra-types = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

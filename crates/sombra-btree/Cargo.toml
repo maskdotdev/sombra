@@ -1,0 +1,13 @@
+[package]
+name = "sombra-btree"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+sombra-types = { path = "../sombra-types" }
+sombra-pager = { path = "../sombra-pager" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"

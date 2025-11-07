@@ -1,0 +1,18 @@
+target/
+Cargo.lock
+
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.pytest_cache/
+.maturin/
+
+node_modules/
+dist/
+# build/
+
+.DS_Store
+.idea/
+.venv/
+.vscode/

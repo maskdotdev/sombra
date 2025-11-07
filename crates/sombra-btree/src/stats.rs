@@ -1,0 +1,96 @@
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct BTreeStatsSnapshot {
+    pub leaf_searches: u64,
+    pub internal_searches: u64,
+    pub leaf_splits: u64,
+    pub internal_splits: u64,
+    pub leaf_merges: u64,
+    pub internal_merges: u64,
+}
+
+#[derive(Default)]
+pub struct BTreeStats {
+    leaf_searches: AtomicU64,
+    internal_searches: AtomicU64,
+    leaf_splits: AtomicU64,
+    internal_splits: AtomicU64,
+    leaf_merges: AtomicU64,
+    internal_merges: AtomicU64,
+}
+
+impl BTreeStats {
+    pub fn leaf_searches(&self) -> u64 {
+        self.leaf_searches.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn internal_searches(&self) -> u64 {
+        self.internal_searches.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn leaf_splits(&self) -> u64 {
+        self.leaf_splits.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn internal_splits(&self) -> u64 {
+        self.internal_splits.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn leaf_merges(&self) -> u64 {
+        self.leaf_merges.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn internal_merges(&self) -> u64 {
+        self.internal_merges.load(AtomicOrdering::Relaxed)
+    }
+
+    pub(crate) fn inc_leaf_searches(&self) {
+        self.leaf_searches.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_internal_searches(&self) {
+        self.internal_searches.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_leaf_splits(&self) {
+        self.leaf_splits.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_internal_splits(&self) {
+        self.internal_splits.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_leaf_merges(&self) {
+        self.leaf_merges.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_internal_merges(&self) {
+        self.internal_merges.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> BTreeStatsSnapshot {
+        BTreeStatsSnapshot {
+            leaf_searches: self.leaf_searches(),
+            internal_searches: self.internal_searches(),
+            leaf_splits: self.leaf_splits(),
+            internal_splits: self.internal_splits(),
+            leaf_merges: self.leaf_merges(),
+            internal_merges: self.internal_merges(),
+        }
+    }
+
+    pub fn emit_tracing(&self) {
+        let snapshot = self.snapshot();
+        tracing::info!(
+            target: "sombra_btree::stats",
+            leaf_searches = snapshot.leaf_searches,
+            internal_searches = snapshot.internal_searches,
+            leaf_splits = snapshot.leaf_splits,
+            internal_splits = snapshot.internal_splits,
+            leaf_merges = snapshot.leaf_merges,
+            internal_merges = snapshot.internal_merges,
+            "btree stats snapshot"
+        );
+    }
+}

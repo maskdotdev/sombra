@@ -1,0 +1,12 @@
+[package]
+name = "sombra-bytes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+proptest = "1.9.0"

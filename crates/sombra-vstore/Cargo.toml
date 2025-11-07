@@ -1,0 +1,14 @@
+[package]
+name = "sombra-vstore"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+sombra-types = { path = "../sombra-types" }
+sombra-pager = { path = "../sombra-pager" }
+sombra-checksum = { path = "../sombra-checksum" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"

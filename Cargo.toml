@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/sombra-*",
+    "bindings/node",
+    "bindings/python",
+]
+resolver = "2"
+
+ [workspace.package]
+ edition = "2021"
+ version = "0.0.0"
+ license = "MIT"
+
+[workspace.dependencies]
+thiserror = "1"
+tracing = "0.1"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+crc32fast = "1.4"
+bytes = "1"
+sombra-types = { path = "crates/sombra-types" }
+sombra-bytes = { path = "crates/sombra-bytes" }
+sombra-checksum = { path = "crates/sombra-checksum" }
+sombra-io = { path = "crates/sombra-io" }
+sombra-wal = { path = "crates/sombra-wal" }
+sombra-concurrency = { path = "crates/sombra-concurrency" }
+sombra-pager = { path = "crates/sombra-pager" }
+sombra-core = { path = "crates/sombra-core" }
+sombra-btree = { path = "crates/sombra-btree" }
+sombra-catalog = { path = "crates/sombra-catalog" }
+sombra-index = { path = "crates/sombra-index" }
+sombra-query = { path = "crates/sombra-query" }
+sombra-storage = { path = "crates/sombra-storage" }
+sombra-vstore = { path = "crates/sombra-vstore" }
+sombra-ffi = { path = "crates/sombra-ffi" }
+sombra-cli = { path = "crates/sombra-cli" }
+sombra-testkit = { path = "crates/sombra-testkit" }
+sombra-bench = { path = "crates/sombra-bench" }
+sombra-fuzz = { path = "crates/sombra-fuzz" }
+sombra-admin = { path = "crates/sombra-admin" }
+sombra-py-native = { path = "bindings/python" }
+
+ [workspace.lints.rust]
+ unsafe_code = "deny"
+ missing_docs = "warn"

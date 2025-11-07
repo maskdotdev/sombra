@@ -1,0 +1,13 @@
+[build]
+rustflags = ["-Ctarget-cpu=native"]
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-Ctarget-cpu=native", "-Clink-arg=-Wl,-O1"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[env]
+PYO3_USE_ABI3_PY3 = "1"

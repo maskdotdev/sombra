@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "sombra-py"
+version = "0.0.0"
+description = "Python bindings for the Sombra database (stub)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Sombra Authors" }]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.maturin]
+module-name = "sombra_py._native"
+bindings = "pyo3"
+manifest-path = "Cargo.toml"
