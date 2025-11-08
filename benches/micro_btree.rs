@@ -9,8 +9,8 @@ use criterion::{
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use sombra::storage::btree::{BTree, BTreeOptions};
 use sombra::primitives::pager::{PageStore, Pager, PagerOptions};
+use sombra::storage::btree::{BTree, BTreeOptions};
 use tempfile::TempDir;
 
 const INSERT_COUNT: u64 = 32_768;

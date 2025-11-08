@@ -5,8 +5,8 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use sombra::storage::index::{intersect_sorted, IndexDef, IndexKind, TypeTag, VecPostingStream};
 use sombra::primitives::pager::{PageStore, Pager, PagerOptions};
+use sombra::storage::index::{intersect_sorted, IndexDef, IndexKind, TypeTag, VecPostingStream};
 use sombra::storage::{Graph, GraphOptions, NodeSpec, PropEntry, PropValue, PropValueOwned};
 use sombra::types::{LabelId, PropId};
 use tempfile::TempDir;
@@ -72,16 +72,16 @@ impl PropertyHarness {
                     )
                     .expect("node");
             }
-                graph
-                    .create_property_index(
-                        &mut write,
-                        IndexDef {
-                            label,
-                            prop,
-                            kind: IndexKind::Chunked,
-                            ty: TypeTag::Int,
-                        },
-                    )
+            graph
+                .create_property_index(
+                    &mut write,
+                    IndexDef {
+                        label,
+                        prop,
+                        kind: IndexKind::Chunked,
+                        ty: TypeTag::Int,
+                    },
+                )
                 .expect("index");
             pager.commit(write).expect("commit");
         }

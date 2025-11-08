@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use sombra::primitives::pager::{PageStore, Pager, PagerOptions};
-use sombra::types::VRef;
 use sombra::storage::vstore::VStore;
+use sombra::types::VRef;
 use tempfile::TempDir;
 
 const WRITE_BATCH: usize = 64;

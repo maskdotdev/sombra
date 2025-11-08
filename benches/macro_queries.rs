@@ -17,7 +17,9 @@ mod bench {
 
     use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
     use sombra::admin::AdminOpenOptions;
-    use sombra::cli::import_export::{run_import, EdgeImportConfig, ImportConfig, NodeImportConfig};
+    use sombra::cli::import_export::{
+        run_import, EdgeImportConfig, ImportConfig, NodeImportConfig,
+    };
     use sombra::ffi::{
         Database, DatabaseOptions, DirectionSpec, EdgeSpec, LiteralSpec, MatchSpec, PredicateSpec,
         ProjectionSpec, QuerySpec,
@@ -198,7 +200,6 @@ mod bench {
             ],
         }
     }
-
 }
 
 #[cfg(feature = "ffi-benches")]

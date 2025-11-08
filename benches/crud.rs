@@ -140,7 +140,11 @@ mod bench {
             group.bench_function("read_user_by_name", |b| {
                 let mut harness = CrudHarness::new(mode, label, tuning);
                 harness.populate_users_for_read_bench(read_user_target);
-                harness.log_dataset_summary("read_user_by_name", label, "point lookup (1 lookup/iter)");
+                harness.log_dataset_summary(
+                    "read_user_by_name",
+                    label,
+                    "point lookup (1 lookup/iter)",
+                );
                 b.iter(|| harness.read_user_by_name_op());
             });
 
@@ -629,7 +633,10 @@ mod bench {
         }
     }
 
-    fn single_prop(key: &str, value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    fn single_prop(
+        key: &str,
+        value: serde_json::Value,
+    ) -> serde_json::Map<String, serde_json::Value> {
         // Construct via JSON deserialization to ensure compatibility with sombra_ffi's serde_json version
         use serde_json::json;
         let json_value = json!({ key: value });
@@ -637,7 +644,6 @@ mod bench {
         let json_str = serde_json::to_string(&json_value).unwrap();
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str).unwrap()
     }
-
 }
 
 #[cfg(feature = "ffi-benches")]

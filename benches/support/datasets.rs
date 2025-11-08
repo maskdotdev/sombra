@@ -17,8 +17,8 @@ pub struct SyntheticDataset {
 
 impl SyntheticDataset {
     pub fn ensure(node_count: usize, edge_count: usize) -> Self {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/bench_datasets/synthetic");
+        let base =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/bench_datasets/synthetic");
         fs::create_dir_all(&base).expect("dataset dir");
         let nodes_csv = base.join(format!("nodes_{node_count}.csv"));
         if !nodes_csv.exists() {
