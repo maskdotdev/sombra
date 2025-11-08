@@ -10,9 +10,18 @@ use crate::storage::vstore::VStore;
 use crate::types::{PageId, Result, SombraError, StrId, VRef};
 use tracing::trace;
 
+/// Configuration options for the dictionary (string catalog).
+///
+/// The dictionary manages the mapping between strings and their integer identifiers,
+/// optimizing storage by inlining short strings and storing longer strings in the
+/// variable-length store (VStore).
 #[derive(Clone, Debug)]
 pub struct DictOptions {
+    /// Maximum string length (in bytes) to store inline. Strings longer than this
+    /// will be stored in the VStore and referenced via [`VRef`].
     pub inline_limit: usize,
+    
+    /// Whether to verify checksums when reading data from disk.
     pub checksum_verify_on_read: bool,
 }
 
@@ -25,12 +34,24 @@ impl Default for DictOptions {
     }
 }
 
+/// Represents how a string is stored in the dictionary.
+///
+/// Strings can be stored in two ways:
+/// - Short strings are stored inline within the BTree for efficiency.
+/// - Long strings are stored in the variable-length store (VStore) and referenced via [`VRef`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StrEntry {
+    /// A string stored inline as a byte vector. Used for strings up to the `inline_limit`.
     Inline(Vec<u8>),
+    
+    /// A reference to a string stored in the VStore. Used for strings exceeding the `inline_limit`.
     VRef(VRef),
 }
 
+/// Thread-safe metrics collector for dictionary operations.
+///
+/// Tracks statistics about string interning and resolution operations,
+/// including cache hit rates and operation counts.
 #[derive(Default)]
 pub struct DictMetrics {
     intern_calls: AtomicU64,
@@ -40,16 +61,34 @@ pub struct DictMetrics {
     resolve_misses: AtomicU64,
 }
 
+/// A point-in-time snapshot of dictionary metrics.
+///
+/// This structure provides a consistent view of dictionary performance metrics
+/// at a specific moment, useful for monitoring and debugging.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DictMetricsSnapshot {
+    /// Total number of intern operations called.
     pub intern_calls: u64,
+    
+    /// Number of intern operations that found an existing entry.
     pub intern_hits: u64,
+    
+    /// Number of intern operations that had to create a new entry.
     pub intern_misses: u64,
+    
+    /// Total number of resolve operations called.
     pub resolve_calls: u64,
+    
+    /// Number of resolve operations that failed to find an entry.
     pub resolve_misses: u64,
 }
 
 impl DictMetricsSnapshot {
+    /// Calculates the cache hit rate for intern operations.
+    ///
+    /// # Returns
+    /// A value between 0.0 and 1.0 representing the percentage of intern operations
+    /// that found an existing entry. Returns 0.0 if no intern operations have been performed.
     pub fn intern_hit_rate(&self) -> f64 {
         if self.intern_calls == 0 {
             return 0.0;
@@ -59,6 +98,10 @@ impl DictMetricsSnapshot {
 }
 
 impl DictMetrics {
+    /// Creates a snapshot of the current metrics.
+    ///
+    /// # Returns
+    /// A [`DictMetricsSnapshot`] containing the current values of all counters.
     pub fn snapshot(&self) -> DictMetricsSnapshot {
         DictMetricsSnapshot {
             intern_calls: self.intern_calls.load(Ordering::Relaxed),
@@ -174,6 +217,16 @@ impl ValCodec for StrEntry {
     }
 }
 
+/// String dictionary providing bidirectional mapping between strings and unique identifiers.
+///
+/// The [`Dict`] manages a persistent mapping between strings and compact integer identifiers
+/// ([`StrId`]). It uses two B-Trees for efficient lookups in both directions:
+/// - String-to-ID mapping for interning strings
+/// - ID-to-String mapping for resolving identifiers
+///
+/// Short strings (up to `inline_limit` bytes) are stored inline in the B-Tree,
+/// while longer strings are stored in the variable-length store (VStore) to avoid
+/// excessive B-Tree node bloat.
 pub struct Dict {
     store: Arc<dyn PageStore>,
     s2i: BTree<Vec<u8>, u64>,
@@ -184,6 +237,17 @@ pub struct Dict {
 }
 
 impl Dict {
+    /// Opens or creates a dictionary using the provided page store and options.
+    ///
+    /// This method initializes the dictionary's B-Trees and VStore, loading existing
+    /// data from the page store if available or creating new structures if needed.
+    ///
+    /// # Parameters
+    /// * `store` - The page store to use for persistent storage.
+    /// * `opts` - Configuration options for the dictionary.
+    ///
+    /// # Returns
+    /// A new [`Dict`] instance on success, or an error if initialization fails.
     pub fn open(store: Arc<dyn PageStore>, opts: DictOptions) -> Result<Self> {
         let vstore = VStore::open(Arc::clone(&store))?;
         let meta = store.meta()?;
@@ -210,15 +274,34 @@ impl Dict {
         Ok(dict)
     }
 
+    /// Returns a shared reference to the dictionary's metrics collector.
+    ///
+    /// # Returns
+    /// An [`Arc`] to the [`DictMetrics`] instance used by this dictionary.
     pub fn metrics(&self) -> Arc<DictMetrics> {
         Arc::clone(&self.metrics)
     }
 
+    /// Creates a snapshot of the current dictionary metrics.
+    ///
+    /// # Returns
+    /// A [`DictMetricsSnapshot`] containing the current metric values.
     pub fn metrics_snapshot(&self) -> DictMetricsSnapshot {
         self.metrics.snapshot()
     }
 
     /// Looks up the identifier for the provided string without mutating the dictionary.
+    ///
+    /// This is a read-only operation that returns the existing identifier if the string
+    /// is already in the dictionary, or `None` if it hasn't been interned yet.
+    ///
+    /// # Parameters
+    /// * `s` - The string to look up.
+    ///
+    /// # Returns
+    /// * `Ok(Some(id))` - The string identifier if found.
+    /// * `Ok(None)` - The string is not in the dictionary.
+    /// * `Err(_)` - An error occurred during the lookup.
     pub fn lookup(&self, s: &str) -> Result<Option<StrId>> {
         let key = encode_string_key(s);
         let read = self.store.begin_read()?;
@@ -234,6 +317,22 @@ impl Dict {
         }
     }
 
+    /// Interns a string, returning its unique identifier.
+    ///
+    /// If the string already exists in the dictionary, returns its existing identifier.
+    /// Otherwise, creates a new entry and assigns a new unique identifier.
+    ///
+    /// # Parameters
+    /// * `tx` - The write transaction to use for modifications.
+    /// * `s` - The string to intern.
+    ///
+    /// # Returns
+    /// The unique identifier for the string, either existing or newly created.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The dictionary runs out of available identifiers (u32::MAX reached).
+    /// * A storage operation fails.
     pub fn intern(&self, tx: &mut WriteGuard<'_>, s: &str) -> Result<StrId> {
         let key = encode_string_key(s);
         self.metrics.intern_call();
@@ -256,6 +355,20 @@ impl Dict {
         Ok(id)
     }
 
+    /// Resolves a string identifier back to its original string.
+    ///
+    /// # Parameters
+    /// * `tx` - The read transaction to use for the lookup.
+    /// * `id` - The string identifier to resolve.
+    ///
+    /// # Returns
+    /// The original string associated with the identifier.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The identifier is not found in the dictionary ([`SombraError::NotFound`]).
+    /// * The stored data is not valid UTF-8 ([`SombraError::Corruption`]).
+    /// * A storage operation fails.
     pub fn resolve(&self, tx: &ReadGuard, id: StrId) -> Result<String> {
         self.metrics.resolve_call();
         match self.i2s.get(tx, &u64::from(id.0))? {

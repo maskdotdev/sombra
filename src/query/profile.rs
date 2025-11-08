@@ -4,27 +4,52 @@ use std::time::Instant;
 
 use crate::storage::storage_profile_snapshot;
 
+/// A snapshot of query execution profiling metrics.
+///
+/// This structure captures timing and count information for various query operations.
+/// Profiling is enabled via the `SOMBRA_PROFILE` environment variable and tracks
+/// performance characteristics across different query execution phases.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryProfileSnapshot {
+    /// Total nanoseconds spent acquiring read guards.
     pub read_guard_ns: u64,
+    /// Number of read guard acquisitions.
     pub read_guard_count: u64,
+    /// Total nanoseconds spent building streams.
     pub stream_build_ns: u64,
+    /// Number of stream build operations.
     pub stream_build_count: u64,
+    /// Total nanoseconds spent iterating over streams.
     pub stream_iter_ns: u64,
+    /// Number of stream iteration operations.
     pub stream_iter_count: u64,
+    /// Total nanoseconds spent in property index operations.
     pub prop_index_ns: u64,
+    /// Number of property index operations.
     pub prop_index_count: u64,
+    /// Total nanoseconds spent looking up property index entries.
     pub prop_index_lookup_ns: u64,
+    /// Number of property index lookup operations.
     pub prop_index_lookup_count: u64,
+    /// Total nanoseconds spent encoding property index data.
     pub prop_index_encode_ns: u64,
+    /// Number of property index encode operations.
     pub prop_index_encode_count: u64,
+    /// Total nanoseconds spent building property index streams.
     pub prop_index_stream_build_ns: u64,
+    /// Number of property index stream build operations.
     pub prop_index_stream_build_count: u64,
+    /// Total nanoseconds spent iterating over property index streams.
     pub prop_index_stream_iter_ns: u64,
+    /// Number of property index stream iteration operations.
     pub prop_index_stream_iter_count: u64,
+    /// Total nanoseconds spent expanding query results.
     pub expand_ns: u64,
+    /// Number of expand operations.
     pub expand_count: u64,
+    /// Total nanoseconds spent filtering query results.
     pub filter_ns: u64,
+    /// Number of filter operations.
     pub filter_count: u64,
 }
 
@@ -60,11 +85,17 @@ pub(crate) fn profile_timer() -> Option<Instant> {
 }
 
 pub(crate) enum QueryProfileKind {
+    /// Profiling for read guard acquisition.
     ReadGuard,
+    /// Profiling for stream building operations.
     StreamBuild,
+    /// Profiling for stream iteration operations.
     StreamIter,
+    /// Profiling for property index operations.
     PropIndex,
+    /// Profiling for query result expansion operations.
     Expand,
+    /// Profiling for query result filtering operations.
     Filter,
 }
 
@@ -104,6 +135,33 @@ pub(crate) fn record_profile_timer(kind: QueryProfileKind, start: Option<Instant
     }
 }
 
+/// Retrieves a snapshot of current query profiling metrics.
+///
+/// # Arguments
+///
+/// * `reset` - If `true`, resets all counters to zero after reading them.
+///            If `false`, reads the current values without modification.
+///
+/// # Returns
+///
+/// Returns `Some(QueryProfileSnapshot)` if profiling is enabled via the
+/// `SOMBRA_PROFILE` environment variable, or `None` if profiling is disabled.
+///
+/// # Example
+///
+/// ```no_run
+/// use sombra_db::query::profile_snapshot;
+///
+/// // Get snapshot without resetting counters
+/// if let Some(snapshot) = profile_snapshot(false) {
+///     println!("Read guard time: {}ns", snapshot.read_guard_ns);
+/// }
+///
+/// // Get snapshot and reset counters
+/// if let Some(snapshot) = profile_snapshot(true) {
+///     println!("Total filter operations: {}", snapshot.filter_count);
+/// }
+/// ```
 pub fn profile_snapshot(reset: bool) -> Option<QueryProfileSnapshot> {
     let counters = counters()?;
     let load = |counter: &AtomicU64| {
