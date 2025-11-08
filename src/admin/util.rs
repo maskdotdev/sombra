@@ -10,12 +10,22 @@ use crate::storage::{Graph, GraphOptions};
 use crate::admin::error::{AdminError, Result};
 use crate::admin::options::AdminOpenOptions;
 
+/// Handle containing pager, graph, and dictionary for administrative operations.
 pub struct GraphHandle {
+    /// The pager instance managing page-level storage.
     pub pager: Arc<Pager>,
+    /// The graph database instance.
     pub graph: Arc<Graph>,
+    /// The dictionary for string interning and lookups.
     pub dict: Arc<Dict>,
 }
 
+/// Opens or creates a pager at the specified path.
+///
+/// # Errors
+///
+/// Returns an error if the database doesn't exist and `create_if_missing` is false,
+/// or if opening/creating the pager fails.
 pub fn open_pager(path: &Path, opts: &AdminOpenOptions) -> Result<Arc<Pager>> {
     if !path.exists() {
         if opts.create_if_missing {
@@ -30,6 +40,11 @@ pub fn open_pager(path: &Path, opts: &AdminOpenOptions) -> Result<Arc<Pager>> {
     Ok(Arc::new(pager))
 }
 
+/// Opens a graph database with pager, graph, and dictionary components.
+///
+/// # Errors
+///
+/// Returns an error if opening the pager or initializing graph/dictionary fails.
 pub fn open_graph(path: &Path, opts: &AdminOpenOptions) -> Result<GraphHandle> {
     let pager = open_pager(path, opts)?;
     let store: Arc<dyn PageStore> = pager.clone();

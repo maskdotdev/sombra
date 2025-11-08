@@ -20,7 +20,7 @@ pub struct DictOptions {
     /// Maximum string length (in bytes) to store inline. Strings longer than this
     /// will be stored in the VStore and referenced via [`VRef`].
     pub inline_limit: usize,
-    
+
     /// Whether to verify checksums when reading data from disk.
     pub checksum_verify_on_read: bool,
 }
@@ -43,7 +43,7 @@ impl Default for DictOptions {
 pub enum StrEntry {
     /// A string stored inline as a byte vector. Used for strings up to the `inline_limit`.
     Inline(Vec<u8>),
-    
+
     /// A reference to a string stored in the VStore. Used for strings exceeding the `inline_limit`.
     VRef(VRef),
 }
@@ -69,16 +69,16 @@ pub struct DictMetrics {
 pub struct DictMetricsSnapshot {
     /// Total number of intern operations called.
     pub intern_calls: u64,
-    
+
     /// Number of intern operations that found an existing entry.
     pub intern_hits: u64,
-    
+
     /// Number of intern operations that had to create a new entry.
     pub intern_misses: u64,
-    
+
     /// Total number of resolve operations called.
     pub resolve_calls: u64,
-    
+
     /// Number of resolve operations that failed to find an entry.
     pub resolve_misses: u64,
 }

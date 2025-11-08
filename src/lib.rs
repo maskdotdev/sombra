@@ -4,8 +4,8 @@
 #![warn(missing_docs)]
 
 pub mod admin;
-pub mod ffi;
 pub mod cli;
+pub mod ffi;
 pub mod primitives;
 pub mod query;
 pub mod storage;

@@ -149,36 +149,55 @@ pub mod page {
 
     use super::{PageId, Result, SombraError};
 
+    /// Magic bytes identifying a valid Sombra page.
     pub const PAGE_MAGIC: [u8; 4] = *b"SOMB";
+    /// Current page format version.
     pub const PAGE_FORMAT_VERSION: u16 = 1;
+    /// Default page size in bytes.
     pub const DEFAULT_PAGE_SIZE: u32 = 8192;
+    /// Length of the page header in bytes.
     pub const PAGE_HDR_LEN: usize = 32;
 
     pub mod header {
         //! Byte offsets for fixed header fields.
         use core::ops::Range;
 
+        /// Byte range for magic bytes.
         pub const MAGIC: Range<usize> = 0..4;
+        /// Byte range for format version.
         pub const FORMAT_VERSION: Range<usize> = 4..6;
+        /// Byte offset for page kind.
         pub const PAGE_KIND: usize = 6;
+        /// Byte offset for reserved field.
         pub const RESERVED: usize = 7;
+        /// Byte range for page size.
         pub const PAGE_SIZE: Range<usize> = 8..12;
+        /// Byte range for page number.
         pub const PAGE_NO: Range<usize> = 12..20;
+        /// Byte range for salt value.
         pub const SALT: Range<usize> = 20..28;
+        /// Byte range for CRC32 checksum.
         pub const CRC32: Range<usize> = 28..32;
     }
 
+    /// Type of page determining its internal structure and usage.
     #[repr(u8)]
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub enum PageKind {
+        /// Database metadata page.
         Meta = 1,
+        /// Free page list.
         FreeList = 2,
+        /// B-tree leaf page containing data records.
         BTreeLeaf = 3,
+        /// B-tree internal page containing routing keys.
         BTreeInternal = 4,
+        /// Overflow page for large values.
         Overflow = 5,
     }
 
     impl PageKind {
+        /// Converts the page kind to its byte representation.
         pub const fn as_u8(self) -> u8 {
             self as u8
         }
@@ -199,17 +218,25 @@ pub mod page {
         }
     }
 
+    /// Fixed-size header present at the start of every page.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct PageHeader {
+        /// Page format version.
         pub format_version: u16,
+        /// Type of this page.
         pub kind: PageKind,
+        /// Size of this page in bytes.
         pub page_size: u32,
+        /// Unique page identifier.
         pub page_no: PageId,
+        /// Random salt for checksum computation.
         pub salt: u64,
+        /// CRC32 checksum of page contents.
         pub crc32: u32,
     }
 
     impl PageHeader {
+        /// Creates a new page header with the given parameters.
         pub fn new(page_no: PageId, kind: PageKind, page_size: u32, salt: u64) -> Result<Self> {
             if (page_size as usize) < PAGE_HDR_LEN {
                 return Err(SombraError::Invalid("page size smaller than header"));
@@ -224,11 +251,13 @@ pub mod page {
             })
         }
 
+        /// Sets the CRC32 checksum and returns the modified header.
         pub fn with_crc32(mut self, crc32: u32) -> Self {
             self.crc32 = crc32;
             self
         }
 
+        /// Encodes the page header into the provided buffer.
         pub fn encode(&self, dst: &mut [u8]) -> Result<()> {
             if dst.len() < PAGE_HDR_LEN {
                 return Err(SombraError::Invalid("page header buffer too small"));
@@ -245,6 +274,7 @@ pub mod page {
             Ok(())
         }
 
+        /// Decodes a page header from the provided buffer.
         pub fn decode(src: &[u8]) -> Result<Self> {
             if src.len() < PAGE_HDR_LEN {
                 return Err(SombraError::Corruption("page header truncated"));
@@ -283,6 +313,7 @@ pub mod page {
         }
     }
 
+    /// Clears the CRC32 field in a page buffer (sets it to zero).
     pub fn clear_crc32(buf: &mut [u8]) -> Result<()> {
         if buf.len() < header::CRC32.end {
             return Err(SombraError::Invalid("page header buffer too small"));

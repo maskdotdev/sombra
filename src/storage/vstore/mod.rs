@@ -14,6 +14,7 @@ use tracing::trace;
 
 const OVERFLOW_HEADER_LEN: usize = 16;
 
+/// Metrics tracking for variable-length value storage operations.
 #[derive(Default)]
 pub struct VStoreMetrics {
     pages_allocated: AtomicU64,
@@ -22,15 +23,21 @@ pub struct VStoreMetrics {
     bytes_read: AtomicU64,
 }
 
+/// Snapshot of variable-length value storage metrics at a point in time.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VStoreMetricsSnapshot {
+    /// Total number of overflow pages allocated
     pub pages_allocated: u64,
+    /// Total number of overflow pages freed
     pub pages_freed: u64,
+    /// Total bytes written to overflow pages
     pub bytes_written: u64,
+    /// Total bytes read from overflow pages
     pub bytes_read: u64,
 }
 
 impl VStoreMetricsSnapshot {
+    /// Returns the current number of live overflow pages.
     pub fn live_pages(&self) -> i64 {
         self.pages_allocated as i64 - self.pages_freed as i64
     }
@@ -38,6 +45,7 @@ impl VStoreMetricsSnapshot {
 
 #[cfg(debug_assertions)]
 impl VStore {
+    /// Dumps detailed information about a VRef chain for debugging purposes.
     pub fn dump_vref(&self, tx: &ReadGuard, vref: VRef) -> Result<()> {
         debug!(
             start_page = vref.start_page.0,
@@ -77,22 +85,27 @@ impl VStore {
 }
 
 impl VStoreMetrics {
+    /// Returns the total number of pages allocated.
     pub fn pages_allocated(&self) -> u64 {
         self.pages_allocated.load(Ordering::Relaxed)
     }
 
+    /// Returns the total number of pages freed.
     pub fn pages_freed(&self) -> u64 {
         self.pages_freed.load(Ordering::Relaxed)
     }
 
+    /// Returns the total number of bytes written.
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written.load(Ordering::Relaxed)
     }
 
+    /// Returns the total number of bytes read.
     pub fn bytes_read(&self) -> u64 {
         self.bytes_read.load(Ordering::Relaxed)
     }
 
+    /// Creates a snapshot of the current metrics.
     pub fn snapshot(&self) -> VStoreMetricsSnapshot {
         VStoreMetricsSnapshot {
             pages_allocated: self.pages_allocated(),
@@ -127,6 +140,7 @@ impl VStoreMetrics {
     }
 }
 
+/// Variable-length data storage manager using overflow pages.
 pub struct VStore {
     store: Arc<dyn PageStore>,
     page_size: usize,
@@ -136,6 +150,7 @@ pub struct VStore {
 }
 
 impl VStore {
+    /// Opens a VStore instance using the provided page store.
     pub fn open(store: Arc<dyn PageStore>) -> Result<Self> {
         let meta = store.meta()?;
         let page_size = store.page_size() as usize;
@@ -157,14 +172,17 @@ impl VStore {
         })
     }
 
+    /// Returns a reference to the VStore metrics.
     pub fn metrics(&self) -> Arc<VStoreMetrics> {
         Arc::clone(&self.metrics)
     }
 
+    /// Returns a snapshot of current VStore metrics.
     pub fn metrics_snapshot(&self) -> VStoreMetricsSnapshot {
         self.metrics.snapshot()
     }
 
+    /// Writes variable-length data and returns a reference to it.
     pub fn write(&self, tx: &mut WriteGuard<'_>, bytes: &[u8]) -> Result<VRef> {
         if bytes.len() > u32::MAX as usize {
             return Err(SombraError::Invalid("value larger than 4GB not supported"));
@@ -212,12 +230,14 @@ impl VStore {
         })
     }
 
+    /// Reads variable-length data from a VRef into a new vector.
     pub fn read(&self, tx: &ReadGuard, vref: VRef) -> Result<Vec<u8>> {
         let mut dst = Vec::with_capacity(vref.len as usize);
         self.read_into(tx, vref, &mut dst)?;
         Ok(dst)
     }
 
+    /// Reads variable-length data from a VRef into an existing vector.
     pub fn read_into(&self, tx: &ReadGuard, vref: VRef, dst: &mut Vec<u8>) -> Result<()> {
         if vref.n_pages == 0 {
             dst.clear();
@@ -266,6 +286,7 @@ impl VStore {
         Ok(())
     }
 
+    /// Frees the overflow pages associated with a VRef.
     pub fn free(&self, tx: &mut WriteGuard<'_>, vref: VRef) -> Result<()> {
         if vref.n_pages == 0 {
             return Ok(());
@@ -295,6 +316,7 @@ impl VStore {
         Ok(())
     }
 
+    /// Updates variable-length data in place if possible, otherwise reallocates.
     pub fn update(&self, tx: &mut WriteGuard<'_>, vref: &mut VRef, new: &[u8]) -> Result<()> {
         if new.len() > u32::MAX as usize {
             return Err(SombraError::Invalid("value larger than 4GB not supported"));

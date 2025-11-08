@@ -25,6 +25,7 @@ use crate::query::profile::{
 /// Materialised result returned by `execute`.
 #[derive(Debug, Default)]
 pub struct QueryResult {
+    /// The rows returned by the query.
     pub rows: Vec<Row>,
 }
 
@@ -34,11 +35,17 @@ pub type Row = BTreeMap<String, Value>;
 /// Runtime value flowing through the executor.
 #[derive(Clone, Debug)]
 pub enum Value {
+    /// Null value
     Null,
+    /// Boolean value
     Bool(bool),
+    /// Integer value
     Int(i64),
+    /// Floating-point value
     Float(f64),
+    /// String value
     String(String),
+    /// Node identifier
     NodeId(NodeId),
 }
 
@@ -129,6 +136,7 @@ impl Iterator for ResultStream {
     }
 }
 
+/// Query executor responsible for running physical query plans.
 pub struct Executor {
     graph: Arc<Graph>,
     pager: Arc<Pager>,
@@ -136,6 +144,7 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// Creates a new executor with the specified graph, pager, and metadata provider.
     pub fn new(graph: Arc<Graph>, pager: Arc<Pager>, metadata: Arc<dyn MetadataProvider>) -> Self {
         Self {
             graph,
@@ -144,6 +153,7 @@ impl Executor {
         }
     }
 
+    /// Executes a physical plan and materializes all results into memory.
     pub fn execute(&self, plan: &PhysicalPlan) -> Result<QueryResult> {
         let mut stream = self.stream(plan)?;
         let iter_timer = query_profile_timer();
@@ -152,6 +162,7 @@ impl Executor {
         Ok(QueryResult { rows })
     }
 
+    /// Executes a physical plan and returns a streaming iterator over results.
     pub fn stream(&self, plan: &PhysicalPlan) -> Result<ResultStream> {
         let guard_timer = query_profile_timer();
         let context = Arc::new(ReadContext::new(self.pager.begin_read()?));
@@ -1178,6 +1189,7 @@ fn unescape_quoted(input: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::pager::{Pager, PagerOptions};
     use crate::query::ast::Var;
     use crate::query::builder::QueryBuilder;
     use crate::query::metadata::InMemoryMetadata;
@@ -1187,7 +1199,6 @@ mod tests {
         PropPredicate as PhysicalPredicate,
     };
     use crate::query::planner::{Planner, PlannerConfig};
-    use crate::primitives::pager::{Pager, PagerOptions};
     use crate::storage::{GraphOptions, NodeSpec, PropEntry, PropValue};
     use crate::types::{LabelId, PropId, TypeId};
     use std::ops::Bound;

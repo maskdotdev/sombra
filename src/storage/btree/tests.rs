@@ -23,48 +23,29 @@ fn assert_tree_matches_reference(
     Ok(())
 }
 
-fn decode_leaf_keys(
-    pager: &Pager,
-    read: &ReadGuard,
-    leaf_id: PageId,
-    prefix_compress: bool,
-) -> Result<Vec<u64>> {
+fn decode_leaf_keys(pager: &Pager, read: &ReadGuard, leaf_id: PageId) -> Result<Vec<u64>> {
     let page = pager.get_page(read, leaf_id)?;
     let header = page::Header::parse(page.data())?;
     assert_eq!(header.kind, page::BTreePageKind::Leaf, "expected leaf page");
     let payload = page::payload(page.data())?;
     let slots = header.slot_directory(page.data())?;
     let mut keys = Vec::with_capacity(slots.len());
-    let mut prev_key: Vec<u8> = Vec::new();
     for idx in 0..slots.len() {
         let record_bytes = page::record_slice_from_parts(&header, payload, &slots, idx)?;
         let record = page::decode_leaf_record(record_bytes)?;
-        let full_key = if prefix_compress {
-            let prefix_len = record.prefix_len as usize;
-            if prefix_len > prev_key.len() {
-                return Err(SombraError::Corruption("leaf prefix longer than base key"));
-            }
-            let mut materialized = Vec::with_capacity(prefix_len + record.key_suffix.len());
-            materialized.extend_from_slice(&prev_key[..prefix_len]);
-            materialized.extend_from_slice(record.key_suffix);
-            materialized
-        } else {
-            if record.prefix_len != 0 {
-                return Err(SombraError::Corruption(
-                    "unexpected prefix on uncompressed key",
-                ));
-            }
-            record.key_suffix.to_vec()
-        };
-        if full_key.len() != 8 {
-            return Err(SombraError::Corruption("unexpected key length"));
-        }
-        let mut arr = [0u8; 8];
-        arr.copy_from_slice(&full_key);
-        keys.push(u64::from_be_bytes(arr));
-        prev_key = full_key;
+        append_u64_from_key(record.key, &mut keys)?;
     }
     Ok(keys)
+}
+
+fn append_u64_from_key(key_bytes: &[u8], dst: &mut Vec<u64>) -> Result<()> {
+    if key_bytes.len() != 8 {
+        return Err(SombraError::Corruption("unexpected key length"));
+    }
+    let mut arr = [0u8; 8];
+    arr.copy_from_slice(key_bytes);
+    dst.push(u64::from_be_bytes(arr));
+    Ok(())
 }
 
 fn choose_child_for_key(header: &page::Header, data: &[u8], key: &[u8]) -> Result<PageId> {
@@ -115,7 +96,6 @@ fn collect_leaf_snapshots(
     pager: &Pager,
     read: &ReadGuard,
     root: PageId,
-    prefix_compress: bool,
 ) -> Result<Vec<(PageId, page::Header, Vec<u64>)>> {
     let mut queue = VecDeque::new();
     let mut visited = HashSet::new();
@@ -129,7 +109,7 @@ fn collect_leaf_snapshots(
         let header = page::Header::parse(page.data())?;
         match header.kind {
             page::BTreePageKind::Leaf => {
-                let keys = decode_leaf_keys(pager, read, page_id, prefix_compress)?;
+                let keys = decode_leaf_keys(pager, read, page_id)?;
                 leaves.push((page_id, header, keys));
             }
             page::BTreePageKind::Internal => {
@@ -153,9 +133,7 @@ fn empty_tree_get_returns_none() -> Result<()> {
     let path = dir.path().join("btree.db");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let mut tree_opts = BTreeOptions::default();
-    tree_opts.prefix_compress = false;
-    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+    let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())?;
     pager.checkpoint(CheckpointMode::Force)?;
     let read = pager.begin_read()?;
     assert!(tree.get(&read, &42)?.is_none());
@@ -266,9 +244,7 @@ fn root_split_creates_new_internal() -> Result<()> {
     options.page_size = 512;
     let pager = Arc::new(Pager::create(&path, options)?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let mut tree_opts = BTreeOptions::default();
-    tree_opts.prefix_compress = false;
-    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+    let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())?;
     let initial_root = tree.root_page();
 
     let mut inserted_keys = Vec::new();
@@ -352,7 +328,6 @@ fn delete_rebalances_via_left_sibling_borrow() -> Result<()> {
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
-    tree_opts.prefix_compress = false;
     tree_opts.page_fill_target = 99;
     let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
 
@@ -366,12 +341,7 @@ fn delete_rebalances_via_left_sibling_borrow() -> Result<()> {
     pager.checkpoint(CheckpointMode::Force)?;
 
     let read = pager.begin_read()?;
-    let leaves = collect_leaf_snapshots(
-        &pager,
-        &read,
-        tree.root_page(),
-        tree.prefix_compression_enabled(),
-    )?;
+    let leaves = collect_leaf_snapshots(&pager, &read, tree.root_page())?;
     let (left_info, right_info) = leaves
         .windows(2)
         .filter_map(|window| {
@@ -412,12 +382,7 @@ fn delete_rebalances_via_left_sibling_borrow() -> Result<()> {
         reference.remove(key);
 
         let read = pager.begin_read()?;
-        let leaves_after = collect_leaf_snapshots(
-            &pager,
-            &read,
-            tree.root_page(),
-            tree.prefix_compression_enabled(),
-        )?;
+        let leaves_after = collect_leaf_snapshots(&pager, &read, tree.root_page())?;
         leaves_after
             .iter()
             .find(|(id, _, _)| *id == left_id)
@@ -459,7 +424,6 @@ fn delete_merges_with_left_sibling_when_borrow_forbidden() -> Result<()> {
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
-    tree_opts.prefix_compress = false;
     tree_opts.page_fill_target = 100;
     let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
 
@@ -489,12 +453,7 @@ fn delete_merges_with_left_sibling_when_borrow_forbidden() -> Result<()> {
         .expect("expected left sibling for merge");
     drop(right_page);
 
-    let keys_to_remove = decode_leaf_keys(
-        &pager,
-        &read,
-        right_leaf_id,
-        tree.prefix_compression_enabled(),
-    )?;
+    let keys_to_remove = decode_leaf_keys(&pager, &read, right_leaf_id)?;
     assert!(
         !keys_to_remove.is_empty(),
         "target leaf should contain keys"
@@ -542,7 +501,6 @@ fn delete_merges_leftmost_leaf_with_right_sibling() -> Result<()> {
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
-    tree_opts.prefix_compress = false;
     tree_opts.page_fill_target = 100;
     let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
 
@@ -572,12 +530,7 @@ fn delete_merges_leftmost_leaf_with_right_sibling() -> Result<()> {
         .expect("leftmost leaf should have right sibling");
     drop(left_page);
 
-    let keys_to_remove = decode_leaf_keys(
-        &pager,
-        &read,
-        left_leaf_id,
-        tree.prefix_compression_enabled(),
-    )?;
+    let keys_to_remove = decode_leaf_keys(&pager, &read, left_leaf_id)?;
     assert!(
         !keys_to_remove.is_empty(),
         "leftmost leaf should contain keys"
@@ -703,9 +656,7 @@ fn cascading_splits_build_multi_level_tree() -> Result<()> {
     pager_opts.page_size = 512;
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let mut tree_opts = BTreeOptions::default();
-    tree_opts.prefix_compress = false;
-    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+    let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())?;
     let initial_root = tree.root_page();
 
     for key in 0u64..200 {

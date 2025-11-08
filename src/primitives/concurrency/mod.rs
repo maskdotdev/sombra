@@ -9,6 +9,7 @@ use std::time::Duration;
 use crate::types::{Result, SombraError};
 use parking_lot::Mutex;
 
+/// Single-writer, multiple-reader lock coordinator using file-based locking.
 #[derive(Clone)]
 pub struct SingleWriter {
     inner: Arc<Inner>,
@@ -26,14 +27,17 @@ struct LockState {
     checkpoint: bool,
 }
 
+/// Guard representing a held reader lock.
 pub struct ReaderGuard {
     _guard: SlotGuard,
 }
 
+/// Guard representing a held writer lock.
 pub struct WriterGuard {
     _guard: SlotGuard,
 }
 
+/// Guard representing a held checkpoint lock that blocks readers.
 pub struct CheckpointGuard {
     checkpoint_guard: Option<SlotGuard>,
     reader_block: Option<RangeGuard>,
@@ -51,6 +55,10 @@ impl Drop for CheckpointGuard {
 }
 
 impl SingleWriter {
+    /// Opens or creates a lock file at the specified path for coordinating access.
+    ///
+    /// Creates a new lock file if it doesn't exist, ensuring it has the correct size
+    /// for managing reader, writer, and checkpoint lock slots.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file = OpenOptions::new()
@@ -69,6 +77,10 @@ impl SingleWriter {
         })
     }
 
+    /// Acquires a reader lock, blocking until available.
+    ///
+    /// Multiple readers can hold locks concurrently. This method will block if a
+    /// checkpoint operation is in progress, waiting for it to complete.
     pub fn acquire_reader(&self) -> Result<ReaderGuard> {
         loop {
             {
@@ -95,6 +107,10 @@ impl SingleWriter {
         })
     }
 
+    /// Acquires the writer lock, blocking until available.
+    ///
+    /// Only one writer can hold the lock at a time. Returns an error if the writer
+    /// lock is already held by the current process.
     pub fn acquire_writer(&self) -> Result<WriterGuard> {
         loop {
             let mut state = self.inner.state.lock();
@@ -119,6 +135,10 @@ impl SingleWriter {
         })
     }
 
+    /// Attempts to acquire a checkpoint lock without blocking.
+    ///
+    /// Checkpoint locks are exclusive - they prevent both readers and writers
+    /// from acquiring locks. Returns `None` if any locks are currently held.
     pub fn try_acquire_checkpoint(&self) -> Result<Option<CheckpointGuard>> {
         {
             let state = self.inner.state.lock();

@@ -6,9 +6,6 @@
 //! bindings can submit JSON-friendly query specifications without reimplementing
 //! the core logic.
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
-use crate::storage::catalog::{Dict, DictOptions};
 use crate::primitives::pager::{PageStore, Pager, PagerOptions, Synchronous, WriteGuard};
 use crate::query::{
     ast::{
@@ -19,12 +16,15 @@ use crate::query::{
     planner::{ExplainNode, PlanExplain, Planner, PlannerConfig, PlannerOutput},
     profile::profile_snapshot as query_profile_snapshot,
 };
+use crate::storage::catalog::{Dict, DictOptions};
 use crate::storage::{
     DeleteNodeOpts, EdgeSpec as StorageEdgeSpec, Graph, GraphOptions, IndexDef, IndexKind,
     NodeSpec as StorageNodeSpec, PropEntry, PropPatch, PropPatchOp, PropValue, PropValueOwned,
     TypeTag,
 };
 use crate::types::{EdgeId, LabelId, NodeId, PropId, SombraError, TypeId};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Number, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -280,8 +280,6 @@ impl Default for DatabaseOptions {
         }
     }
 }
-
-
 
 /// Shared database handle used by language bindings (Node.js, Python, etc.).
 ///
@@ -1647,8 +1645,11 @@ impl NodeHandle {
 /// Can reference a node handle from the current transaction, an alias, or an existing node ID.
 #[derive(Clone, Debug)]
 pub enum NodeRef {
+    /// Reference to a node by its handle in the current transaction.
     Handle(NodeHandle),
+    /// Reference to a node by an alias name.
     Alias(String),
+    /// Reference to a node by its existing node ID.
     Existing(NodeId),
 }
 

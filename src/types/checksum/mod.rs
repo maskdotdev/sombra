@@ -1,11 +1,16 @@
 #![forbid(unsafe_code)]
 
+/// Trait for computing checksums incrementally.
 pub trait Checksum {
+    /// Resets the checksum state to its initial value.
     fn reset(&mut self);
+    /// Updates the checksum with the provided bytes.
     fn update(&mut self, bytes: &[u8]);
+    /// Returns the computed checksum value without consuming the hasher.
     fn finalize(&self) -> u32;
 }
 
+/// Fast CRC32 checksum implementation using the `crc32fast` library.
 pub struct Crc32Fast {
     inner: crc32fast::Hasher,
 }
@@ -32,6 +37,7 @@ impl Checksum for Crc32Fast {
     }
 }
 
+/// Computes a CRC32 checksum for a page, incorporating the page number and salt.
 pub fn page_crc32(page_no: u64, salt: u64, payload: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&page_no.to_be_bytes());

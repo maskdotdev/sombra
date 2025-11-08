@@ -9,22 +9,22 @@ use std::sync::Arc;
 pub trait StorageMetrics: Send + Sync {
     /// Records the creation of a new node in the graph.
     fn node_created(&self);
-    
+
     /// Records the deletion of a node from the graph.
     fn node_deleted(&self);
-    
+
     /// Records the creation of a new edge in the graph.
     fn edge_created(&self);
-    
+
     /// Records the deletion of an edge from the graph.
     fn edge_deleted(&self);
-    
+
     /// Records an adjacency scan operation.
     ///
     /// # Parameters
     /// * `direction` - The direction of the scan: "out" for outgoing edges, "in" for incoming edges.
     fn adjacency_scan(&self, direction: &'static str);
-    
+
     /// Records a degree query operation.
     ///
     /// # Parameters
@@ -58,34 +58,34 @@ impl StorageMetrics for NoopMetrics {
 pub struct CounterMetrics {
     /// Number of nodes created.
     pub nodes_created: AtomicU64,
-    
+
     /// Number of nodes deleted.
     pub nodes_deleted: AtomicU64,
-    
+
     /// Number of edges created.
     pub edges_created: AtomicU64,
-    
+
     /// Number of edges deleted.
     pub edges_deleted: AtomicU64,
-    
+
     /// Number of outgoing adjacency scans performed.
     pub adjacency_scans_out: AtomicU64,
-    
+
     /// Number of incoming adjacency scans performed.
     pub adjacency_scans_in: AtomicU64,
-    
+
     /// Number of outgoing degree queries performed.
     pub degree_queries_out: AtomicU64,
-    
+
     /// Number of incoming degree queries performed.
     pub degree_queries_in: AtomicU64,
-    
+
     /// Number of bidirectional degree queries performed.
     pub degree_queries_both: AtomicU64,
-    
+
     /// Number of degree queries served from cache.
     pub degree_cache_hits: AtomicU64,
-    
+
     /// Number of degree queries that required computation.
     pub degree_cache_misses: AtomicU64,
 }

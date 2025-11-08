@@ -32,6 +32,7 @@ impl ValCodec for EmptyValue {
     }
 }
 
+/// Sentinel node ID used as a marker for label index existence.
 pub const LABEL_SENTINEL_NODE: NodeId = NodeId(0);
 const GLOBAL_SENTINEL_LABEL: LabelId = LabelId(u32::MAX);
 
@@ -249,12 +250,14 @@ impl LabelIndex {
     }
 }
 
+/// Iterator for scanning nodes with a specific label.
 pub struct LabelScan<'a> {
     target_label: LabelId,
     cursor: Cursor<'a, Vec<u8>, EmptyValue>,
 }
 
 impl<'a> LabelScan<'a> {
+    /// Retrieves the next node ID matching the target label, if available.
     pub fn next(&mut self) -> Result<Option<NodeId>> {
         while let Some((key, _)) = self.cursor.next()? {
             let (label, node) = decode_key(&key)?;

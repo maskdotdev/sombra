@@ -15,6 +15,7 @@ pub mod ord {
         dst[..U64_LEN].copy_from_slice(&v.to_be_bytes());
     }
 
+    /// Decodes a u64 from big-endian byte order.
     pub fn get_u64_be(src: &[u8]) -> u64 {
         let head = src
             .get(..U64_LEN)
@@ -23,29 +24,34 @@ pub mod ord {
         u64::from_be_bytes(bytes)
     }
 
+    /// Encodes a signed i64 with order preservation (flip sign bit for sorting).
     pub fn put_i64_be(dst: &mut [u8], v: i64) {
         let flipped = (v as u64) ^ SIGN_BIT;
         put_u64_be(dst, flipped);
     }
 
+    /// Decodes a signed i64 with order preservation.
     pub fn get_i64_be(src: &[u8]) -> i64 {
         let flipped = get_u64_be(src);
         let raw = flipped ^ SIGN_BIT;
         raw as i64
     }
 
+    /// Encodes an f64 with order preservation (NaN not allowed).
     pub fn put_f64_be(dst: &mut [u8], v: f64) {
         debug_assert!(!v.is_nan(), "NaN keys are not allowed");
         let bits = encode_f64_bits(v);
         put_u64_be(dst, bits);
     }
 
+    /// Decodes an f64 with order preservation.
     pub fn get_f64_be(src: &[u8]) -> f64 {
         let bits = get_u64_be(src);
         let decoded = decode_f64_bits(bits);
         f64::from_bits(decoded)
     }
 
+    /// Appends a length-prefixed string key to a byte vector.
     pub fn put_str_key(dst: &mut Vec<u8>, s: &str) {
         let len = s.len();
         assert!(
@@ -57,6 +63,7 @@ pub mod ord {
         dst.extend_from_slice(s.as_bytes());
     }
 
+    /// Splits a length-prefixed string key, returning the string and its total length in bytes.
     pub fn split_str_key(src: &[u8]) -> (&str, usize) {
         const LEN_LEN: usize = core::mem::size_of::<u32>();
         assert!(
@@ -107,6 +114,7 @@ pub mod var {
         out.push(byte);
     }
 
+    /// Encodes a u64 as an unsigned varint.
     pub fn encode_u64(mut v: u64, out: &mut Vec<u8>) {
         loop {
             let byte = (v & 0x7f) as u8;
@@ -120,6 +128,7 @@ pub mod var {
         }
     }
 
+    /// Decodes a u64 varint from a slice, updating the offset.
     pub fn decode_u64(src: &[u8], off: &mut usize) -> u64 {
         let mut result = 0u64;
         let mut shift = 0u32;
@@ -146,11 +155,13 @@ pub mod var {
         panic!("varint too long (exceeded 10 bytes)");
     }
 
+    /// Encodes an i64 as a ZigZag-encoded varint.
     pub fn encode_i64(v: i64, out: &mut Vec<u8>) {
         let zigzag = ((v << 1) ^ (v >> 63)) as u64;
         encode_u64(zigzag, out);
     }
 
+    /// Decodes a ZigZag-encoded i64 varint from a slice, updating the offset.
     pub fn decode_i64(src: &[u8], off: &mut usize) -> i64 {
         let zigzag = decode_u64(src, off);
         ((zigzag >> 1) as i64) ^ (-((zigzag & 1) as i64))
@@ -162,16 +173,21 @@ pub mod buf {
 
     use core::fmt;
 
+    /// A cursor for reading bytes from a slice with offset tracking.
     pub struct Cursor<'a> {
+        /// The underlying byte slice.
         pub buf: &'a [u8],
+        /// Current read offset.
         pub off: usize,
     }
 
     impl<'a> Cursor<'a> {
+        /// Creates a new cursor starting at offset 0.
         pub fn new(buf: &'a [u8]) -> Self {
             Self { buf, off: 0 }
         }
 
+        /// Takes the next `n` bytes from the cursor, advancing the offset.
         pub fn take(&mut self, n: usize) -> &'a [u8] {
             let end = self
                 .off
@@ -189,6 +205,7 @@ pub mod buf {
             slice
         }
 
+        /// Returns the number of bytes remaining in the buffer.
         pub fn remaining(&self) -> usize {
             self.buf.len().saturating_sub(self.off)
         }

@@ -12,22 +12,34 @@ pub enum IndexKind {
 /// Logical type of the indexed property value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypeTag {
+    /// Null value type
     Null,
+    /// Boolean value type
     Bool,
+    /// Integer value type
     Int,
+    /// Floating-point value type
     Float,
+    /// String value type
     String,
+    /// Byte array value type
     Bytes,
+    /// Date value type
     Date,
+    /// Date and time value type
     DateTime,
 }
 
 /// Definition supplied when creating a property index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexDef {
+    /// The label this index applies to
     pub label: LabelId,
+    /// The property being indexed
     pub prop: PropId,
+    /// The storage backend implementation to use
     pub kind: IndexKind,
+    /// The expected type of property values
     pub ty: TypeTag,
 }
 
@@ -77,6 +89,7 @@ pub struct VecPostingStream<'a> {
 
 impl<'a> VecPostingStream<'a> {
     #[allow(dead_code)]
+    /// Creates a new posting stream from a slice of node IDs.
     pub fn new(nodes: &'a [NodeId]) -> Self {
         Self { nodes, pos: 0 }
     }

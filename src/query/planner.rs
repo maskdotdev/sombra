@@ -1,7 +1,5 @@
 //! Rule-based planner scaffolding.
 
-use crate::storage::index::IndexDef;
-use crate::types::{LabelId, PropId, Result, SombraError, TypeId};
 use crate::query::{
     ast::{EdgeDirection, MatchClause, Projection, PropPredicate as AstPredicate, QueryAst, Var},
     logical::{LogicalOp, LogicalPlan, PlanNode},
@@ -11,6 +9,8 @@ use crate::query::{
         PropPredicate as PhysicalPredicate,
     },
 };
+use crate::storage::index::IndexDef;
+use crate::types::{LabelId, PropId, Result, SombraError, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::Arc;
@@ -18,31 +18,39 @@ use std::sync::Arc;
 /// Planner inputs that influence rule selection.
 #[derive(Clone, Debug, Default)]
 pub struct PlannerConfig {
+    /// Whether to enable hash join optimization
     pub enable_hash_join: bool,
 }
 
 /// Planner output containing the chosen physical plan and explain tree.
 #[derive(Clone, Debug)]
 pub struct PlannerOutput {
+    /// The generated physical query plan
     pub plan: PhysicalPlan,
+    /// Human-readable explain tree
     pub explain: PlanExplain,
 }
 
 /// Human-readable explain tree.
 #[derive(Clone, Debug)]
 pub struct PlanExplain {
+    /// Root node of the explain tree
     pub root: ExplainNode,
 }
 
 /// Explain node representing an operator with optional metadata.
 #[derive(Clone, Debug)]
 pub struct ExplainNode {
+    /// Operator name
     pub op: String,
+    /// Additional properties describing the operator
     pub props: Vec<(String, String)>,
+    /// Input operators
     pub inputs: Vec<ExplainNode>,
 }
 
 impl ExplainNode {
+    /// Creates a new explain node with the given operator name.
     pub fn new(op: impl Into<String>) -> Self {
         Self {
             op: op.into(),
@@ -52,13 +60,14 @@ impl ExplainNode {
     }
 }
 
-/// Planner facade.
+/// Query planner that converts AST to physical execution plans.
 pub struct Planner {
     metadata: Arc<dyn MetadataProvider>,
     _config: PlannerConfig,
 }
 
 impl Planner {
+    /// Creates a new planner with the given configuration and metadata provider.
     pub fn new(config: PlannerConfig, metadata: Arc<dyn MetadataProvider>) -> Self {
         Self {
             metadata,

@@ -4,18 +4,26 @@ use std::{fs::File, io, path::Path, sync::Arc};
 
 use crate::types::{Result, SombraError};
 
+/// Trait for performing positioned file I/O operations.
 pub trait FileIo: Send + Sync + 'static {
+    /// Reads bytes from the file at the specified offset into the buffer.
     fn read_at(&self, off: u64, dst: &mut [u8]) -> Result<()>;
+    /// Writes bytes to the file at the specified offset from the buffer.
     fn write_at(&self, off: u64, src: &[u8]) -> Result<()>;
+    /// Synchronizes all file data and metadata to disk.
     fn sync_all(&self) -> Result<()>;
+    /// Returns the current length of the file in bytes.
     fn len(&self) -> Result<u64>;
+    /// Returns true if the file is empty.
     fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
     }
+    /// Truncates or extends the file to the specified length.
     fn truncate(&self, len: u64) -> Result<()>;
 }
 
 #[cfg(unix)]
+/// Unix-specific file I/O operations using POSIX APIs.
 pub mod stdio_unix {
     use std::{
         fs::{File, OpenOptions},
@@ -28,6 +36,7 @@ pub mod stdio_unix {
 
     use super::StdFileIo;
 
+    /// Opens a file in read-write mode with creation support (Unix).
     pub fn open_rw(path: impl AsRef<Path>) -> Result<StdFileIo> {
         let file = OpenOptions::new()
             .read(true)
@@ -39,6 +48,7 @@ pub mod stdio_unix {
         Ok(StdFileIo::new(file))
     }
 
+    /// Reads exact number of bytes at offset using Unix pread semantics.
     pub fn read_exact(file: &File, mut off: u64, mut dst: &mut [u8]) -> io::Result<()> {
         while !dst.is_empty() {
             let read = file.read_at(dst, off)?;
@@ -55,6 +65,7 @@ pub mod stdio_unix {
         Ok(())
     }
 
+    /// Writes all bytes at offset using Unix pwrite semantics.
     pub fn write_all(file: &File, mut off: u64, mut src: &[u8]) -> io::Result<()> {
         while !src.is_empty() {
             let written = file.write_at(src, off)?;
@@ -127,18 +138,21 @@ pub mod stdio_win {
     }
 }
 
+/// Standard file I/O implementation using `Arc<File>`.
 #[derive(Clone)]
 pub struct StdFileIo {
     inner: Arc<File>,
 }
 
 impl StdFileIo {
+    /// Creates a new StdFileIo from an existing File handle.
     pub fn new(file: File) -> Self {
         Self {
             inner: Arc::new(file),
         }
     }
 
+    /// Opens or creates a file for read-write access.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         #[cfg(unix)]
         {

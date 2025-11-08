@@ -14,6 +14,7 @@ pub struct IndexCatalog {
 }
 
 impl IndexCatalog {
+    /// Opens an existing catalog or creates a new one if the root is invalid.
     pub fn open(store: &Arc<dyn PageStore>, root: PageId) -> Result<(Self, PageId)> {
         let mut opts = BTreeOptions::default();
         opts.root_page = (root.0 != 0).then_some(root);
@@ -26,10 +27,12 @@ impl IndexCatalog {
         Ok((catalog, root_page))
     }
 
+    /// Returns a reference to the underlying page store.
     pub fn store(&self) -> &Arc<dyn PageStore> {
         &self.store
     }
 
+    /// Returns a reference to the underlying B-tree.
     pub fn tree(&self) -> &BTree<Vec<u8>, Vec<u8>> {
         &self.tree
     }
@@ -98,11 +101,13 @@ impl IndexCatalog {
         Ok((kind, ty))
     }
 
+    /// Checks if a property index exists for the given label and property.
     pub fn has_property_index(&self, tx: &ReadGuard, label: LabelId, prop: PropId) -> Result<bool> {
         let key = Self::encode_key(label, prop);
         Ok(self.tree.get(tx, &key)?.is_some())
     }
 
+    /// Retrieves the index definition for the given label and property, if it exists.
     pub fn get(&self, tx: &ReadGuard, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
         let key = Self::encode_key(label, prop);
         let Some(value) = self.tree.get(tx, &key)? else {
@@ -117,6 +122,8 @@ impl IndexCatalog {
         }))
     }
 
+    /// Inserts a new property index definition into the catalog.
+    /// Returns an error if an index for this label-property pair already exists.
     pub fn insert(&self, tx: &mut WriteGuard<'_>, def: IndexDef) -> Result<()> {
         let key = Self::encode_key(def.label, def.prop);
         if self.tree.get_with_write(tx, &key)?.is_some() {
@@ -126,11 +133,14 @@ impl IndexCatalog {
         self.tree.put(tx, &key, &value)
     }
 
+    /// Removes a property index definition from the catalog.
+    /// Returns true if the index was found and removed, false otherwise.
     pub fn remove(&self, tx: &mut WriteGuard<'_>, label: LabelId, prop: PropId) -> Result<bool> {
         let key = Self::encode_key(label, prop);
         self.tree.delete(tx, &key)
     }
 
+    /// Iterates over all property indexes for the given label using a read transaction.
     pub fn iter_label<'a>(&'a self, tx: &'a ReadGuard, label: LabelId) -> Result<Vec<IndexDef>> {
         let mut results = Vec::new();
         let mut lower = Vec::with_capacity(8);
@@ -160,6 +170,7 @@ impl IndexCatalog {
         Ok(results)
     }
 
+    /// Iterates over all property indexes for the given label using a write transaction.
     pub fn iter_label_with_write(
         &self,
         tx: &mut WriteGuard<'_>,

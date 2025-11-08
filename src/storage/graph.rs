@@ -32,8 +32,11 @@ use super::types::{
     PropValueOwned,
 };
 
+/// Default maximum size for inline property blob storage in bytes.
 pub const DEFAULT_INLINE_PROP_BLOB: u32 = 128;
+/// Default maximum size for inline property value storage in bytes.
 pub const DEFAULT_INLINE_PROP_VALUE: u32 = 48;
+/// Storage flag indicating that degree caching is enabled.
 pub const STORAGE_FLAG_DEGREE_CACHE: u32 = 0x01;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,6 +54,7 @@ impl ValCodec for UnitValue {
     }
 }
 
+/// Main graph storage structure managing nodes, edges, adjacency lists, and indexes.
 #[allow(dead_code)]
 pub struct Graph {
     store: Arc<dyn PageStore>,
@@ -74,6 +78,7 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// Opens a graph storage instance with the specified configuration options.
     pub fn open(opts: GraphOptions) -> Result<Self> {
         let store = Arc::clone(&opts.store);
         let meta = store.meta()?;
@@ -255,6 +260,7 @@ impl Graph {
         })
     }
 
+    /// Creates a new node in the graph with the given specification.
     pub fn create_node(&self, tx: &mut WriteGuard<'_>, spec: NodeSpec<'_>) -> Result<NodeId> {
         let labels = normalize_labels(spec.labels)?;
         let mut prop_owned: BTreeMap<PropId, PropValueOwned> = BTreeMap::new();
@@ -319,6 +325,7 @@ impl Graph {
         Ok(node_id)
     }
 
+    /// Creates a label index for fast node lookups by label.
     pub fn create_label_index(&self, tx: &mut WriteGuard<'_>, label: LabelId) -> Result<()> {
         if self.indexes.has_label_index_with_write(tx, label)? {
             return Ok(());
@@ -334,14 +341,17 @@ impl Graph {
         self.indexes.create_label_index(tx, label, nodes)
     }
 
+    /// Drops an existing label index.
     pub fn drop_label_index(&self, tx: &mut WriteGuard<'_>, label: LabelId) -> Result<()> {
         self.indexes.drop_label_index(tx, label)
     }
 
+    /// Checks if a label index exists for the given label.
     pub fn has_label_index(&self, label: LabelId) -> Result<bool> {
         self.indexes.has_label_index(label)
     }
 
+    /// Creates a property index for fast property-based lookups.
     pub fn create_property_index(&self, tx: &mut WriteGuard<'_>, def: IndexDef) -> Result<()> {
         let existing = self
             .indexes
@@ -367,6 +377,7 @@ impl Graph {
         self.indexes.create_property_index(tx, def, &entries)
     }
 
+    /// Drops a property index for the given label and property.
     pub fn drop_property_index(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -382,6 +393,7 @@ impl Graph {
         self.indexes.drop_property_index(tx, def)
     }
 
+    /// Checks if a property index exists for the given label and property.
     pub fn has_property_index(&self, label: LabelId, prop: PropId) -> Result<bool> {
         let read = self.store.begin_read()?;
         Ok(self
@@ -390,15 +402,18 @@ impl Graph {
             .is_some())
     }
 
+    /// Returns the root page ID of the index catalog.
     pub fn index_catalog_root(&self) -> PageId {
         self.indexes.catalog().tree().root_page()
     }
 
+    /// Retrieves the property index definition for a given label and property.
     pub fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
         let read = self.store.begin_read()?;
         self.indexes.get_property_index(&read, label, prop)
     }
 
+    /// Scans for nodes matching an exact property value using an index.
     pub fn property_scan_eq(
         &self,
         tx: &ReadGuard,
@@ -410,6 +425,7 @@ impl Graph {
         collect_posting_stream(&mut *stream)
     }
 
+    /// Returns a stream of node IDs with the specified label and property value.
     pub fn property_scan_eq_stream<'a>(
         &'a self,
         tx: &'a ReadGuard,
@@ -434,6 +450,7 @@ impl Graph {
         Ok(instrument_posting_stream(stream))
     }
 
+    /// Scans for nodes with property values in a range (inclusive bounds).
     pub fn property_scan_range(
         &self,
         tx: &ReadGuard,
@@ -451,6 +468,7 @@ impl Graph {
         )
     }
 
+    /// Scans for nodes with property values in a range with custom bounds.
     pub fn property_scan_range_bounds(
         &self,
         tx: &ReadGuard,
@@ -463,6 +481,7 @@ impl Graph {
         collect_posting_stream(&mut *stream)
     }
 
+    /// Returns a stream of node IDs with the specified label and property values in the given range.
     pub fn property_scan_range_stream<'a>(
         &'a self,
         tx: &'a ReadGuard,
@@ -491,6 +510,7 @@ impl Graph {
         Ok(instrument_posting_stream(stream))
     }
 
+    /// Returns a label scan iterator for nodes with the given label.
     pub fn label_scan<'a>(
         &'a self,
         tx: &'a ReadGuard,
@@ -499,6 +519,7 @@ impl Graph {
         self.indexes.label_scan(tx, label)
     }
 
+    /// Retrieves node data by ID.
     pub fn get_node(&self, tx: &ReadGuard, id: NodeId) -> Result<Option<NodeData>> {
         let Some(bytes) = self.nodes.get(tx, &id.0)? else {
             return Ok(None);
@@ -516,6 +537,7 @@ impl Graph {
         }))
     }
 
+    /// Scans and returns all nodes in the graph.
     pub fn scan_all_nodes(&self, tx: &ReadGuard) -> Result<Vec<(NodeId, NodeData)>> {
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut rows = Vec::new();
@@ -537,6 +559,7 @@ impl Graph {
         Ok(rows)
     }
 
+    /// Deletes a node from the graph with the given options.
     pub fn delete_node(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -580,6 +603,7 @@ impl Graph {
         Ok(())
     }
 
+    /// Updates the properties of an existing node by applying the given patch.
     pub fn update_node(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -635,6 +659,7 @@ impl Graph {
         self.free_node_props(tx, storage)
     }
 
+    /// Creates a new edge in the graph with the given specification.
     pub fn create_edge(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
         self.ensure_node_exists(tx, spec.src, "edge source node missing")?;
         self.ensure_node_exists(tx, spec.dst, "edge destination node missing")?;
@@ -684,6 +709,7 @@ impl Graph {
         Ok(edge_id)
     }
 
+    /// Retrieves edge data by ID.
     pub fn get_edge(&self, tx: &ReadGuard, id: EdgeId) -> Result<Option<EdgeData>> {
         let Some(bytes) = self.edges.get(tx, &id.0)? else {
             return Ok(None);
@@ -703,6 +729,7 @@ impl Graph {
         }))
     }
 
+    /// Scans and returns all edges in the graph.
     pub fn scan_all_edges(&self, tx: &ReadGuard) -> Result<Vec<(EdgeId, EdgeData)>> {
         let mut cursor = self.edges.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut rows = Vec::new();
@@ -726,6 +753,7 @@ impl Graph {
         Ok(rows)
     }
 
+    /// Updates edge properties with the given patch.
     pub fn update_edge(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -783,6 +811,7 @@ impl Graph {
         Ok(())
     }
 
+    /// Returns neighboring nodes of a given node based on direction and edge type.
     pub fn neighbors(
         &self,
         tx: &ReadGuard,
@@ -805,6 +834,7 @@ impl Graph {
         Ok(NeighborCursor::new(neighbors))
     }
 
+    /// Computes the degree (number of edges) for a node in a given direction.
     pub fn degree(&self, tx: &ReadGuard, id: NodeId, dir: Dir, ty: Option<TypeId>) -> Result<u64> {
         let result = match dir {
             Dir::Out => self.degree_single(tx, id, true, ty)?,
@@ -826,6 +856,7 @@ impl Graph {
         Ok(result)
     }
 
+    /// Deletes an edge from the graph by ID.
     pub fn delete_edge(&self, tx: &mut WriteGuard<'_>, id: EdgeId) -> Result<()> {
         let Some(bytes) = self.edges.get_with_write(tx, &id.0)? else {
             return Err(SombraError::NotFound);
@@ -1384,6 +1415,7 @@ impl PostingStream for ProfilingPostingStream<'_> {
     }
 }
 
+/// Computes adjacency list bounds for a given node.
 fn adjacency_bounds_for_node(node: NodeId) -> (Vec<u8>, Vec<u8>) {
     const SUFFIX_LEN: usize = 4 + 8 + 8;
     let mut lower = Vec::with_capacity(8 + SUFFIX_LEN);
@@ -1395,6 +1427,7 @@ fn adjacency_bounds_for_node(node: NodeId) -> (Vec<u8>, Vec<u8>) {
     (lower, upper)
 }
 
+/// Normalizes and deduplicates a list of labels.
 fn normalize_labels(labels: &[LabelId]) -> Result<Vec<LabelId>> {
     let mut result: Vec<LabelId> = labels.to_vec();
     result.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1406,6 +1439,7 @@ fn normalize_labels(labels: &[LabelId]) -> Result<Vec<LabelId>> {
 }
 
 impl Graph {
+    /// Collects all forward adjacency entries for debugging purposes.
     pub fn debug_collect_adj_fwd(
         &self,
         tx: &ReadGuard,
@@ -1420,6 +1454,7 @@ impl Graph {
         Ok(entries)
     }
 
+    /// Collects all reverse adjacency entries for debugging purposes.
     pub fn debug_collect_adj_rev(
         &self,
         tx: &ReadGuard,

@@ -1,5 +1,7 @@
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 
+use crate::primitives::bytes::var;
+use crate::storage::btree::KeyCursor;
 use crate::types::{page::PAGE_HDR_LEN, PageId, Result, SombraError};
 
 /// Number of bytes used by the B+ tree payload header (excluding fences and slot directory).
@@ -18,20 +20,20 @@ const HIGH_FENCE_LEN_OFFSET: usize = 40;
 const FENCE_DATA_OFFSET: usize = PAYLOAD_HEADER_LEN;
 const SLOT_ENTRY_LEN: usize = 2;
 
-/// Leaf record header length in bytes (`prefix_len:u16` + `suffix_len:u16`).
-pub const LEAF_RECORD_HEADER_LEN: usize = 4;
-
 /// Internal record header length (`child:u64` + `sep_len:u16`).
 pub const INTERNAL_RECORD_HEADER_LEN: usize = 10;
 
 /// Logical kind for a B+ tree page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BTreePageKind {
+    /// Leaf page containing actual data records
     Leaf = 1,
+    /// Internal page containing separators and child pointers
     Internal = 2,
 }
 
 impl BTreePageKind {
+    /// Converts a byte value to a BTreePageKind.
     pub fn from_u8(value: u8) -> Result<Self> {
         match value {
             1 => Ok(Self::Leaf),
@@ -44,15 +46,25 @@ impl BTreePageKind {
 /// Header metadata decoded from the payload region of a B+ tree page.
 #[derive(Clone, Debug)]
 pub struct Header {
+    /// The type of B+ tree page (leaf or internal)
     pub kind: BTreePageKind,
+    /// Page-level flags for future use
     pub flags: u8,
+    /// Number of records in the slot directory
     pub slot_count: u16,
+    /// Offset to the start of free space in the payload
     pub free_start: u16,
+    /// Offset to the end of free space in the payload
     pub free_end: u16,
+    /// Page ID of the parent page, if any
     pub parent: Option<PageId>,
+    /// Page ID of the right sibling page, if any
     pub right_sibling: Option<PageId>,
+    /// Page ID of the left sibling page, if any
     pub left_sibling: Option<PageId>,
+    /// Length of the low fence key in bytes
     pub low_fence_len: usize,
+    /// Length of the high fence key in bytes
     pub high_fence_len: usize,
 }
 
@@ -153,34 +165,43 @@ impl Header {
 }
 
 /// Update helpers for callers that operate on a mutable page payload.
+
+/// Sets the slot count in the page header.
 pub fn set_slot_count(payload: &mut [u8], value: u16) {
     write_u16(payload, NSLOTS_OFFSET, value);
 }
 
+/// Sets the free space start offset in the page header.
 pub fn set_free_start(payload: &mut [u8], value: u16) {
     write_u16(payload, FREE_START_OFFSET, value);
 }
 
+/// Sets the free space end offset in the page header.
 pub fn set_free_end(payload: &mut [u8], value: u16) {
     write_u16(payload, FREE_END_OFFSET, value);
 }
 
+/// Sets the parent page ID in the page header.
 pub fn set_parent(payload: &mut [u8], page: Option<PageId>) {
     write_page_id(payload, PARENT_OFFSET, page);
 }
 
+/// Sets the right sibling page ID in the page header.
 pub fn set_right_sibling(payload: &mut [u8], page: Option<PageId>) {
     write_page_id(payload, RIGHT_SIB_OFFSET, page);
 }
 
+/// Sets the left sibling page ID in the page header.
 pub fn set_left_sibling(payload: &mut [u8], page: Option<PageId>) {
     write_page_id(payload, LEFT_SIB_OFFSET, page);
 }
 
+/// Sets the low fence key in the page.
 pub fn set_low_fence(payload: &mut [u8], fence: &[u8]) -> Result<()> {
     write_fence(payload, LOW_FENCE_LEN_OFFSET, fence)
 }
 
+/// Sets the high fence key in the page.
 pub fn set_high_fence(payload: &mut [u8], fence: &[u8]) -> Result<()> {
     write_fence(payload, HIGH_FENCE_LEN_OFFSET, fence)
 }
@@ -191,10 +212,12 @@ pub struct SlotDirectory<'a> {
 }
 
 impl<'a> SlotDirectory<'a> {
+    /// Returns the number of slots in the directory.
     pub fn len(&self) -> usize {
         self.slots.len() / SLOT_ENTRY_LEN
     }
 
+    /// Retrieves the offset value at the given slot index.
     pub fn get(&self, idx: usize) -> Result<u16> {
         if idx >= self.len() {
             return Err(SombraError::Invalid("slot index out of range"));
@@ -205,6 +228,7 @@ impl<'a> SlotDirectory<'a> {
         ))
     }
 
+    /// Returns an iterator over all slot offsets.
     pub fn iter(&self) -> SlotIter<'a> {
         SlotIter {
             slots: self.slots,
@@ -213,6 +237,7 @@ impl<'a> SlotDirectory<'a> {
     }
 }
 
+/// Iterator over slot directory entries.
 pub struct SlotIter<'a> {
     slots: &'a [u8],
     pos: usize,
@@ -235,45 +260,25 @@ impl<'a> Iterator for SlotIter<'a> {
     }
 }
 
-/// Reference to a leaf record stored on-page.
+/// Reference to a plain leaf record stored on-page (`varint key_len | varint val_len | key | value`).
 #[derive(Clone, Copy, Debug)]
 pub struct LeafRecordRef<'a> {
-    pub prefix_len: u16,
-    pub key_suffix: &'a [u8],
+    /// Full key bytes stored in the record.
+    pub key: &'a [u8],
+    /// Value data stored in the record.
     pub value: &'a [u8],
-}
-
-impl<'a> LeafRecordRef<'a> {
-    pub fn total_len(&self) -> usize {
-        LEAF_RECORD_HEADER_LEN + self.key_suffix.len() + self.value.len()
-    }
 }
 
 /// Reference to an internal record stored on-page.
 #[derive(Clone, Copy, Debug)]
 pub struct InternalRecordRef<'a> {
+    /// The separator key stored in the internal record
     pub separator: &'a [u8],
+    /// The child page ID pointed to by this record
     pub child: PageId,
 }
 
-pub fn decode_leaf_record(buf: &[u8]) -> Result<LeafRecordRef<'_>> {
-    if buf.len() < LEAF_RECORD_HEADER_LEN {
-        return Err(SombraError::Corruption("leaf record shorter than header"));
-    }
-    let prefix_len = u16::from_be_bytes(buf[0..2].try_into().unwrap());
-    let suffix_len = u16::from_be_bytes(buf[2..4].try_into().unwrap()) as usize;
-    if buf.len() < LEAF_RECORD_HEADER_LEN + suffix_len {
-        return Err(SombraError::Corruption("leaf record key truncated"));
-    }
-    let key_suffix = &buf[LEAF_RECORD_HEADER_LEN..LEAF_RECORD_HEADER_LEN + suffix_len];
-    let value = &buf[LEAF_RECORD_HEADER_LEN + suffix_len..];
-    Ok(LeafRecordRef {
-        prefix_len,
-        key_suffix,
-        value,
-    })
-}
-
+/// Decodes an internal record from the given buffer.
 pub fn decode_internal_record(buf: &[u8]) -> Result<InternalRecordRef<'_>> {
     if buf.len() < INTERNAL_RECORD_HEADER_LEN {
         return Err(SombraError::Corruption(
@@ -290,12 +295,55 @@ pub fn decode_internal_record(buf: &[u8]) -> Result<InternalRecordRef<'_>> {
     Ok(InternalRecordRef { separator, child })
 }
 
-pub fn encode_leaf_record(prefix_len: u16, key_suffix: &[u8], value: &[u8], dst: &mut Vec<u8>) {
-    let suffix_len = u16::try_from(key_suffix.len()).expect("key suffix longer than u16");
-    dst.extend_from_slice(&prefix_len.to_be_bytes());
-    dst.extend_from_slice(&suffix_len.to_be_bytes());
-    dst.extend_from_slice(key_suffix);
+/// Encodes a plain (varint) leaf record into the destination vector.
+pub fn encode_leaf_record(key: &[u8], value: &[u8], dst: &mut Vec<u8>) -> Result<()> {
+    if key.is_empty() {
+        return Err(SombraError::Invalid(
+            "plain leaf key length must be non-zero",
+        ));
+    }
+    let key_len = u64::try_from(key.len())
+        .map_err(|_| SombraError::Invalid("plain leaf key length exceeds u64"))?;
+    let val_len = u64::try_from(value.len())
+        .map_err(|_| SombraError::Invalid("plain leaf value length exceeds u64"))?;
+    var::encode_u64(key_len, dst);
+    var::encode_u64(val_len, dst);
+    dst.extend_from_slice(key);
     dst.extend_from_slice(value);
+    Ok(())
+}
+
+/// Decodes a plain leaf record from the given buffer.
+pub fn decode_leaf_record(buf: &[u8]) -> Result<LeafRecordRef<'_>> {
+    let mut cursor = KeyCursor::new(buf);
+    let key_len = cursor.read_var_u64("plain leaf key length truncated")?;
+    if key_len == 0 {
+        return Err(SombraError::Corruption("plain leaf key length zero"));
+    }
+    let val_len = cursor.read_var_u64("plain leaf value length truncated")?;
+    let key_len_usize = usize::try_from(key_len)
+        .map_err(|_| SombraError::Corruption("plain leaf key length exceeds usize"))?;
+    let val_len_usize = usize::try_from(val_len)
+        .map_err(|_| SombraError::Corruption("plain leaf value length exceeds usize"))?;
+    let key = cursor.take(key_len_usize)?;
+    let value = cursor.take(val_len_usize)?;
+    Ok(LeafRecordRef { key, value })
+}
+
+/// Computes the encoded length of a plain leaf record without writing it.
+pub fn plain_leaf_record_encoded_len(key_len: usize, value_len: usize) -> Result<usize> {
+    if key_len == 0 {
+        return Err(SombraError::Invalid(
+            "plain leaf key length must be non-zero",
+        ));
+    }
+    let key_var = varint_len_usize(key_len)?;
+    let val_var = varint_len_usize(value_len)?;
+    key_var
+        .checked_add(val_var)
+        .and_then(|total| total.checked_add(key_len))
+        .and_then(|total| total.checked_add(value_len))
+        .ok_or(SombraError::Invalid("plain leaf record length overflow"))
 }
 
 /// Encode an internal record as `[child_page_id:u64][sep_len:u16][sep bytes]`.
@@ -347,15 +395,19 @@ pub fn record_slice_from_parts<'a>(
     Ok(&payload[start..end])
 }
 
-/// Compute the length of the shared prefix for two encoded keys.
-pub fn shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
-    let max = a.len().min(b.len());
-    for i in 0..max {
-        if a[i] != b[i] {
-            return i;
-        }
+fn varint_len_usize(value: usize) -> Result<usize> {
+    let raw =
+        u64::try_from(value).map_err(|_| SombraError::Invalid("plain leaf length exceeds u64"))?;
+    Ok(varint_len_u64(raw))
+}
+
+fn varint_len_u64(mut value: u64) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
     }
-    max
+    len
 }
 
 fn decode_page_id(bytes: &[u8]) -> Option<PageId> {
@@ -461,15 +513,18 @@ pub struct PayloadMut<'a> {
 }
 
 impl<'a> PayloadMut<'a> {
+    /// Creates a new PayloadMut from a page buffer.
     pub fn new(page: &'a mut [u8]) -> Result<Self> {
         let buf = payload_slice_mut(page)?;
         Ok(Self { buf })
     }
 
+    /// Returns an immutable slice of the payload.
     pub fn as_slice(&self) -> &[u8] {
         self.buf
     }
 
+    /// Returns a mutable slice of the payload.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         self.buf
     }
@@ -502,12 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_leaf_record_roundtrip() -> Result<()> {
+    fn encode_decode_plain_leaf_record_roundtrip() -> Result<()> {
         let mut buf = Vec::new();
-        encode_leaf_record(3, b"suffix", b"value", &mut buf);
+        encode_leaf_record(b"plain-key", b"value", &mut buf)?;
         let rec = decode_leaf_record(&buf)?;
-        assert_eq!(rec.prefix_len, 3);
-        assert_eq!(rec.key_suffix, b"suffix");
+        assert_eq!(rec.key, b"plain-key");
         assert_eq!(rec.value, b"value");
         Ok(())
     }
@@ -523,13 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_prefix_len_handles_mismatch() {
-        assert_eq!(shared_prefix_len(b"abcdef", b"abcXYZ"), 3);
-        assert_eq!(shared_prefix_len(b"", b"foo"), 0);
-        assert_eq!(shared_prefix_len(b"same", b"same"), 4);
-    }
-
-    #[test]
     fn record_slice_tracks_free_space() -> Result<()> {
         let page_size = 512;
         let mut buf = vec![0u8; page_size];
@@ -540,7 +587,7 @@ mod tests {
 
         let payload_len = page_size - PAGE_HDR_LEN;
         let mut rec = Vec::new();
-        encode_leaf_record(0, b"key", b"value", &mut rec);
+        encode_leaf_record(b"key", b"value", &mut rec)?;
         assert!(rec.len() < payload_len);
         let record_start = PAYLOAD_HEADER_LEN;
         let record_end = record_start + rec.len();
@@ -557,8 +604,24 @@ mod tests {
         let slice = record_slice(&hdr, &buf, 0)?;
         assert_eq!(slice, &payload[record_start..record_end]);
         let rec_decoded = decode_leaf_record(slice)?;
-        assert_eq!(rec_decoded.key_suffix, b"key");
+        assert_eq!(rec_decoded.key, b"key");
         assert_eq!(rec_decoded.value, b"value");
         Ok(())
+    }
+
+    #[test]
+    fn encode_plain_leaf_record_rejects_empty_key() {
+        let mut buf = Vec::new();
+        let err = encode_leaf_record(b"", b"value", &mut buf).unwrap_err();
+        assert!(matches!(err, SombraError::Invalid(_)));
+    }
+
+    #[test]
+    fn decode_plain_leaf_record_rejects_truncated_payload() {
+        let mut buf = Vec::new();
+        encode_leaf_record(b"k", b"v", &mut buf).expect("encode plain record");
+        let truncated = &buf[..buf.len() - 1];
+        let err = decode_leaf_record(truncated).unwrap_err();
+        assert!(matches!(err, SombraError::Corruption(_)));
     }
 }

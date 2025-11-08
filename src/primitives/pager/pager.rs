@@ -19,6 +19,9 @@ use crate::primitives::{
     io::{FileIo, StdFileIo},
     wal::{Wal, WalCommitConfig, WalCommitter, WalFrameOwned, WalOptions, WalSyncMode},
 };
+use crate::storage::{
+    profile_scope, record_pager_wal_bytes, record_pager_wal_frames, StorageProfileKind,
+};
 use crate::types::{
     page::{self, PageHeader, PAGE_HDR_LEN},
     page_crc32, Lsn, PageId, Result, SombraError,
@@ -1208,6 +1211,7 @@ impl Pager {
     }
 
     fn commit_txn(&self, mut guard: WriteGuard<'_>) -> Result<Lsn> {
+        let _scope = profile_scope(StorageProfileKind::PagerCommit);
         let mut inner = self.inner.lock();
         let lsn = inner.next_lsn;
         let mut dirty_pages: Vec<PageId> = guard.dirty_pages.iter().copied().collect();
@@ -1254,6 +1258,12 @@ impl Pager {
         }
         inner.next_lsn = Lsn(lsn.0 + 1);
         drop(inner);
+        let wal_frame_count = wal_frames.len() as u64;
+        if wal_frame_count > 0 {
+            record_pager_wal_frames(wal_frame_count);
+            let payload_bytes = wal_frame_count.saturating_mul(self.page_size as u64);
+            record_pager_wal_bytes(payload_bytes);
+        }
 
         let synchronous = {
             let options = self.options.lock();

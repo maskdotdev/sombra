@@ -116,25 +116,33 @@ pub(crate) fn decode_degree_key(bytes: &[u8]) -> Option<(NodeId, DegreeDir, Type
     Some((node, dir, ty))
 }
 
+/// Direction for graph traversal and adjacency queries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Dir {
+    /// Outgoing edges from a node.
     Out,
+    /// Incoming edges to a node.
     In,
+    /// Both incoming and outgoing edges.
     Both,
 }
 
 impl Dir {
+    /// Returns true if this direction includes outgoing edges.
     pub fn includes_out(self) -> bool {
         matches!(self, Dir::Out | Dir::Both)
     }
 
+    /// Returns true if this direction includes incoming edges.
     pub fn includes_in(self) -> bool {
         matches!(self, Dir::In | Dir::Both)
     }
 }
 
+/// Options for neighbor expansion queries.
 #[derive(Clone, Copy, Debug)]
 pub struct ExpandOpts {
+    /// Whether to deduplicate nodes in the result set.
     pub distinct_nodes: bool,
 }
 
@@ -146,13 +154,18 @@ impl Default for ExpandOpts {
     }
 }
 
+/// A neighboring node in the graph with its connecting edge information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Neighbor {
+    /// The neighboring node ID.
     pub neighbor: NodeId,
+    /// The edge connecting to this neighbor.
     pub edge: EdgeId,
+    /// The type of the connecting edge.
     pub ty: TypeId,
 }
 
+/// Cursor for iterating through neighbors of a node.
 pub struct NeighborCursor {
     neighbors: Vec<Neighbor>,
     index: usize,
@@ -166,10 +179,12 @@ impl NeighborCursor {
         }
     }
 
+    /// Returns the number of neighbors in this cursor.
     pub fn len(&self) -> usize {
         self.neighbors.len()
     }
 
+    /// Returns true if there are no neighbors.
     pub fn is_empty(&self) -> bool {
         self.neighbors.is_empty()
     }

@@ -150,7 +150,7 @@ pub(crate) fn record_profile_timer(kind: QueryProfileKind, start: Option<Instant
 /// # Example
 ///
 /// ```no_run
-/// use sombra_db::query::profile_snapshot;
+/// use sombra::query::profile::profile_snapshot;
 ///
 /// // Get snapshot without resetting counters
 /// if let Some(snapshot) = profile_snapshot(false) {

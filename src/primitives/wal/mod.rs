@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::primitives::io::FileIo;
+use crate::storage::record_pager_fsync;
 use crate::types::{Checksum, Crc32Fast, Lsn, PageId, Result, SombraError};
 use parking_lot::{Condvar, Mutex};
 
@@ -16,14 +17,19 @@ const WAL_FORMAT_VERSION: u16 = 1;
 const FILE_HEADER_LEN: usize = 32;
 const FRAME_HEADER_LEN: usize = 32;
 
+/// Configuration options for opening a write-ahead log.
 #[derive(Clone, Debug)]
 pub struct WalOptions {
+    /// Size of each page in bytes
     pub page_size: u32,
+    /// Random salt value to distinguish different database instances
     pub wal_salt: u64,
+    /// Starting LSN for the log sequence
     pub start_lsn: Lsn,
 }
 
 impl WalOptions {
+    /// Creates a new WalOptions with the specified configuration.
     pub fn new(page_size: u32, wal_salt: u64, start_lsn: Lsn) -> Self {
         Self {
             page_size,
@@ -43,10 +49,14 @@ impl Default for WalOptions {
     }
 }
 
+/// Statistics tracking WAL operations.
 #[derive(Clone, Debug, Default)]
 pub struct WalStats {
+    /// Number of frames appended to the log
     pub frames_appended: u64,
+    /// Total bytes written to the log
     pub bytes_appended: u64,
+    /// Number of sync operations performed
     pub syncs: u64,
 }
 
@@ -199,6 +209,11 @@ impl WalState {
     }
 }
 
+/// Write-ahead log that provides durability and crash recovery.
+///
+/// The WAL stores page modifications as a sequence of frames, each containing
+/// a page image along with metadata. Frames are checksummed and chained together
+/// to detect corruption.
 pub struct Wal {
     io: Arc<dyn FileIo>,
     page_size: usize,
@@ -206,6 +221,10 @@ pub struct Wal {
 }
 
 impl Wal {
+    /// Opens or creates a write-ahead log with the given options.
+    ///
+    /// If the file already exists, validates that the stored page size and salt
+    /// match the provided options.
     pub fn open(io: Arc<dyn FileIo>, options: WalOptions) -> Result<Self> {
         if options.page_size == 0 {
             return Err(SombraError::Invalid("wal page size must be non-zero"));
@@ -237,6 +256,7 @@ impl Wal {
         Ok(wal)
     }
 
+    /// Resets the WAL to a new starting LSN, truncating all existing frames.
     pub fn reset(&self, start_lsn: Lsn) -> Result<()> {
         let mut state = self.state.lock();
         state.header = FileHeader::new(state.header.page_size, state.header.wal_salt, start_lsn);
@@ -248,6 +268,10 @@ impl Wal {
         Ok(())
     }
 
+    /// Appends a single frame to the WAL.
+    ///
+    /// The frame payload must match the configured page size. This method does not
+    /// sync to disk; call `sync()` to ensure durability.
     pub fn append_frame(&self, frame: WalFrame<'_>) -> Result<()> {
         if frame.payload.len() != self.page_size {
             return Err(SombraError::Invalid("wal frame payload size mismatch"));
@@ -282,13 +306,16 @@ impl Wal {
         Ok(())
     }
 
+    /// Syncs all pending writes to persistent storage.
     pub fn sync(&self) -> Result<()> {
         self.io.sync_all()?;
+        record_pager_fsync();
         let mut state = self.state.lock();
         state.stats.syncs += 1;
         Ok(())
     }
 
+    /// Creates an iterator to read frames from the WAL.
     pub fn iter(&self) -> Result<WalIterator> {
         let len = self.io.len()?;
         if len < FILE_HEADER_LEN as u64 {
@@ -308,29 +335,40 @@ impl Wal {
         })
     }
 
+    /// Returns current statistics for this WAL instance.
     pub fn stats(&self) -> WalStats {
         let state = self.state.lock();
         state.stats.clone()
     }
 
+    /// Returns the total size of the WAL file in bytes.
     pub fn len(&self) -> Result<u64> {
         self.io.len()
     }
 
+    /// Returns true if the WAL contains no frames.
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? <= FILE_HEADER_LEN as u64)
     }
 }
 
+/// A WAL frame containing a page image and metadata.
 pub struct WalFrame<'a> {
+    /// Log sequence number for this frame
     pub lsn: Lsn,
+    /// Page identifier being updated
     pub page_id: PageId,
+    /// Page data contents
     pub payload: &'a [u8],
 }
 
+/// Owned version of WalFrame with owned payload data.
 pub struct WalFrameOwned {
+    /// Log sequence number for this frame
     pub lsn: Lsn,
+    /// Page identifier being updated
     pub page_id: PageId,
+    /// Owned page data contents
     pub payload: Vec<u8>,
 }
 
@@ -344,17 +382,25 @@ impl fmt::Debug for WalFrameOwned {
     }
 }
 
+/// Synchronization mode for WAL commits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WalSyncMode {
+    /// Sync immediately after writing frames
     Immediate,
+    /// Defer sync to a later time
     Deferred,
+    /// Do not sync (unsafe, for testing only)
     Off,
 }
 
+/// Configuration for batch commit behavior in WalCommitter.
 #[derive(Clone, Copy, Debug)]
 pub struct WalCommitConfig {
+    /// Maximum number of commit requests to batch together
     pub max_batch_commits: usize,
+    /// Maximum total frames across all batched commits
     pub max_batch_frames: usize,
+    /// Maximum time to wait for additional commits before flushing batch
     pub max_batch_wait: Duration,
 }
 
@@ -383,6 +429,10 @@ impl WalCommitConfig {
     }
 }
 
+/// Asynchronous WAL committer that batches writes for improved throughput.
+///
+/// Spawns a background worker thread that coalesces multiple commit requests
+/// into larger batches before writing to the WAL.
 pub struct WalCommitter {
     wal: Arc<Wal>,
     state: Arc<Mutex<CommitState>>,
@@ -390,17 +440,24 @@ pub struct WalCommitter {
     config: Arc<Mutex<WalCommitConfig>>,
 }
 
+/// Ticket representing a pending commit operation.
+///
+/// Call `wait()` to block until the commit completes or fails.
 pub struct WalCommitTicket {
     request: Arc<CommitRequest>,
 }
 
 impl WalCommitTicket {
+    /// Blocks until the associated commit operation completes.
+    ///
+    /// Returns an error if the commit failed.
     pub fn wait(self) -> Result<()> {
         self.request.wait()
     }
 }
 
 impl WalCommitter {
+    /// Creates a new WalCommitter with the specified configuration.
     pub fn new(wal: Arc<Wal>, config: WalCommitConfig) -> Self {
         let cfg = config.normalize();
         Self {
@@ -411,6 +468,10 @@ impl WalCommitter {
         }
     }
 
+    /// Enqueues a commit request without blocking.
+    ///
+    /// Returns a ticket that can be used to wait for completion, or None if
+    /// the request was empty and no sync was needed.
     pub fn enqueue(
         &self,
         frames: Vec<WalFrameOwned>,
@@ -438,6 +499,7 @@ impl WalCommitter {
         Some(WalCommitTicket { request })
     }
 
+    /// Enqueues a commit request and blocks until it completes.
     pub fn commit(&self, frames: Vec<WalFrameOwned>, sync_mode: WalSyncMode) -> Result<()> {
         match self.enqueue(frames, sync_mode) {
             Some(ticket) => ticket.wait(),
@@ -445,6 +507,7 @@ impl WalCommitter {
         }
     }
 
+    /// Updates the commit batching configuration at runtime.
     pub fn set_config(&self, config: WalCommitConfig) {
         {
             let mut guard = self.config.lock();
@@ -600,6 +663,9 @@ impl CommitRequest {
     }
 }
 
+/// Iterator for reading frames from a WAL file.
+///
+/// Stops iteration when corruption is detected or end of valid frames is reached.
 pub struct WalIterator {
     io: Arc<dyn FileIo>,
     page_size: usize,
@@ -611,6 +677,9 @@ pub struct WalIterator {
 }
 
 impl WalIterator {
+    /// Reads the next frame from the WAL.
+    ///
+    /// Returns None when reaching the end of valid frames or detecting corruption.
     pub fn next_frame(&mut self) -> Result<Option<WalFrameOwned>> {
         if self.offset + FRAME_HEADER_LEN as u64 > self.end {
             self.offset = self.end;
@@ -675,6 +744,7 @@ impl WalIterator {
         }))
     }
 
+    /// Returns the file offset up to which frames have been validated.
     pub fn valid_up_to(&self) -> u64 {
         self.valid_up_to
     }

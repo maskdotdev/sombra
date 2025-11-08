@@ -14,9 +14,13 @@ use crate::types::{LabelId, PageId, PropId, Result, SombraError, TypeId};
 
 /// Provides name-to-identifier resolution for planner consumers.
 pub trait MetadataProvider: Send + Sync {
+    /// Resolves a label name to its numeric identifier.
     fn resolve_label(&self, name: &str) -> Result<LabelId>;
+    /// Resolves a property name to its numeric identifier.
     fn resolve_property(&self, name: &str) -> Result<PropId>;
+    /// Resolves an edge type name to its numeric identifier.
     fn resolve_edge_type(&self, name: &str) -> Result<TypeId>;
+    /// Looks up an index definition for the given label and property.
     fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>>;
 }
 
@@ -89,6 +93,7 @@ pub struct InMemoryMetadata {
 }
 
 impl InMemoryMetadata {
+    /// Creates a new empty in-memory metadata provider.
     pub fn new() -> Self {
         Self {
             labels: HashMap::new(),
@@ -98,21 +103,25 @@ impl InMemoryMetadata {
         }
     }
 
+    /// Registers a label name with its identifier.
     pub fn with_label(mut self, name: impl Into<String>, id: LabelId) -> Self {
         self.labels.insert(name.into(), id);
         self
     }
 
+    /// Registers a property name with its identifier.
     pub fn with_property(mut self, name: impl Into<String>, id: PropId) -> Self {
         self.props.insert(name.into(), id);
         self
     }
 
+    /// Registers an edge type name with its identifier.
     pub fn with_edge_type(mut self, name: impl Into<String>, id: TypeId) -> Self {
         self.edge_types.insert(name.into(), id);
         self
     }
 
+    /// Registers a property index for the given label and property.
     pub fn with_property_index(mut self, label: LabelId, prop: PropId) -> Self {
         self.prop_indexes.insert(
             (label, prop),
@@ -126,6 +135,7 @@ impl InMemoryMetadata {
         self
     }
 
+    /// Registers a custom index definition for the given label and property.
     pub fn with_property_index_def(mut self, def: IndexDef) -> Self {
         self.prop_indexes.insert((def.label, def.prop), def);
         self

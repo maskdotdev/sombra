@@ -8,13 +8,25 @@ use crate::admin::options::AdminOpenOptions;
 use crate::admin::util::open_pager;
 use crate::admin::Result;
 
+/// Report generated after executing a checkpoint operation.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckpointReport {
+    /// The checkpoint mode used (e.g., "force", "best_effort").
     pub mode: String,
+    /// Duration of the checkpoint operation in milliseconds.
     pub duration_ms: f64,
+    /// The LSN (log sequence number) of the last checkpoint.
     pub last_checkpoint_lsn: u64,
 }
 
+/// Executes a checkpoint operation on a database.
+///
+/// Opens the database at the given path, performs a checkpoint with the specified mode,
+/// and returns a report with timing and checkpoint information.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened or the checkpoint fails.
 pub fn checkpoint(
     path: impl AsRef<Path>,
     opts: &AdminOpenOptions,

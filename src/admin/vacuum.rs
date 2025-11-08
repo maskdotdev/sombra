@@ -13,32 +13,58 @@ use crate::admin::options::AdminOpenOptions;
 use crate::admin::util::{ensure_parent_dir, open_graph};
 use crate::admin::{AdminError, Result};
 
+/// Options for configuring the vacuum operation.
 #[derive(Clone, Debug, Default)]
 pub struct VacuumOptions {
+    /// Whether to analyze the database during vacuum.
     pub analyze: bool,
 }
 
+/// Report generated after a vacuum operation completes.
 #[derive(Debug, Clone, Serialize)]
 pub struct VacuumReport {
+    /// Duration of the vacuum operation in milliseconds.
     pub duration_ms: f64,
+    /// Number of bytes copied to the new database file.
     pub copied_bytes: u64,
+    /// LSN of the last checkpoint.
     pub checkpoint_lsn: u64,
+    /// Whether analysis was performed during vacuum.
     pub analyze_performed: bool,
+    /// Optional summary of database analysis results.
     pub analyze_summary: Option<AnalyzeSummary>,
 }
 
+/// Summary of database analysis results from a vacuum operation.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AnalyzeSummary {
+    /// Statistics for each label in the database.
     pub label_counts: Vec<LabelStat>,
 }
 
+/// Statistics for a single label.
 #[derive(Debug, Clone, Serialize)]
 pub struct LabelStat {
+    /// Numeric identifier of the label.
     pub label_id: u32,
+    /// Human-readable name of the label, if available.
     pub label_name: Option<String>,
+    /// Number of nodes with this label.
     pub nodes: u64,
 }
 
+/// Vacuums a database by copying it to a new location and optionally analyzing it.
+///
+/// This operation checkpoints the source database, copies it to the destination,
+/// and optionally collects statistics about the database contents.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The source and destination paths are the same
+/// - The destination path already exists
+/// - Opening the source database fails
+/// - The checkpoint or copy operation fails
 pub fn vacuum_into(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,

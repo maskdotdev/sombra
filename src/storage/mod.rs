@@ -68,9 +68,12 @@ pub use options::GraphOptions;
 /// Property patch operations for updates.
 pub use patch::{PropPatch, PropPatchOp};
 
+pub use profile::profile_snapshot as storage_profile_snapshot;
 /// Storage layer profiling and statistics.
 pub use profile::{
-    profile_snapshot as storage_profile_snapshot, StorageProfileKind, StorageProfileSnapshot,
+    profile_scope, profile_snapshot, record_btree_leaf_key_cmps, record_btree_leaf_key_decodes,
+    record_btree_leaf_memcopy_bytes, record_pager_fsync, record_pager_wal_bytes,
+    record_pager_wal_frames, StorageProfileKind, StorageProfileSnapshot,
 };
 
 /// Node, edge, and property data types and operations.

@@ -1,6 +1,5 @@
 //! Fluent query builder scaffolding.
 
-use crate::types::Result;
 use crate::query::{
     ast::{
         EdgeClause, EdgeDirection, Literal, MatchClause, Projection, PropPredicate, QueryAst, Var,
@@ -8,6 +7,7 @@ use crate::query::{
     executor::{Executor, QueryResult},
     planner::{PlanExplain, Planner, PlannerOutput},
 };
+use crate::types::Result;
 use std::ops::Bound;
 
 /// Fluent builder matching the Stage 8 ergonomics.
@@ -203,8 +203,15 @@ impl QueryBuilder {
 
 /// Specifies the target node for a match or edge clause.
 pub enum MatchTarget {
+    /// Match by label only
     Label(String),
-    Var { name: String, label: Option<String> },
+    /// Match by variable name and optional label
+    Var {
+        /// Variable name
+        name: String,
+        /// Optional label constraint
+        label: Option<String>,
+    },
 }
 
 impl MatchTarget {
@@ -252,6 +259,7 @@ pub struct EdgeSpec {
 }
 
 impl EdgeSpec {
+    /// Creates a new edge specification with an optional edge type constraint.
     pub fn new(edge_type: Option<String>) -> Self {
         Self { edge_type }
     }
@@ -272,15 +280,22 @@ impl From<Option<&str>> for EdgeSpec {
 /// Property comparison operators supported by the builder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PropOp {
+    /// Equal
     Eq,
+    /// Less than
     Lt,
+    /// Less than or equal
     Le,
+    /// Greater than
     Gt,
+    /// Greater than or equal
     Ge,
+    /// Between two values (inclusive)
     Between,
 }
 
 impl PropOp {
+    /// Parses a property operator from a string representation.
     pub fn from_str(op: &str) -> Option<Self> {
         match op {
             "=" => Some(Self::Eq),

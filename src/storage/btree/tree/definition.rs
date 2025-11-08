@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -9,6 +8,10 @@ use super::super::cursor::Cursor;
 use super::super::page;
 use super::super::stats::{BTreeStats, BTreeStatsSnapshot};
 use crate::primitives::pager::{PageMut, PageRef, PageStore, ReadGuard, WriteGuard};
+use crate::storage::profile::{
+    profile_scope, record_btree_leaf_key_cmps, record_btree_leaf_key_decodes,
+    record_btree_leaf_memcopy_bytes, StorageProfileKind,
+};
 use crate::types::{
     page::PAGE_HDR_LEN,
     page::{PageHeader, PageKind},
@@ -39,10 +42,13 @@ pub trait ValCodec: Sized {
 /// Configuration knobs for the B+ tree.
 #[derive(Clone, Debug)]
 pub struct BTreeOptions {
+    /// Target fill percentage for pages (0-100)
     pub page_fill_target: u8,
+    /// Minimum fill percentage for internal pages before merging (0-100)
     pub internal_min_fill: u8,
-    pub prefix_compress: bool,
+    /// Whether to verify checksums when reading pages
     pub checksum_verify_on_read: bool,
+    /// Optional root page ID for an existing tree
     pub root_page: Option<PageId>,
 }
 
@@ -51,7 +57,6 @@ impl Default for BTreeOptions {
         Self {
             page_fill_target: 85,
             internal_min_fill: 40,
-            prefix_compress: true,
             checksum_verify_on_read: true,
             root_page: None,
         }
@@ -124,10 +129,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         self.stats.emit_tracing();
     }
 
-    pub(crate) fn prefix_compression_enabled(&self) -> bool {
-        self.options.prefix_compress
-    }
-
+    /// Iterates through all key-value pairs in the tree using a write transaction,
+    /// calling the visitor function for each pair.
     pub fn for_each_with_write<F>(&self, tx: &mut WriteGuard<'_>, mut visit: F) -> Result<()>
     where
         F: FnMut(K, V) -> Result<()>,
@@ -137,26 +140,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             return Ok(());
         }
         let mut current = self.leftmost_leaf_id_with_write(tx)?;
-        let mut prev_key: Vec<u8> = Vec::new();
         loop {
             let page = tx.page_mut(current)?;
             let header = page::Header::parse(page.data())?;
             let payload = page::payload(page.data())?;
             let slots = header.slot_directory(page.data())?;
-            if self.prefix_compression_enabled() {
-                let (low_fence, _) = header.fence_slices(page.data())?;
-                prev_key = low_fence.to_vec();
-            } else {
-                prev_key.clear();
-            }
             for idx in 0..slots.len() {
                 let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
+                record_btree_leaf_key_decodes(1);
                 let record = page::decode_leaf_record(rec_slice)?;
-                let key_bytes = self.build_key_from_record(prev_key.as_slice(), &record)?;
                 let value = V::decode_val(record.value)?;
-                let key = K::decode_key(key_bytes.as_slice())?;
+                let key = K::decode_key(record.key)?;
                 visit(key, value)?;
-                prev_key = key_bytes;
             }
             let next = header.right_sibling;
             drop(page);
@@ -168,6 +163,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(())
     }
 
+    /// Retrieves the value associated with the given key, if it exists, using a read transaction.
     pub fn get(&self, tx: &ReadGuard, key: &K) -> Result<Option<V>> {
         let mut encoded_key = Vec::new();
         K::encode_key(key, &mut encoded_key);
@@ -175,6 +171,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         self.search_leaf(&leaf, &header, &encoded_key)
     }
 
+    /// Retrieves the value associated with the given key, if it exists, using a write transaction.
     pub fn get_with_write(&self, tx: &mut WriteGuard<'_>, key: &K) -> Result<Option<V>> {
         let mut encoded_key = Vec::new();
         K::encode_key(key, &mut encoded_key);
@@ -185,6 +182,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(result)
     }
 
+    /// Inserts or updates a key-value pair in the tree.
     pub fn put(&self, tx: &mut WriteGuard<'_>, key: &K, val: &V) -> Result<()> {
         let mut key_buf = Vec::new();
         K::encode_key(key, &mut key_buf);
@@ -202,6 +200,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
     }
 
+    /// Deletes the key-value pair associated with the given key.
+    /// Returns true if the key was found and deleted, false otherwise.
     pub fn delete(&self, tx: &mut WriteGuard<'_>, key: &K) -> Result<bool> {
         let mut key_buf = Vec::new();
         K::encode_key(key, &mut key_buf);
@@ -334,6 +334,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(true)
     }
 
+    /// Returns a cursor for iterating over key-value pairs within the specified range bounds.
     pub fn range<'a>(
         &'a self,
         tx: &'a ReadGuard,
@@ -512,44 +513,27 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         header: &page::Header,
         key: &[u8],
     ) -> Result<Option<V>> {
+        let _scope = profile_scope(StorageProfileKind::BTreeLeafSearch);
         let payload = page::payload(data)?;
         let slots = header.slot_directory(data)?;
         if slots.len() == 0 {
             return Ok(None);
         }
-        let (low_fence, _) = header.fence_slices(data)?;
-        let mut prev_key = if self.options.prefix_compress {
-            low_fence.to_vec()
-        } else {
-            Vec::new()
-        };
-        let mut current_key = Vec::new();
-        for idx in 0..slots.len() {
-            let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
+        let mut lo = 0usize;
+        let mut hi = slots.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let rec_slice = page::record_slice_from_parts(&header, payload, &slots, mid)?;
             let record = page::decode_leaf_record(rec_slice)?;
-            current_key.clear();
-            if self.options.prefix_compress {
-                let prefix_len = record.prefix_len as usize;
-                if prefix_len > prev_key.len() {
-                    return Err(SombraError::Corruption("leaf prefix exceeds base key"));
-                }
-                current_key.extend_from_slice(&prev_key[..prefix_len]);
-            } else if record.prefix_len != 0 {
-                return Err(SombraError::Corruption(
-                    "non-zero prefix length with compression disabled",
-                ));
-            }
-            current_key.extend_from_slice(record.key_suffix);
-            match K::compare_encoded(&current_key, key) {
-                Ordering::Less => {
-                    mem::swap(&mut prev_key, &mut current_key);
-                    continue;
-                }
+            record_btree_leaf_key_decodes(1);
+            record_btree_leaf_key_cmps(1);
+            match K::compare_encoded(record.key, key) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
                 Ordering::Equal => {
                     let value = V::decode_val(record.value)?;
                     return Ok(Some(value));
                 }
-                Ordering::Greater => return Ok(None),
             }
         }
         Ok(None)
@@ -563,6 +547,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<LeafInsert> {
+        let _scope = profile_scope(StorageProfileKind::BTreeLeafInsert);
         let data = page.data();
         let payload = page::payload(data)?;
         let slots = header.slot_directory(data)?;
@@ -570,33 +555,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let low_fence_vec = low_fence.to_vec();
         let high_fence_vec = high_fence.to_vec();
         let mut entries = Vec::with_capacity(slots.len());
-        let mut prev_key = if self.options.prefix_compress {
-            low_fence_vec.clone()
-        } else {
-            Vec::new()
-        };
         for idx in 0..slots.len() {
             let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
+            record_btree_leaf_key_decodes(1);
             let record = page::decode_leaf_record(rec_slice)?;
-            let mut full_key = Vec::new();
-            if self.options.prefix_compress {
-                let prefix_len = record.prefix_len as usize;
-                if prefix_len > prev_key.len() {
-                    return Err(SombraError::Corruption("leaf prefix exceeds base key"));
-                }
-                full_key.extend_from_slice(&prev_key[..prefix_len]);
-            } else if record.prefix_len != 0 {
-                return Err(SombraError::Corruption(
-                    "non-zero prefix length with compression disabled",
-                ));
-            }
-            full_key.extend_from_slice(record.key_suffix);
-            entries.push((full_key.clone(), record.value.to_vec()));
-            prev_key = full_key;
+            record_btree_leaf_memcopy_bytes(record.key.len() as u64);
+            entries.push((record.key.to_vec(), record.value.to_vec()));
         }
 
-        match entries.binary_search_by(|(existing, _)| K::compare_encoded(existing, key.as_slice()))
-        {
+        match entries.binary_search_by(|(existing, _)| {
+            record_btree_leaf_key_cmps(1);
+            K::compare_encoded(existing, key.as_slice())
+        }) {
             Ok(idx) => {
                 entries[idx].1 = value;
             }
@@ -982,21 +952,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let max_records_bytes = new_free_end - fences_end;
         let mut records = Vec::new();
         let mut offsets = Vec::with_capacity(entries.len());
-        let mut prev_key = if self.options.prefix_compress {
-            low_fence.to_vec()
-        } else {
-            Vec::new()
-        };
         for (key, value) in entries {
-            let prefix_len = if self.options.prefix_compress {
-                page::shared_prefix_len(&prev_key, key)
-            } else {
-                0
-            };
-            let prefix_u16 = u16::try_from(prefix_len)
-                .map_err(|_| SombraError::Invalid("leaf prefix exceeds u16"))?;
-            let suffix = &key[prefix_len..];
-            let record_len = page::LEAF_RECORD_HEADER_LEN + suffix.len() + value.len();
+            let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
             if records.len() + record_len > max_records_bytes {
                 return Ok(None);
             }
@@ -1004,9 +961,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let offset_u16 = u16::try_from(offset)
                 .map_err(|_| SombraError::Invalid("record offset exceeds u16"))?;
             offsets.push(offset_u16);
-            page::encode_leaf_record(prefix_u16, suffix, value, &mut records);
-            prev_key.clear();
-            prev_key.extend_from_slice(key);
+            page::encode_leaf_record(key, value, &mut records)?;
         }
         let free_start = fences_end + records.len();
         if free_start > new_free_end {
@@ -1147,7 +1102,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         page::write_initial_header(
             &mut buf[PAGE_HDR_LEN..self.page_size],
             page::BTreePageKind::Leaf,
-        )
+        )?;
+        Ok(())
     }
 
     fn init_internal_page(&self, page_id: PageId, page: &mut PageMut<'_>) -> Result<()> {
@@ -1284,29 +1240,10 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let low_vec = low_fence_bytes.to_vec();
         let high_vec = high_fence_bytes.to_vec();
         let mut entries = Vec::with_capacity(slots.len());
-        let mut prev_key = if self.options.prefix_compress {
-            low_vec.clone()
-        } else {
-            Vec::new()
-        };
         for idx in 0..slots.len() {
             let rec_slice = page::record_slice_from_parts(header, payload, &slots, idx)?;
             let record = page::decode_leaf_record(rec_slice)?;
-            let mut full_key = Vec::new();
-            if self.options.prefix_compress {
-                let prefix_len = record.prefix_len as usize;
-                if prefix_len > prev_key.len() {
-                    return Err(SombraError::Corruption("leaf prefix exceeds base key"));
-                }
-                full_key.extend_from_slice(&prev_key[..prefix_len]);
-            } else if record.prefix_len != 0 {
-                return Err(SombraError::Corruption(
-                    "non-zero prefix length with compression disabled",
-                ));
-            }
-            full_key.extend_from_slice(record.key_suffix);
-            entries.push((full_key.clone(), record.value.to_vec()));
-            prev_key = full_key;
+            entries.push((record.key.to_vec(), record.value.to_vec()));
         }
         Ok(LeafSnapshot {
             entries,
@@ -2553,27 +2490,6 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     current = next;
                 }
             }
-        }
-    }
-
-    fn build_key_from_record(
-        &self,
-        prev_key: &[u8],
-        record: &page::LeafRecordRef<'_>,
-    ) -> Result<Vec<u8>> {
-        if self.prefix_compression_enabled() {
-            let prefix_len = record.prefix_len as usize;
-            if prefix_len > prev_key.len() {
-                return Err(SombraError::Corruption(
-                    "leaf prefix longer than previous key",
-                ));
-            }
-            let mut key = Vec::with_capacity(prefix_len + record.key_suffix.len());
-            key.extend_from_slice(&prev_key[..prefix_len]);
-            key.extend_from_slice(record.key_suffix);
-            Ok(key)
-        } else {
-            Ok(record.key_suffix.to_vec())
         }
     }
 }
