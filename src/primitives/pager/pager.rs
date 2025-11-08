@@ -959,6 +959,459 @@ impl Pager {
             }
         }
     }
+
+    fn get_page_mut_for_write(
+        &self,
+        guard: &mut WriteGuard<'_>,
+        id: PageId,
+    ) -> Result<PageMut<'_>> {
+        let (idx, buf_arc) = {
+            let mut inner = self.inner.lock();
+            let (idx, hit) = self.lookup_or_load_frame(&mut inner, id)?;
+            if hit {
+                inner.stats.hits += 1;
+            } else {
+                inner.stats.misses += 1;
+            }
+            {
+                let frame = &mut inner.frames[idx];
+                frame.reference = true;
+                frame.pin_count += 1;
+                frame.dirty = true;
+                frame.needs_refresh = false;
+                if guard.allocated_pages.contains(&id) {
+                    frame.newly_allocated = true;
+                }
+            }
+            guard.original_pages.entry(id).or_insert_with(|| {
+                let snapshot = inner.frames[idx].buf.read_arc();
+                snapshot.as_ref().to_vec()
+            });
+            guard.dirty_pages.insert(id);
+            let arc = inner.frames[idx].buf.clone();
+            (idx, arc)
+        };
+        let guard_buf = buf_arc.write_arc();
+        Ok(PageMut {
+            id,
+            pager: self,
+            frame_idx: idx,
+            guard: guard_buf,
+        })
+    }
+
+    fn allocate_page_in_txn(&self, guard: &mut WriteGuard<'_>) -> Result<PageId> {
+        let wal_frames = self.wal.stats().frames_appended;
+        let mut inner = self.inner.lock();
+        if let Some(page) = inner.free_cache.pop() {
+            if page.0 >= inner.meta.next_page.0 {
+                inner.meta.next_page = PageId(page.0 + 1);
+            }
+            inner.meta_dirty = true;
+            guard.allocated_pages.push(page);
+            return Ok(page);
+        }
+        let should_reload = !inner.meta_dirty
+            && wal_frames == 0
+            && (inner.meta.free_head.0 != 0 || !inner.freelist_pages.is_empty());
+        if should_reload {
+            self.load_freelist_locked(&mut inner)?;
+            if let Some(page) = inner.free_cache.pop() {
+                if page.0 >= inner.meta.next_page.0 {
+                    inner.meta.next_page = PageId(page.0 + 1);
+                }
+                inner.meta_dirty = true;
+                guard.allocated_pages.push(page);
+                return Ok(page);
+            }
+        }
+        let page = inner.meta.next_page;
+        inner.meta.next_page = PageId(page.0 + 1);
+        inner.meta_dirty = true;
+        guard.allocated_pages.push(page);
+        Ok(page)
+    }
+
+    fn free_page_in_txn(&self, guard: &mut WriteGuard<'_>, id: PageId) -> Result<()> {
+        if id.0 == 0 {
+            return Err(SombraError::Invalid("cannot free meta page"));
+        }
+        let mut inner = self.inner.lock();
+        if let Some(&idx) = inner.page_table.get(&id) {
+            let frame = &inner.frames[idx];
+            if frame.pin_count != 0 {
+                return Err(SombraError::Invalid("cannot free pinned page"));
+            }
+        }
+        inner.page_table.remove(&id);
+        inner.pending_free.push(id);
+        inner.meta_dirty = true;
+        guard.freed_pages.push(id);
+        guard.dirty_pages.remove(&id);
+        guard.original_pages.remove(&id);
+        Ok(())
+    }
+
+    fn update_meta_in_txn<F>(&self, guard: &mut WriteGuard<'_>, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Meta),
+    {
+        let mut inner = self.inner.lock();
+        f(&mut inner.meta);
+        inner.meta_dirty = true;
+        drop(inner);
+        guard.dirty_pages.insert(PageId(0));
+        Ok(())
+    }
+
+    fn rollback_transaction(&self, guard: &mut WriteGuard<'_>) -> Result<()> {
+        let mut inner = self.inner.lock();
+        inner.meta = guard.meta_snapshot.clone();
+        inner.free_cache = guard.free_cache_snapshot.clone();
+        inner.freelist_pages = guard.freelist_pages_snapshot.clone();
+        inner.pending_free = guard.pending_free_snapshot.clone();
+        inner.meta_dirty = guard.meta_dirty_snapshot;
+        for (page_id, data) in guard.original_pages.iter() {
+            if let Some(&idx) = inner.page_table.get(page_id) {
+                {
+                    let mut buf = inner.frames[idx].buf.write();
+                    buf.copy_from_slice(data);
+                }
+                inner.frames[idx].dirty = false;
+                inner.frames[idx].pending_checkpoint = false;
+                inner.frames[idx].newly_allocated = false;
+                inner.frames[idx].needs_refresh = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn wal_commit_config_from_options(options: &PagerOptions) -> WalCommitConfig {
+        WalCommitConfig {
+            max_batch_commits: options.wal_commit_max_commits,
+            max_batch_frames: options.wal_commit_max_frames,
+            max_batch_wait: Duration::from_millis(options.wal_commit_coalesce_ms),
+        }
+    }
+
+    fn run_clock(&self, inner: &mut PagerInner) -> Result<()> {
+        let len = inner.frames.len();
+        for _ in 0..len * 4 {
+            let idx = inner.clock_hand_cold;
+            inner.clock_hand_cold = (inner.clock_hand_cold + 1) % len;
+            let mut promote_to_hot = false;
+            let mut convert_to_cold = false;
+            let mut evict = false;
+            {
+                let frame = &mut inner.frames[idx];
+                if frame.id.is_none() || frame.pin_count > 0 {
+                    continue;
+                }
+                match frame.state {
+                    FrameState::Cold => {
+                        if frame.reference {
+                            frame.reference = false;
+                            promote_to_hot = true;
+                        } else {
+                            evict = true;
+                        }
+                    }
+                    FrameState::Hot => {
+                        if frame.reference {
+                            frame.reference = false;
+                        } else if inner.cold_count < inner.target_cold {
+                            convert_to_cold = true;
+                        }
+                    }
+                    FrameState::Test => {}
+                }
+            }
+            if promote_to_hot {
+                inner.set_frame_state(idx, FrameState::Hot);
+                continue;
+            }
+            if convert_to_cold {
+                inner.set_frame_state(idx, FrameState::Cold);
+                continue;
+            }
+            if evict {
+                self.evict_frame(inner, idx)?;
+                return Ok(());
+            }
+        }
+        Err(SombraError::Invalid("no eviction candidate available"))
+    }
+
+    fn adjust_cold_balance(&self, inner: &mut PagerInner) {
+        while inner.cold_count > inner.target_cold {
+            if !self.promote_cold_to_hot(inner) {
+                break;
+            }
+        }
+        while inner.cold_count < inner.target_cold {
+            if !self.demote_hot_to_cold(inner) {
+                break;
+            }
+        }
+    }
+
+    fn promote_cold_to_hot(&self, inner: &mut PagerInner) -> bool {
+        if inner.cold_count == 0 {
+            return false;
+        }
+        let len = inner.frames.len();
+        for _ in 0..len {
+            let idx = inner.clock_hand_hot;
+            inner.clock_hand_hot = (inner.clock_hand_hot + 1) % len;
+            let should_promote = {
+                let frame = &inner.frames[idx];
+                frame.id.is_some() && frame.pin_count == 0 && frame.state == FrameState::Cold
+            };
+            if should_promote {
+                inner.set_frame_state(idx, FrameState::Hot);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn demote_hot_to_cold(&self, inner: &mut PagerInner) -> bool {
+        if inner.hot_count == 0 {
+            return false;
+        }
+        let len = inner.frames.len();
+        for _ in 0..len * 2 {
+            let idx = inner.clock_hand_hot;
+            inner.clock_hand_hot = (inner.clock_hand_hot + 1) % len;
+            let should_demote = {
+                let frame = &mut inner.frames[idx];
+                if frame.id.is_none() || frame.pin_count > 0 {
+                    continue;
+                }
+                match frame.state {
+                    FrameState::Hot => {
+                        if frame.reference {
+                            frame.reference = false;
+                            continue;
+                        }
+                        true
+                    }
+                    _ => continue,
+                }
+            };
+            if should_demote {
+                inner.set_frame_state(idx, FrameState::Cold);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn commit_txn(&self, mut guard: WriteGuard<'_>) -> Result<Lsn> {
+        let mut inner = self.inner.lock();
+        let lsn = inner.next_lsn;
+        let mut dirty_pages: Vec<PageId> = guard.dirty_pages.iter().copied().collect();
+        if inner.meta_dirty && !dirty_pages.iter().any(|p| p.0 == 0) {
+            dirty_pages.push(PageId(0));
+        }
+        dirty_pages.sort_by_key(|p| p.0);
+        dirty_pages.dedup();
+
+        let mut wal_frames = Vec::with_capacity(dirty_pages.len());
+        for page_id in dirty_pages {
+            if page_id.0 == 0 {
+                let mut payload = vec![0u8; self.page_size];
+                write_meta_page(&mut payload, &inner.meta)?;
+                wal_frames.push(WalFrameOwned {
+                    lsn,
+                    page_id,
+                    payload,
+                });
+                continue;
+            }
+            let idx = match inner.page_table.get(&page_id) {
+                Some(&idx) => idx,
+                None => {
+                    return Err(SombraError::Invalid("page not cached"));
+                }
+            };
+            let mut payload = vec![0u8; self.page_size];
+            {
+                let mut buf_guard = inner.frames[idx].buf.write();
+                page::clear_crc32(&mut buf_guard[..PAGE_HDR_LEN])?;
+                let crc = page_crc32(page_id.0, inner.meta.salt, &buf_guard);
+                buf_guard[page::header::CRC32].copy_from_slice(&crc.to_be_bytes());
+                payload.copy_from_slice(&buf_guard[..]);
+            }
+            inner.frames[idx].pending_checkpoint = true;
+            wal_frames.push(WalFrameOwned {
+                lsn,
+                page_id,
+                payload,
+            });
+            inner.frames[idx].dirty = false;
+            inner.stats.dirty_writebacks += 1;
+        }
+        inner.next_lsn = Lsn(lsn.0 + 1);
+        drop(inner);
+
+        let synchronous = {
+            let options = self.options.lock();
+            options.synchronous
+        };
+        let sync_mode = match synchronous {
+            Synchronous::Full => WalSyncMode::Immediate,
+            Synchronous::Normal => WalSyncMode::Deferred,
+            Synchronous::Off => WalSyncMode::Off,
+        };
+        let ticket = self.wal_committer.enqueue(wal_frames, sync_mode);
+        guard.release_writer_lock();
+        let commit_result = match ticket {
+            Some(waiter) => waiter.wait(),
+            None => Ok(()),
+        };
+        if let Err(err) = commit_result {
+            guard.reacquire_writer_lock()?;
+            return Err(err);
+        }
+        if matches!(synchronous, Synchronous::Normal) {
+            self.schedule_normal_sync()?;
+        }
+        guard.committed = true;
+        drop(guard);
+        self.maybe_autocheckpoint()?;
+        Ok(lsn)
+    }
+
+    fn run_checkpoint(&self, mode: CheckpointMode) -> Result<()> {
+        let checkpoint_guard = match mode {
+            CheckpointMode::Force => loop {
+                if let Some(guard) = self.locks.try_acquire_checkpoint()? {
+                    break guard;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            },
+            CheckpointMode::BestEffort => match self.locks.try_acquire_checkpoint()? {
+                Some(guard) => guard,
+                None => return Ok(()),
+            },
+        };
+        let result = self.perform_checkpoint();
+        drop(checkpoint_guard);
+        result
+    }
+
+    fn perform_checkpoint(&self) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let mut iter = self.wal.iter()?;
+        let mut frames = Vec::new();
+        let mut max_lsn = inner.meta.last_checkpoint_lsn;
+        while let Some(frame) = iter.next_frame()? {
+            if frame.lsn.0 <= inner.meta.last_checkpoint_lsn.0 {
+                continue;
+            }
+            if frame.lsn.0 > max_lsn.0 {
+                max_lsn = frame.lsn;
+            }
+            frames.push(frame);
+        }
+        if frames.is_empty() {
+            self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
+            inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
+            return Ok(());
+        }
+        for frame in &frames {
+            let offset = page_offset(frame.page_id, self.page_size);
+            self.db_io.write_at(offset, &frame.payload)?;
+            if let Some(&idx) = inner.page_table.get(&frame.page_id) {
+                {
+                    let mut buf = inner.frames[idx].buf.write();
+                    buf.copy_from_slice(&frame.payload);
+                }
+                inner.frames[idx].dirty = false;
+                inner.frames[idx].pending_checkpoint = false;
+                inner.frames[idx].newly_allocated = false;
+                inner.frames[idx].needs_refresh = true;
+            }
+        }
+        self.rebuild_freelist(&mut inner)?;
+        self.db_io.sync_all()?;
+        inner.meta.last_checkpoint_lsn = max_lsn;
+        let mut meta_buf = vec![0u8; self.page_size];
+        write_meta_page(&mut meta_buf, &inner.meta)?;
+        self.db_io.write_at(0, &meta_buf)?;
+        self.db_io.sync_all()?;
+        self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
+        inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
+        inner.meta_dirty = false;
+        *self.last_autocheckpoint.lock() = Some(Instant::now());
+        Ok(())
+    }
+
+    fn schedule_normal_sync(&self) -> Result<()> {
+        let state_arc = Arc::clone(&self.wal_sync_state);
+        {
+            let mut state = state_arc.lock();
+            if let Some(err) = state.last_error.take() {
+                return Err(err);
+            }
+            if state.scheduled {
+                return Ok(());
+            }
+            state.scheduled = true;
+        }
+        let wal = Arc::clone(&self.wal);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(NORMAL_SYNC_DELAY_MS));
+            let result = wal.sync();
+            let mut state = state_arc.lock();
+            state.scheduled = false;
+            match result {
+                Ok(()) => {}
+                Err(err) => {
+                    state.last_error = Some(err);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn maybe_autocheckpoint(&self) -> Result<()> {
+        let (autocheckpoint_pages, autocheckpoint_ms) = {
+            let options = self.options.lock();
+            (options.autocheckpoint_pages, options.autocheckpoint_ms)
+        };
+        let mut should_checkpoint = false;
+        if autocheckpoint_pages > 0 {
+            let wal_len = self.wal.len()?;
+            let threshold = (autocheckpoint_pages as u64).saturating_mul(self.page_size as u64);
+            if wal_len >= threshold {
+                should_checkpoint = true;
+            }
+        }
+        if let Some(ms) = autocheckpoint_ms {
+            let mut last = self.last_autocheckpoint.lock();
+            match *last {
+                Some(prev) if prev.elapsed() >= Duration::from_millis(ms) => {
+                    should_checkpoint = true;
+                }
+                None => {
+                    *last = Some(Instant::now());
+                }
+                _ => {}
+            }
+        }
+        if should_checkpoint {
+            let _ = self.run_checkpoint(CheckpointMode::BestEffort);
+        }
+        Ok(())
+    }
+
+    /// Returns the current metadata.
+    pub fn meta(&self) -> Result<Meta> {
+        let inner = self.inner.lock();
+        Ok(inner.meta.clone())
+    }
 }
 
 impl PageStore for Pager {
@@ -1109,7 +1562,8 @@ impl PageStore for Pager {
     }
 
     fn meta(&self) -> Result<Meta> {
-        Pager::meta(self)
+        let inner = self.inner.lock();
+        Ok(inner.meta.clone())
     }
 
     fn set_checksum_verification(&self, enabled: bool) {

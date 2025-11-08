@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::primitives::pager::PagerStats;
+use crate::primitives::pager::{PageStore, PagerStats};
 use serde::Serialize;
 
 use crate::admin::options::AdminOpenOptions;
