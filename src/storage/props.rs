@@ -241,6 +241,42 @@ pub fn materialize_props(
     Ok(result)
 }
 
+pub fn materialize_props_with_write(
+    raw: &[RawProp],
+    vstore: &VStore,
+    tx: &mut WriteGuard<'_>,
+) -> Result<Vec<(PropId, PropValueOwned)>> {
+    let mut result = Vec::with_capacity(raw.len());
+    for prop in raw {
+        let value = match &prop.value {
+            RawPropValue::Null => PropValueOwned::Null,
+            RawPropValue::Bool(v) => PropValueOwned::Bool(*v),
+            RawPropValue::Int(v) => PropValueOwned::Int(*v),
+            RawPropValue::Float(v) => PropValueOwned::Float(*v),
+            RawPropValue::StrInline(bytes) => {
+                let s = std::str::from_utf8(bytes)
+                    .map_err(|_| SombraError::Corruption("stored string not utf8"))?;
+                PropValueOwned::Str(s.to_owned())
+            }
+            RawPropValue::StrVRef(vref) => {
+                let bytes = vstore.read_with_write(tx, *vref)?;
+                let s = String::from_utf8(bytes)
+                    .map_err(|_| SombraError::Corruption("stored string not utf8"))?;
+                PropValueOwned::Str(s)
+            }
+            RawPropValue::BytesInline(bytes) => PropValueOwned::Bytes(bytes.clone()),
+            RawPropValue::BytesVRef(vref) => {
+                let bytes = vstore.read_with_write(tx, *vref)?;
+                PropValueOwned::Bytes(bytes)
+            }
+            RawPropValue::Date(v) => PropValueOwned::Date(*v),
+            RawPropValue::DateTime(v) => PropValueOwned::DateTime(*v),
+        };
+        result.push((prop.prop, value));
+    }
+    Ok(result)
+}
+
 pub fn free_vrefs(vstore: &VStore, tx: &mut WriteGuard<'_>, vrefs: &[VRef]) {
     for vref in vrefs {
         let _ = vstore.free(tx, *vref);

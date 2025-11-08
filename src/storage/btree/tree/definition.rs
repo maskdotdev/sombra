@@ -74,10 +74,23 @@ pub struct BTree<K: KeyCodec, V: ValCodec> {
     _marker: PhantomData<(K, V)>,
 }
 
+/// Item to insert via [`BTree::put_many`].
+pub struct PutItem<'a, K: KeyCodec, V: ValCodec> {
+    /// Key reference to insert.
+    pub key: &'a K,
+    /// Value reference to insert.
+    pub value: &'a V,
+}
+
 #[derive(Clone)]
 struct PathEntry {
     page_id: PageId,
     slot_index: usize,
+}
+
+struct LeafCache {
+    leaf_id: PageId,
+    path: Vec<PathEntry>,
 }
 
 impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
@@ -198,6 +211,59 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 right_page,
             } => self.propagate_split(tx, path, leaf_id, left_min, right_min, right_page),
         }
+    }
+
+    /// Inserts many key-value pairs assuming the iterator is sorted by key.
+    ///
+    /// Keys must be provided in ascending order (duplicates allowed). In debug builds this is
+    /// asserted, while release builds assume the caller upholds the contract.
+    pub fn put_many<'a, I>(&self, tx: &mut WriteGuard<'_>, items: I) -> Result<()>
+    where
+        I: IntoIterator<Item = PutItem<'a, K, V>>,
+        K: 'a,
+        V: 'a,
+    {
+        let mut cache: Option<LeafCache> = None;
+        let mut prev_key: Option<Vec<u8>> = None;
+        for item in items.into_iter() {
+            let mut key_buf = Vec::new();
+            K::encode_key(item.key, &mut key_buf);
+            if let Some(prev) = &prev_key {
+                debug_assert!(
+                    K::compare_encoded(prev, &key_buf) != Ordering::Greater,
+                    "put_many keys must be sorted"
+                );
+            }
+            let mut val_buf = Vec::new();
+            V::encode_val(item.value, &mut val_buf);
+            let (leaf_id, header, path) = match cache.take() {
+                Some(cached) => match self.try_reuse_leaf(tx, cached, &key_buf)? {
+                    Some(result) => result,
+                    None => self.find_leaf_mut(tx, &key_buf)?,
+                },
+                None => self.find_leaf_mut(tx, &key_buf)?,
+            };
+            let leaf_page = tx.page_mut(leaf_id)?;
+            let key_for_insert = key_buf.clone();
+            match self.insert_into_leaf(tx, leaf_page, header, key_for_insert, val_buf)? {
+                LeafInsert::Done => {
+                    cache = Some(LeafCache {
+                        leaf_id,
+                        path: path.clone(),
+                    });
+                }
+                LeafInsert::Split {
+                    left_min,
+                    right_min,
+                    right_page,
+                } => {
+                    self.propagate_split(tx, path, leaf_id, left_min, right_min, right_page)?;
+                    cache = None;
+                }
+            }
+            prev_key = Some(key_buf);
+        }
+        Ok(())
     }
 
     /// Deletes the key-value pair associated with the given key.
@@ -459,6 +525,36 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             path.push(entry);
             current = next;
         }
+    }
+
+    fn try_reuse_leaf(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        cache: LeafCache,
+        key: &[u8],
+    ) -> Result<Option<(PageId, page::Header, Vec<PathEntry>)>> {
+        match self.leaf_header_for_key(tx, cache.leaf_id, key)? {
+            Some(header) => Ok(Some((cache.leaf_id, header, cache.path))),
+            None => Ok(None),
+        }
+    }
+
+    fn leaf_header_for_key(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        key: &[u8],
+    ) -> Result<Option<page::Header>> {
+        let page = self.store.get_page_with_write(tx, leaf_id)?;
+        let header = page::Header::parse(page.data())?;
+        let (low, high) = header.fence_slices(page.data())?;
+        if K::compare_encoded(key, low) == Ordering::Less {
+            return Ok(None);
+        }
+        if !high.is_empty() && K::compare_encoded(key, high) != Ordering::Less {
+            return Ok(None);
+        }
+        Ok(Some(header))
     }
 
     fn search_leaf(&self, page: &PageRef, header: &page::Header, key: &[u8]) -> Result<Option<V>> {

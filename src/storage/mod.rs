@@ -37,6 +37,7 @@ mod options;
 mod patch;
 mod profile;
 mod props;
+mod rowhash;
 mod types;
 
 /// Main database interface.

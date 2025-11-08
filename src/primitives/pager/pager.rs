@@ -1,3 +1,4 @@
+use std::any::{Any, TypeId};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -194,6 +195,8 @@ pub trait PageStore: Send + Sync {
     fn page_size(&self) -> u32;
     /// Retrieves a page within a read transaction.
     fn get_page(&self, guard: &ReadGuard, id: PageId) -> Result<PageRef>;
+    /// Retrieves a page while holding a write transaction.
+    fn get_page_with_write(&self, guard: &mut WriteGuard<'_>, id: PageId) -> Result<PageRef>;
     /// Begins a read transaction.
     fn begin_read(&self) -> Result<ReadGuard>;
     /// Begins a write transaction.
@@ -279,6 +282,30 @@ pub struct WriteGuard<'a> {
     pending_free_snapshot: Vec<PageId>,
     meta_dirty_snapshot: bool,
     committed: bool,
+    extensions: TxnExtensions,
+}
+
+#[derive(Default)]
+struct TxnExtensions {
+    map: HashMap<TypeId, Box<dyn Any>>,
+}
+
+impl TxnExtensions {
+    fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.map
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_mut::<T>())
+    }
+
+    fn insert<T: Any>(&mut self, value: T) {
+        self.map.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
+    fn remove<T: Any>(&mut self) -> Option<T> {
+        self.map
+            .remove(&TypeId::of::<T>())
+            .map(|boxed| *boxed.downcast::<T>().expect("extension type mismatch"))
+    }
 }
 
 impl ReadGuard {
@@ -310,6 +337,21 @@ impl<'a> WriteGuard<'a> {
         F: FnOnce(&mut Meta),
     {
         self.pager.update_meta_in_txn(self, f)
+    }
+
+    /// Retrieves a mutable reference to a previously stored extension of type `T`.
+    pub fn extension_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.extensions.get_mut::<T>()
+    }
+
+    /// Inserts or replaces the extension of type `T`.
+    pub fn store_extension<T: Any>(&mut self, value: T) {
+        self.extensions.insert(value);
+    }
+
+    /// Removes and returns the extension of type `T`, if present.
+    pub fn take_extension<T: Any>(&mut self) -> Option<T> {
+        self.extensions.remove::<T>()
     }
     fn release_writer_lock(&mut self) {
         if let Some(lock) = self.lock.take() {
@@ -1525,6 +1567,23 @@ impl PageStore for Pager {
         })
     }
 
+    fn get_page_with_write(&self, _guard: &mut WriteGuard<'_>, id: PageId) -> Result<PageRef> {
+        let data = {
+            let mut inner = self.inner.lock();
+            let (idx, hit) = self.lookup_or_load_frame(&mut inner, id)?;
+            if hit {
+                inner.stats.hits += 1;
+            } else {
+                inner.stats.misses += 1;
+            }
+            let buf = inner.frames[idx].buf.read();
+            let mut copy = vec![0u8; self.page_size];
+            copy.copy_from_slice(&buf[..]);
+            Arc::<[u8]>::from(copy)
+        };
+        Ok(PageRef { id, data })
+    }
+
     fn begin_read(&self) -> Result<ReadGuard> {
         let lock = self.locks.acquire_reader()?;
         let snapshot_lsn = {
@@ -1553,6 +1612,7 @@ impl PageStore for Pager {
             pending_free_snapshot: inner.pending_free.clone(),
             meta_dirty_snapshot: inner.meta_dirty,
             committed: false,
+            extensions: TxnExtensions::default(),
         };
         drop(inner);
         Ok(guard)

@@ -15,7 +15,7 @@ mod tree;
 pub use cursor::Cursor;
 pub(crate) use key_cursor::KeyCursor;
 pub use stats::BTreeStats;
-pub use tree::{BTree, BTreeOptions, KeyCodec, ValCodec};
+pub use tree::{BTree, BTreeOptions, KeyCodec, PutItem, ValCodec};
 
 #[cfg(test)]
 mod tests;

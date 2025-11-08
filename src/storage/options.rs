@@ -17,6 +17,8 @@ pub struct GraphOptions {
     pub distinct_neighbors_default: bool,
     /// Optional metrics collection implementation
     pub metrics: Option<Arc<dyn super::metrics::StorageMetrics>>,
+    /// Whether to append SipHash64 footers to node/edge rows.
+    pub row_hash_header: bool,
 }
 
 impl GraphOptions {
@@ -29,6 +31,7 @@ impl GraphOptions {
             degree_cache: cfg!(feature = "degree-cache"),
             distinct_neighbors_default: false,
             metrics: None,
+            row_hash_header: false,
         }
     }
 
@@ -59,6 +62,12 @@ impl GraphOptions {
     /// Sets the metrics collection implementation.
     pub fn metrics(mut self, metrics: Arc<dyn super::metrics::StorageMetrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Enables or disables SipHash64 footers on node and edge rows.
+    pub fn row_hash_header(mut self, enabled: bool) -> Self {
+        self.row_hash_header = enabled;
         self
     }
 }

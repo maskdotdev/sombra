@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{
     page::{self, BTreePageKind},
-    BTree, BTreeOptions, Cursor, ValCodec,
+    BTree, BTreeOptions, Cursor, PutItem, ValCodec,
 };
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
@@ -136,12 +136,18 @@ impl LabelIndex {
 
         let sentinel_key = encode_key(label, LABEL_SENTINEL_NODE);
         self.tree.put(tx, &sentinel_key, &EmptyValue)?;
-        for node in existing_nodes {
-            if node == LABEL_SENTINEL_NODE {
-                continue;
+        let filtered: Vec<_> = existing_nodes
+            .into_iter()
+            .filter(|node| *node != LABEL_SENTINEL_NODE)
+            .collect();
+        if !filtered.is_empty() {
+            let mut key_bufs = Vec::with_capacity(filtered.len());
+            for node in &filtered {
+                key_bufs.push(encode_key(label, *node));
             }
-            let key = encode_key(label, node);
-            self.tree.put(tx, &key, &EmptyValue)?;
+            let empty = EmptyValue;
+            let iter = key_bufs.iter().map(|key| PutItem { key, value: &empty });
+            self.tree.put_many(tx, iter)?;
         }
         self.indexed_labels.write().insert(label);
         Ok(())

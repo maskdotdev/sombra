@@ -474,12 +474,12 @@ fn insert_in_place(leaf: &mut [u8], pos: usize, cell: &[u8]) -> Result<bool> {
 
 ## K. Quick Checklist (copy into your issue tracker)
 
-* [ ] `DdlEpoch` persisted, loaded, and bumped at every DDL site
-* [ ] Txn-local `GraphIndexCache` (hits/misses metrics)
-* [ ] `PropDelta` (PropId/PropValue) + no-op update fast-path
-* [ ] Row-hash storage feature + mixed-row compatibility tests
+* [x] `DdlEpoch` persisted, loaded, and bumped at every DDL site
+* [x] Txn-local `GraphIndexCache` (hits/misses metrics)
+* [x] `PropDelta` (PropId/PropValue) + no-op update fast-path
+* [x] Row-hash storage feature + mixed-row compatibility tests
 * [ ] `VStore::read_with_write` / write-path materialization reuse
-* [ ] `BTree::put_many` wired into adjacency/property indexes
+* [x] `BTree::put_many` wired into adjacency/property indexes
 * [ ] In-place insert (+ scratch buffer + fuzz/property tests)
 * [ ] In-place delete/merge w/ borrow fallback
 * [ ] WAL borrowed buffers + full-page CRC + coalescing metrics

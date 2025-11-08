@@ -3,7 +3,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
-use crate::storage::btree::{page, BTree, BTreeOptions, ValCodec};
+use crate::storage::btree::{page, BTree, BTreeOptions, PutItem, ValCodec};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, PropId, Result, SombraError,
@@ -50,6 +50,16 @@ impl BTreePostings {
         let tree = tree_ref.as_ref().expect("btree postings initialised");
         let key = Self::make_key(prefix, node);
         tree.put(tx, &key, &Unit)
+    }
+
+    pub fn put_many<'a, I>(&self, tx: &mut WriteGuard<'_>, items: I) -> Result<()>
+    where
+        I: IntoIterator<Item = PutItem<'a, Vec<u8>, Unit>>,
+    {
+        self.ensure_tree_with_write(tx)?;
+        let tree_ref = self.tree.borrow();
+        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        tree.put_many(tx, items)
     }
 
     pub fn remove(&self, tx: &mut WriteGuard<'_>, prefix: &[u8], node: NodeId) -> Result<()> {
@@ -292,7 +302,7 @@ impl BTreePostings {
         buf
     }
 
-    fn make_key(prefix: &[u8], node: NodeId) -> Vec<u8> {
+    pub(crate) fn make_key(prefix: &[u8], node: NodeId) -> Vec<u8> {
         let mut buf = Vec::with_capacity(prefix.len() + 8);
         buf.extend_from_slice(prefix);
         buf.extend_from_slice(&node.0.to_be_bytes());

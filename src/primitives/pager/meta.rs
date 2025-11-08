@@ -36,7 +36,8 @@ const META_STORAGE_NEXT_NODE_ID: Range<usize> = PAGE_HDR_LEN + 152..PAGE_HDR_LEN
 const META_STORAGE_NEXT_EDGE_ID: Range<usize> = PAGE_HDR_LEN + 160..PAGE_HDR_LEN + 168;
 const META_STORAGE_INLINE_PROP_BLOB: Range<usize> = PAGE_HDR_LEN + 168..PAGE_HDR_LEN + 172;
 const META_STORAGE_INLINE_PROP_VALUE: Range<usize> = PAGE_HDR_LEN + 172..PAGE_HDR_LEN + 176;
-const META_RESERVED_3: Range<usize> = PAGE_HDR_LEN + 176..PAGE_HDR_LEN + 192;
+const META_STORAGE_DDL_EPOCH: Range<usize> = PAGE_HDR_LEN + 176..PAGE_HDR_LEN + 184;
+const META_RESERVED_3: Range<usize> = PAGE_HDR_LEN + 184..PAGE_HDR_LEN + 192;
 
 /// Database metadata stored in page 0 containing configuration and root pointers.
 ///
@@ -94,6 +95,8 @@ pub struct Meta {
     pub storage_inline_prop_blob: u32,
     /// Size threshold for inline property values.
     pub storage_inline_prop_value: u32,
+    /// Catalog DDL epoch used to invalidate cached index metadata.
+    pub storage_ddl_epoch: u64,
 }
 
 /// Creates a new database metadata page with default values and writes it to page 0.
@@ -133,6 +136,7 @@ pub fn create_meta(io: &dyn FileIo, page_size: u32) -> Result<Meta> {
         storage_next_edge_id: 1,
         storage_inline_prop_blob: 128,
         storage_inline_prop_value: 48,
+        storage_ddl_epoch: 0,
     };
     let mut buf = vec![0u8; page_size as usize];
     write_meta_page(&mut buf, &meta)?;
@@ -206,6 +210,7 @@ pub fn write_meta_page(buf: &mut [u8], meta: &Meta) -> Result<()> {
         .copy_from_slice(&meta.storage_inline_prop_blob.to_be_bytes());
     buf[META_STORAGE_INLINE_PROP_VALUE]
         .copy_from_slice(&meta.storage_inline_prop_value.to_be_bytes());
+    buf[META_STORAGE_DDL_EPOCH].copy_from_slice(&meta.storage_ddl_epoch.to_be_bytes());
     buf[META_RESERVED_3].fill(0);
     page::clear_crc32(&mut buf[..PAGE_HDR_LEN])?;
     let crc = page_crc32(PageId(0).0, meta.salt, &buf[..page_size]);
@@ -296,6 +301,7 @@ pub fn read_meta_page(buf: &[u8]) -> Result<Meta> {
         u32::from_be_bytes(buf[META_STORAGE_INLINE_PROP_BLOB].try_into().unwrap());
     let storage_inline_prop_value =
         u32::from_be_bytes(buf[META_STORAGE_INLINE_PROP_VALUE].try_into().unwrap());
+    let storage_ddl_epoch = u64::from_be_bytes(buf[META_STORAGE_DDL_EPOCH].try_into().unwrap());
     if buf[META_RESERVED_3].iter().any(|b| *b != 0) {
         return Err(SombraError::Corruption("meta reserved3 field non-zero"));
     }
@@ -325,6 +331,7 @@ pub fn read_meta_page(buf: &[u8]) -> Result<Meta> {
         storage_next_edge_id: storage_next_edge_id.max(1),
         storage_inline_prop_blob: storage_inline_prop_blob.max(32),
         storage_inline_prop_value: storage_inline_prop_value.max(8),
+        storage_ddl_epoch,
     })
 }
 
@@ -332,7 +339,7 @@ impl fmt::Display for Meta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Meta(page_size={}, salt={}, format_version={}, free_head={}, next_page={}, last_checkpoint_lsn={}, wal_salt={}, wal_policy_flags={}, dict_str_to_id_root={}, dict_id_to_str_root={}, dict_next_str_id={}, storage_flags={}, storage_nodes_root={}, storage_edges_root={}, storage_adj_fwd_root={}, storage_adj_rev_root={}, storage_degree_root={}, storage_index_catalog_root={}, storage_label_index_root={}, storage_prop_chunk_root={}, storage_prop_btree_root={}, storage_next_node_id={}, storage_next_edge_id={}, storage_inline_prop_blob={}, storage_inline_prop_value={})",
+            "Meta(page_size={}, salt={}, format_version={}, free_head={}, next_page={}, last_checkpoint_lsn={}, wal_salt={}, wal_policy_flags={}, dict_str_to_id_root={}, dict_id_to_str_root={}, dict_next_str_id={}, storage_flags={}, storage_nodes_root={}, storage_edges_root={}, storage_adj_fwd_root={}, storage_adj_rev_root={}, storage_degree_root={}, storage_index_catalog_root={}, storage_label_index_root={}, storage_prop_chunk_root={}, storage_prop_btree_root={}, storage_next_node_id={}, storage_next_edge_id={}, storage_inline_prop_blob={}, storage_inline_prop_value={}, storage_ddl_epoch={})",
             self.page_size,
             self.salt,
             self.format_version,
@@ -358,6 +365,7 @@ impl fmt::Display for Meta {
             self.storage_next_edge_id,
             self.storage_inline_prop_blob,
             self.storage_inline_prop_value,
+            self.storage_ddl_epoch,
         )
     }
 }

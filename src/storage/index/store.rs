@@ -2,9 +2,10 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
+use crate::storage::btree::PutItem;
 use crate::types::{LabelId, NodeId, PageId, PropId, Result, SombraError};
 
-use super::btree_postings::BTreePostings;
+use super::btree_postings::{BTreePostings, Unit};
 use super::catalog::IndexCatalog;
 use super::chunked::ChunkedIndex;
 use super::label::{LabelIndex, LabelScan};
@@ -178,10 +179,37 @@ impl IndexStore {
         existing: &[(Vec<u8>, NodeId)],
     ) -> Result<()> {
         self.catalog.insert(tx, def)?;
-        for (value_key, node) in existing {
-            self.insert_property_value(tx, &def, value_key, *node)?;
+        match def.kind {
+            IndexKind::Chunked => {
+                for (value_key, node) in existing {
+                    self.insert_property_value(tx, &def, value_key, *node)?;
+                }
+            }
+            IndexKind::BTree => {
+                self.insert_property_values_btree(tx, &def, existing)?;
+            }
         }
         Ok(())
+    }
+
+    fn insert_property_values_btree(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        def: &IndexDef,
+        existing: &[(Vec<u8>, NodeId)],
+    ) -> Result<()> {
+        if existing.is_empty() {
+            return Ok(());
+        }
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(existing.len());
+        for (value_key, node) in existing {
+            let prefix = BTreePostings::make_prefix(def.label, def.prop, value_key);
+            keys.push(BTreePostings::make_key(&prefix, *node));
+        }
+        keys.sort();
+        let unit = Unit;
+        let iter = keys.iter().map(|key| PutItem { key, value: &unit });
+        self.btree.put_many(tx, iter)
     }
 
     /// Drops an existing property index and removes all entries.

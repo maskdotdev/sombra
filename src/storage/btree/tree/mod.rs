@@ -1,3 +1,3 @@
 mod definition;
 
-pub use definition::{BTree, BTreeOptions, KeyCodec, ValCodec};
+pub use definition::{BTree, BTreeOptions, KeyCodec, PutItem, ValCodec};

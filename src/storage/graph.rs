@@ -1,3 +1,4 @@
+use std::cmp::Ordering as CmpOrdering;
 #[cfg(feature = "degree-cache")]
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
@@ -7,9 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
-use crate::storage::btree::{BTree, BTreeOptions, ValCodec};
+use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
 use crate::storage::index::{
-    collect_all, IndexDef, IndexRoots, IndexStore, LabelScan, PostingStream, TypeTag,
+    collect_all, CatalogEpoch, DdlEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef,
+    IndexRoots, IndexStore, LabelScan, PostingStream, TypeTag,
 };
 use crate::storage::vstore::VStore;
 use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId, VRef};
@@ -17,8 +19,14 @@ use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError,
 #[cfg(feature = "degree-cache")]
 use super::adjacency::DegreeDir;
 use super::adjacency::{self, Dir, ExpandOpts, Neighbor, NeighborCursor};
-use super::edge::{self, PropPayload as EdgePropPayload, PropStorage as EdgePropStorage};
-use super::node::{self, PropPayload as NodePropPayload, PropStorage as NodePropStorage};
+use super::edge::{
+    self, EncodeOpts as EdgeEncodeOpts, PropPayload as EdgePropPayload,
+    PropStorage as EdgePropStorage,
+};
+use super::node::{
+    self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
+    PropStorage as NodePropStorage,
+};
 use super::options::GraphOptions;
 use super::patch::{PropPatch, PropPatchOp};
 use super::profile::{
@@ -66,15 +74,19 @@ pub struct Graph {
     degree: Option<BTree<Vec<u8>, u64>>,
     vstore: VStore,
     indexes: IndexStore,
+    catalog_epoch: CatalogEpoch,
     inline_prop_blob: usize,
     inline_prop_value: usize,
     #[cfg(feature = "degree-cache")]
     degree_cache_enabled: bool,
     next_node_id: AtomicU64,
     next_edge_id: AtomicU64,
+    idx_cache_hits: AtomicU64,
+    idx_cache_misses: AtomicU64,
     storage_flags: u32,
     metrics: Arc<dyn super::metrics::StorageMetrics>,
     distinct_neighbors_default: bool,
+    row_hash_header: bool,
 }
 
 impl Graph {
@@ -233,8 +245,12 @@ impl Graph {
         }
 
         let vstore = VStore::open(Arc::clone(&store))?;
+        let catalog_epoch = CatalogEpoch::new(DdlEpoch(meta.storage_ddl_epoch));
         let next_node_id = AtomicU64::new(next_node_id_init);
         let next_edge_id = AtomicU64::new(next_edge_id_init);
+        let idx_cache_hits = AtomicU64::new(0);
+        let idx_cache_misses = AtomicU64::new(0);
+        let row_hash_header = opts.row_hash_header;
 
         Ok(Self {
             store,
@@ -246,17 +262,21 @@ impl Graph {
             degree: degree_tree,
             vstore,
             indexes,
+            catalog_epoch,
             inline_prop_blob,
             inline_prop_value,
             #[cfg(feature = "degree-cache")]
             degree_cache_enabled,
             next_node_id,
             next_edge_id,
+            idx_cache_hits,
+            idx_cache_misses,
             storage_flags,
             metrics: opts
                 .metrics
                 .unwrap_or_else(|| super::metrics::default_metrics()),
             distinct_neighbors_default: opts.distinct_neighbors_default,
+            row_hash_header,
         })
     }
 
@@ -279,16 +299,17 @@ impl Graph {
         };
         let root = self.nodes.root_page();
         debug_assert!(root.0 != 0, "nodes root page not initialized");
-        let row_bytes = match node::encode(&labels, payload) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                if let Some(vref) = map_vref.take() {
-                    let _ = self.vstore.free(tx, vref);
+        let row_bytes =
+            match node::encode(&labels, payload, NodeEncodeOpts::new(self.row_hash_header)) {
+                Ok(encoded) => encoded.bytes,
+                Err(err) => {
+                    if let Some(vref) = map_vref.take() {
+                        let _ = self.vstore.free(tx, vref);
+                    }
+                    props::free_vrefs(&self.vstore, tx, &spill_vrefs);
+                    return Err(err);
                 }
-                props::free_vrefs(&self.vstore, tx, &spill_vrefs);
-                return Err(err);
-            }
-        };
+            };
         let id_raw = self.next_node_id.fetch_add(1, Ordering::SeqCst);
         let node_id = NodeId(id_raw);
         let next_id = node_id.0.saturating_add(1);
@@ -338,12 +359,17 @@ impl Graph {
             }
             Ok(())
         })?;
-        self.indexes.create_label_index(tx, label, nodes)
+        self.indexes.create_label_index(tx, label, nodes)?;
+        self.bump_ddl_epoch(tx)
     }
 
     /// Drops an existing label index.
     pub fn drop_label_index(&self, tx: &mut WriteGuard<'_>, label: LabelId) -> Result<()> {
-        self.indexes.drop_label_index(tx, label)
+        if !self.indexes.has_label_index_with_write(tx, label)? {
+            return Ok(());
+        }
+        self.indexes.drop_label_index(tx, label)?;
+        self.bump_ddl_epoch(tx)
     }
 
     /// Checks if a label index exists for the given label.
@@ -374,7 +400,12 @@ impl Graph {
             }
             Ok(())
         })?;
-        self.indexes.create_property_index(tx, def, &entries)
+        entries.sort_by(|(a, node_a), (b, node_b)| match a.cmp(b) {
+            CmpOrdering::Equal => node_a.0.cmp(&node_b.0),
+            other => other,
+        });
+        self.indexes.create_property_index(tx, def, &entries)?;
+        self.bump_ddl_epoch(tx)
     }
 
     /// Drops a property index for the given label and property.
@@ -390,7 +421,8 @@ impl Graph {
         let Some(def) = defs.into_iter().find(|d| d.prop == prop) else {
             return Ok(());
         };
-        self.indexes.drop_property_index(tx, def)
+        self.indexes.drop_property_index(tx, def)?;
+        self.bump_ddl_epoch(tx)
     }
 
     /// Checks if a property index exists for the given label and property.
@@ -466,6 +498,14 @@ impl Graph {
             Bound::Included(start),
             Bound::Included(end),
         )
+    }
+
+    /// Returns aggregate cache statistics for label→index lookups.
+    pub fn index_cache_stats(&self) -> GraphIndexCacheStats {
+        GraphIndexCacheStats {
+            hits: self.idx_cache_hits.load(Ordering::Relaxed),
+            misses: self.idx_cache_misses.load(Ordering::Relaxed),
+        }
     }
 
     /// Scans for nodes with property values in a range with custom bounds.
@@ -589,8 +629,8 @@ impl Graph {
             }
         }
 
-        let prop_bytes = self.read_node_prop_bytes(&row.props)?;
-        let prop_values = self.materialize_props_owned(&prop_bytes)?;
+        let prop_bytes = self.read_node_prop_bytes_with_write(tx, &row.props)?;
+        let prop_values = self.materialize_props_owned_with_write(tx, &prop_bytes)?;
         let prop_map: BTreeMap<PropId, PropValueOwned> = prop_values.into_iter().collect();
         self.remove_indexed_props(tx, id, &row.labels, &prop_map)?;
         self.indexes.remove_node_labels(tx, id, &row.labels)?;
@@ -619,43 +659,50 @@ impl Graph {
         let node::NodeRow {
             labels,
             props: storage,
+            row_hash,
         } = node::decode(&existing_bytes)?;
-        let prop_bytes = self.read_node_prop_bytes(&storage)?;
-        let current = self.materialize_props_owned(&prop_bytes)?;
-        let mut map: BTreeMap<PropId, PropValueOwned> = current.into_iter().collect();
-        let old_map = map.clone();
-        apply_patch_ops(&mut map, &patch.ops);
-
-        let ordered: Vec<(PropId, PropValueOwned)> = map.into_iter().collect();
-        let encoded =
-            props::encode_props_owned(&ordered, self.inline_prop_value, &self.vstore, tx)?;
+        let prop_bytes = self.read_node_prop_bytes_with_write(tx, &storage)?;
+        let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
+            return Ok(());
+        };
         let mut map_vref: Option<VRef> = None;
-        let payload = if encoded.bytes.len() <= self.inline_prop_blob {
-            NodePropPayload::Inline(&encoded.bytes)
+        let payload = if delta.encoded.bytes.len() <= self.inline_prop_blob {
+            NodePropPayload::Inline(&delta.encoded.bytes)
         } else {
-            let vref = self.vstore.write(tx, &encoded.bytes)?;
+            let vref = self.vstore.write(tx, &delta.encoded.bytes)?;
             map_vref = Some(vref);
             NodePropPayload::VRef(vref)
         };
-        let new_bytes = match node::encode(&labels, payload) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                if let Some(vref) = map_vref.take() {
-                    let _ = self.vstore.free(tx, vref);
+        let encoded_row =
+            match node::encode(&labels, payload, NodeEncodeOpts::new(self.row_hash_header)) {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    if let Some(vref) = map_vref.take() {
+                        let _ = self.vstore.free(tx, vref);
+                    }
+                    props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
+                    return Err(err);
                 }
-                props::free_vrefs(&self.vstore, tx, &encoded.spill_vrefs);
-                return Err(err);
+            };
+        if self.row_hash_header {
+            if let (Some(old_hash), Some(new_hash)) = (row_hash, encoded_row.row_hash) {
+                if old_hash == new_hash {
+                    if let Some(vref) = map_vref.take() {
+                        let _ = self.vstore.free(tx, vref);
+                    }
+                    props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
+                    return Ok(());
+                }
             }
-        };
-        if let Err(err) = self.nodes.put(tx, &id.0, &new_bytes) {
+        }
+        if let Err(err) = self.nodes.put(tx, &id.0, &encoded_row.bytes) {
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
-            props::free_vrefs(&self.vstore, tx, &encoded.spill_vrefs);
+            props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
             return Err(err);
         }
-        let new_map: BTreeMap<PropId, PropValueOwned> = ordered.into_iter().collect();
-        self.update_indexed_props_for_node(tx, id, &labels, &old_map, &new_map)?;
+        self.update_indexed_props_for_node(tx, id, &labels, &delta.old_map, &delta.new_map)?;
         self.free_node_props(tx, storage)
     }
 
@@ -672,8 +719,14 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let row_bytes = match edge::encode(spec.src, spec.dst, spec.ty, payload) {
-            Ok(bytes) => bytes,
+        let row_bytes = match edge::encode(
+            spec.src,
+            spec.dst,
+            spec.ty,
+            payload,
+            EdgeEncodeOpts::new(self.row_hash_header),
+        ) {
+            Ok(encoded) => encoded.bytes,
             Err(err) => {
                 if let Some(vref) = map_vref.take() {
                     let _ = self.vstore.free(tx, vref);
@@ -697,7 +750,10 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
-        if let Err(err) = self.insert_adjacency(tx, spec.src, spec.dst, spec.ty, edge_id) {
+        if let Err(err) = self.insert_adjacencies(
+            tx,
+            &[(spec.src, spec.dst, spec.ty, edge_id)],
+        ) {
             let _ = self.edges.delete(tx, &edge_id.0);
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
@@ -771,44 +827,57 @@ impl Graph {
             dst,
             ty,
             props: storage,
+            row_hash: old_row_hash,
         } = edge::decode(&existing_bytes)?;
-        let prop_bytes = self.read_edge_prop_bytes(&storage)?;
-        let current = self.materialize_props_owned(&prop_bytes)?;
-        let mut map: BTreeMap<PropId, PropValueOwned> = current.into_iter().collect();
-        apply_patch_ops(&mut map, &patch.ops);
-
-        let ordered: Vec<(PropId, PropValueOwned)> = map.into_iter().collect();
-        let encoded =
-            props::encode_props_owned(&ordered, self.inline_prop_value, &self.vstore, tx)?;
+        let prop_bytes = self.read_edge_prop_bytes_with_write(tx, &storage)?;
+        let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
+            return Ok(());
+        };
         let mut map_vref: Option<VRef> = None;
-        let payload = if encoded.bytes.len() <= self.inline_prop_blob {
-            EdgePropPayload::Inline(&encoded.bytes)
+        let payload = if delta.encoded.bytes.len() <= self.inline_prop_blob {
+            EdgePropPayload::Inline(&delta.encoded.bytes)
         } else {
-            let vref = self.vstore.write(tx, &encoded.bytes)?;
+            let vref = self.vstore.write(tx, &delta.encoded.bytes)?;
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let new_bytes = match edge::encode(src, dst, ty, payload) {
-            Ok(bytes) => bytes,
+        let encoded_row = match edge::encode(
+            src,
+            dst,
+            ty,
+            payload,
+            EdgeEncodeOpts::new(self.row_hash_header),
+        ) {
+            Ok(encoded) => encoded,
             Err(err) => {
                 if let Some(vref) = map_vref.take() {
                     let _ = self.vstore.free(tx, vref);
                 }
-                props::free_vrefs(&self.vstore, tx, &encoded.spill_vrefs);
+                props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
                 return Err(err);
             }
         };
 
-        if let Err(err) = self.edges.put(tx, &id.0, &new_bytes) {
+        if self.row_hash_header {
+            if let (Some(old_hash), Some(new_hash)) = (old_row_hash, encoded_row.row_hash) {
+                if old_hash == new_hash {
+                    if let Some(vref) = map_vref.take() {
+                        let _ = self.vstore.free(tx, vref);
+                    }
+                    props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
+                    return Ok(());
+                }
+            }
+        }
+
+        if let Err(err) = self.edges.put(tx, &id.0, &encoded_row.bytes) {
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
-            props::free_vrefs(&self.vstore, tx, &encoded.spill_vrefs);
+            props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
             return Err(err);
         }
-        self.free_edge_props(tx, storage)?;
-        self.metrics.edge_deleted();
-        Ok(())
+        self.free_edge_props(tx, storage)
     }
 
     /// Returns neighboring nodes of a given node based on direction and edge type.
@@ -892,35 +961,49 @@ impl Graph {
         }
     }
 
-    fn insert_adjacency(
+    fn insert_adjacencies(
         &self,
         tx: &mut WriteGuard<'_>,
-        src: NodeId,
-        dst: NodeId,
-        ty: TypeId,
-        edge: EdgeId,
+        entries: &[(NodeId, NodeId, TypeId, EdgeId)],
     ) -> Result<()> {
-        let fwd_key = adjacency::encode_fwd_key(src, ty, dst, edge);
-        let rev_key = adjacency::encode_rev_key(dst, ty, src, edge);
-        if let Err(err) = self.adj_fwd.put(tx, &fwd_key, &UnitValue) {
-            return Err(err);
+        if entries.is_empty() {
+            return Ok(());
         }
-        if let Err(err) = self.adj_rev.put(tx, &rev_key, &UnitValue) {
-            let _ = self.adj_fwd.delete(tx, &fwd_key);
-            return Err(err);
+        let mut keys: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(entries.len());
+        for (src, dst, ty, edge) in entries {
+            let fwd_key = adjacency::encode_fwd_key(*src, *ty, *dst, *edge);
+            let rev_key = adjacency::encode_rev_key(*dst, *ty, *src, *edge);
+            keys.push((fwd_key, rev_key));
+        }
+        let unit = UnitValue;
+        {
+            let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(fwd, _)| fwd).collect();
+            refs.sort_unstable_by(|a, b| a.cmp(b));
+            let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
+            self.adj_fwd.put_many(tx, iter)?;
+        }
+        {
+            let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(_, rev)| rev).collect();
+            refs.sort_unstable_by(|a, b| a.cmp(b));
+            let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
+            self.adj_rev.put_many(tx, iter)?;
         }
         #[cfg(feature = "degree-cache")]
         if self.degree_cache_enabled {
-            if let Err(err) = self.bump_degree(tx, src, DegreeDir::Out, ty, 1) {
-                let _ = self.adj_rev.delete(tx, &rev_key);
-                let _ = self.adj_fwd.delete(tx, &fwd_key);
-                return Err(err);
-            }
-            if let Err(err) = self.bump_degree(tx, dst, DegreeDir::In, ty, 1) {
-                let _ = self.bump_degree(tx, src, DegreeDir::Out, ty, -1);
-                let _ = self.adj_rev.delete(tx, &rev_key);
-                let _ = self.adj_fwd.delete(tx, &fwd_key);
-                return Err(err);
+            let mut applied: Vec<(NodeId, DegreeDir, TypeId)> = Vec::new();
+            for (src, dst, ty, _edge) in entries {
+                if let Err(err) = self.bump_degree(tx, *src, DegreeDir::Out, *ty, 1) {
+                    self.rollback_adjacency_batch(tx, &keys);
+                    self.rollback_degrees(tx, &applied);
+                    return Err(err);
+                }
+                applied.push((*src, DegreeDir::Out, *ty));
+                if let Err(err) = self.bump_degree(tx, *dst, DegreeDir::In, *ty, 1) {
+                    self.rollback_adjacency_batch(tx, &keys);
+                    self.rollback_degrees(tx, &applied);
+                    return Err(err);
+                }
+                applied.push((*dst, DegreeDir::In, *ty));
             }
         }
         Ok(())
@@ -1231,13 +1314,25 @@ impl Graph {
         }
     }
 
-    fn read_edge_prop_bytes(&self, storage: &EdgePropStorage) -> Result<Vec<u8>> {
+    fn read_node_prop_bytes_with_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        storage: &NodePropStorage,
+    ) -> Result<Vec<u8>> {
+        match storage {
+            NodePropStorage::Inline(bytes) => Ok(bytes.clone()),
+            NodePropStorage::VRef(vref) => self.vstore.read_with_write(tx, *vref),
+        }
+    }
+
+    fn read_edge_prop_bytes_with_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        storage: &EdgePropStorage,
+    ) -> Result<Vec<u8>> {
         match storage {
             EdgePropStorage::Inline(bytes) => Ok(bytes.clone()),
-            EdgePropStorage::VRef(vref) => {
-                let read = self.store.begin_read()?;
-                self.vstore.read(&read, *vref)
-            }
+            EdgePropStorage::VRef(vref) => self.vstore.read_with_write(tx, *vref),
         }
     }
 
@@ -1246,6 +1341,15 @@ impl Graph {
         let read = self.store.begin_read()?;
         let props = props::materialize_props(&raw, &self.vstore, &read)?;
         Ok(props)
+    }
+
+    fn materialize_props_owned_with_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        bytes: &[u8],
+    ) -> Result<Vec<(PropId, PropValueOwned)>> {
+        let raw = props::decode_raw(bytes)?;
+        props::materialize_props_with_write(&raw, &self.vstore, tx)
     }
 
     #[cfg(feature = "degree-cache")]
@@ -1306,6 +1410,24 @@ fn open_degree_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Ve
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
     BTree::open_or_create(store, opts)
+}
+
+struct GraphTxnState {
+    index_cache: GraphIndexCache,
+}
+
+impl GraphTxnState {
+    fn new(epoch: DdlEpoch) -> Self {
+        Self {
+            index_cache: GraphIndexCache::new(epoch),
+        }
+    }
+}
+
+struct PropDelta {
+    old_map: BTreeMap<PropId, PropValueOwned>,
+    new_map: BTreeMap<PropId, PropValueOwned>,
+    encoded: props::PropEncodeResult,
 }
 
 fn apply_patch_ops(map: &mut BTreeMap<PropId, PropValueOwned>, ops: &[PropPatchOp<'_>]) {
@@ -1477,10 +1599,8 @@ impl Graph {
         props: &BTreeMap<PropId, PropValueOwned>,
     ) -> Result<()> {
         for label in labels {
-            let defs = self
-                .indexes
-                .property_indexes_for_label_with_write(tx, *label)?;
-            for def in defs {
+            let defs = self.index_defs_for_label(tx, *label)?;
+            for def in defs.iter() {
                 if let Some(value) = props.get(&def.prop) {
                     let key = encode_value_key_owned(def.ty, value)?;
                     self.indexes.insert_property_value(tx, &def, &key, node)?;
@@ -1498,10 +1618,8 @@ impl Graph {
         props: &BTreeMap<PropId, PropValueOwned>,
     ) -> Result<()> {
         for label in labels {
-            let defs = self
-                .indexes
-                .property_indexes_for_label_with_write(tx, *label)?;
-            for def in defs {
+            let defs = self.index_defs_for_label(tx, *label)?;
+            for def in defs.iter() {
                 if let Some(value) = props.get(&def.prop) {
                     let key = encode_value_key_owned(def.ty, value)?;
                     self.indexes.remove_property_value(tx, &def, &key, node)?;
@@ -1509,6 +1627,28 @@ impl Graph {
             }
         }
         Ok(())
+    }
+
+    #[cfg(feature = "degree-cache")]
+    fn rollback_degrees(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        applied: &[(NodeId, DegreeDir, TypeId)],
+    ) {
+        for (node, dir, ty) in applied.iter().rev() {
+            let _ = self.bump_degree(tx, *node, *dir, *ty, -1);
+        }
+    }
+
+    fn rollback_adjacency_batch(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        keys: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        for (fwd, rev) in keys {
+            let _ = self.adj_fwd.delete(tx, fwd);
+            let _ = self.adj_rev.delete(tx, rev);
+        }
     }
 
     fn update_indexed_props_for_node(
@@ -1520,10 +1660,8 @@ impl Graph {
         new_props: &BTreeMap<PropId, PropValueOwned>,
     ) -> Result<()> {
         for label in labels {
-            let defs = self
-                .indexes
-                .property_indexes_for_label_with_write(tx, *label)?;
-            for def in defs {
+            let defs = self.index_defs_for_label(tx, *label)?;
+            for def in defs.iter() {
                 let old = old_props.get(&def.prop);
                 let new = new_props.get(&def.prop);
                 if old == new {
@@ -1539,6 +1677,78 @@ impl Graph {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn build_prop_delta(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        prop_bytes: &[u8],
+        patch: &PropPatch<'_>,
+    ) -> Result<Option<PropDelta>> {
+        if patch.is_empty() {
+            return Ok(None);
+        }
+        let current = self.materialize_props_owned_with_write(tx, prop_bytes)?;
+        let mut new_map: BTreeMap<PropId, PropValueOwned> = current.into_iter().collect();
+        let old_map = new_map.clone();
+        apply_patch_ops(&mut new_map, &patch.ops);
+        if new_map == old_map {
+            return Ok(None);
+        }
+        let ordered = new_map
+            .iter()
+            .map(|(prop, value)| (*prop, value.clone()))
+            .collect::<Vec<_>>();
+        let encoded =
+            props::encode_props_owned(&ordered, self.inline_prop_value, &self.vstore, tx)?;
+        Ok(Some(PropDelta {
+            old_map,
+            new_map,
+            encoded,
+        }))
+    }
+
+    fn index_defs_for_label(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        label: LabelId,
+    ) -> Result<Arc<Vec<IndexDef>>> {
+        let mut state = self.take_txn_state(tx);
+        state.index_cache.sync_epoch(self.catalog_epoch.current());
+        let result = state.index_cache.get_or_load(label, |label| {
+            self.indexes
+                .property_indexes_for_label_with_write(tx, label)
+        });
+        self.store_txn_state(tx, state);
+        result
+    }
+
+    fn take_txn_state(&self, tx: &mut WriteGuard<'_>) -> GraphTxnState {
+        tx.take_extension::<GraphTxnState>()
+            .unwrap_or_else(|| GraphTxnState::new(self.catalog_epoch.current()))
+    }
+
+    fn store_txn_state(&self, tx: &mut WriteGuard<'_>, mut state: GraphTxnState) {
+        let stats = state.index_cache.take_stats();
+        self.idx_cache_hits.fetch_add(stats.hits, Ordering::Relaxed);
+        self.idx_cache_misses
+            .fetch_add(stats.misses, Ordering::Relaxed);
+        tx.store_extension(state);
+    }
+
+    fn invalidate_txn_cache(&self, tx: &mut WriteGuard<'_>) {
+        if let Some(mut state) = tx.take_extension::<GraphTxnState>() {
+            let stats = state.index_cache.take_stats();
+            self.idx_cache_hits.fetch_add(stats.hits, Ordering::Relaxed);
+            self.idx_cache_misses
+                .fetch_add(stats.misses, Ordering::Relaxed);
+        }
+    }
+
+    fn bump_ddl_epoch(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        self.catalog_epoch.bump_in_txn(tx)?;
+        self.invalidate_txn_cache(tx);
         Ok(())
     }
 

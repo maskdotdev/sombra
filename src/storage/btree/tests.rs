@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use super::{page, BTree, BTreeOptions};
+use super::{page, BTree, BTreeOptions, PutItem};
 use crate::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions, ReadGuard};
 use crate::types::{PageId, Result, SombraError};
 use proptest::prelude::*;
@@ -185,6 +185,35 @@ fn insert_and_get_roundtrip() -> Result<()> {
     pager.checkpoint(CheckpointMode::Force)?;
     let read = pager.begin_read()?;
     assert_eq!(tree.get(&read, &5)?, Some(456));
+    Ok(())
+}
+
+#[test]
+fn put_many_inserts_sorted_keys() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_put_many.db");
+    let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())?;
+
+    let keys: Vec<u64> = (0..128).collect();
+    let values: Vec<u64> = keys.iter().map(|k| k * 2).collect();
+    let items: Vec<_> = keys
+        .iter()
+        .zip(values.iter())
+        .map(|(k, v)| PutItem { key: k, value: v })
+        .collect();
+
+    {
+        let mut write = pager.begin_write()?;
+        tree.put_many(&mut write, items.into_iter())?;
+        pager.commit(write)?;
+    }
+    pager.checkpoint(CheckpointMode::Force)?;
+    let read = pager.begin_read()?;
+    for (key, value) in keys.iter().zip(values.iter()) {
+        assert_eq!(tree.get(&read, key)?, Some(*value));
+    }
     Ok(())
 }
 

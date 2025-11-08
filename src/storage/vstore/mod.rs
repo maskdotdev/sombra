@@ -286,6 +286,71 @@ impl VStore {
         Ok(())
     }
 
+    /// Reads variable-length data using a write transaction without opening a read guard.
+    pub fn read_with_write(&self, tx: &mut WriteGuard<'_>, vref: VRef) -> Result<Vec<u8>> {
+        let mut dst = Vec::with_capacity(vref.len as usize);
+        self.read_into_with_write(tx, vref, &mut dst)?;
+        Ok(dst)
+    }
+
+    /// Reads variable-length data into an existing buffer using a write transaction.
+    pub fn read_into_with_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        vref: VRef,
+        dst: &mut Vec<u8>,
+    ) -> Result<()> {
+        if vref.n_pages == 0 {
+            dst.clear();
+            return Ok(());
+        }
+        let mut current = vref.start_page;
+        let mut pages_left = vref.n_pages;
+        let mut remaining = vref.len as usize;
+        dst.clear();
+        dst.reserve(remaining);
+        let mut checksum = Crc32Fast::default();
+        while pages_left > 0 {
+            if current.0 == 0 {
+                return Err(SombraError::Corruption("overflow chain terminated early"));
+            }
+            let page = self.store.get_page_with_write(tx, current)?;
+            let (next, used, data) = self.decode_page(page.data())?;
+            let used_usize = used as usize;
+            if used_usize > remaining {
+                return Err(SombraError::Corruption(
+                    "overflow chain exceeded reported length",
+                ));
+            }
+            dst.extend_from_slice(data);
+            checksum.update(data);
+            remaining -= used_usize;
+            pages_left -= 1;
+            current = next;
+        }
+        if current.0 != 0 {
+            return Err(SombraError::Corruption(
+                "overflow chain longer than n_pages",
+            ));
+        }
+        if remaining != 0 {
+            return Err(SombraError::Corruption(
+                "overflow chain shorter than reported length",
+            ));
+        }
+        let computed = checksum.finalize();
+        if computed != vref.checksum {
+            return Err(SombraError::Corruption("overflow checksum mismatch"));
+        }
+        self.metrics.add_bytes_read(vref.len as u64);
+        trace!(
+            pages = vref.n_pages,
+            len = vref.len,
+            "vstore.read_with_write"
+        );
+        Ok(())
+    }
+
     /// Frees the overflow pages associated with a VRef.
     pub fn free(&self, tx: &mut WriteGuard<'_>, vref: VRef) -> Result<()> {
         if vref.n_pages == 0 {
