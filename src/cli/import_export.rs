@@ -30,64 +30,102 @@ struct EdgeInsert {
     props: Map<String, Value>,
 }
 
+/// Configuration for importing nodes from a CSV file.
 #[derive(Debug, Clone)]
 pub struct NodeImportConfig {
+    /// Path to the CSV file containing node data.
     pub path: PathBuf,
+    /// Name of the CSV column containing unique node identifiers.
     pub id_column: String,
+    /// Optional CSV column name containing node labels (pipe-separated).
     pub label_column: Option<String>,
+    /// Static labels to apply to all imported nodes.
     pub static_labels: Vec<String>,
+    /// Optional list of CSV columns to import as node properties.
+    /// If None, all columns except id and label columns are imported.
     pub prop_columns: Option<Vec<String>>,
 }
 
+/// Configuration for importing edges from a CSV file.
 #[derive(Debug, Clone)]
 pub struct EdgeImportConfig {
+    /// Path to the CSV file containing edge data.
     pub path: PathBuf,
+    /// Name of the CSV column containing source node identifiers.
     pub src_column: String,
+    /// Name of the CSV column containing destination node identifiers.
     pub dst_column: String,
+    /// Optional CSV column name containing edge type.
     pub type_column: Option<String>,
+    /// Static edge type to apply to all imported edges.
     pub static_type: Option<String>,
+    /// Optional list of CSV columns to import as edge properties.
+    /// If None, all columns except src, dst, and type columns are imported.
     pub prop_columns: Option<Vec<String>>,
 }
 
+/// Configuration for the complete import operation.
 #[derive(Debug, Clone)]
 pub struct ImportConfig {
+    /// Path to the database file.
     pub db_path: PathBuf,
+    /// Whether to create the database if it doesn't exist.
     pub create_if_missing: bool,
+    /// Optional configuration for node import.
     pub nodes: Option<NodeImportConfig>,
+    /// Optional configuration for edge import.
     pub edges: Option<EdgeImportConfig>,
 }
 
+/// Summary statistics from an import operation.
 #[derive(Debug, Clone, Default)]
 pub struct ImportSummary {
+    /// Total number of nodes imported.
     pub nodes_imported: u64,
+    /// Total number of edges imported.
     pub edges_imported: u64,
 }
 
+/// Configuration for exporting graph data to CSV files.
 #[derive(Debug, Clone)]
 pub struct ExportConfig {
+    /// Path to the database file.
     pub db_path: PathBuf,
+    /// Optional output path for exported nodes CSV.
     pub nodes_out: Option<PathBuf>,
+    /// Optional output path for exported edges CSV.
     pub edges_out: Option<PathBuf>,
+    /// List of property names to include in node export.
     pub node_props: Vec<String>,
+    /// List of property names to include in edge export.
     pub edge_props: Vec<String>,
 }
 
+/// Summary statistics from an export operation.
 #[derive(Debug, Clone, Default)]
 pub struct ExportSummary {
+    /// Total number of nodes exported.
     pub nodes_exported: u64,
+    /// Total number of edges exported.
     pub edges_exported: u64,
 }
 
+/// Error type for CLI import/export operations.
 #[derive(Error, Debug)]
 pub enum CliError {
+    /// Generic error message.
     #[error("{0}")]
     Message(String),
+    /// IO error from file operations.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// CSV parsing or writing error.
     #[error(transparent)]
     Csv(#[from] csv::Error),
+    /// Admin operation error.
     #[error(transparent)]
     Admin(#[from] crate::admin::AdminError),
+    /// Storage layer error.
     #[error(transparent)]
     Storage(#[from] SombraError),
 }
@@ -104,6 +142,17 @@ impl From<String> for CliError {
     }
 }
 
+/// Executes a complete import operation from CSV files into the graph database.
+///
+/// This function imports nodes first, building an ID mapping, and then optionally imports edges.
+/// The database is checkpointed after a successful import.
+///
+/// # Arguments
+/// * `cfg` - Import configuration specifying input files and options
+/// * `opts` - Admin options for opening the database
+///
+/// # Returns
+/// An `ImportSummary` with counts of imported nodes and edges, or a `CliError` on failure.
 pub fn run_import(cfg: &ImportConfig, opts: &AdminOpenOptions) -> Result<ImportSummary, CliError> {
     let nodes_cfg = cfg
         .nodes
@@ -142,6 +191,16 @@ pub fn run_import(cfg: &ImportConfig, opts: &AdminOpenOptions) -> Result<ImportS
     Ok(summary)
 }
 
+/// Executes a complete export operation from the graph database to CSV files.
+///
+/// This function exports nodes and/or edges to CSV files with specified properties.
+///
+/// # Arguments
+/// * `cfg` - Export configuration specifying output files and properties
+/// * `opts` - Admin options for opening the database
+///
+/// # Returns
+/// An `ExportSummary` with counts of exported nodes and edges, or a `CliError` on failure.
 pub fn run_export(cfg: &ExportConfig, opts: &AdminOpenOptions) -> Result<ExportSummary, CliError> {
     if cfg.nodes_out.is_none() && cfg.edges_out.is_none() {
         return Err(CliError::Message(

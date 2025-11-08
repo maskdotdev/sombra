@@ -8,53 +8,117 @@ use crate::admin::options::AdminOpenOptions;
 use crate::admin::util::{open_pager, wal_path};
 use crate::admin::Result;
 
+/// Comprehensive statistics report for a database instance.
+///
+/// Contains detailed information about the pager, WAL, storage, and filesystem
+/// aspects of the database.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsReport {
+    /// Statistics about the pager component.
     pub pager: PagerStatsSection,
+    /// Statistics about the write-ahead log (WAL).
     pub wal: WalStatsSection,
+    /// Statistics about the storage layer.
     pub storage: StorageStatsSection,
+    /// Statistics about filesystem usage.
     pub filesystem: FilesystemStats,
 }
 
+/// Pager-related statistics and configuration.
+///
+/// Provides information about the page cache, hit/miss rates, and checkpoint state.
 #[derive(Debug, Clone, Serialize)]
 pub struct PagerStatsSection {
+    /// Size of each page in bytes.
     pub page_size: u32,
+    /// Number of pages in the cache.
     pub cache_pages: usize,
+    /// Number of cache hits.
     pub hits: u64,
+    /// Number of cache misses.
     pub misses: u64,
+    /// Number of pages evicted from the cache.
     pub evictions: u64,
+    /// Number of dirty pages written back to disk.
     pub dirty_writebacks: u64,
+    /// Log sequence number of the last checkpoint.
     pub last_checkpoint_lsn: u64,
 }
 
+/// Write-ahead log (WAL) statistics.
+///
+/// Contains information about the WAL file location, size, and state.
 #[derive(Debug, Clone, Serialize)]
 pub struct WalStatsSection {
+    /// Path to the WAL file.
     pub path: String,
+    /// Whether the WAL file exists on disk.
     pub exists: bool,
+    /// Size of the WAL file in bytes.
     pub size_bytes: u64,
+    /// Log sequence number of the last checkpoint.
     pub last_checkpoint_lsn: u64,
 }
 
+/// Storage layer statistics.
+///
+/// Provides information about nodes, edges, and storage configuration.
 #[derive(Debug, Clone, Serialize)]
 pub struct StorageStatsSection {
+    /// Next available node ID.
     pub next_node_id: u64,
+    /// Next available edge ID.
     pub next_edge_id: u64,
+    /// Estimated number of nodes in the database.
     pub estimated_node_count: u64,
+    /// Estimated number of edges in the database.
     pub estimated_edge_count: u64,
+    /// Maximum size for inline property blobs in bytes.
     pub inline_prop_blob: u32,
+    /// Maximum size for inline property values in bytes.
     pub inline_prop_value: u32,
+    /// Storage configuration flags.
     pub storage_flags: u32,
+    /// Whether distinct neighbors are enforced by default.
     pub distinct_neighbors_default: bool,
 }
 
+/// Filesystem statistics for database files.
+///
+/// Contains information about file paths and sizes for the database and WAL.
 #[derive(Debug, Clone, Serialize)]
 pub struct FilesystemStats {
+    /// Path to the database file.
     pub db_path: String,
+    /// Size of the database file in bytes.
     pub db_size_bytes: u64,
+    /// Path to the WAL file.
     pub wal_path: String,
+    /// Size of the WAL file in bytes.
     pub wal_size_bytes: u64,
 }
 
+/// Collects comprehensive statistics about a database.
+///
+/// This function gathers statistics from the pager, WAL, storage layer, and filesystem
+/// for the database at the specified path.
+///
+/// # Arguments
+///
+/// * `path` - Path to the database file
+/// * `opts` - Admin options for opening the database
+///
+/// # Returns
+///
+/// Returns a `StatsReport` containing all collected statistics, or an error if the
+/// database cannot be opened or read.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The database file cannot be opened
+/// - The pager metadata cannot be read
+/// - File metadata cannot be retrieved
 pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsReport> {
     let path = path.as_ref();
     let pager = open_pager(path, opts)?;
