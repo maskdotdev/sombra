@@ -38,35 +38,68 @@ const META_STORAGE_INLINE_PROP_BLOB: Range<usize> = PAGE_HDR_LEN + 168..PAGE_HDR
 const META_STORAGE_INLINE_PROP_VALUE: Range<usize> = PAGE_HDR_LEN + 172..PAGE_HDR_LEN + 176;
 const META_RESERVED_3: Range<usize> = PAGE_HDR_LEN + 176..PAGE_HDR_LEN + 192;
 
+/// Database metadata stored in page 0 containing configuration and root pointers.
+///
+/// This structure holds all essential database metadata including page size, version info,
+/// freelist head, dictionary roots, storage roots, and various configuration flags.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Meta {
+    /// Size of each page in bytes.
     pub page_size: u32,
+    /// Random salt value used for page checksums.
     pub salt: u64,
+    /// Database format version number.
     pub format_version: u16,
+    /// Page ID of the head of the freelist chain.
     pub free_head: PageId,
+    /// Next page ID to be allocated.
     pub next_page: PageId,
+    /// LSN of the last successful checkpoint.
     pub last_checkpoint_lsn: Lsn,
+    /// Random salt value for WAL integrity checks.
     pub wal_salt: u64,
+    /// Configuration flags for WAL policy.
     pub wal_policy_flags: u32,
+    /// Root page ID for the string-to-ID dictionary B-tree.
     pub dict_str_to_id_root: PageId,
+    /// Root page ID for the ID-to-string dictionary B-tree.
     pub dict_id_to_str_root: PageId,
+    /// Next string ID to be allocated in the dictionary.
     pub dict_next_str_id: u32,
+    /// Configuration flags for storage layer.
     pub storage_flags: u32,
+    /// Root page ID for the nodes B-tree.
     pub storage_nodes_root: PageId,
+    /// Root page ID for the edges B-tree.
     pub storage_edges_root: PageId,
+    /// Root page ID for the forward adjacency B-tree.
     pub storage_adj_fwd_root: PageId,
+    /// Root page ID for the reverse adjacency B-tree.
     pub storage_adj_rev_root: PageId,
+    /// Root page ID for the degree tracking B-tree.
     pub storage_degree_root: PageId,
+    /// Root page ID for the index catalog B-tree.
     pub storage_index_catalog_root: PageId,
+    /// Root page ID for the label index B-tree.
     pub storage_label_index_root: PageId,
+    /// Root page ID for the property chunk B-tree.
     pub storage_prop_chunk_root: PageId,
+    /// Root page ID for the property B-tree.
     pub storage_prop_btree_root: PageId,
+    /// Next node ID to be allocated.
     pub storage_next_node_id: u64,
+    /// Next edge ID to be allocated.
     pub storage_next_edge_id: u64,
+    /// Size threshold for inline property blobs.
     pub storage_inline_prop_blob: u32,
+    /// Size threshold for inline property values.
     pub storage_inline_prop_value: u32,
 }
 
+/// Creates a new database metadata page with default values and writes it to page 0.
+///
+/// Generates random salts, initializes all root pointers to null, and sets default configuration.
+/// The metadata page is immediately written to disk and synced.
 pub fn create_meta(io: &dyn FileIo, page_size: u32) -> Result<Meta> {
     if (page_size as usize) < PAGE_HDR_LEN {
         return Err(SombraError::Invalid("page size smaller than header"));
@@ -108,6 +141,10 @@ pub fn create_meta(io: &dyn FileIo, page_size: u32) -> Result<Meta> {
     Ok(meta)
 }
 
+/// Loads and verifies the database metadata from page 0.
+///
+/// Reads page 0, verifies the CRC checksum, and parses the metadata structure.
+/// Returns an error if the page is truncated, corrupted, or has invalid checksums.
 pub fn load_meta(io: &dyn FileIo, page_size: u32) -> Result<Meta> {
     if (page_size as usize) < PAGE_HDR_LEN {
         return Err(SombraError::Invalid("page size smaller than header"));
@@ -124,6 +161,10 @@ pub fn load_meta(io: &dyn FileIo, page_size: u32) -> Result<Meta> {
     read_meta_page(&buf)
 }
 
+/// Encodes metadata into a page buffer with proper header and CRC checksum.
+///
+/// Serializes all metadata fields into the provided buffer and computes a CRC32 checksum
+/// for integrity verification. The buffer must be at least `page_size` bytes.
 pub fn write_meta_page(buf: &mut [u8], meta: &Meta) -> Result<()> {
     if buf.len() < PAGE_HDR_LEN {
         return Err(SombraError::Invalid("meta buffer too small"));
@@ -172,6 +213,10 @@ pub fn write_meta_page(buf: &mut [u8], meta: &Meta) -> Result<()> {
     Ok(())
 }
 
+/// Decodes metadata from a page buffer and verifies its integrity.
+///
+/// Parses the page header, validates the CRC checksum, and deserializes all metadata fields.
+/// Returns an error if the page kind is wrong, the checksum fails, or reserved fields are non-zero.
 pub fn read_meta_page(buf: &[u8]) -> Result<Meta> {
     if buf.len() < PAGE_HDR_LEN {
         return Err(SombraError::Corruption("meta page truncated"));

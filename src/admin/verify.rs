@@ -13,24 +13,34 @@ use crate::admin::Result;
 
 const MAX_FINDINGS: usize = 32;
 
+/// Specifies the depth of verification checks to perform.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyLevel {
+    /// Quick validation of metadata without scanning storage structures.
     Fast,
+    /// Comprehensive validation including nodes, edges, and adjacency lists.
     Full,
 }
 
+/// Indicates the severity level of a verification finding.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifySeverity {
+    /// Informational message about the verification process.
     Info,
+    /// Non-critical issue that may indicate a problem.
     Warning,
+    /// Critical issue indicating data corruption or integrity failure.
     Error,
 }
 
+/// Represents a single issue discovered during verification.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerifyFinding {
+    /// The severity level of this finding.
     pub severity: VerifySeverity,
+    /// Human-readable description of the issue.
     pub message: String,
 }
 
@@ -43,22 +53,55 @@ impl VerifyFinding {
     }
 }
 
+/// Statistics collected during the verification process.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct VerifyCounts {
+    /// Total number of nodes found in storage.
     pub nodes_found: u64,
+    /// Total number of edges found in storage.
     pub edges_found: u64,
+    /// Total number of adjacency list entries (forward + reverse).
     pub adjacency_entries: u64,
+    /// Number of distinct nodes referenced in adjacency lists.
     pub adjacency_nodes_touched: u64,
 }
 
+/// Complete report of a verification operation.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerifyReport {
+    /// The verification level that was performed.
     pub level: VerifyLevel,
+    /// Whether verification passed without finding any issues.
     pub success: bool,
+    /// List of issues discovered during verification.
     pub findings: Vec<VerifyFinding>,
+    /// Statistics about the data structures examined.
     pub counts: VerifyCounts,
 }
 
+/// Verifies the integrity of a graph database.
+///
+/// Performs structural validation checks on the database file to detect corruption,
+/// inconsistencies, or missing data. The level of verification determines which checks
+/// are performed:
+///
+/// - `VerifyLevel::Fast`: Quick validation of metadata only
+/// - `VerifyLevel::Full`: Comprehensive scan of all nodes, edges, and adjacency lists
+///
+/// # Arguments
+///
+/// * `path` - Path to the database file
+/// * `opts` - Options for opening the database
+/// * `level` - Depth of verification to perform
+///
+/// # Returns
+///
+/// A `VerifyReport` containing the results of the verification, including any issues
+/// found and statistics about the data structures examined.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened or if I/O operations fail.
 pub fn verify(
     path: impl AsRef<Path>,
     opts: &AdminOpenOptions,
