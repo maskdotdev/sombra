@@ -9,8 +9,10 @@ use pyo3::{
     Bound,
 };
 use serde_json::Value;
-use sombra_ffi::{Database, DatabaseOptions, FfiError, QueryStream};
-use sombra_pager::{PagerOptions, Synchronous};
+use sombra::{
+    ffi::{Database, DatabaseOptions, FfiError, QueryStream},
+    primitives::pager::{PagerOptions, Synchronous},
+};
 
 #[derive(Debug)]
 struct PyConnectOptions {

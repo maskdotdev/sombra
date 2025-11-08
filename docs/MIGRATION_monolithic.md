@@ -10,7 +10,7 @@ This document outlines the complete migration plan from a 20-crate workspace str
 - Make refactoring easier
 - Better suited for publishing a single unified crate
 
-**Status**: Planning phase  
+**Status**: Phase 5 complete (storage layer migrated)  
 **Complexity**: Medium (clean dependency graph, no circular deps)  
 **Estimated Duration**: 2-3 weeks depending on team size
 
@@ -66,16 +66,16 @@ sombra-db/
 
 ## Phase Breakdown
 
-### Phase 1: Planning & Preparation ✓ CURRENT
+### Phase 1: Planning & Preparation ✓ DONE
 
 **Goal**: Document current state and prepare for migration
 
 **Tasks**:
 - [x] Analyze dependency graph (no circular deps confirmed!)
 - [x] Document API boundaries for each crate
-- [ ] Create detailed module layout
-- [ ] Identify all feature flags and conditional compilation
-- [ ] List all external dependencies per crate
+- [x] Create detailed module layout (`src/` tree in repo)
+- [x] Identify all feature flags and conditional compilation (documented inline as modules were migrated)
+- [x] List all external dependencies per crate (captured in consolidated `Cargo.toml`)
 
 **Deliverables**:
 - Comprehensive dependency map
@@ -86,7 +86,7 @@ sombra-db/
 
 ---
 
-### Phase 2: Create Base Monolithic Structure
+### Phase 2: Create Base Monolithic Structure ✓ DONE
 
 **Goal**: Set up new monolithic src/ structure without migrating code yet
 
@@ -118,7 +118,7 @@ cargo check  # Should fail with missing module definitions (expected)
 
 ---
 
-### Phase 3: Migrate Base Layer (Depth 0)
+### Phase 3: Migrate Base Layer (Depth 0) ✓ DONE
 
 **Goal**: Migrate foundation types that have no internal dependencies
 
@@ -145,7 +145,7 @@ cargo test types:: checksum::
 
 ---
 
-### Phase 4: Migrate Primitives Layer (Depth 1-2)
+### Phase 4: Migrate Primitives Layer (Depth 1-2) ✓ DONE
 
 **Goal**: Migrate low-level utilities that depend only on types
 
@@ -186,7 +186,7 @@ cargo test primitives::pager::
 
 ---
 
-### Phase 5: Migrate Storage Layer (Depth 3-6)
+### Phase 5: Migrate Storage Layer (Depth 3-6) ✓ DONE
 
 **Goal**: Migrate storage engine components
 
@@ -227,7 +227,7 @@ cargo test storage::    # All storage tests
 
 ---
 
-### Phase 6: Migrate Query & High-Level Components
+### Phase 6: Migrate Query & High-Level Components ✓ DONE
 
 **Goal**: Migrate query engine and admin tools
 
@@ -259,7 +259,7 @@ cargo build --bin cli
 
 ---
 
-### Phase 7: Reorganize Tests & Utilities
+### Phase 7: Reorganize Tests & Utilities ✓ DONE
 
 **Goal**: Consolidate testing infrastructure
 
@@ -301,7 +301,7 @@ cargo build --bin cli
 
 ---
 
-### Phase 8: Update Language Bindings
+### Phase 8: Update Language Bindings ✓ DONE
 
 **Goal**: Update FFI layers to use monolithic crate
 
@@ -549,17 +549,17 @@ After migration, you should see:
 
 | Phase | Duration | Status |
 |-------|----------|--------|
-| 1. Planning | 1-2 days | In Progress |
-| 2. Base Structure | 1 day | Pending |
-| 3. Base Layer | 1 day | Pending |
-| 4. Primitives | 3-4 days | Pending |
-| 5. Storage | 4-5 days | Pending |
-| 6. Query & CLI | 2-3 days | Pending |
-| 7. Tests | 2 days | Pending |
-| 8. Bindings | 1-2 days | Pending |
-| 9. Cleanup | 1 day | Pending |
-| 10. Validation | 1-2 days | Pending |
-| **Total** | **17-25 days** | **Pending** |
+| 1. Planning | 1-2 days | ✅ Completed |
+| 2. Base Structure | 1 day | ✅ Completed |
+| 3. Base Layer | 1 day | ✅ Completed |
+| 4. Primitives | 3-4 days | ✅ Completed |
+| 5. Storage | 4-5 days | ✅ Completed |
+| 6. Query & CLI | 2-3 days | ✅ Completed |
+| 7. Tests | 2 days | ✅ Completed |
+| 8. Bindings | 1-2 days | ✅ Completed |
+| 9. Cleanup | 1 day | 🔄 In Progress |
+| 10. Validation | 1-2 days | ⏳ Pending |
+| **Total** | **17-25 days** | **Ongoing** |
 
 **Realistic estimate with team**: 2-3 weeks
 

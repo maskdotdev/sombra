@@ -1,44 +1,51 @@
-[workspace]
-members = [
-    "crates/sombra-*",
-    "bindings/node",
-    "bindings/python",
-]
-resolver = "2"
+[package]
+name = "sombra"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+authors = ["Sombra DB Developers"]
 
- [workspace.package]
- edition = "2021"
- version = "0.0.0"
- license = "MIT"
+[lib]
+name = "sombra"
+path = "src/lib.rs"
 
-[workspace.dependencies]
+[[bin]]
+name = "cli"
+path = "src/bin/cli.rs"
+
+[features]
+default = []
+degree-cache = []
+ffi-benches = []
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+bytes = "1"
+crc32fast = "1.4"
+csv = "1.3"
+hex = "0.4"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+rand = "0.8"
+smallvec = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "1"
 tracing = "0.1"
-parking_lot = { version = "0.12", features = ["arc_lock"] }
-crc32fast = "1.4"
-bytes = "1"
-sombra-types = { path = "crates/sombra-types" }
-sombra-bytes = { path = "crates/sombra-bytes" }
-sombra-checksum = { path = "crates/sombra-checksum" }
-sombra-io = { path = "crates/sombra-io" }
-sombra-wal = { path = "crates/sombra-wal" }
-sombra-concurrency = { path = "crates/sombra-concurrency" }
-sombra-pager = { path = "crates/sombra-pager" }
-sombra-core = { path = "crates/sombra-core" }
-sombra-btree = { path = "crates/sombra-btree" }
-sombra-catalog = { path = "crates/sombra-catalog" }
-sombra-index = { path = "crates/sombra-index" }
-sombra-query = { path = "crates/sombra-query" }
-sombra-storage = { path = "crates/sombra-storage" }
-sombra-vstore = { path = "crates/sombra-vstore" }
-sombra-ffi = { path = "crates/sombra-ffi" }
-sombra-cli = { path = "crates/sombra-cli" }
-sombra-testkit = { path = "crates/sombra-testkit" }
-sombra-bench = { path = "crates/sombra-bench" }
-sombra-fuzz = { path = "crates/sombra-fuzz" }
-sombra-admin = { path = "crates/sombra-admin" }
-sombra-py-native = { path = "bindings/python" }
 
- [workspace.lints.rust]
- unsafe_code = "deny"
- missing_docs = "warn"
+[dev-dependencies]
+assert_cmd = "2.0"
+proptest = "1.9.0"
+tempfile = "3.10.1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+rand_chacha = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

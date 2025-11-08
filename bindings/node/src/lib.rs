@@ -6,8 +6,10 @@ use napi::bindgen_prelude::Result as NapiResult;
 use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value;
-use sombra_ffi::{Database, DatabaseOptions, FfiError, QueryStream};
-use sombra_pager::{PagerOptions, Synchronous};
+use sombra::{
+  ffi::{Database, DatabaseOptions, FfiError, QueryStream},
+  primitives::pager::{PagerOptions, Synchronous},
+};
 
 #[derive(Debug, Default, Deserialize)]
 #[napi(object)]

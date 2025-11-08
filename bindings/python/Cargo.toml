@@ -14,5 +14,4 @@ path = "sombra_py/_native.rs"
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sombra-ffi = { workspace = true }
-sombra-pager = { workspace = true }
+sombra = { path = "../.." }
