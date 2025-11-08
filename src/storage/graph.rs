@@ -750,10 +750,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
-        if let Err(err) = self.insert_adjacencies(
-            tx,
-            &[(spec.src, spec.dst, spec.ty, edge_id)],
-        ) {
+        if let Err(err) = self.insert_adjacencies(tx, &[(spec.src, spec.dst, spec.ty, edge_id)]) {
             let _ = self.edges.delete(tx, &edge_id.0);
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
@@ -986,24 +983,21 @@ impl Graph {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(_, rev)| rev).collect();
             refs.sort_unstable_by(|a, b| a.cmp(b));
             let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
-            self.adj_rev.put_many(tx, iter)?;
+            if let Err(err) = self.adj_rev.put_many(tx, iter) {
+                self.rollback_adjacency_batch(tx, &keys);
+                return Err(err);
+            }
         }
         #[cfg(feature = "degree-cache")]
         if self.degree_cache_enabled {
-            let mut applied: Vec<(NodeId, DegreeDir, TypeId)> = Vec::new();
+            let mut deltas: BTreeMap<(NodeId, DegreeDir, TypeId), i64> = BTreeMap::new();
             for (src, dst, ty, _edge) in entries {
-                if let Err(err) = self.bump_degree(tx, *src, DegreeDir::Out, *ty, 1) {
-                    self.rollback_adjacency_batch(tx, &keys);
-                    self.rollback_degrees(tx, &applied);
-                    return Err(err);
-                }
-                applied.push((*src, DegreeDir::Out, *ty));
-                if let Err(err) = self.bump_degree(tx, *dst, DegreeDir::In, *ty, 1) {
-                    self.rollback_adjacency_batch(tx, &keys);
-                    self.rollback_degrees(tx, &applied);
-                    return Err(err);
-                }
-                applied.push((*dst, DegreeDir::In, *ty));
+                *deltas.entry((*src, DegreeDir::Out, *ty)).or_default() += 1;
+                *deltas.entry((*dst, DegreeDir::In, *ty)).or_default() += 1;
+            }
+            if let Err(err) = self.apply_degree_batch(tx, &deltas) {
+                self.rollback_adjacency_batch(tx, &keys);
+                return Err(err);
             }
         }
         Ok(())
@@ -1630,21 +1624,34 @@ impl Graph {
     }
 
     #[cfg(feature = "degree-cache")]
-    fn rollback_degrees(
+    fn apply_degree_batch(
         &self,
         tx: &mut WriteGuard<'_>,
-        applied: &[(NodeId, DegreeDir, TypeId)],
-    ) {
-        for (node, dir, ty) in applied.iter().rev() {
-            let _ = self.bump_degree(tx, *node, *dir, *ty, -1);
+        deltas: &BTreeMap<(NodeId, DegreeDir, TypeId), i64>,
+    ) -> Result<()> {
+        if deltas.is_empty() {
+            return Ok(());
         }
+        let mut applied: Vec<(NodeId, DegreeDir, TypeId, i64)> = Vec::new();
+        for ((node, dir, ty), delta) in deltas {
+            if *delta == 0 {
+                continue;
+            }
+            if let Err(err) = self.bump_degree(tx, *node, *dir, *ty, *delta) {
+                for (node_applied, dir_applied, ty_applied, delta_applied) in
+                    applied.into_iter().rev()
+                {
+                    let _ =
+                        self.bump_degree(tx, node_applied, dir_applied, ty_applied, -delta_applied);
+                }
+                return Err(err);
+            }
+            applied.push((*node, *dir, *ty, *delta));
+        }
+        Ok(())
     }
 
-    fn rollback_adjacency_batch(
-        &self,
-        tx: &mut WriteGuard<'_>,
-        keys: &[(Vec<u8>, Vec<u8>)],
-    ) {
+    fn rollback_adjacency_batch(&self, tx: &mut WriteGuard<'_>, keys: &[(Vec<u8>, Vec<u8>)]) {
         for (fwd, rev) in keys {
             let _ = self.adj_fwd.delete(tx, fwd);
             let _ = self.adj_rev.delete(tx, rev);
