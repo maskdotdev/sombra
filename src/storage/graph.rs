@@ -1106,6 +1106,16 @@ impl Graph {
                 let (src, ty, dst, edge) = adjacency::decode_fwd_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
                 debug_assert_eq!(src, node);
+                match src.cmp(&node) {
+                    CmpOrdering::Less => continue,
+                    CmpOrdering::Greater => break,
+                    CmpOrdering::Equal => {}
+                }
+                if let Some(filter) = ty_filter {
+                    if ty != filter {
+                        continue;
+                    }
+                }
                 if let Some(set) = seen.as_deref_mut() {
                     if !set.insert(dst) {
                         continue;
@@ -1120,6 +1130,16 @@ impl Graph {
                 let (dst, ty, src, edge) = adjacency::decode_rev_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
                 debug_assert_eq!(dst, node);
+                match dst.cmp(&node) {
+                    CmpOrdering::Less => continue,
+                    CmpOrdering::Greater => break,
+                    CmpOrdering::Equal => {}
+                }
+                if let Some(filter) = ty_filter {
+                    if ty != filter {
+                        continue;
+                    }
+                }
                 if let Some(set) = seen.as_deref_mut() {
                     if !set.insert(src) {
                         continue;
