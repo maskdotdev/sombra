@@ -929,12 +929,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             return Ok(false);
         }
 
-        let (slot_offsets, insert_idx, has_existing) = {
+        let (slot_entries, insert_idx, has_existing) = {
             let data = page.data();
             let slot_view = SlotView::new(&header, data)?;
-            let mut offsets = Vec::with_capacity(slot_view.len());
-            for offset in slot_view.slots().iter() {
-                offsets.push(offset);
+            let mut entries = Vec::with_capacity(slot_view.len());
+            for idx in 0..slot_view.len() {
+                let (start, len) = slot_view.slots().extent(idx)?;
+                entries.push((start as usize, len as usize));
             }
             let mut lo = 0usize;
             let mut hi = slot_view.len();
@@ -954,7 +955,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     }
                 }
             }
-            (offsets, existing.unwrap_or(lo), existing.is_some())
+            (entries, existing.unwrap_or(lo), existing.is_some())
         };
 
         if has_existing {
@@ -967,10 +968,10 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
         }
 
-        let insert_offset = if insert_idx == slot_offsets.len() {
+        let insert_offset = if insert_idx == slot_entries.len() {
             free_start
         } else {
-            slot_offsets[insert_idx] as usize
+            slot_entries[insert_idx].0
         };
 
         let mut record = Vec::with_capacity(record_len);
@@ -994,36 +995,43 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             page::set_free_start(payload, new_free_start_u16);
             page::set_free_end(payload, new_free_end_u16);
 
-            let new_slot_count = slot_offsets.len() + 1;
+            let new_slot_count = slot_entries.len() + 1;
             let new_slot_count_u16 = u16::try_from(new_slot_count)
                 .map_err(|_| SombraError::Invalid("leaf slot count overflow"))?;
             page::set_slot_count(payload, new_slot_count_u16);
 
-            let mut new_offsets = Vec::with_capacity(new_slot_count);
+            let record_len_u16 = u16::try_from(record_len)
+                .map_err(|_| SombraError::Invalid("leaf slot length overflow"))?;
+            let mut new_entries = Vec::with_capacity(new_slot_count);
             for i in 0..new_slot_count {
                 if i == insert_idx {
                     let offset_u16 = u16::try_from(insert_offset)
                         .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
-                    new_offsets.push(offset_u16);
+                    new_entries.push((offset_u16, record_len_u16));
                 } else {
                     let old_idx = if i < insert_idx { i } else { i - 1 };
-                    let mut offset = slot_offsets[old_idx] as usize;
+                    let (old_offset, old_len) = slot_entries[old_idx];
+                    let mut offset = old_offset;
                     if old_idx >= insert_idx {
-                        offset += record_len;
+                        offset = offset
+                            .checked_add(record_len)
+                            .ok_or_else(|| SombraError::Invalid("leaf slot offset overflow"))?;
                     }
                     let offset_u16 = u16::try_from(offset)
                         .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
-                    new_offsets.push(offset_u16);
+                    let len_u16 = u16::try_from(old_len)
+                        .map_err(|_| SombraError::Invalid("leaf slot length overflow"))?;
+                    new_entries.push((offset_u16, len_u16));
                 }
             }
             let payload_len = payload.len();
-            let new_slot_bytes = new_offsets.len() * page::SLOT_ENTRY_LEN;
+            let new_slot_bytes = new_entries.len() * page::SLOT_ENTRY_LEN;
             let slot_dir_start = payload_len
                 .checked_sub(new_slot_bytes)
                 .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
-            for (idx, offset) in new_offsets.iter().enumerate() {
+            for (idx, (offset, len)) in new_entries.iter().enumerate() {
                 let pos = slot_dir_start + idx * page::SLOT_ENTRY_LEN;
-                payload[pos..pos + page::SLOT_ENTRY_LEN].copy_from_slice(&offset.to_be_bytes());
+                page::write_slot_entry(payload, pos, *offset, *len);
             }
 
             if insert_idx == 0 {
@@ -1056,12 +1064,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 return Ok(None);
             }
         }
-        let (slot_offsets, target_idx, payload_len) = {
+        let (slot_entries, target_idx, payload_len) = {
             let data = page.data();
             let slot_view = SlotView::new(header, data)?;
-            let mut offsets = Vec::with_capacity(slot_view.len());
+            let mut entries = Vec::with_capacity(slot_view.len());
             for idx in 0..slot_view.len() {
-                offsets.push(slot_view.slots().get(idx)?);
+                let (start, len) = slot_view.slots().extent(idx)?;
+                entries.push((start as usize, len as usize));
             }
             let mut lo = 0usize;
             let mut hi = slot_view.len();
@@ -1082,21 +1091,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let Some(idx) = found else {
                 return Ok(None);
             };
-            (offsets, idx, slot_view.payload().len())
+            (entries, idx, slot_view.payload().len())
         };
-        if slot_offsets.len() <= 1 {
+        if slot_entries.len() <= 1 {
             return Ok(None);
         }
-        let record_start = slot_offsets[target_idx] as usize;
-        let record_end = if target_idx + 1 < slot_offsets.len() {
-            slot_offsets[target_idx + 1] as usize
-        } else {
-            header.free_start as usize
-        };
+        let (record_start, record_len) = slot_entries[target_idx];
+        let record_end = record_start
+            .checked_add(record_len)
+            .ok_or_else(|| SombraError::Corruption("leaf record extent overflow"))?;
         if record_end < record_start {
             return Err(SombraError::Corruption("leaf record extent inverted"));
         }
-        let record_len = record_end - record_start;
         if record_len == 0 {
             return Ok(None);
         }
@@ -1128,12 +1134,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         page::set_free_start(payload, new_free_start_u16);
         page::set_free_end(payload, new_free_end_u16);
 
-        let mut new_offsets = Vec::with_capacity(slot_offsets.len() - 1);
-        for (idx, offset) in slot_offsets.iter().enumerate() {
+        let mut new_entries = Vec::with_capacity(slot_entries.len() - 1);
+        for (idx, (offset, len)) in slot_entries.iter().enumerate() {
             if idx == target_idx {
                 continue;
             }
-            let mut adjusted = *offset as usize;
+            let mut adjusted = *offset;
             if idx > target_idx {
                 adjusted = adjusted
                     .checked_sub(record_len)
@@ -1141,24 +1147,26 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
             let offset_u16 = u16::try_from(adjusted)
                 .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
-            new_offsets.push(offset_u16);
+            let len_u16 = u16::try_from(*len)
+                .map_err(|_| SombraError::Invalid("leaf slot length overflow"))?;
+            new_entries.push((offset_u16, len_u16));
         }
-        let new_slot_count_u16 = u16::try_from(new_offsets.len())
+        let new_slot_count_u16 = u16::try_from(new_entries.len())
             .map_err(|_| SombraError::Invalid("leaf slot count overflow"))?;
         page::set_slot_count(payload, new_slot_count_u16);
-        let new_slot_bytes = new_offsets.len() * page::SLOT_ENTRY_LEN;
+        let new_slot_bytes = new_entries.len() * page::SLOT_ENTRY_LEN;
         let new_slot_start = payload_len
             .checked_sub(new_slot_bytes)
             .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
         let old_slot_start = payload_len
-            .checked_sub(slot_offsets.len() * page::SLOT_ENTRY_LEN)
+            .checked_sub(slot_entries.len() * page::SLOT_ENTRY_LEN)
             .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
         if new_slot_start > old_slot_start {
             payload[old_slot_start..new_slot_start].fill(0);
         }
-        for (idx, offset) in new_offsets.iter().enumerate() {
+        for (idx, (offset, len)) in new_entries.iter().enumerate() {
             let pos = new_slot_start + idx * page::SLOT_ENTRY_LEN;
-            payload[pos..pos + page::SLOT_ENTRY_LEN].copy_from_slice(&offset.to_be_bytes());
+            page::write_slot_entry(payload, pos, *offset, *len);
         }
         if removed_first_key {
             if let Some(first) = new_first_key {
@@ -1397,7 +1405,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let fences_end = page::PAYLOAD_HEADER_LEN + low_fence.len() + high_fence.len();
         let slot_bytes = entries
             .len()
-            .checked_mul(2)
+            .checked_mul(page::SLOT_ENTRY_LEN)
             .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
         if fences_end > payload_len {
             return Err(SombraError::Invalid("fence data exceeds payload"));
@@ -1414,6 +1422,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let max_records_bytes = new_free_end - fences_end;
         let mut records = Vec::new();
         let mut offsets = Vec::with_capacity(entries.len());
+        let mut lengths = Vec::with_capacity(entries.len());
         for (key, value) in entries {
             let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
             if records.len() + record_len > max_records_bytes {
@@ -1423,6 +1432,9 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let offset_u16 = u16::try_from(offset)
                 .map_err(|_| SombraError::Invalid("record offset exceeds u16"))?;
             offsets.push(offset_u16);
+            let record_len_u16 = u16::try_from(record_len)
+                .map_err(|_| SombraError::Invalid("record length exceeds u16"))?;
+            lengths.push(record_len_u16);
             page::encode_leaf_record(key, value, &mut records)?;
         }
         let free_start = fences_end + records.len();
@@ -1436,6 +1448,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(Some(LeafLayout {
             records,
             offsets,
+            lengths,
             free_start: free_start_u16,
             free_end: free_end_u16,
         }))
@@ -1464,9 +1477,10 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         page::set_slot_count(payload, slot_count_u16);
         page::set_free_start(payload, layout.free_start);
         page::set_free_end(payload, layout.free_end);
-        for (i, offset) in layout.offsets.iter().enumerate() {
-            let pos = new_free_end + i * 2;
-            payload[pos..pos + 2].copy_from_slice(&offset.to_be_bytes());
+        debug_assert_eq!(layout.offsets.len(), layout.lengths.len());
+        for i in 0..layout.offsets.len() {
+            let pos = new_free_end + i * page::SLOT_ENTRY_LEN;
+            page::write_slot_entry(payload, pos, layout.offsets[i], layout.lengths[i]);
         }
         // Preserve parent/sibling metadata.
         if let Some(parent) = header.parent {
@@ -1521,6 +1535,7 @@ enum InternalInsert {
 struct LeafLayout {
     records: Vec<u8>,
     offsets: Vec<u16>,
+    lengths: Vec<u16>,
     free_start: u16,
     free_end: u16,
 }
@@ -1528,6 +1543,7 @@ struct LeafLayout {
 struct InternalLayout {
     records: Vec<u8>,
     offsets: Vec<u16>,
+    lengths: Vec<u16>,
     free_start: u16,
     free_end: u16,
 }
@@ -1605,7 +1621,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let fences_end = page::PAYLOAD_HEADER_LEN + low_fence.len() + high_fence.len();
         let slot_bytes = entries
             .len()
-            .checked_mul(2)
+            .checked_mul(page::SLOT_ENTRY_LEN)
             .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
         if fences_end > payload_len {
             return Err(SombraError::Invalid("fence data exceeds payload"));
@@ -1622,6 +1638,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let max_records_bytes = new_free_end - fences_end;
         let mut records = Vec::new();
         let mut offsets = Vec::with_capacity(entries.len());
+        let mut lengths = Vec::with_capacity(entries.len());
         for (key, child) in entries {
             let record_len = page::INTERNAL_RECORD_HEADER_LEN + key.len();
             if records.len() + record_len > max_records_bytes {
@@ -1631,6 +1648,9 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let offset_u16 = u16::try_from(offset)
                 .map_err(|_| SombraError::Invalid("record offset exceeds u16"))?;
             offsets.push(offset_u16);
+            let record_len_u16 = u16::try_from(record_len)
+                .map_err(|_| SombraError::Invalid("internal record length exceeds u16"))?;
+            lengths.push(record_len_u16);
             page::encode_internal_record(key, *child, &mut records);
         }
         let free_start = fences_end + records.len();
@@ -1644,6 +1664,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(Some(InternalLayout {
             records,
             offsets,
+            lengths,
             free_start: free_start_u16,
             free_end: free_end_u16,
         }))
@@ -1672,9 +1693,9 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         page::set_slot_count(payload, slot_count_u16);
         page::set_free_start(payload, layout.free_start);
         page::set_free_end(payload, layout.free_end);
-        for (i, offset) in layout.offsets.iter().enumerate() {
-            let pos = new_free_end + i * 2;
-            payload[pos..pos + 2].copy_from_slice(&offset.to_be_bytes());
+        for i in 0..layout.offsets.len() {
+            let pos = new_free_end + i * page::SLOT_ENTRY_LEN;
+            page::write_slot_entry(payload, pos, layout.offsets[i], layout.lengths[i]);
         }
         if let Some(parent) = header.parent {
             page::set_parent(payload, Some(parent));

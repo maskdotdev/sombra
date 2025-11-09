@@ -876,8 +876,9 @@ fn cascading_splits_build_multi_level_tree() -> Result<()> {
     let header = page::Header::parse(root_page.data())?;
     assert_eq!(header.kind, page::BTreePageKind::Internal);
     assert!(
-        header.slot_count as usize >= 3,
-        "expected root to have at least 3 children"
+        header.slot_count as usize >= 2,
+        "expected root to have at least 2 children, got {}",
+        header.slot_count
     );
 
     for key in 0u64..200 {

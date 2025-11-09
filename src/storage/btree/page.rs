@@ -23,8 +23,8 @@ const FENCE_DATA_OFFSET: usize = PAYLOAD_HEADER_LEN;
 /// Internal record header length (`child:u64` + `sep_len:u16`).
 pub const INTERNAL_RECORD_HEADER_LEN: usize = 10;
 
-/// Size in bytes of a single slot directory entry.
-pub const SLOT_ENTRY_LEN: usize = 2;
+/// Size in bytes of a single slot directory entry (offset + length).
+pub const SLOT_ENTRY_LEN: usize = 4;
 
 /// Logical kind for a B+ tree page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +174,16 @@ pub fn set_slot_count(payload: &mut [u8], value: u16) {
     write_u16(payload, NSLOTS_OFFSET, value);
 }
 
+/// Writes a single slot entry at `pos` (relative to the payload start).
+#[inline]
+pub fn write_slot_entry(payload: &mut [u8], pos: usize, offset: u16, len: u16) {
+    debug_assert!(pos + SLOT_ENTRY_LEN <= payload.len());
+    let offset_bytes = offset.to_be_bytes();
+    let len_bytes = len.to_be_bytes();
+    payload[pos..pos + 2].copy_from_slice(&offset_bytes);
+    payload[pos + 2..pos + 4].copy_from_slice(&len_bytes);
+}
+
 /// Sets the free space start offset in the page header.
 pub fn set_free_start(payload: &mut [u8], value: u16) {
     write_u16(payload, FREE_START_OFFSET, value);
@@ -217,18 +227,17 @@ pub struct SlotDirectory<'a> {
 impl<'a> SlotDirectory<'a> {
     /// Returns the number of slots in the directory.
     pub fn len(&self) -> usize {
-        self.slots.len() / SLOT_ENTRY_LEN
+        if SLOT_ENTRY_LEN == 0 {
+            0
+        } else {
+            self.slots.len() / SLOT_ENTRY_LEN
+        }
     }
 
     /// Retrieves the offset value at the given slot index.
     pub fn get(&self, idx: usize) -> Result<u16> {
-        if idx >= self.len() {
-            return Err(SombraError::Invalid("slot index out of range"));
-        }
-        let off = idx * SLOT_ENTRY_LEN;
-        Ok(u16::from_be_bytes(
-            self.slots[off..off + SLOT_ENTRY_LEN].try_into().unwrap(),
-        ))
+        let entry = self.entry_bytes(idx)?;
+        Ok(u16::from_be_bytes(entry[0..2].try_into().unwrap()))
     }
 
     /// Returns an iterator over all slot offsets.
@@ -238,9 +247,25 @@ impl<'a> SlotDirectory<'a> {
             pos: 0,
         }
     }
+
+    /// Returns the (start, length) tuple for `idx`.
+    pub fn extent(&self, idx: usize) -> Result<(u16, u16)> {
+        let entry = self.entry_bytes(idx)?;
+        let start = u16::from_be_bytes(entry[0..2].try_into().unwrap());
+        let len = u16::from_be_bytes(entry[2..4].try_into().unwrap());
+        Ok((start, len))
+    }
+
+    fn entry_bytes(&self, idx: usize) -> Result<&'a [u8]> {
+        if idx >= self.len() {
+            return Err(SombraError::Invalid("slot index out of range"));
+        }
+        let off = idx * SLOT_ENTRY_LEN;
+        Ok(&self.slots[off..off + SLOT_ENTRY_LEN])
+    }
 }
 
-/// Iterator over slot directory entries.
+/// Iterator over slot directory entries (offset-only view).
 pub struct SlotIter<'a> {
     slots: &'a [u8],
     pos: usize,
@@ -254,7 +279,7 @@ impl<'a> Iterator for SlotIter<'a> {
             return None;
         }
         let value = u16::from_be_bytes(
-            self.slots[self.pos..self.pos + SLOT_ENTRY_LEN]
+            self.slots[self.pos..self.pos + 2]
                 .try_into()
                 .expect("slot slice always 2 bytes"),
         );
@@ -293,44 +318,44 @@ impl SlotExtents {
         if free_start > payload_len {
             return Err(SombraError::Corruption("record extent beyond payload"));
         }
+        let mut extents = SmallVec::with_capacity(slots.len());
+        extents.resize(slots.len(), SlotExtent::default());
         let mut ordered: SmallVec<[(usize, usize); INLINE_SLOT_EXTENTS]> =
             SmallVec::with_capacity(slots.len());
         for idx in 0..slots.len() {
-            let offset = slots.get(idx)? as usize;
-            ordered.push((offset, idx));
-        }
-        ordered.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        let mut extents = SmallVec::with_capacity(slots.len());
-        extents.resize(slots.len(), SlotExtent::default());
-        for (i, (start, slot_idx)) in ordered.iter().enumerate() {
-            if *start < fences_end {
+            let (start_u16, len_u16) = slots.extent(idx)?;
+            let start = start_u16 as usize;
+            let len = len_u16 as usize;
+            if len == 0 {
+                return Err(SombraError::Corruption("record length zero"));
+            }
+            if start < fences_end {
                 return Err(SombraError::Corruption("record overlaps fence keys"));
             }
-            if *start >= payload_len {
-                return Err(SombraError::Corruption("record offset beyond payload"));
-            }
-            let end = if let Some((next_start, _)) = ordered.get(i + 1) {
-                *next_start
-            } else {
-                free_start
-            };
+            let end = start
+                .checked_add(len)
+                .ok_or(SombraError::Corruption("record extent overflow"))?;
             if end > payload_len {
                 return Err(SombraError::Corruption("record extent beyond payload"));
             }
-            if end < *start {
-                return Err(SombraError::Corruption("record extent inverted"));
+            if end > free_start {
+                return Err(SombraError::Corruption("record extent beyond free_start"));
             }
-            if end == *start {
-                return Err(SombraError::Corruption("record extent empty"));
-            }
-            let start_u16 = u16::try_from(*start)
-                .map_err(|_| SombraError::Corruption("record offset beyond u16"))?;
             let end_u16 = u16::try_from(end)
                 .map_err(|_| SombraError::Corruption("record extent beyond u16"))?;
-            extents[*slot_idx] = SlotExtent {
+            extents[idx] = SlotExtent {
                 start: start_u16,
                 end: end_u16,
             };
+            ordered.push((start, end));
+        }
+        ordered.sort_unstable_by_key(|entry| entry.0);
+        let mut prev_end = fences_end;
+        for (start, end) in ordered {
+            if start < prev_end {
+                return Err(SombraError::Corruption("record extents overlap"));
+            }
+            prev_end = end;
         }
         Ok(Self { extents })
     }
@@ -667,7 +692,14 @@ mod tests {
             set_free_start(payload, record_end as u16);
             set_free_end(payload, (payload_len - SLOT_ENTRY_LEN) as u16);
             set_slot_count(payload, 1);
-            write_u16(payload, payload_len - SLOT_ENTRY_LEN, record_start as u16);
+            let rec_len_u16 =
+                u16::try_from(rec.len()).expect("test record length fits into u16 slot entry");
+            write_slot_entry(
+                payload,
+                payload_len - SLOT_ENTRY_LEN,
+                record_start as u16,
+                rec_len_u16,
+            );
         }
         let payload = &buf[PAGE_HDR_LEN..];
         let hdr = Header::parse(&buf)?;
@@ -718,9 +750,18 @@ mod tests {
         set_free_start(payload, rec2_end as u16);
         set_free_end(payload, (payload_len - SLOT_ENTRY_LEN * 2) as u16);
         set_slot_count(payload, 2);
+        let rec1_len_u16 =
+            u16::try_from(rec1.len()).expect("test record length fits into u16 slot entry");
+        let rec2_len_u16 =
+            u16::try_from(rec2.len()).expect("test record length fits into u16 slot entry");
         let slots_start = payload_len - SLOT_ENTRY_LEN * 2;
-        write_u16(payload, slots_start, rec1_start as u16);
-        write_u16(payload, slots_start + SLOT_ENTRY_LEN, rec2_start as u16);
+        write_slot_entry(payload, slots_start, rec1_start as u16, rec1_len_u16);
+        write_slot_entry(
+            payload,
+            slots_start + SLOT_ENTRY_LEN,
+            rec2_start as u16,
+            rec2_len_u16,
+        );
 
         let parsed = Header::parse(&buf)?;
         let payload = payload_slice(&buf)?;
