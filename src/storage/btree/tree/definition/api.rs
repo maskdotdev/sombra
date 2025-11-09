@@ -108,7 +108,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let (leaf_id, header, path) = self.find_leaf_mut(tx, &key_buf)?;
         let leaf = tx.page_mut(leaf_id)?;
         match self.insert_into_leaf(tx, leaf, header, key_buf, val_buf)? {
-            LeafInsert::Done => Ok(()),
+            LeafInsert::Done { new_first_key } => {
+                if let (Some(first_key), Some(parent_frame)) = (new_first_key.as_ref(), path.last())
+                {
+                    self.update_parent_separator(tx, parent_frame, first_key)?;
+                }
+                Ok(())
+            }
             LeafInsert::Split {
                 left_min,
                 right_min,
@@ -150,7 +156,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let leaf_page = tx.page_mut(leaf_id)?;
             let key_for_insert = key_buf.clone();
             match self.insert_into_leaf(tx, leaf_page, header, key_for_insert, val_buf)? {
-                LeafInsert::Done => {
+                LeafInsert::Done { new_first_key } => {
+                    if let (Some(first), Some(parent_frame)) =
+                        (new_first_key.as_ref(), path.last())
+                    {
+                        self.update_parent_separator(tx, parent_frame, first)?;
+                    }
                     cache = Some(LeafCache {
                         leaf_id,
                         path: path.clone(),
@@ -220,6 +231,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 if can_update_fence {
                     let mut page = tx.page_mut(leaf_id)?;
                     if let Some(result) = self.try_delete_leaf_in_place(
+                        tx,
                         &mut page,
                         &header,
                         key_buf.as_slice(),
@@ -246,84 +258,105 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
 
             if !applied_in_place {
-                let high_slice = high_fence.as_slice();
-                let primary_layout =
-                    self.build_leaf_layout(payload_len, new_low.as_slice(), high_slice, &entries)?;
-                local_rebalance = match primary_layout {
-                    Some(layout) => {
-                        let fences_end =
-                            page::PAYLOAD_HEADER_LEN + new_low.len() + high_fence.len();
-                        {
-                            let mut page = tx.page_mut(leaf_id)?;
-                            self.apply_leaf_layout(&mut page, &header, fences_end, &layout)?;
-                            let high_opt = if high_fence.is_empty() {
-                                None
-                            } else {
-                                Some(high_slice)
-                            };
-                            self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
-                        }
-                        self.stats.inc_leaf_rebuilds();
-                        let fill =
-                            Self::fill_percent(payload_len, layout.free_start, layout.free_end);
-                        has_parent && fill < self.options.page_fill_target
+                if self.options.in_place_leaf_edits {
+                    if !has_parent {
+                        return Err(SombraError::Invalid(
+                            "leaf layout after delete exceeds capacity",
+                        ));
                     }
-                    None => {
-                        let fallback_layout = self.build_leaf_layout(
-                            payload_len,
-                            low_fence.as_slice(),
-                            high_slice,
-                            &entries,
-                        )?;
-                        match fallback_layout {
-                            Some(layout) => {
-                                {
-                                    let mut page = tx.page_mut(leaf_id)?;
-                                    let fences_end = page::PAYLOAD_HEADER_LEN
-                                        + low_fence.len()
-                                        + high_fence.len();
-                                    self.apply_leaf_layout(
-                                        &mut page, &header, fences_end, &layout,
-                                    )?;
-                                    let high_opt = if high_fence.is_empty() {
-                                        None
-                                    } else {
-                                        Some(high_slice)
-                                    };
-                                    self.apply_leaf_fences(
-                                        &mut page,
-                                        low_fence.as_slice(),
-                                        high_opt,
-                                    )?;
-                                }
-                                self.stats.inc_leaf_rebuilds();
-                                let fill = Self::fill_percent(
-                                    payload_len,
-                                    layout.free_start,
-                                    layout.free_end,
-                                );
-                                first_key_changed = false;
-                                has_parent && fill < self.options.page_fill_target
+                    rebalance_snapshot = Some(LeafSnapshot {
+                        entries: entries.clone(),
+                        low_fence: new_low.clone(),
+                        high_fence: high_fence.clone(),
+                    });
+                    local_rebalance = true;
+                    if first_key_changed {
+                        parent_update_key = Some(new_low);
+                    }
+                } else {
+                    let high_slice = high_fence.as_slice();
+                    let primary_layout = self.build_leaf_layout(
+                        payload_len,
+                        new_low.as_slice(),
+                        high_slice,
+                        &entries,
+                    )?;
+                    local_rebalance = match primary_layout {
+                        Some(layout) => {
+                            let fences_end =
+                                page::PAYLOAD_HEADER_LEN + new_low.len() + high_fence.len();
+                            {
+                                let mut page = tx.page_mut(leaf_id)?;
+                                self.apply_leaf_layout(&mut page, &header, fences_end, &layout)?;
+                                let high_opt = if high_fence.is_empty() {
+                                    None
+                                } else {
+                                    Some(high_slice)
+                                };
+                                self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
                             }
-                            None => {
-                                if !has_parent {
-                                    return Err(SombraError::Invalid(
-                                        "leaf layout after delete exceeds capacity",
-                                    ));
+                            self.stats.inc_leaf_rebuilds();
+                            let fill =
+                                Self::fill_percent(payload_len, layout.free_start, layout.free_end);
+                            has_parent && fill < self.options.page_fill_target
+                        }
+                        None => {
+                            let fallback_layout = self.build_leaf_layout(
+                                payload_len,
+                                low_fence.as_slice(),
+                                high_slice,
+                                &entries,
+                            )?;
+                            match fallback_layout {
+                                Some(layout) => {
+                                    {
+                                        let mut page = tx.page_mut(leaf_id)?;
+                                        let fences_end = page::PAYLOAD_HEADER_LEN
+                                            + low_fence.len()
+                                            + high_fence.len();
+                                        self.apply_leaf_layout(
+                                            &mut page, &header, fences_end, &layout,
+                                        )?;
+                                        let high_opt = if high_fence.is_empty() {
+                                            None
+                                        } else {
+                                            Some(high_slice)
+                                        };
+                                        self.apply_leaf_fences(
+                                            &mut page,
+                                            low_fence.as_slice(),
+                                            high_opt,
+                                        )?;
+                                    }
+                                    self.stats.inc_leaf_rebuilds();
+                                    let fill = Self::fill_percent(
+                                        payload_len,
+                                        layout.free_start,
+                                        layout.free_end,
+                                    );
+                                    first_key_changed = false;
+                                    has_parent && fill < self.options.page_fill_target
                                 }
-                                rebalance_snapshot = Some(LeafSnapshot {
-                                    entries: entries.clone(),
-                                    low_fence: new_low.clone(),
-                                    high_fence: high_fence.clone(),
-                                });
-                                true
+                                None => {
+                                    if !has_parent {
+                                        return Err(SombraError::Invalid(
+                                            "leaf layout after delete exceeds capacity",
+                                        ));
+                                    }
+                                    rebalance_snapshot = Some(LeafSnapshot {
+                                        entries: entries.clone(),
+                                        low_fence: new_low.clone(),
+                                        high_fence: high_fence.clone(),
+                                    });
+                                    true
+                                }
                             }
                         }
-                    }
-                };
+                    };
 
-                if first_key_changed {
-                    parent_update_key = Some(new_low);
+                    if first_key_changed {
+                        parent_update_key = Some(new_low);
+                    }
                 }
             }
             local_rebalance

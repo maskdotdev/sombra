@@ -6,56 +6,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         high_fence: &[u8],
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<Option<LeafLayout>> {
-        let fences_end = page::PAYLOAD_HEADER_LEN + low_fence.len() + high_fence.len();
-        let slot_bytes = entries
-            .len()
-            .checked_mul(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
-        if fences_end > payload_len {
-            return Err(SombraError::Invalid("fence data exceeds payload"));
-        }
-        if slot_bytes > payload_len {
-            return Err(SombraError::Invalid("slot directory exceeds payload"));
-        }
-        let new_free_end = payload_len
-            .checked_sub(slot_bytes)
-            .ok_or_else(|| SombraError::Invalid("slot directory larger than payload"))?;
-        if new_free_end < fences_end {
-            return Ok(None);
-        }
-        let max_records_bytes = new_free_end - fences_end;
-        let mut records = Vec::new();
-        let mut offsets = Vec::with_capacity(entries.len());
-        let mut lengths = Vec::with_capacity(entries.len());
-        for (key, value) in entries {
-            let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
-            if records.len() + record_len > max_records_bytes {
-                return Ok(None);
-            }
-            let offset = fences_end + records.len();
-            let offset_u16 = u16::try_from(offset)
-                .map_err(|_| SombraError::Invalid("record offset exceeds u16"))?;
-            offsets.push(offset_u16);
-            let record_len_u16 = u16::try_from(record_len)
-                .map_err(|_| SombraError::Invalid("record length exceeds u16"))?;
-            lengths.push(record_len_u16);
-            page::encode_leaf_record(key, value, &mut records)?;
-        }
-        let free_start = fences_end + records.len();
-        if free_start > new_free_end {
-            return Ok(None);
-        }
-        let free_start_u16 = u16::try_from(free_start)
-            .map_err(|_| SombraError::Invalid("free_start exceeds u16"))?;
-        let free_end_u16 = u16::try_from(new_free_end)
-            .map_err(|_| SombraError::Invalid("free_end exceeds u16"))?;
-        Ok(Some(LeafLayout {
-            records,
-            offsets,
-            lengths,
-            free_start: free_start_u16,
-            free_end: free_end_u16,
-        }))
+        LeafSplitBuilder::build_from_entries(payload_len, low_fence, high_fence, entries)
     }
 
     fn apply_leaf_layout(
@@ -550,71 +501,60 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if left_header.slot_count <= 1 {
             return Ok(false);
         }
-
+        self.trace_leaf_slots("borrow_left.before_donor", left_id, left_page.data());
         let left_data = left_page.data();
         let slot_view = SlotView::new(&left_header, left_data)?;
-        if slot_view.len() == 0 {
+        debug_assert_eq!(slot_view.len(), left_header.slot_count as usize);
+        if slot_view.len() <= 1 {
             return Ok(false);
         }
         let donor_idx = slot_view.len() - 1;
         let rec_slice = slot_view.slice(donor_idx)?;
         let record = page::decode_leaf_record(rec_slice)?;
         let borrowed_key = record.key.to_vec();
-        let borrowed_val = record.value.to_vec();
-        let record_len =
-            page::plain_leaf_record_encoded_len(borrowed_key.len(), borrowed_val.len())?;
+        let mut record_bytes = Vec::new();
+        page::encode_leaf_record(record.key, record.value, &mut record_bytes)?;
+        let (_, original_high) = left_header.fence_slices(left_page.data())?;
+        let original_high = original_high.to_vec();
 
-        let free_gap =
-            (leaf_header.free_end as usize).saturating_sub(leaf_header.free_start as usize);
-        let needed = record_len
-            .checked_add(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("leaf borrow size overflow"))?;
-        if free_gap < needed {
-            return Ok(false);
-        }
-        if leaf_header.low_fence_len != borrowed_key.len()
-            || left_header.high_fence_len != borrowed_key.len()
         {
-            return Ok(false);
+            let mut allocator = LeafAllocator::new(left_page.data_mut(), left_header.clone())?;
+            allocator.delete_slot(donor_idx)?;
         }
-
-        // Delete from the donor first to ensure we can fall back by reinserting.
-        if self
-            .try_delete_leaf_in_place(
-                &mut left_page,
-                &left_header,
-                borrowed_key.as_slice(),
-                false,
-                None,
-            )?
-            .is_none()
-        {
-            return Ok(false);
-        }
+        self.trace_leaf_slots("borrow_left.after_donor", left_id, left_page.data());
         drop(left_page);
 
-        let mut applied = false;
-        {
+        let applied = {
             let mut page = tx.page_mut(leaf_id)?;
-            if self.try_insert_leaf_in_place(
-                &mut page,
-                leaf_header,
-                borrowed_key.as_slice(),
-                borrowed_val.as_slice(),
-            )? {
-                applied = true;
-            }
-        }
+            self.trace_leaf_slots("borrow_left.before_recipient", leaf_id, page.data());
+            let recipient_header = page::Header::parse(page.data())?;
+            let insert_idx = 0;
+            let mut allocator = LeafAllocator::new(page.data_mut(), recipient_header.clone())?;
+            let applied = match allocator.insert_slot(insert_idx, &record_bytes) {
+                Ok(()) => {
+                    allocator.update_low_fence(borrowed_key.as_slice())?;
+                    true
+                }
+                Err(err) if allocator_capacity_error(&err) => false,
+                Err(err) => return Err(err),
+            };
+            self.trace_leaf_slots("borrow_left.after_recipient_attempt", leaf_id, page.data());
+            applied
+        };
         if !applied {
             // Reinsert into the left sibling to restore original state.
             let mut left_page = tx.page_mut(left_id)?;
             let refreshed_header = page::Header::parse(left_page.data())?;
-            let _ = self.try_insert_leaf_in_place(
-                &mut left_page,
-                &refreshed_header,
-                borrowed_key.as_slice(),
-                borrowed_val.as_slice(),
-            )?;
+            {
+                let mut allocator = LeafAllocator::new(left_page.data_mut(), refreshed_header.clone())?;
+                let reinstate_idx = allocator.slot_count();
+                allocator.insert_slot(reinstate_idx, &record_bytes)?;
+            }
+            {
+                let payload = page::payload_mut(left_page.data_mut())?;
+                page::set_high_fence(payload, original_high.as_slice())?;
+            }
+            self.trace_leaf_slots("borrow_left.rollback", left_id, left_page.data());
             return Ok(false);
         }
 
@@ -629,17 +569,6 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(true)
     }
 
-    fn leaf_append_cost(entries: &[(Vec<u8>, Vec<u8>)]) -> Result<usize> {
-        let mut total = 0usize;
-        for (key, value) in entries {
-            let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
-            total = total
-                .checked_add(record_len)
-                .and_then(|acc| acc.checked_add(page::SLOT_ENTRY_LEN))
-                .ok_or_else(|| SombraError::Invalid("leaf append size overflow"))?;
-        }
-        Ok(total)
-    }
 
     fn borrow_from_right_rebuild(
         &self,
@@ -755,7 +684,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if right_header.slot_count <= 1 {
             return Ok(false);
         }
-
+        self.trace_leaf_slots("borrow_right.before_donor", right_id, right_page.data());
         let right_data = right_page.data();
         let slot_view = SlotView::new(&right_header, right_data)?;
         if slot_view.len() < 2 {
@@ -764,58 +693,49 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let first_slice = slot_view.slice(0)?;
         let record = page::decode_leaf_record(first_slice)?;
         let borrowed_key = record.key.to_vec();
-        let borrowed_val = record.value.to_vec();
-        let record_len =
-            page::plain_leaf_record_encoded_len(borrowed_key.len(), borrowed_val.len())?;
 
         let second_slice = slot_view.slice(1)?;
         let next_record = page::decode_leaf_record(second_slice)?;
         let right_new_first = next_record.key.to_vec();
-
-        if right_header.low_fence_len != right_new_first.len()
-            || leaf_header.high_fence_len != right_new_first.len()
-        {
-            return Ok(false);
-        }
-
-        let free_gap =
-            (leaf_header.free_end as usize).saturating_sub(leaf_header.free_start as usize);
-        let needed = record_len
-            .checked_add(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("leaf borrow size overflow"))?;
-        if free_gap < needed {
-            return Ok(false);
-        }
+        let mut record_bytes = Vec::new();
+        page::encode_leaf_record(record.key, record.value, &mut record_bytes)?;
 
         // Insert into the recipient before deleting from the donor so we can bail out cleanly.
-        let mut appended = false;
-        {
+        let appended = {
             let mut page = tx.page_mut(leaf_id)?;
-            if self.try_insert_leaf_in_place(
-                &mut page,
-                leaf_header,
-                borrowed_key.as_slice(),
-                borrowed_val.as_slice(),
-            )? {
-                appended = true;
-            }
-        }
+            self.trace_leaf_slots("borrow_right.before_recipient", leaf_id, page.data());
+            let recipient_header = page::Header::parse(page.data())?;
+            let insert_idx = recipient_header.slot_count as usize;
+            let mut allocator = LeafAllocator::new(page.data_mut(), recipient_header.clone())?;
+            let appended = match allocator.insert_slot(insert_idx, &record_bytes) {
+                Ok(()) => {
+                    if insert_idx == 0 {
+                        allocator.update_low_fence(borrowed_key.as_slice())?;
+                    }
+                    true
+                }
+                Err(err) if allocator_capacity_error(&err) => false,
+                Err(err) => return Err(err),
+            };
+            self.trace_leaf_slots("borrow_right.after_recipient_attempt", leaf_id, page.data());
+            appended
+        };
         if !appended {
             return Ok(false);
         }
 
-        let delete_result = self.try_delete_leaf_in_place(
-            &mut right_page,
-            &right_header,
-            borrowed_key.as_slice(),
-            true,
-            Some(right_new_first.as_slice()),
-        )?;
-        if delete_result.is_none() {
+        let donor_result: Result<()> = (|| {
+            let mut allocator = LeafAllocator::new(right_page.data_mut(), right_header.clone())?;
+            allocator.delete_slot(0)?;
+            allocator.update_low_fence(right_new_first.as_slice())?;
+            Ok(())
+        })();
+        if donor_result.is_err() {
             // Remove the appended key to keep state consistent.
             let mut page = tx.page_mut(leaf_id)?;
             let refreshed = page::Header::parse(page.data())?;
             let _ = self.try_delete_leaf_in_place(
+                tx,
                 &mut page,
                 &refreshed,
                 borrowed_key.as_slice(),
@@ -824,6 +744,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             )?;
             return Ok(false);
         }
+        self.trace_leaf_slots("borrow_right.after_donor", right_id, right_page.data());
         drop(right_page);
 
         {
@@ -1081,27 +1002,30 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             ));
         }
 
-        let total_cost = Self::leaf_append_cost(&leaf_snapshot.entries)?;
-        let free_gap =
-            (left_header.free_end as usize).saturating_sub(left_header.free_start as usize);
-        if free_gap < total_cost {
-            return Ok(false);
-        }
-        if left_header.high_fence_len != leaf_snapshot.high_fence.len() {
-            return Ok(false);
-        }
-
-        for (key, value) in &leaf_snapshot.entries {
-            let header = page::Header::parse(left_page.data())?;
-            if !self.try_insert_leaf_in_place(
-                &mut left_page,
-                &header,
-                key.as_slice(),
-                value.as_slice(),
-            )? {
-                return Ok(false);
+        self.trace_leaf_slots("merge_left.before_donor", left_id, left_page.data());
+        {
+            let mut allocator = LeafAllocator::new(left_page.data_mut(), left_header.clone())?;
+            let mut appended = 0usize;
+            for (key, value) in &leaf_snapshot.entries {
+                let mut record = Vec::new();
+                page::encode_leaf_record(key.as_slice(), value.as_slice(), &mut record)?;
+                match allocator.insert_slot(allocator.slot_count(), &record) {
+                    Ok(()) => {
+                        appended += 1;
+                    }
+                    Err(err) if allocator_capacity_error(&err) => {
+                        while appended > 0 {
+                            appended -= 1;
+                            let idx = allocator.slot_count().saturating_sub(1);
+                            let _ = allocator.delete_slot(idx)?;
+                        }
+                        return Ok(false);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
+        self.trace_leaf_slots("merge_left.after_accumulate", left_id, left_page.data());
         {
             let payload = page::payload_mut(left_page.data_mut())?;
             page::set_right_sibling(payload, leaf_header.right_sibling);
@@ -1305,7 +1229,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         &self,
         tx: &mut WriteGuard<'_>,
         leaf_id: PageId,
-        leaf_header: &page::Header,
+        _leaf_header: &page::Header,
         leaf_snapshot: &LeafSnapshot,
         parent_frame: &PathEntry,
         path: &[PathEntry],
@@ -1314,27 +1238,28 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         right_snapshot: &LeafSnapshot,
     ) -> Result<bool> {
         let mut leaf_page = tx.page_mut(leaf_id)?;
-        let total_cost = Self::leaf_append_cost(&right_snapshot.entries)?;
-        let free_gap =
-            (leaf_header.free_end as usize).saturating_sub(leaf_header.free_start as usize);
-        if free_gap < total_cost {
-            return Ok(false);
-        }
-        if leaf_header.high_fence_len != right_snapshot.high_fence.len() {
-            return Ok(false);
-        }
-
-        for (key, value) in &right_snapshot.entries {
-            let header = page::Header::parse(leaf_page.data())?;
-            if !self.try_insert_leaf_in_place(
-                &mut leaf_page,
-                &header,
-                key.as_slice(),
-                value.as_slice(),
-            )? {
-                return Ok(false);
+        self.trace_leaf_slots("merge_right.before_recipient", leaf_id, leaf_page.data());
+        {
+            let mut allocator = LeafAllocator::new(leaf_page.data_mut(), _leaf_header.clone())?;
+            let mut appended = 0usize;
+            for (key, value) in &right_snapshot.entries {
+                let mut record = Vec::new();
+                page::encode_leaf_record(key.as_slice(), value.as_slice(), &mut record)?;
+                match allocator.insert_slot(allocator.slot_count(), &record) {
+                    Ok(()) => appended += 1,
+                    Err(err) if allocator_capacity_error(&err) => {
+                        while appended > 0 {
+                            appended -= 1;
+                            let idx = allocator.slot_count().saturating_sub(1);
+                            let _ = allocator.delete_slot(idx)?;
+                        }
+                        return Ok(false);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
+        self.trace_leaf_slots("merge_right.after_recipient", leaf_id, leaf_page.data());
         {
             let payload = page::payload_mut(leaf_page.data_mut())?;
             page::set_right_sibling(payload, right_header.right_sibling);
@@ -2086,4 +2011,69 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
         }
     }
+
+    #[cfg(any(test, feature = "btree-in-place-debug"))]
+    fn trace_leaf_slots(&self, stage: &str, page_id: PageId, data: &[u8]) {
+        if !tracing::level_enabled!(tracing::Level::TRACE) {
+            return;
+        }
+        let header = match page::Header::parse(data) {
+            Ok(header) => header,
+            Err(err) => {
+                tracing::trace!(
+                    target: "sombra_btree::in_place",
+                    stage,
+                    page = page_id.0,
+                    error = ?err,
+                    "failed to parse header for allocator trace"
+                );
+                return;
+            }
+        };
+        if header.kind != page::BTreePageKind::Leaf {
+            return;
+        }
+        let slot_view = match SlotView::new(&header, data) {
+            Ok(view) => view,
+            Err(err) => {
+                tracing::trace!(
+                    target: "sombra_btree::in_place",
+                    stage,
+                    page = page_id.0,
+                    error = ?err,
+                    "failed to build slot view for allocator trace"
+                );
+                return;
+            }
+        };
+        let mut keys = Vec::with_capacity(slot_view.len());
+        for idx in 0..slot_view.len() {
+            match slot_view.slice(idx).and_then(page::decode_leaf_record) {
+                Ok(record) => keys.push(hex::encode(record.key)),
+                Err(err) => {
+                    tracing::trace!(
+                        target: "sombra_btree::in_place",
+                        stage,
+                        page = page_id.0,
+                        slot = idx,
+                        error = ?err,
+                        "failed to decode slot for allocator trace"
+                    );
+                    return;
+                }
+            }
+        }
+        tracing::trace!(
+            target: "sombra_btree::in_place",
+            stage,
+            page = page_id.0,
+            slots = keys.len(),
+            free_start = header.free_start,
+            free_end = header.free_end,
+            keys = ?keys,
+        );
+    }
+
+    #[cfg(not(any(test, feature = "btree-in-place-debug")))]
+    fn trace_leaf_slots(&self, _stage: &str, _page_id: PageId, _data: &[u8]) {}
 }

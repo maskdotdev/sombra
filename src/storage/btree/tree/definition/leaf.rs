@@ -1,4 +1,12 @@
 impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
+    fn leaf_allocator_cache<'a>(&self, tx: &'a mut WriteGuard<'_>) -> &'a mut LeafAllocatorCache {
+        if tx.extension_mut::<LeafAllocatorCache>().is_none() {
+            tx.store_extension(LeafAllocatorCache::default());
+        }
+        tx.extension_mut::<LeafAllocatorCache>()
+            .expect("allocator cache extension")
+    }
+
     fn find_leaf_mut(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -150,6 +158,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let _scope = profile_scope(StorageProfileKind::BTreeLeafInsert);
         if self.options.in_place_leaf_edits {
             match self.try_insert_leaf_in_place(
+                tx,
                 &mut page,
                 &header,
                 key.as_slice(),
@@ -333,6 +342,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
     fn try_insert_leaf_in_place(
         &self,
+        tx: &mut WriteGuard<'_>,
         page: &mut PageMut<'_>,
         header: &page::Header,
         key: &[u8],
@@ -346,7 +356,14 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             header.fence_slices(fences)?.0.to_vec()
         };
 
-        let mut allocator = LeafAllocator::new(page.data_mut(), header.clone())?;
+        let cache = self.leaf_allocator_cache(tx);
+        let snapshot = cache.take(page.id);
+        let allocator_header = header.clone();
+        let mut allocator = if let Some(snapshot) = snapshot {
+            LeafAllocator::from_snapshot(page.data_mut(), allocator_header, snapshot)?
+        } else {
+            LeafAllocator::new(page.data_mut(), allocator_header)?
+        };
         let mut lo = 0usize;
         let mut hi = allocator.slot_count();
         let mut existing = None;
@@ -385,6 +402,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     allocator.update_low_fence(key)?;
                     new_first_key = Some(key.to_vec());
                 }
+                let snapshot = allocator.into_snapshot();
+                cache.insert(page.id, snapshot);
                 Ok(InPlaceInsertResult::Applied { new_first_key })
             }
             Err(err) if allocator_capacity_error(&err) => {
@@ -396,6 +415,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
     fn try_delete_leaf_in_place(
         &self,
+        tx: &mut WriteGuard<'_>,
         page: &mut PageMut<'_>,
         header: &page::Header,
         key: &[u8],
@@ -414,10 +434,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if header.slot_count <= 1 {
             return Ok(None);
         }
-        let mut allocator = LeafAllocator::new(page.data_mut(), header.clone())?;
-        if allocator.slot_count() <= 1 {
-            return Ok(None);
-        }
+        let cache = self.leaf_allocator_cache(tx);
+        let snapshot = cache.take(page.id);
+        let mut allocator = if let Some(snapshot) = snapshot {
+            LeafAllocator::from_snapshot(page.data_mut(), header.clone(), snapshot)?
+        } else {
+            LeafAllocator::new(page.data_mut(), header.clone())?
+        };
         let mut lo = 0usize;
         let mut hi = allocator.slot_count();
         let mut found = None;
@@ -447,9 +470,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
         }
         let updated = allocator.header();
+        let free_start = updated.free_start;
+        let free_end = updated.free_end;
+        let snapshot = allocator.into_snapshot();
+        cache.insert(page.id, snapshot);
         Ok(Some(InPlaceDeleteResult {
-            free_start: updated.free_start,
-            free_end: updated.free_end,
+            free_start,
+            free_end,
         }))
     }
 }

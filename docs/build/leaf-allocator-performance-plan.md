@@ -60,12 +60,12 @@ Code review points to three dominant costs:
 
 ### Phase B — Remove Redundant Rebuilds
 
-1. **Share slot extents.** Extend `SlotView` so it can hand its already-built
-   `SlotExtents` into `LeafAllocator::new`, avoiding the second scan.
-2. **Persist allocator state per page visit.** Instead of rebuilding metadata on
-   every call, stash `slot_meta` and `free_regions` in a small scratch cache
-   keyed by `PageId` for the duration of a write transaction. That lets us reuse
-   fragmentation knowledge across multiple inserts/deletes on the same page.
+1. **(Done)** Persist allocator state per page visit. We now stash per-leaf
+   snapshots inside the write-transaction extension so repeated inserts/deletes
+   reuse the cached `slot_meta` without rescanning slot directories.
+2. **Share slot extents with allocator build.** Extend `SlotView` so it can hand
+   its already-built `SlotExtents` into `LeafAllocator::new`, avoiding even the
+   initial scan when the cache is cold.
 3. **Avoid repeated `Vec` allocations.** Reuse a small `Vec<u8>` scratch buffer
    for `record` encoding and consider SmallVec for the `entries` list when we do
    need rebuild snapshots.

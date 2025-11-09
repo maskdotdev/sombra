@@ -43,6 +43,29 @@ impl<'page> LeafAllocator<'page> {
         Ok(allocator)
     }
 
+    pub fn from_snapshot(
+        page_bytes: &'page mut [u8],
+        header: page::Header,
+        snapshot: LeafAllocatorSnapshot,
+    ) -> Result<Self> {
+        let payload_len = page::payload(page_bytes)?.len();
+        if payload_len != snapshot.payload_len {
+            return Err(SombraError::Invalid("leaf allocator snapshot payload mismatch"));
+        }
+        if snapshot.slot_meta.len() != header.slot_count as usize {
+            return Err(SombraError::Invalid("leaf allocator snapshot slot mismatch"));
+        }
+        let arena_start = snapshot.arena_start;
+        Ok(Self {
+            page_bytes,
+            header,
+            payload_len,
+            arena_start,
+            slot_meta: SmallVec::from_vec(snapshot.slot_meta),
+            free_regions: SmallVec::from_vec(snapshot.free_regions),
+        })
+    }
+
     /// Returns the number of slots currently tracked.
     pub fn slot_count(&self) -> usize {
         self.slot_meta.len()
@@ -185,6 +208,16 @@ impl<'page> LeafAllocator<'page> {
     pub fn leaf_record(&self, slot_idx: usize) -> Result<page::LeafRecordRef<'_>> {
         let slice = self.record_slice(slot_idx)?;
         page::decode_leaf_record(slice)
+    }
+
+    /// Persists the allocator metadata for reuse by future edits.
+    pub fn into_snapshot(self) -> LeafAllocatorSnapshot {
+        LeafAllocatorSnapshot {
+            slot_meta: self.slot_meta.into_vec(),
+            free_regions: self.free_regions.into_vec(),
+            arena_start: self.arena_start,
+            payload_len: self.payload_len,
+        }
     }
 
     fn total_used_bytes(&self) -> usize {
@@ -482,6 +515,15 @@ impl SlotMeta {
 struct FreeRegion {
     start: u16,
     end: u16,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(super) struct LeafAllocatorSnapshot {
+    slot_meta: Vec<SlotMeta>,
+    free_regions: Vec<FreeRegion>,
+    arena_start: usize,
+    payload_len: usize,
 }
 
 #[allow(dead_code)]

@@ -21,6 +21,19 @@ Observations:
   fall back to compaction once, indicating that `LeafAllocator::new` is fighting
   fragmentation on every attempt.
 
+### Cache-assisted run (later on 2025-11-09)
+
+After introducing the per-leaf allocator snapshot cache, the same workload drops to
+**13.82 ms** (723,748 ops/s) with `insert_avg_us=0.607`. The allocator failure count remains
+53 because we still hit the guardrail, but the cache eliminated the second O(n) scan per
+mutation, giving us another ~2.8× speedup over the previous 38.98 ms run.
+
+```
+Sombra inserts-only 10000 docs --btree-inplace (allocator cache enabled)
+TIME 13.82 ms  OPS/SEC 723748  µS/OP 1.4
+metrics: ... allocator_compactions=1 allocator_failures=53 allocator_bytes_moved=18 allocator_avg_bytes=18.0 insert_avg_us=0.607 slot_extent_avg_us=0.109
+```
+
 ## Raw Output
 
 ```
