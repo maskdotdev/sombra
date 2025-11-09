@@ -10,6 +10,28 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             .map(|layout| layout.is_some())
     }
 
+    fn rebuild_leaf_payload(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        page: &mut PageMut<'_>,
+        header: &page::Header,
+        low_fence: &[u8],
+        high_fence: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        let cache = self.leaf_allocator_cache(tx);
+        let snapshot = cache.take(page.id);
+        let page_id = page.id;
+        let mut allocator = if let Some(snapshot) = snapshot {
+            LeafAllocator::from_snapshot(page.data_mut(), header.clone(), snapshot)?
+        } else {
+            LeafAllocator::new(page.data_mut(), header.clone())?
+        };
+        allocator.rebuild_from_entries(low_fence, high_fence, entries)?;
+        cache.insert(page_id, allocator.into_snapshot());
+        Ok(())
+    }
+
     fn leaf_allocator_cache<'a>(&self, tx: &'a mut WriteGuard<'_>) -> &'a mut LeafAllocatorCache {
         if tx.extension_mut::<LeafAllocatorCache>().is_none() {
             tx.store_extension(LeafAllocatorCache::default());
@@ -214,19 +236,21 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let payload_len = payload.len();
         let high_slice_existing = high_fence_vec.as_slice();
         let new_low_slice = entries[0].0.as_slice();
-        let fences_end_inline =
-            page::PAYLOAD_HEADER_LEN + new_low_slice.len() + high_slice_existing.len();
-        if let Some(layout) =
-            self.build_leaf_layout(payload_len, new_low_slice, high_slice_existing, &entries)?
-        {
-            self.apply_leaf_layout(&mut page, &header, fences_end_inline, &layout)?;
+        if self.slice_fits(
+            payload_len,
+            new_low_slice,
+            high_slice_existing,
+            &entries,
+        )? {
+            self.rebuild_leaf_payload(
+                tx,
+                &mut page,
+                &header,
+                new_low_slice,
+                high_slice_existing,
+                &entries,
+            )?;
             let new_low = entries[0].0.clone();
-            let high_opt = if high_fence_vec.is_empty() {
-                None
-            } else {
-                Some(high_fence_vec.as_slice())
-            };
-            self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
             self.stats.inc_leaf_rebuilds();
             let first_key_changed = K::compare_encoded(
                 new_low.as_slice(),

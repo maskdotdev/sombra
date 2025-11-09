@@ -1,51 +1,4 @@
 impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
-    fn build_leaf_layout(
-        &self,
-        payload_len: usize,
-        low_fence: &[u8],
-        high_fence: &[u8],
-        entries: &[(Vec<u8>, Vec<u8>)],
-    ) -> Result<Option<LeafLayout>> {
-        LeafSplitBuilder::build_from_entries(payload_len, low_fence, high_fence, entries)
-    }
-
-    fn apply_leaf_layout(
-        &self,
-        page: &mut PageMut<'_>,
-        header: &page::Header,
-        fences_end: usize,
-        layout: &LeafLayout,
-    ) -> Result<()> {
-        let payload = page::payload_mut(page.data_mut())?;
-        let new_free_end = layout.free_end as usize;
-        if fences_end > payload.len() || new_free_end > payload.len() {
-            return Err(SombraError::Invalid("leaf layout exceeds payload"));
-        }
-        payload[fences_end..new_free_end].fill(0);
-        let record_end = fences_end + layout.records.len();
-        if record_end > new_free_end {
-            return Err(SombraError::Invalid("leaf layout overflows payload"));
-        }
-        payload[fences_end..record_end].copy_from_slice(&layout.records);
-        let slot_count_u16 = u16::try_from(layout.offsets.len())
-            .map_err(|_| SombraError::Invalid("leaf slot count exceeds u16"))?;
-        page::set_slot_count(payload, slot_count_u16);
-        page::set_free_start(payload, layout.free_start);
-        page::set_free_end(payload, layout.free_end);
-        debug_assert_eq!(layout.offsets.len(), layout.lengths.len());
-        for i in 0..layout.offsets.len() {
-            let pos = new_free_end + i * page::SLOT_ENTRY_LEN;
-            page::write_slot_entry(payload, pos, layout.offsets[i], layout.lengths[i]);
-        }
-        // Preserve parent/sibling metadata.
-        if let Some(parent) = header.parent {
-            page::set_parent(payload, Some(parent));
-        }
-        page::set_left_sibling(payload, header.left_sibling);
-        page::set_right_sibling(payload, header.right_sibling);
-        Ok(())
-    }
-
     fn apply_leaf_fences(
         &self,
         page: &mut PageMut<'_>,
@@ -440,46 +393,44 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             .map(|(k, _)| k.clone())
             .ok_or_else(|| SombraError::Corruption("borrowed leaf has no keys"))?;
 
-        let left_layout = match self.build_leaf_layout(
+        if !self.slice_fits(
             left_payload_len,
             left_low.as_slice(),
             new_leaf_first.as_slice(),
             &left_entries,
         )? {
-            Some(layout) => layout,
-            None => return Ok(BorrowResult::LayoutOverflow),
-        };
-        let leaf_layout = match self.build_leaf_layout(
+            return Ok(BorrowResult::LayoutOverflow);
+        }
+        if !self.slice_fits(
             leaf_payload_len,
             new_leaf_first.as_slice(),
             leaf_snapshot.high_fence.as_slice(),
             &leaf_entries,
         )? {
-            Some(layout) => layout,
-            None => return Ok(BorrowResult::LayoutOverflow),
-        };
+            return Ok(BorrowResult::LayoutOverflow);
+        }
 
         {
             let mut page = tx.page_mut(left_id)?;
-            let fences_end = page::PAYLOAD_HEADER_LEN + left_low.len() + new_leaf_first.len();
-            self.apply_leaf_layout(&mut page, &left_header, fences_end, &left_layout)?;
-            self.apply_leaf_fences(
+            self.rebuild_leaf_payload(
+                tx,
                 &mut page,
+                &left_header,
                 left_low.as_slice(),
-                Some(new_leaf_first.as_slice()),
+                new_leaf_first.as_slice(),
+                &left_entries,
             )?;
         }
         {
             let mut page = tx.page_mut(leaf_id)?;
-            let fences_end =
-                page::PAYLOAD_HEADER_LEN + new_leaf_first.len() + leaf_snapshot.high_fence.len();
-            self.apply_leaf_layout(&mut page, leaf_header, fences_end, &leaf_layout)?;
-            let high_opt = if leaf_snapshot.high_fence.is_empty() {
-                None
-            } else {
-                Some(leaf_snapshot.high_fence.as_slice())
-            };
-            self.apply_leaf_fences(&mut page, new_leaf_first.as_slice(), high_opt)?;
+            self.rebuild_leaf_payload(
+                tx,
+                &mut page,
+                leaf_header,
+                new_leaf_first.as_slice(),
+                leaf_snapshot.high_fence.as_slice(),
+                &leaf_entries,
+            )?;
         }
         self.update_parent_separator(tx, parent_frame, new_leaf_first.as_slice())?;
         Ok(BorrowResult::Borrowed)
@@ -632,46 +583,43 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             .map(|(k, _)| k.clone())
             .ok_or_else(|| SombraError::Corruption("right leaf empty after lending"))?;
 
-        let right_layout = match self.build_leaf_layout(
+        if !self.slice_fits(
             right_payload_len,
             right_new_first.as_slice(),
             right_snapshot.high_fence.as_slice(),
             &right_entries,
         )? {
-            Some(layout) => layout,
-            None => return Ok(false),
-        };
-        let leaf_layout = match self.build_leaf_layout(
+            return Ok(false);
+        }
+        if !self.slice_fits(
             leaf_payload_len,
             new_leaf_first.as_slice(),
             right_new_first.as_slice(),
             &leaf_entries,
         )? {
-            Some(layout) => layout,
-            None => return Ok(false),
-        };
+            return Ok(false);
+        }
 
         {
             let mut page = tx.page_mut(right_id)?;
-            let fences_end =
-                page::PAYLOAD_HEADER_LEN + right_new_first.len() + right_snapshot.high_fence.len();
-            self.apply_leaf_layout(&mut page, &right_header, fences_end, &right_layout)?;
-            let high_opt = if right_snapshot.high_fence.is_empty() {
-                None
-            } else {
-                Some(right_snapshot.high_fence.as_slice())
-            };
-            self.apply_leaf_fences(&mut page, right_new_first.as_slice(), high_opt)?;
+            self.rebuild_leaf_payload(
+                tx,
+                &mut page,
+                &right_header,
+                right_new_first.as_slice(),
+                right_snapshot.high_fence.as_slice(),
+                &right_entries,
+            )?;
         }
         {
             let mut page = tx.page_mut(leaf_id)?;
-            let fences_end =
-                page::PAYLOAD_HEADER_LEN + new_leaf_first.len() + right_new_first.len();
-            self.apply_leaf_layout(&mut page, leaf_header, fences_end, &leaf_layout)?;
-            self.apply_leaf_fences(
+            self.rebuild_leaf_payload(
+                tx,
                 &mut page,
+                leaf_header,
                 new_leaf_first.as_slice(),
-                Some(right_new_first.as_slice()),
+                right_new_first.as_slice(),
+                &leaf_entries,
             )?;
         }
 
@@ -954,40 +902,33 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             return Ok(true);
         }
         let new_low = combined[0].0.clone();
-        let primary_layout = self.build_leaf_layout(
+        let mut fence_low = new_low.clone();
+        if !self.slice_fits(
             left_payload_len,
-            new_low.as_slice(),
+            fence_low.as_slice(),
             leaf_snapshot.high_fence.as_slice(),
             &combined,
-        )?;
-        let layout = match primary_layout {
-            Some(layout) => layout,
-            None => {
-                let fallback = self.build_leaf_layout(
-                    left_payload_len,
-                    left_snapshot.low_fence.as_slice(),
-                    leaf_snapshot.high_fence.as_slice(),
-                    &combined,
-                )?;
-                match fallback {
-                    Some(layout) => layout,
-                    None => {
-                        return Ok(false);
-                    }
-                }
+        )? {
+            if !self.slice_fits(
+                left_payload_len,
+                left_snapshot.low_fence.as_slice(),
+                leaf_snapshot.high_fence.as_slice(),
+                &combined,
+            )? {
+                return Ok(false);
             }
-        };
+            fence_low = left_snapshot.low_fence.clone();
+        }
         {
             let mut page = tx.page_mut(left_id)?;
-            let fences_end =
-                page::PAYLOAD_HEADER_LEN + new_low.len() + leaf_snapshot.high_fence.len();
-            self.apply_leaf_layout(&mut page, left_header, fences_end, &layout)?;
-            let high_opt = if leaf_snapshot.high_fence.is_empty() {
-                None
-            } else {
-                Some(leaf_snapshot.high_fence.as_slice())
-            };
-            self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
+            self.rebuild_leaf_payload(
+                tx,
+                &mut page,
+                left_header,
+                fence_low.as_slice(),
+                leaf_snapshot.high_fence.as_slice(),
+                &combined,
+            )?;
             let payload = page::payload_mut(page.data_mut())?;
             page::set_right_sibling(payload, leaf_header.right_sibling);
         }
@@ -1004,7 +945,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             ));
         }
         let left_index = removal_index - 1;
-        if K::compare_encoded(new_low.as_slice(), left_snapshot.low_fence.as_slice())
+        if K::compare_encoded(fence_low.as_slice(), left_snapshot.low_fence.as_slice())
             != Ordering::Equal
         {
             self.update_parent_separator_at_index(
@@ -1220,40 +1161,33 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             return Ok(true);
         }
         let new_low = combined[0].0.clone();
-        let primary_layout = self.build_leaf_layout(
+        let mut fence_low = new_low.clone();
+        if !self.slice_fits(
             leaf_payload_len,
-            new_low.as_slice(),
+            fence_low.as_slice(),
             right_snapshot.high_fence.as_slice(),
             &combined,
-        )?;
-        let layout = match primary_layout {
-            Some(layout) => layout,
-            None => {
-                let fallback = self.build_leaf_layout(
-                    leaf_payload_len,
-                    leaf_snapshot.low_fence.as_slice(),
-                    right_snapshot.high_fence.as_slice(),
-                    &combined,
-                )?;
-                match fallback {
-                    Some(layout) => layout,
-                    None => {
-                        return Ok(false);
-                    }
-                }
+        )? {
+            if !self.slice_fits(
+                leaf_payload_len,
+                leaf_snapshot.low_fence.as_slice(),
+                right_snapshot.high_fence.as_slice(),
+                &combined,
+            )? {
+                return Ok(false);
             }
-        };
+            fence_low = leaf_snapshot.low_fence.clone();
+        }
         {
             let mut page = tx.page_mut(leaf_id)?;
-            let fences_end =
-                page::PAYLOAD_HEADER_LEN + new_low.len() + right_snapshot.high_fence.len();
-            self.apply_leaf_layout(&mut page, leaf_header, fences_end, &layout)?;
-            let high_opt = if right_snapshot.high_fence.is_empty() {
-                None
-            } else {
-                Some(right_snapshot.high_fence.as_slice())
-            };
-            self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
+            self.rebuild_leaf_payload(
+                tx,
+                &mut page,
+                leaf_header,
+                fence_low.as_slice(),
+                right_snapshot.high_fence.as_slice(),
+                &combined,
+            )?;
             let payload = page::payload_mut(page.data_mut())?;
             page::set_right_sibling(payload, right_header.right_sibling);
         }
@@ -1264,10 +1198,10 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
         tx.free_page(right_id)?;
 
-        if K::compare_encoded(new_low.as_slice(), leaf_snapshot.low_fence.as_slice())
+        if K::compare_encoded(fence_low.as_slice(), leaf_snapshot.low_fence.as_slice())
             != Ordering::Equal
         {
-            self.update_parent_separator(tx, parent_frame, new_low.as_slice())?;
+            self.update_parent_separator(tx, parent_frame, fence_low.as_slice())?;
         }
         self.stats.inc_leaf_merges();
         tracing::trace!(

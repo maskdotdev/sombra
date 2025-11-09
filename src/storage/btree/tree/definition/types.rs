@@ -112,12 +112,21 @@ impl<'a> SlotView<'a> {
 }
 
 enum LeafInsert {
-    Done,
+    Done {
+        new_first_key: Option<Vec<u8>>,
+    },
     Split {
         left_min: Vec<u8>,
         right_min: Vec<u8>,
         right_page: PageId,
     },
+}
+
+enum InPlaceInsertResult {
+    Applied {
+        new_first_key: Option<Vec<u8>>,
+    },
+    NotApplied,
 }
 
 enum BorrowResult {
@@ -135,6 +144,7 @@ enum InternalInsert {
     },
 }
 
+#[allow(dead_code)]
 struct LeafLayout {
     records: Vec<u8>,
     offsets: Vec<u16>,
