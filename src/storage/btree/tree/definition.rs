@@ -97,6 +97,41 @@ struct LeafCache {
     path: Vec<PathEntry>,
 }
 
+struct SlotView<'a> {
+    payload: &'a [u8],
+    slots: page::SlotDirectory<'a>,
+    extents: page::SlotExtents,
+}
+
+impl<'a> SlotView<'a> {
+    fn new(header: &page::Header, data: &'a [u8]) -> Result<Self> {
+        let payload = page::payload(data)?;
+        let slots = header.slot_directory(data)?;
+        let extents = page::SlotExtents::build(header, payload, &slots)?;
+        Ok(Self {
+            payload,
+            slots,
+            extents,
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn payload(&self) -> &'a [u8] {
+        self.payload
+    }
+
+    fn slots(&self) -> &page::SlotDirectory<'a> {
+        &self.slots
+    }
+
+    fn slice(&self, slot_idx: usize) -> Result<&'a [u8]> {
+        self.extents.record_slice(self.payload, slot_idx)
+    }
+}
+
 impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
     /// Open an existing tree or create a brand-new one if the root page has not been allocated.
     pub fn open_or_create(ps: &Arc<dyn PageStore>, mut opts: BTreeOptions) -> Result<Self> {
@@ -160,10 +195,9 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         loop {
             let page = tx.page_mut(current)?;
             let header = page::Header::parse(page.data())?;
-            let payload = page::payload(page.data())?;
-            let slots = header.slot_directory(page.data())?;
-            for idx in 0..slots.len() {
-                let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
+            let slot_view = SlotView::new(&header, page.data())?;
+            for idx in 0..slot_view.len() {
+                let rec_slice = slot_view.slice(idx)?;
                 record_btree_leaf_key_decodes(1);
                 let record = page::decode_leaf_record(rec_slice)?;
                 let value = V::decode_val(record.value)?;
@@ -519,13 +553,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                         kind = "internal",
                         "descending to leftmost child"
                     );
-                    let payload = page::payload(page.data())?;
-                    let slots = header.slot_directory(page.data())?;
-                    if slots.len() == 0 {
+                    let slot_view = SlotView::new(&header, page.data())?;
+                    if slot_view.len() == 0 {
                         return Err(SombraError::Corruption("internal node without slots"));
                     }
                     let child = {
-                        let rec_slice = page::record_slice_from_parts(&header, payload, &slots, 0)?;
+                        let rec_slice = slot_view.slice(0)?;
                         let record = page::decode_internal_record(rec_slice)?;
                         record.child
                     };
@@ -635,13 +668,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if header.slot_count == 0 {
             return Err(SombraError::Corruption("internal node without slots"));
         }
-        let payload = page::payload(data)?;
-        let slots = header.slot_directory(data)?;
+        let slot_view = SlotView::new(header, data)?;
+        let slot_len = slot_view.len();
         let mut lo = 0usize;
-        let mut hi = slots.len();
+        let mut hi = slot_len;
         while lo < hi {
             let mid = (lo + hi) / 2;
-            let rec_slice = page::record_slice_from_parts(header, payload, &slots, mid)?;
+            let rec_slice = slot_view.slice(mid)?;
             let record = page::decode_internal_record(rec_slice)?;
             match K::compare_encoded(key, record.separator) {
                 Ordering::Less => hi = mid,
@@ -651,9 +684,9 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let idx = if lo == 0 {
             0
         } else {
-            (lo - 1).min(slots.len() - 1)
+            (lo - 1).min(slot_len - 1)
         };
-        let rec_slice = page::record_slice_from_parts(header, payload, &slots, idx)?;
+        let rec_slice = slot_view.slice(idx)?;
         let record = page::decode_internal_record(rec_slice)?;
         Ok((record.child, idx))
     }
@@ -665,16 +698,15 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         key: &[u8],
     ) -> Result<Option<V>> {
         let _scope = profile_scope(StorageProfileKind::BTreeLeafSearch);
-        let payload = page::payload(data)?;
-        let slots = header.slot_directory(data)?;
-        if slots.len() == 0 {
+        let slot_view = SlotView::new(header, data)?;
+        if slot_view.len() == 0 {
             return Ok(None);
         }
         let mut lo = 0usize;
-        let mut hi = slots.len();
+        let mut hi = slot_view.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            let rec_slice = page::record_slice_from_parts(&header, payload, &slots, mid)?;
+            let rec_slice = slot_view.slice(mid)?;
             let record = page::decode_leaf_record(rec_slice)?;
             record_btree_leaf_key_decodes(1);
             record_btree_leaf_key_cmps(1);
@@ -712,15 +744,15 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
 
         let data = page.data();
-        let payload = page::payload(data)?;
-        let slots = header.slot_directory(data)?;
+        let slot_view = SlotView::new(&header, data)?;
+        let payload = slot_view.payload();
         let (low_fence, high_fence) = header.fence_slices(data)?;
         let low_fence_vec = low_fence.to_vec();
         let high_fence_vec = high_fence.to_vec();
 
-        let mut entries = Vec::with_capacity(slots.len());
-        for idx in 0..slots.len() {
-            let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
+        let mut entries = Vec::with_capacity(slot_view.len());
+        for idx in 0..slot_view.len() {
+            let rec_slice = slot_view.slice(idx)?;
             record_btree_leaf_key_decodes(1);
             let record = page::decode_leaf_record(rec_slice)?;
             record_btree_leaf_memcopy_bytes(record.key.len() as u64);
@@ -899,18 +931,17 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
         let (slot_offsets, insert_idx, has_existing) = {
             let data = page.data();
-            let payload = page::payload(data)?;
-            let slots = header.slot_directory(data)?;
-            let mut offsets = Vec::with_capacity(slots.len());
-            for offset in slots.iter() {
+            let slot_view = SlotView::new(&header, data)?;
+            let mut offsets = Vec::with_capacity(slot_view.len());
+            for offset in slot_view.slots().iter() {
                 offsets.push(offset);
             }
             let mut lo = 0usize;
-            let mut hi = slots.len();
+            let mut hi = slot_view.len();
             let mut existing = None;
             while lo < hi {
                 let mid = (lo + hi) / 2;
-                let rec_slice = page::record_slice_from_parts(&header, payload, &slots, mid)?;
+                let rec_slice = slot_view.slice(mid)?;
                 record_btree_leaf_key_decodes(1);
                 let record = page::decode_leaf_record(rec_slice)?;
                 record_btree_leaf_key_cmps(1);
@@ -1027,18 +1058,17 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
         let (slot_offsets, target_idx, payload_len) = {
             let data = page.data();
-            let payload = page::payload(data)?;
-            let slots = header.slot_directory(data)?;
-            let mut offsets = Vec::with_capacity(slots.len());
-            for idx in 0..slots.len() {
-                offsets.push(slots.get(idx)?);
+            let slot_view = SlotView::new(header, data)?;
+            let mut offsets = Vec::with_capacity(slot_view.len());
+            for idx in 0..slot_view.len() {
+                offsets.push(slot_view.slots().get(idx)?);
             }
             let mut lo = 0usize;
-            let mut hi = slots.len();
+            let mut hi = slot_view.len();
             let mut found = None;
             while lo < hi {
                 let mid = (lo + hi) / 2;
-                let rec_slice = page::record_slice_from_parts(header, payload, &slots, mid)?;
+                let rec_slice = slot_view.slice(mid)?;
                 let record = page::decode_leaf_record(rec_slice)?;
                 match K::compare_encoded(record.key, key) {
                     Ordering::Less => lo = mid + 1,
@@ -1052,7 +1082,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let Some(idx) = found else {
                 return Ok(None);
             };
-            (offsets, idx, payload.len())
+            (offsets, idx, slot_view.payload().len())
         };
         if slot_offsets.len() <= 1 {
             return Ok(None);
@@ -1195,14 +1225,14 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let mut page = tx.page_mut(page_id)?;
         let header = page::Header::parse(page.data())?;
         let data = page.data();
-        let payload = page::payload(data)?;
-        let slots = header.slot_directory(data)?;
+        let slot_view = SlotView::new(&header, data)?;
+        let payload = slot_view.payload();
         let (low_fence_bytes, high_fence_bytes) = header.fence_slices(data)?;
         let old_low_fence = low_fence_bytes.to_vec();
         let old_high_fence = high_fence_bytes.to_vec();
-        let mut entries = Vec::with_capacity(slots.len() + 1);
-        for idx in 0..slots.len() {
-            let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
+        let mut entries = Vec::with_capacity(slot_view.len() + 1);
+        for idx in 0..slot_view.len() {
+            let rec_slice = slot_view.slice(idx)?;
             let record = page::decode_internal_record(rec_slice)?;
             entries.push((record.separator.to_vec(), record.child));
         }
@@ -1671,14 +1701,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
     }
 
     fn snapshot_leaf(&self, header: &page::Header, data: &[u8]) -> Result<LeafSnapshot> {
-        let payload = page::payload(data)?;
-        let slots = header.slot_directory(data)?;
+        let slot_view = SlotView::new(header, data)?;
         let (low_fence_bytes, high_fence_bytes) = header.fence_slices(data)?;
         let low_vec = low_fence_bytes.to_vec();
         let high_vec = high_fence_bytes.to_vec();
-        let mut entries = Vec::with_capacity(slots.len());
-        for idx in 0..slots.len() {
-            let rec_slice = page::record_slice_from_parts(header, payload, &slots, idx)?;
+        let mut entries = Vec::with_capacity(slot_view.len());
+        for idx in 0..slot_view.len() {
+            let rec_slice = slot_view.slice(idx)?;
             let record = page::decode_leaf_record(rec_slice)?;
             entries.push((record.key.to_vec(), record.value.to_vec()));
         }
@@ -1690,14 +1719,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
     }
 
     fn snapshot_internal(&self, header: &page::Header, data: &[u8]) -> Result<InternalSnapshot> {
-        let payload = page::payload(data)?;
-        let slots = header.slot_directory(data)?;
+        let slot_view = SlotView::new(header, data)?;
         let (low_fence_bytes, high_fence_bytes) = header.fence_slices(data)?;
         let low_vec = low_fence_bytes.to_vec();
         let high_vec = high_fence_bytes.to_vec();
-        let mut entries = Vec::with_capacity(slots.len());
-        for idx in 0..slots.len() {
-            let rec_slice = page::record_slice_from_parts(header, payload, &slots, idx)?;
+        let mut entries = Vec::with_capacity(slot_view.len());
+        for idx in 0..slot_view.len() {
+            let rec_slice = slot_view.slice(idx)?;
             let record = page::decode_internal_record(rec_slice)?;
             entries.push((record.separator.to_vec(), record.child));
         }
@@ -1956,13 +1984,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
 
         let left_data = left_page.data();
-        let payload = page::payload(left_data)?;
-        let slots = left_header.slot_directory(left_data)?;
-        if slots.len() == 0 {
+        let slot_view = SlotView::new(&left_header, left_data)?;
+        if slot_view.len() == 0 {
             return Ok(false);
         }
-        let donor_idx = slots.len() - 1;
-        let rec_slice = page::record_slice_from_parts(&left_header, payload, &slots, donor_idx)?;
+        let donor_idx = slot_view.len() - 1;
+        let rec_slice = slot_view.slice(donor_idx)?;
         let record = page::decode_leaf_record(rec_slice)?;
         let borrowed_key = record.key.to_vec();
         let borrowed_val = record.value.to_vec();
@@ -2162,19 +2189,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
 
         let right_data = right_page.data();
-        let payload = page::payload(right_data)?;
-        let slots = right_header.slot_directory(right_data)?;
-        if slots.len() < 2 {
+        let slot_view = SlotView::new(&right_header, right_data)?;
+        if slot_view.len() < 2 {
             return Ok(false);
         }
-        let first_slice = page::record_slice_from_parts(&right_header, payload, &slots, 0)?;
+        let first_slice = slot_view.slice(0)?;
         let record = page::decode_leaf_record(first_slice)?;
         let borrowed_key = record.key.to_vec();
         let borrowed_val = record.value.to_vec();
         let record_len =
             page::plain_leaf_record_encoded_len(borrowed_key.len(), borrowed_val.len())?;
 
-        let second_slice = page::record_slice_from_parts(&right_header, payload, &slots, 1)?;
+        let second_slice = slot_view.slice(1)?;
         let next_record = page::decode_leaf_record(second_slice)?;
         let right_new_first = next_record.key.to_vec();
 
@@ -3479,12 +3505,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     return Ok(current);
                 }
                 page::BTreePageKind::Internal => {
-                    let payload = page::payload(page.data())?;
-                    let slots = header.slot_directory(page.data())?;
-                    if slots.len() == 0 {
+                    let slot_view = SlotView::new(&header, page.data())?;
+                    if slot_view.len() == 0 {
                         return Err(SombraError::Corruption("internal node without slots"));
                     }
-                    let rec_slice = page::record_slice_from_parts(&header, payload, &slots, 0)?;
+                    let rec_slice = slot_view.slice(0)?;
                     let record = page::decode_internal_record(rec_slice)?;
                     let next = record.child;
                     drop(page);

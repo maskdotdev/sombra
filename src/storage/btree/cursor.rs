@@ -3,7 +3,7 @@ use std::ops::Bound;
 
 use crate::primitives::pager::{PageRef, ReadGuard};
 use crate::storage::profile::record_btree_leaf_key_decodes;
-use crate::types::Result;
+use crate::types::{Result, SombraError};
 
 use super::page;
 use super::tree::{BTree, KeyCodec, ValCodec};
@@ -16,6 +16,7 @@ pub struct Cursor<'a, K: KeyCodec, V: ValCodec> {
     upper: EncodedBound,
     current_page: Option<PageRef>,
     current_header: Option<page::Header>,
+    slot_extents: Option<page::SlotExtents>,
     slot_index: usize,
     done: bool,
 }
@@ -37,6 +38,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
                 upper,
                 current_page: None,
                 current_header: None,
+                slot_extents: None,
                 slot_index: 0,
                 done: true,
             });
@@ -49,6 +51,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
             upper,
             current_page: None,
             current_header: None,
+            slot_extents: None,
             slot_index: 0,
             done: false,
         };
@@ -71,14 +74,14 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
             };
             let payload = page::payload(page.data())?;
             let slots = header.slot_directory(page.data())?;
+            let extents = self.current_extents()?;
             if self.slot_index >= slots.len() {
                 if !self.advance_to_next_leaf()? {
                     return Ok(None);
                 }
                 continue;
             }
-            let rec_slice =
-                page::record_slice_from_parts(header, payload, &slots, self.slot_index)?;
+            let rec_slice = extents.record_slice(payload, self.slot_index)?;
             record_btree_leaf_key_decodes(1);
             let record = page::decode_leaf_record(rec_slice)?;
             if self.is_past_upper(record.key) {
@@ -100,8 +103,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
             Some(key) => self.tree.find_leaf(self.tx, key)?,
             None => self.tree.find_leftmost_leaf(self.tx)?,
         };
-        self.current_page = Some(page);
-        self.current_header = Some(header);
+        self.set_current_page(page, header)?;
         self.slot_index = 0;
         self.seek_to_lower_bound()
     }
@@ -120,6 +122,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
             };
             let payload = page::payload(page.data())?;
             let slots = header.slot_directory(page.data())?;
+            let extents = self.current_extents()?;
             if slots.len() == 0 {
                 if !self.advance_to_next_leaf()? {
                     return Ok(());
@@ -127,7 +130,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
                 continue;
             }
             for idx in 0..slots.len() {
-                let rec_slice = page::record_slice_from_parts(header, payload, &slots, idx)?;
+                let rec_slice = extents.record_slice(payload, idx)?;
                 let record = page::decode_leaf_record(rec_slice)?;
                 record_btree_leaf_key_decodes(1);
                 if self.is_past_upper(record.key) {
@@ -158,8 +161,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
             }
         };
         let (page, header) = self.tree.load_leaf_page(self.tx, next_id)?;
-        self.current_page = Some(page);
-        self.current_header = Some(header);
+        self.set_current_page(page, header)?;
         self.slot_index = 0;
         Ok(true)
     }
@@ -174,7 +176,24 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
         self.done = true;
         self.current_page = None;
         self.current_header = None;
+        self.slot_extents = None;
         self.slot_index = 0;
+    }
+
+    fn set_current_page(&mut self, page: PageRef, header: page::Header) -> Result<()> {
+        let payload = page::payload(page.data())?;
+        let slots = header.slot_directory(page.data())?;
+        let extents = page::SlotExtents::build(&header, payload, &slots)?;
+        self.current_page = Some(page);
+        self.current_header = Some(header);
+        self.slot_extents = Some(extents);
+        Ok(())
+    }
+
+    fn current_extents(&self) -> Result<&page::SlotExtents> {
+        self.slot_extents
+            .as_ref()
+            .ok_or_else(|| SombraError::Corruption("cursor missing slot extents"))
     }
 
     fn lower_allows(&self, key: &[u8]) -> bool {

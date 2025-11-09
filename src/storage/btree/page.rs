@@ -3,6 +3,7 @@ use std::convert::{TryFrom, TryInto};
 use crate::primitives::bytes::var;
 use crate::storage::btree::KeyCursor;
 use crate::types::{page::PAGE_HDR_LEN, PageId, Result, SombraError};
+use smallvec::SmallVec;
 
 /// Number of bytes used by the B+ tree payload header (excluding fences and slot directory).
 pub const PAYLOAD_HEADER_LEN: usize = 48;
@@ -262,6 +263,96 @@ impl<'a> Iterator for SlotIter<'a> {
     }
 }
 
+const INLINE_SLOT_EXTENTS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SlotExtent {
+    start: u16,
+    end: u16,
+}
+
+/// Precomputed extents for all slots on a page to make record lookups O(1).
+pub struct SlotExtents {
+    extents: SmallVec<[SlotExtent; INLINE_SLOT_EXTENTS]>,
+}
+
+impl SlotExtents {
+    /// Builds the extent table for `slots` on a single page visit.
+    pub fn build(header: &Header, payload: &[u8], slots: &SlotDirectory<'_>) -> Result<Self> {
+        if slots.len() == 0 {
+            return Ok(Self {
+                extents: SmallVec::new(),
+            });
+        }
+        let payload_len = payload.len();
+        if payload_len > u16::MAX as usize {
+            return Err(SombraError::Corruption("btree payload exceeds u16"));
+        }
+        let fences_end = FENCE_DATA_OFFSET + header.low_fence_len + header.high_fence_len;
+        let free_start = header.free_start as usize;
+        if free_start > payload_len {
+            return Err(SombraError::Corruption("record extent beyond payload"));
+        }
+        let mut ordered: SmallVec<[(usize, usize); INLINE_SLOT_EXTENTS]> =
+            SmallVec::with_capacity(slots.len());
+        for idx in 0..slots.len() {
+            let offset = slots.get(idx)? as usize;
+            ordered.push((offset, idx));
+        }
+        ordered.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut extents = SmallVec::with_capacity(slots.len());
+        extents.resize(slots.len(), SlotExtent::default());
+        for (i, (start, slot_idx)) in ordered.iter().enumerate() {
+            if *start < fences_end {
+                return Err(SombraError::Corruption("record overlaps fence keys"));
+            }
+            if *start >= payload_len {
+                return Err(SombraError::Corruption("record offset beyond payload"));
+            }
+            let end = if let Some((next_start, _)) = ordered.get(i + 1) {
+                *next_start
+            } else {
+                free_start
+            };
+            if end > payload_len {
+                return Err(SombraError::Corruption("record extent beyond payload"));
+            }
+            if end < *start {
+                return Err(SombraError::Corruption("record extent inverted"));
+            }
+            if end == *start {
+                return Err(SombraError::Corruption("record extent empty"));
+            }
+            let start_u16 = u16::try_from(*start)
+                .map_err(|_| SombraError::Corruption("record offset beyond u16"))?;
+            let end_u16 = u16::try_from(end)
+                .map_err(|_| SombraError::Corruption("record extent beyond u16"))?;
+            extents[*slot_idx] = SlotExtent {
+                start: start_u16,
+                end: end_u16,
+            };
+        }
+        Ok(Self { extents })
+    }
+
+    /// Returns the raw bytes for `slot_idx` using the precomputed extents.
+    pub fn record_slice<'a>(&self, payload: &'a [u8], slot_idx: usize) -> Result<&'a [u8]> {
+        let extent = self
+            .extents
+            .get(slot_idx)
+            .ok_or(SombraError::Invalid("slot index out of bounds"))?;
+        let start = extent.start as usize;
+        let end = extent.end as usize;
+        if end > payload.len() {
+            return Err(SombraError::Corruption("record extent beyond payload"));
+        }
+        if start > end {
+            return Err(SombraError::Corruption("record extent inverted"));
+        }
+        Ok(&payload[start..end])
+    }
+}
+
 /// Reference to a plain leaf record stored on-page (`varint key_len | varint val_len | key | value`).
 #[derive(Clone, Copy, Debug)]
 pub struct LeafRecordRef<'a> {
@@ -370,31 +461,8 @@ pub fn record_slice_from_parts<'a>(
     slots: &SlotDirectory<'a>,
     slot_idx: usize,
 ) -> Result<&'a [u8]> {
-    if slot_idx >= slots.len() {
-        return Err(SombraError::Invalid("slot index out of bounds"));
-    }
-    let start = slots.get(slot_idx)? as usize;
-    let fences_end = FENCE_DATA_OFFSET + header.low_fence_len + header.high_fence_len;
-    if start < fences_end {
-        return Err(SombraError::Corruption("record overlaps fence keys"));
-    }
-    if start >= payload.len() {
-        return Err(SombraError::Corruption("record offset beyond payload"));
-    }
-    let mut end = header.free_start as usize;
-    for offset in slots.iter() {
-        let offset = offset as usize;
-        if offset > start && offset < end {
-            end = offset;
-        }
-    }
-    if end > payload.len() {
-        return Err(SombraError::Corruption("record extent beyond payload"));
-    }
-    if end < start {
-        return Err(SombraError::Corruption("record extent inverted"));
-    }
-    Ok(&payload[start..end])
+    let extents = SlotExtents::build(header, payload, slots)?;
+    extents.record_slice(payload, slot_idx)
 }
 
 fn varint_len_usize(value: usize) -> Result<usize> {
@@ -625,5 +693,43 @@ mod tests {
         let truncated = &buf[..buf.len() - 1];
         let err = decode_leaf_record(truncated).unwrap_err();
         assert!(matches!(err, SombraError::Corruption(_)));
+    }
+
+    #[test]
+    fn slot_extents_precompute_record_boundaries() -> Result<()> {
+        let page_size = 512;
+        let mut buf = vec![0u8; page_size];
+        let header =
+            PageHeader::new(PageId(6), PageKind::BTreeLeaf, page_size as u32, 421)?.with_crc32(0);
+        header.encode(&mut buf[..PAGE_HDR_LEN])?;
+        write_initial_header(&mut buf[PAGE_HDR_LEN..], BTreePageKind::Leaf)?;
+
+        let mut rec1 = Vec::new();
+        let mut rec2 = Vec::new();
+        encode_leaf_record(b"key-1", b"value-1", &mut rec1)?;
+        encode_leaf_record(b"key-2", b"value-2", &mut rec2)?;
+        let payload_len = page_size - PAGE_HDR_LEN;
+        let payload = payload_slice_mut(&mut buf)?;
+        let rec1_start = PAYLOAD_HEADER_LEN;
+        let rec2_start = rec1_start + rec1.len();
+        let rec2_end = rec2_start + rec2.len();
+        payload[rec1_start..rec1_start + rec1.len()].copy_from_slice(&rec1);
+        payload[rec2_start..rec2_end].copy_from_slice(&rec2);
+        set_free_start(payload, rec2_end as u16);
+        set_free_end(payload, (payload_len - SLOT_ENTRY_LEN * 2) as u16);
+        set_slot_count(payload, 2);
+        let slots_start = payload_len - SLOT_ENTRY_LEN * 2;
+        write_u16(payload, slots_start, rec1_start as u16);
+        write_u16(payload, slots_start + SLOT_ENTRY_LEN, rec2_start as u16);
+
+        let parsed = Header::parse(&buf)?;
+        let payload = payload_slice(&buf)?;
+        let slots = parsed.slot_directory(&buf)?;
+        let extents = SlotExtents::build(&parsed, payload, &slots)?;
+        let first = extents.record_slice(payload, 0)?;
+        let second = extents.record_slice(payload, 1)?;
+        assert_eq!(first, &rec1[..]);
+        assert_eq!(second, &rec2[..]);
+        Ok(())
     }
 }
