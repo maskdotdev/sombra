@@ -1047,7 +1047,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
         self.trace_leaf_slots("merge_left.before_donor", left_id, left_page.data());
         {
-            let mut allocator = LeafAllocator::new(left_page.data_mut(), left_header.clone())?;
+            let snapshot = self.leaf_allocator_cache(tx).take(left_id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(left_page.data_mut(), left_header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(left_page.data_mut(), left_header.clone())?
+            };
             let mut appended = 0usize;
             for (key, value) in &leaf_snapshot.entries {
                 let mut record = Vec::new();
@@ -1062,11 +1067,19 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                             let idx = allocator.slot_count().saturating_sub(1);
                             let _ = allocator.delete_slot(idx)?;
                         }
+                        let snapshot = allocator.into_snapshot();
+                        self.leaf_allocator_cache(tx).insert(left_id, snapshot);
                         return Ok(false);
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => {
+                        let snapshot = allocator.into_snapshot();
+                        self.leaf_allocator_cache(tx).insert(left_id, snapshot);
+                        return Err(err);
+                    }
                 }
             }
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(left_id, snapshot);
         }
         self.trace_leaf_slots("merge_left.after_accumulate", left_id, left_page.data());
         {
@@ -1283,7 +1296,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let mut leaf_page = tx.page_mut(leaf_id)?;
         self.trace_leaf_slots("merge_right.before_recipient", leaf_id, leaf_page.data());
         {
-            let mut allocator = LeafAllocator::new(leaf_page.data_mut(), _leaf_header.clone())?;
+            let snapshot = self.leaf_allocator_cache(tx).take(leaf_id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(leaf_page.data_mut(), _leaf_header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(leaf_page.data_mut(), _leaf_header.clone())?
+            };
             let mut appended = 0usize;
             for (key, value) in &right_snapshot.entries {
                 let mut record = Vec::new();
@@ -1296,11 +1314,19 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                             let idx = allocator.slot_count().saturating_sub(1);
                             let _ = allocator.delete_slot(idx)?;
                         }
+                        let snapshot = allocator.into_snapshot();
+                        self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
                         return Ok(false);
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => {
+                        let snapshot = allocator.into_snapshot();
+                        self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
+                        return Err(err);
+                    }
                 }
             }
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
         }
         self.trace_leaf_slots("merge_right.after_recipient", leaf_id, leaf_page.data());
         {
