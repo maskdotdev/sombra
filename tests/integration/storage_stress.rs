@@ -28,6 +28,7 @@ fn randomized_graph_stress_and_recovery() -> Result<()> {
     let mut rng = ChaCha8Rng::seed_from_u64(SEED);
     let mut nodes = Vec::with_capacity(NODE_COUNT);
     let mut edges = HashSet::new();
+    let mut edge_specs: HashMap<EdgeId, (NodeId, NodeId, TypeId)> = HashMap::new();
 
     {
         let mut write = pager.begin_write()?;
@@ -61,6 +62,7 @@ fn randomized_graph_stress_and_recovery() -> Result<()> {
                 },
             )?;
             edges.insert(edge);
+            edge_specs.insert(edge, (src, dst, ty));
         }
         pager.commit(write)?;
     }
@@ -110,25 +112,42 @@ fn randomized_graph_stress_and_recovery() -> Result<()> {
             assert_eq!(in_neighbors.len() as u64, in_degree);
         }
 
-        let mut fwd_map: HashMap<EdgeId, (NodeId, NodeId, TypeId)> = HashMap::new();
-        for (src, ty, dst, edge) in graph.debug_collect_adj_fwd(&read)? {
-            fwd_map.insert(edge, (src, dst, ty));
+        let mut specs: Vec<_> = edge_specs.iter().collect();
+        specs.sort_unstable_by_key(|(edge_id, _)| edge_id.0);
+        for (edge_id, (src, dst, ty)) in specs {
+            let out_neighbors: Vec<_> = graph
+                .neighbors(&read, *src, Dir::Out, Some(*ty), ExpandOpts::default())?
+                .collect();
+            assert!(
+                out_neighbors.iter().any(|n| n.neighbor == *dst),
+                "Edge {:?} missing from out-adjacency of {:?} (expected dst {:?}, ty {:?}); entries: {:?}",
+                edge_id,
+                src,
+                dst,
+                ty,
+                graph
+                    .debug_collect_adj_fwd(&read)?
+                    .into_iter()
+                    .filter(|(_, _, _, edge)| edge == edge_id)
+                    .collect::<Vec<_>>()
+            );
+            let in_neighbors: Vec<_> = graph
+                .neighbors(&read, *dst, Dir::In, Some(*ty), ExpandOpts::default())?
+                .collect();
+            assert!(
+                in_neighbors.iter().any(|n| n.neighbor == *src),
+                "Edge {:?} missing from in-adjacency of {:?} (expected src {:?}, ty {:?}); entries: {:?}",
+                edge_id,
+                dst,
+                src,
+                ty,
+                graph
+                    .debug_collect_adj_rev(&read)?
+                    .into_iter()
+                    .filter(|(_, _, _, edge)| edge == edge_id)
+                    .collect::<Vec<_>>()
+            );
         }
-        for (dst, ty, src, edge) in graph.debug_collect_adj_rev(&read)? {
-            let Some((fwd_src, fwd_dst, fwd_ty)) = fwd_map.remove(&edge) else {
-                panic!(
-                    "Reverse adjacency missing forward entry for edge {:?}",
-                    edge
-                );
-            };
-            assert_eq!(fwd_src, src);
-            assert_eq!(fwd_dst, dst);
-            assert_eq!(fwd_ty, ty);
-        }
-        assert!(
-            fwd_map.is_empty(),
-            "Forward adjacency entries without reverse counterparts"
-        );
     }
 
     Ok(())
