@@ -12,8 +12,8 @@ use clap::{Parser, ValueEnum};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rusqlite::{params, Connection, Transaction};
-use sombra::primitives::pager::{PageStore, Pager, PagerOptions, PagerStats};
-use sombra::storage::btree::{BTree, BTreeOptions};
+use sombra::primitives::pager::{PageStore, Pager, PagerOptions, PagerStats, WriteGuard};
+use sombra::storage::btree::{BTree, BTreeOptions, PutItem};
 use sombra::storage::{profile_snapshot, StorageProfileSnapshot};
 use tempfile::tempdir;
 
@@ -31,8 +31,12 @@ fn try_main() -> Result<(), Box<dyn Error>> {
     let cfg = BenchConfig::from(args);
 
     let mut results = Vec::new();
-    results.push(run_sombra_bench(&cfg));
-    results.push(run_sqlite_bench(&cfg));
+    if cfg.should_run_sombra() {
+        results.push(run_sombra_bench(&cfg));
+    }
+    if cfg.should_run_sqlite() {
+        results.push(run_sqlite_bench(&cfg));
+    }
 
     BenchResult::print_header(cfg.mode.label());
     for result in &results {
@@ -64,6 +68,22 @@ struct Args {
     /// RNG seed for repeatable mixed/read workloads.
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    /// Enable in-place B-tree leaf edits for the Sombra workload.
+    #[arg(long, default_value_t = false)]
+    btree_inplace: bool,
+
+    /// Sombra insert API to exercise (pointwise put vs. batched put_many).
+    #[arg(long, value_enum, default_value_t = SombraInsertApi::Pointwise)]
+    sombra_insert_api: SombraInsertApi,
+
+    /// Number of edges per source node when batching via put_many.
+    #[arg(long, default_value_t = 64)]
+    put_many_group: usize,
+
+    /// Database implementations to benchmark (both, sombra-only, sqlite-only).
+    #[arg(long, value_enum, default_value_t = DatabaseSelection::Both)]
+    databases: DatabaseSelection,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
@@ -104,6 +124,21 @@ impl fmt::Display for TxMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
+#[value(rename_all = "kebab_case")]
+enum SombraInsertApi {
+    Pointwise,
+    PutMany,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
+#[value(rename_all = "kebab_case")]
+enum DatabaseSelection {
+    Both,
+    SombraOnly,
+    SqliteOnly,
+}
+
 #[derive(Clone, Debug)]
 struct BenchConfig {
     docs: usize,
@@ -111,6 +146,10 @@ struct BenchConfig {
     commit_every: usize,
     mode: BenchMode,
     tx_mode: TxMode,
+    btree_inplace: bool,
+    insert_api: SombraInsertApi,
+    put_many_group: usize,
+    databases: DatabaseSelection,
 }
 
 impl From<Args> for BenchConfig {
@@ -119,13 +158,53 @@ impl From<Args> for BenchConfig {
             value.commit_every > 0,
             "--commit-every must be greater than zero"
         );
+        assert!(
+            value.put_many_group > 0,
+            "--put-many-group must be greater than zero"
+        );
+        if value.sombra_insert_api == SombraInsertApi::PutMany {
+            assert!(
+                value.put_many_group <= u32::MAX as usize,
+                "--put-many-group must fit within 32 bits"
+            );
+        }
         Self {
             docs: value.docs,
             seed: value.seed,
             commit_every: value.commit_every,
             mode: value.mode,
             tx_mode: value.tx_mode,
+            btree_inplace: value.btree_inplace,
+            insert_api: value.sombra_insert_api,
+            put_many_group: value.put_many_group,
+            databases: value.databases,
         }
+    }
+}
+
+impl BenchConfig {
+    fn btree_options(&self) -> BTreeOptions {
+        let mut opts = BTreeOptions::default();
+        opts.in_place_leaf_edits = self.btree_inplace;
+        opts
+    }
+
+    fn uses_put_many(&self) -> bool {
+        self.insert_api == SombraInsertApi::PutMany
+    }
+
+    fn should_run_sombra(&self) -> bool {
+        matches!(
+            self.databases,
+            DatabaseSelection::Both | DatabaseSelection::SombraOnly
+        )
+    }
+
+    fn should_run_sqlite(&self) -> bool {
+        matches!(
+            self.databases,
+            DatabaseSelection::Both | DatabaseSelection::SqliteOnly
+        )
     }
 }
 
@@ -206,8 +285,23 @@ impl BenchResult {
                 profile.btree_leaf_insert_ns,
                 profile.btree_leaf_insert_count,
             );
+            let slot_extent_avg_us = avg_us(
+                profile.btree_slot_extent_ns,
+                profile.btree_slot_extent_count,
+            );
+            let slot_extent_ns_per_slot = avg_per_unit(
+                profile.btree_slot_extent_ns,
+                profile.btree_slot_extent_slots,
+            );
+            let allocator_compactions = profile.btree_leaf_allocator_compactions;
+            let allocator_bytes_moved = profile.btree_leaf_allocator_bytes_moved;
+            let allocator_failures = profile.btree_leaf_allocator_failures;
+            let allocator_avg_bytes = avg_per_unit(
+                profile.btree_leaf_allocator_bytes_moved,
+                profile.btree_leaf_allocator_compactions,
+            );
             println!(
-                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3}",
+                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} allocator_bytes_moved={} allocator_avg_bytes={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
                 profile.pager_wal_frames,
                 profile.pager_wal_bytes,
                 profile.pager_fsync_count,
@@ -216,9 +310,15 @@ impl BenchResult {
                 profile.btree_leaf_memcopy_bytes,
                 profile.btree_leaf_rebalance_in_place,
                 profile.btree_leaf_rebalance_rebuilds,
+                allocator_compactions,
+                allocator_failures,
+                allocator_bytes_moved,
+                allocator_avg_bytes,
                 commit_avg_ms,
                 search_avg_us,
                 insert_avg_us,
+                slot_extent_avg_us,
+                slot_extent_ns_per_slot,
             );
         }
         if let Some(stats) = &self.telemetry.pager {
@@ -242,6 +342,13 @@ fn avg_us(total_ns: u64, count: u64) -> f64 {
         return 0.0;
     }
     (total_ns as f64 / 1_000.0) / count as f64
+}
+
+fn avg_per_unit(total_ns: u64, units: u64) -> f64 {
+    if units == 0 {
+        return 0.0;
+    }
+    total_ns as f64 / units as f64
 }
 
 fn format_duration(d: Duration) -> String {
@@ -288,16 +395,17 @@ fn bench_sombra_reads(cfg: &BenchConfig) -> BenchResult {
     let path = tmpdir.path().join("btree.sombra");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
     let store: Arc<dyn PageStore> = pager.clone();
-    let tree = BTree::open_or_create(&store, BTreeOptions::default()).unwrap();
+    let tree = BTree::open_or_create(&store, cfg.btree_options()).unwrap();
 
-    populate_tree(&pager, &tree, cfg.docs);
+    populate_tree(&pager, &tree, cfg);
     reset_profile_counters();
 
     bench(DatabaseKind::Sombra, cfg.mode.label(), cfg.docs, || {
         let read = pager.begin_read().unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
         for _ in 0..cfg.docs {
-            let key = rng.gen_range(0..cfg.docs) as u64;
+            let idx = rng.gen_range(0..cfg.docs) as usize;
+            let key = sombra_key_for_doc(cfg, idx);
             let _ = tree.get(&read, &key).unwrap();
         }
         BenchTelemetry::from_sombra(&pager)
@@ -309,13 +417,13 @@ fn bench_sombra_inserts(cfg: &BenchConfig) -> BenchResult {
     let path = tmpdir.path().join("btree.sombra");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
     let store: Arc<dyn PageStore> = pager.clone();
-    let tree = BTree::open_or_create(&store, BTreeOptions::default()).unwrap();
+    let tree = BTree::open_or_create(&store, cfg.btree_options()).unwrap();
 
     reset_profile_counters();
     bench(DatabaseKind::Sombra, cfg.mode.label(), cfg.docs, || {
         match cfg.tx_mode {
-            TxMode::Commit => sombra_insert_with_commits(&pager, &tree, cfg.docs, cfg.commit_every),
-            TxMode::ReadWithWrite => sombra_insert_single_commit(&pager, &tree, cfg.docs),
+            TxMode::Commit => sombra_insert_with_commits(&pager, &tree, cfg),
+            TxMode::ReadWithWrite => sombra_insert_single_commit(&pager, &tree, cfg),
         }
         BenchTelemetry::from_sombra(&pager)
     })
@@ -326,96 +434,197 @@ fn bench_sombra_mixed(cfg: &BenchConfig) -> BenchResult {
     let path = tmpdir.path().join("btree.sombra");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
     let store: Arc<dyn PageStore> = pager.clone();
-    let tree = BTree::open_or_create(&store, BTreeOptions::default()).unwrap();
+    let tree = BTree::open_or_create(&store, cfg.btree_options()).unwrap();
 
     reset_profile_counters();
     bench(DatabaseKind::Sombra, cfg.mode.label(), cfg.docs, || {
         match cfg.tx_mode {
-            TxMode::Commit => {
-                sombra_mixed_with_commits(&pager, &tree, cfg.docs, cfg.commit_every, cfg.seed)
-            }
-            TxMode::ReadWithWrite => {
-                sombra_mixed_read_with_write(&pager, &tree, cfg.docs, cfg.seed)
-            }
+            TxMode::Commit => sombra_mixed_with_commits(&pager, &tree, cfg),
+            TxMode::ReadWithWrite => sombra_mixed_read_with_write(&pager, &tree, cfg),
         }
         BenchTelemetry::from_sombra(&pager)
     })
 }
 
-fn populate_tree(pager: &Arc<Pager>, tree: &BTree<u64, u64>, docs: usize) {
+fn populate_tree(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &BenchConfig) {
     let mut write = pager.begin_write().unwrap();
-    for i in 0..docs {
-        tree.put(&mut write, &(i as u64), &(i as u64)).unwrap();
+    for i in 0..cfg.docs {
+        let key = sombra_key_for_doc(cfg, i);
+        let value = i as u64;
+        tree.put(&mut write, &key, &value).unwrap();
     }
     pager.commit(write).unwrap();
 }
 
-fn sombra_insert_with_commits(
-    pager: &Arc<Pager>,
-    tree: &BTree<u64, u64>,
-    docs: usize,
-    commit_every: usize,
-) {
+fn sombra_key_for_doc(cfg: &BenchConfig, index: usize) -> u64 {
+    if cfg.uses_put_many() {
+        let group = cfg.put_many_group;
+        let source = (index / group) as u64;
+        let ordinal = (index % group) as u64;
+        (source << 32) | ordinal
+    } else {
+        index as u64
+    }
+}
+
+struct PutManyBatch {
+    group_size: usize,
+    entries: Vec<(u64, u64)>,
+}
+
+impl PutManyBatch {
+    fn new(group_size: usize) -> Self {
+        Self {
+            group_size,
+            entries: Vec::with_capacity(group_size),
+        }
+    }
+
+    fn push(&mut self, tree: &BTree<u64, u64>, tx: &mut WriteGuard<'_>, key: u64, value: u64) {
+        self.entries.push((key, value));
+        if self.entries.len() >= self.group_size {
+            self.flush(tree, tx);
+        }
+    }
+
+    fn flush(&mut self, tree: &BTree<u64, u64>, tx: &mut WriteGuard<'_>) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let iter = self
+            .entries
+            .iter()
+            .map(|(key, value)| PutItem { key, value });
+        tree.put_many(tx, iter).unwrap();
+        self.entries.clear();
+    }
+}
+
+fn sombra_insert_with_commits(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &BenchConfig) {
     let mut write: Option<_> = None;
     let mut pending = 0usize;
-    for i in 0..docs {
+    let use_put_many = cfg.uses_put_many();
+    let mut batch = if use_put_many {
+        Some(PutManyBatch::new(cfg.put_many_group))
+    } else {
+        None
+    };
+    for i in 0..cfg.docs {
         if write.is_none() {
             write = Some(pager.begin_write().unwrap());
         }
-        let guard = write.as_mut().unwrap();
-        tree.put(guard, &(i as u64), &(i as u64)).unwrap();
+        let key = sombra_key_for_doc(cfg, i);
+        let value = i as u64;
+        {
+            let guard = write.as_mut().unwrap();
+            if use_put_many {
+                batch.as_mut().unwrap().push(tree, guard, key, value);
+            } else {
+                tree.put(guard, &key, &value).unwrap();
+            }
+        }
         pending += 1;
-        if pending == commit_every {
+        if pending == cfg.commit_every {
+            if use_put_many {
+                let guard = write.as_mut().unwrap();
+                batch.as_mut().unwrap().flush(tree, guard);
+            }
             let guard = write.take().unwrap();
             pager.commit(guard).unwrap();
             pending = 0;
         }
     }
+    if let Some(guard) = write.as_mut() {
+        if use_put_many {
+            batch.as_mut().unwrap().flush(tree, guard);
+        }
+    }
     if let Some(guard) = write.take() {
         pager.commit(guard).unwrap();
     }
 }
 
-fn sombra_insert_single_commit(pager: &Arc<Pager>, tree: &BTree<u64, u64>, docs: usize) {
+fn sombra_insert_single_commit(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &BenchConfig) {
     let mut write = pager.begin_write().unwrap();
-    for i in 0..docs {
-        tree.put(&mut write, &(i as u64), &(i as u64)).unwrap();
+    let use_put_many = cfg.uses_put_many();
+    let mut batch = if use_put_many {
+        Some(PutManyBatch::new(cfg.put_many_group))
+    } else {
+        None
+    };
+    for i in 0..cfg.docs {
+        if use_put_many {
+            batch
+                .as_mut()
+                .unwrap()
+                .push(tree, &mut write, sombra_key_for_doc(cfg, i), i as u64);
+        } else {
+            let key = sombra_key_for_doc(cfg, i);
+            let value = i as u64;
+            tree.put(&mut write, &key, &value).unwrap();
+        }
+    }
+    if use_put_many {
+        batch.as_mut().unwrap().flush(tree, &mut write);
     }
     pager.commit(write).unwrap();
 }
 
-fn sombra_mixed_with_commits(
-    pager: &Arc<Pager>,
-    tree: &BTree<u64, u64>,
-    docs: usize,
-    commit_every: usize,
-    seed: u64,
-) {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+fn sombra_mixed_with_commits(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &BenchConfig) {
+    let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
     let mut write: Option<_> = None;
     let mut pending = 0usize;
-    for i in 0..docs {
+    let use_put_many = cfg.uses_put_many();
+    let mut batch = if use_put_many {
+        Some(PutManyBatch::new(cfg.put_many_group))
+    } else {
+        None
+    };
+    for i in 0..cfg.docs {
         let do_write = rng.gen_bool(0.7);
         if do_write {
             if write.is_none() {
                 write = Some(pager.begin_write().unwrap());
             }
-            let guard = write.as_mut().unwrap();
-            tree.put(guard, &(i as u64), &(i as u64)).unwrap();
+            let key = sombra_key_for_doc(cfg, i);
+            let value = i as u64;
+            {
+                let guard = write.as_mut().unwrap();
+                if use_put_many {
+                    batch.as_mut().unwrap().push(tree, guard, key, value);
+                } else {
+                    tree.put(guard, &key, &value).unwrap();
+                }
+            }
             pending += 1;
-            if pending == commit_every {
+            if pending == cfg.commit_every {
+                if use_put_many {
+                    let guard = write.as_mut().unwrap();
+                    batch.as_mut().unwrap().flush(tree, guard);
+                }
                 let guard = write.take().unwrap();
                 pager.commit(guard).unwrap();
                 pending = 0;
             }
         } else if i > 0 {
-            if let Some(guard) = write.take() {
+            if write.is_some() {
+                if use_put_many {
+                    let guard = write.as_mut().unwrap();
+                    batch.as_mut().unwrap().flush(tree, guard);
+                }
+                let guard = write.take().unwrap();
                 pager.commit(guard).unwrap();
                 pending = 0;
             }
             let read = pager.begin_read().unwrap();
-            let key = rng.gen_range(0..i) as u64;
+            let doc_idx = rng.gen_range(0..i) as usize;
+            let key = sombra_key_for_doc(cfg, doc_idx);
             let _ = tree.get(&read, &key).unwrap();
+        }
+    }
+    if let Some(guard) = write.as_mut() {
+        if use_put_many {
+            batch.as_mut().unwrap().flush(tree, guard);
         }
     }
     if let Some(guard) = write.take() {
@@ -423,21 +632,40 @@ fn sombra_mixed_with_commits(
     }
 }
 
-fn sombra_mixed_read_with_write(
-    pager: &Arc<Pager>,
-    tree: &BTree<u64, u64>,
-    docs: usize,
-    seed: u64,
-) {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+fn sombra_mixed_read_with_write(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &BenchConfig) {
+    let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
     let mut write = pager.begin_write().unwrap();
-    for i in 0..docs {
+    let use_put_many = cfg.uses_put_many();
+    let mut batch = if use_put_many {
+        Some(PutManyBatch::new(cfg.put_many_group))
+    } else {
+        None
+    };
+    for i in 0..cfg.docs {
         if rng.gen_bool(0.7) {
-            tree.put(&mut write, &(i as u64), &(i as u64)).unwrap();
+            if use_put_many {
+                batch.as_mut().unwrap().push(
+                    tree,
+                    &mut write,
+                    sombra_key_for_doc(cfg, i),
+                    i as u64,
+                );
+            } else {
+                let key = sombra_key_for_doc(cfg, i);
+                let value = i as u64;
+                tree.put(&mut write, &key, &value).unwrap();
+            }
         } else if i > 0 {
-            let key = rng.gen_range(0..i) as u64;
+            if use_put_many {
+                batch.as_mut().unwrap().flush(tree, &mut write);
+            }
+            let doc_idx = rng.gen_range(0..i) as usize;
+            let key = sombra_key_for_doc(cfg, doc_idx);
             let _ = tree.get_with_write(&mut write, &key).unwrap();
         }
+    }
+    if use_put_many {
+        batch.as_mut().unwrap().flush(tree, &mut write);
     }
     pager.commit(write).unwrap();
 }
