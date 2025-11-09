@@ -259,6 +259,8 @@ impl BTree {
 
 ### B2) In-place deletes & merges
 
+**Status (May 2024):** `btree_inplace` now toggles `try_delete_leaf_in_place`, `borrow_from_{left,right}_in_place`, and the merge helpers in `src/storage/btree/tree/definition.rs`. `BTreeStats::leaf_merges()` increments whenever we collapse siblings, so the plumbing exists — the remaining work is to add the guardrails and telemetry we promised before turning the feature on by default.
+
 **Algorithm (delete):**
 
 1. Find slot, get cell bounds, `copy_within` to close the hole.
@@ -271,6 +273,14 @@ impl BTree {
 
 * Delete single key doesn’t rewrite entire page.
 * Borrow/merge correctness with varied neighbor sizes.
+* Extend `src/storage/btree/tests.rs` to fuzz delete-heavy workloads with `BTreeOptions { in_place_leaf_edits: true }` and assert at least one merge event by checking `BTree::stats().leaf_merges() > 0`.
+* Integration workload in `tests/integration/storage_stage7.rs` that alternates insert/delete cycles with `GraphOptions::btree_inplace(true)` and validates adjacency scans remain sorted.
+
+**Follow-ups before default-on:**
+
+* Export `leaf_merges`, `leaf_rebalance_in_place`, and `leaf_rebalance_rebuilds` through `src/storage/metrics.rs` so CRUD + micro benches show how often we stay in-place.
+* Gate rollout behind an env/pragma toggle so we can bisect regressions without rebuilding.
+* Run nightly fuzzers with `RUSTFLAGS='-Zpanic_abort_tests' SOMBRA_FEATURES=btree_inplace` to ensure the in-place delete path keeps passing under abort-on-panic.
 
 ---
 
@@ -341,7 +351,7 @@ impl BTree {
 
 * **Counters:**
 
-  * `btree_in_place_inserts`, `btree_leaf_rebuilds`, `btree_splits`
+  * `btree_in_place_edits`, `btree_leaf_rebuilds`, `btree_splits`
   * `wal_frames`, `wal_coalesced_writes`, `wal_commit_ms_p50/p95`
   * `idx_cache_hits`, `idx_cache_misses`
 * **Trace probes:** mark `put_many` groups and commit phases.
@@ -478,15 +488,67 @@ fn insert_in_place(leaf: &mut [u8], pos: usize, cell: &[u8]) -> Result<bool> {
 * [x] Txn-local `GraphIndexCache` (hits/misses metrics)
 * [x] `PropDelta` (PropId/PropValue) + no-op update fast-path
 * [x] Row-hash storage feature + mixed-row compatibility tests
-* [ ] `VStore::read_with_write` / write-path materialization reuse
+* [x] `VStore::read_with_write` / write-path materialization reuse
 * [x] `BTree::put_many` wired into adjacency/property indexes
-* [ ] In-place insert (+ scratch buffer + fuzz/property tests)
-* [ ] In-place delete/merge w/ borrow fallback
+* [x] In-place insert (+ scratch buffer + fuzz/property tests)
+* [x] In-place delete/merge w/ borrow fallback _(still staged behind `btree_inplace`; telemetry + fuzzing before default-on)_
 * [ ] WAL borrowed buffers + full-page CRC + coalescing metrics
 * [ ] VStore contiguous extents / streaming overflow writes
-* [ ] Bulk `GraphWriter` with `trusted_endpoints` + validator enforcement
+* [x] Bulk `GraphWriter` with `trusted_endpoints` + validator enforcement
 * [ ] Bench matrix updated & baselined; feature flags + dashboards
 
 ---
 
-If you want, I can tailor the first PR diff outline (files, function signatures, and minimal tests) for `PropDelta + no-op update fast-path` so you can start coding immediately.
+## L. Next PR Blueprints
+
+### L1) WAL borrowed buffers + coalesced I/O (`wal_coalesce`)
+
+**Touch points:** `src/primitives/pager/pager.rs`, `src/primitives/pager/frame.rs`, `src/primitives/wal/mod.rs`, `src/primitives/io/mod.rs`, `src/storage/profile.rs`, `src/storage/metrics.rs`.
+
+**Implementation:**
+
+* Introduce `PendingWalFrame` + `PageImageLease` so `Pager::commit` can hold read guards over dirty frames; if any leases exist we flush synchronously without cloning and unblock writers once the append completes.
+* Keep `WalFrameOwned` for the async path and convert pending frames into `Vec<u8>` only when no leases are present, preserving the existing background committer semantics for catalog/meta-only commits.
+* Add `WalIoBatch` to `WalCommitter`: bucket consecutive `page_id`s (or `page_offset`s) up to `wal_commit_max_frames`; emit vectored writes via a new optional `FileIo::writev_at` (Unix pwritev / Windows WriteFileGather) while retaining the existing `write_at` loop as a fallback.
+* Track `wal_coalesced_writes`, `wal_commit_group_len_{p50,p95}`, and `pager_commit_bytes_borrowed` counters through `storage::profile` + `StorageMetrics`.
+
+**Verification:**
+
+* Unit test in `src/primitives/pager/pager.rs` that forces mixed dirty pages and asserts `PageImageLease` blocks new writers until the WAL append drains (drop guard afterward).
+* Golden test comparing WAL bytes/LSNs between the old clone-heavy path and the borrowed path for the same workload.
+* Crash-recovery test (kill process mid-write) ensuring the vectored writer honors ordering and the database replays cleanly.
+* Benchmarks (`benches/micro_property.rs`, CRUD bench) report ≥3× drop in `(WAL frames / writes)` when `wal_coalesce` is enabled.
+
+### L2) VStore contiguous extents (`vstore_extents`)
+
+**Touch points:** `src/primitives/pager/freelist.rs`, `src/primitives/pager/pager.rs`, `src/storage/vstore/mod.rs`, `tests/integration/storage_stage7.rs`, `tests/integration/storage_stress.rs`.
+
+**Implementation:**
+
+* Teach `FreeCache` to hand out `Extent`s directly (`pop_extent(len)`), and plumb `WriteGuard::allocate_extent(len)` so higher layers can reserve contiguous page ranges in one go.
+* Update `VStore::write`/`update` to request the minimum number of extents for the payload, streaming bytes into each extent with a single pager guard per extent; keep the existing single-page chain as a fallback when the freelist fragmentes.
+* Store extent metadata (start + len) in-memory only; `VRef` still records `(start_page, n_pages, len)` so on read we walk contiguously and only hop when the writer had to allocate a secondary extent.
+* Track new metrics: `vstore_extent_writes`, `avg_extent_len`, and expose them via `VStoreMetrics`.
+
+**Verification:**
+
+* Integration test writing a ≥256 KiB property verifies we allocate ≪ (len / page_size) WAL frames and that `metrics.live_pages()` matches expectations even after crash/recovery.
+* Stress test that alternates large writes/deletes with `Pager::wal_coalesce_ms` tuned low to ensure extents are reclaimed and re-used instead of fragmenting the freelist.
+* Regression test confirming mixed extent + chained layouts decode to identical bytes.
+
+### L3) GraphWriter trusted endpoints + validator
+
+**Touch points:** `src/storage/graph.rs`, `src/query/executor.rs`, `src/cli/import_export.rs`, `bindings/python/benchmarks/crud.py`, `benches/micro_adjacency.rs`.
+
+**Implementation:**
+
+* Introduce `GraphWriterOptions` (or extend the existing builder) with `trusted_endpoints`, `exists_cache_capacity`, and optional `BulkEdgeValidator`. Store the options on the per-connection writer so OLTP keeps the safe default.
+* Add `BulkEdgeValidator` trait object (`validate_batch(&[(NodeId, NodeId)]) -> Result<()>`) plus a concrete helper that samples node existence via a snapshot or pre-built Bloom filter; CLI/bulk importer must call `validate_batch` before flipping `trusted_endpoints=true`.
+* When `trusted_endpoints=true`, skip the dual node lookups in `Graph::create_edge`; instead rely on the validator + optional sampling audit (`sample_rate`).
+* Keep a small `exists_cache: LruCache<NodeId, bool>` for the non-trusted path so repeated edges still avoid redundant probes; expose metrics for cache hit rate and “probing skipped due to trust”.
+
+**Verification:**
+
+* Integration test in `tests/integration/storage_stage7.rs` that attempts to enable `trusted_endpoints` without providing a validator and asserts we error out before inserting anything.
+* CLI test (`src/cli/import_export.rs`) that loads a synthetic edge batch twice: first with validation (should succeed), then with mismatched nodes (validator rejects before touching the pager).
+* Benchmarks in `benches/micro_adjacency.rs` compare baseline edge ingest vs trusted ingest, recording pager reads per edge and confirming the expected ~2× probe reduction.

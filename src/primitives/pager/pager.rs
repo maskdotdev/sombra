@@ -9,7 +9,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use parking_lot::{lock_api::ArcRwLockWriteGuard, Mutex};
+use parking_lot::{
+    lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard},
+    Mutex, RawRwLock,
+};
 use std::io::ErrorKind;
 
 use super::frame::{Frame, FrameState};
@@ -18,15 +21,33 @@ use super::meta::{create_meta, load_meta, write_meta_page, Meta};
 use crate::primitives::{
     concurrency::{ReaderGuard as LockReaderGuard, SingleWriter, WriterGuard as LockWriterGuard},
     io::{FileIo, StdFileIo},
-    wal::{Wal, WalCommitConfig, WalCommitter, WalFrameOwned, WalOptions, WalSyncMode},
+    wal::{Wal, WalCommitConfig, WalCommitter, WalFrame, WalFrameOwned, WalOptions, WalSyncMode},
 };
 use crate::storage::{
-    profile_scope, record_pager_wal_bytes, record_pager_wal_frames, StorageProfileKind,
+    profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
+    record_pager_wal_frames, StorageProfileKind,
 };
 use crate::types::{
     page::{self, PageHeader, PAGE_HDR_LEN},
     page_crc32, Lsn, PageId, Result, SombraError,
 };
+use tracing::debug;
+
+#[cfg(test)]
+macro_rules! pager_test_log {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! pager_test_log {
+    ($($arg:tt)*) => {
+        if false {
+            let _ = format_args!($($arg)*);
+        }
+    };
+}
 
 /// Configuration options for the pager.
 ///
@@ -52,6 +73,51 @@ pub struct PagerOptions {
     pub wal_commit_max_frames: usize,
     /// Time in milliseconds to coalesce WAL commits.
     pub wal_commit_coalesce_ms: u64,
+}
+
+struct PendingWalFrame {
+    lsn: Lsn,
+    page_id: PageId,
+    payload: PendingPayload,
+}
+
+enum PendingPayload {
+    Owned(Vec<u8>),
+    Borrowed(PageImageLease),
+}
+
+impl PendingPayload {
+    fn is_borrowed(&self) -> bool {
+        matches!(self, PendingPayload::Borrowed(_))
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            PendingPayload::Owned(buf) => buf.as_slice(),
+            PendingPayload::Borrowed(lease) => lease.as_slice(),
+        }
+    }
+
+    fn into_owned(self) -> Vec<u8> {
+        match self {
+            PendingPayload::Owned(buf) => buf,
+            PendingPayload::Borrowed(lease) => lease.into_vec(),
+        }
+    }
+}
+
+struct PageImageLease {
+    guard: ArcRwLockReadGuard<RawRwLock, Box<[u8]>>,
+}
+
+impl PageImageLease {
+    fn as_slice(&self) -> &[u8] {
+        &self.guard
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.guard.to_vec()
+    }
 }
 
 impl Default for PagerOptions {
@@ -144,7 +210,7 @@ fn recover_database(
     let mut frames = Vec::new();
     let mut max_lsn = meta.last_checkpoint_lsn;
     while let Some(frame) = iter.next_frame()? {
-        if frame.payload.len() != page_size {
+        if frame.payload.as_slice().len() != page_size {
             return Err(SombraError::Corruption("wal frame payload length mismatch"));
         }
         if frame.lsn.0 <= meta.last_checkpoint_lsn.0 {
@@ -161,7 +227,7 @@ fn recover_database(
     }
     for frame in &frames {
         let offset = page_offset(frame.page_id, page_size);
-        db_io.write_at(offset, &frame.payload)?;
+        db_io.write_at(offset, frame.payload.as_slice())?;
     }
     db_io.sync_all()?;
     meta.last_checkpoint_lsn = max_lsn;
@@ -241,23 +307,32 @@ pub struct PageMut<'a> {
     pub id: PageId,
     pager: &'a Pager,
     frame_idx: usize,
-    guard: ArcRwLockWriteGuard<parking_lot::RawRwLock, Box<[u8]>>,
+    guard: Option<ArcRwLockWriteGuard<parking_lot::RawRwLock, Box<[u8]>>>,
 }
 
 impl<'a> PageMut<'a> {
     /// Returns the page data as an immutable byte slice.
     pub fn data(&self) -> &[u8] {
-        &self.guard
+        self.guard
+            .as_ref()
+            .map(|guard| &guard[..])
+            .expect("page guard missing")
     }
 
     /// Returns the page data as a mutable byte slice.
     pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.guard
+        self.guard
+            .as_mut()
+            .map(|guard| &mut guard[..])
+            .expect("page guard missing")
     }
 }
 
 impl<'a> Drop for PageMut<'a> {
     fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            drop(guard);
+        }
         self.pager.release_frame(self.frame_idx);
     }
 }
@@ -329,6 +404,15 @@ impl<'a> WriteGuard<'a> {
     /// Marks a page as free within this write transaction.
     pub fn free_page(&mut self, id: PageId) -> Result<()> {
         self.pager.free_page_in_txn(self, id)
+    }
+
+    /// Allocates a contiguous extent containing up to `len` pages.
+    ///
+    /// The returned extent may be shorter than `len` if the free cache cannot
+    /// satisfy the entire request; callers should continue requesting extents
+    /// until the desired page count is reached.
+    pub fn allocate_extent(&mut self, len: u32) -> Result<Extent> {
+        self.pager.allocate_extent_in_txn(self, len)
     }
 
     /// Updates the metadata within this write transaction using a closure.
@@ -830,6 +914,12 @@ impl Pager {
     fn rebuild_freelist(&self, inner: &mut PagerInner) -> Result<()> {
         let original_next_page = inner.meta.next_page;
         let mut truncated = false;
+        pager_test_log!(
+            "[pager.freelist] rebuild start free_cache_extents={} pending_free={} freelist_pages={}",
+            inner.free_cache.extents().len(),
+            inner.pending_free.len(),
+            inner.freelist_pages.len()
+        );
         // absorb pending frees
         let mut all_pages: Vec<PageId> = inner
             .free_cache
@@ -848,6 +938,7 @@ impl Pager {
         }
         all_pages.sort_by_key(|p| p.0);
         all_pages.dedup();
+        pager_test_log!("[pager.freelist] unique free pages={}", all_pages.len());
 
         {
             let mut shrink_target = inner.meta.next_page;
@@ -862,6 +953,11 @@ impl Pager {
             }
             if shrink_target != inner.meta.next_page {
                 truncated = true;
+                pager_test_log!(
+                    "[pager.freelist] shrink next_page from {} to {}",
+                    inner.meta.next_page.0,
+                    shrink_target.0
+                );
                 let mut to_clear = Vec::new();
                 for (idx, frame) in inner.frames.iter().enumerate() {
                     if let Some(id) = frame.id {
@@ -885,6 +981,10 @@ impl Pager {
             }
         }
         all_pages.retain(|p| p.0 < inner.meta.next_page.0);
+        pager_test_log!(
+            "[pager.freelist] pages after truncation={}",
+            all_pages.len()
+        );
 
         if all_pages.is_empty() {
             inner.free_cache = FreeCache::default();
@@ -904,6 +1004,10 @@ impl Pager {
 
         // We'll take pages needed for freelist metadata from the end
         let capacity = free_page_capacity(self.page_size);
+        pager_test_log!(
+            "[pager.freelist] free page capacity per freelist page={}",
+            capacity
+        );
         inner.free_cache = FreeCache::from_extents(pages_to_extents(&all_pages));
 
         if capacity == 0 {
@@ -915,6 +1019,11 @@ impl Pager {
         } else {
             (total_extents.len() + capacity - 1) / capacity
         };
+        pager_test_log!(
+            "[pager.freelist] total_extents={} needed_pages={}",
+            total_extents.len(),
+            needed_pages
+        );
         if needed_pages == 0 {
             inner.meta.free_head = PageId(0);
             inner.freelist_pages.clear();
@@ -954,6 +1063,7 @@ impl Pager {
         }
 
         freelist_pages.sort_by_key(|p| p.0);
+        pager_test_log!("[pager.freelist] freelist_pages={:?}", freelist_pages);
         inner.meta.free_head = freelist_pages[0];
         inner.freelist_pages = freelist_pages.clone();
 
@@ -969,6 +1079,11 @@ impl Pager {
 
         let mut extent_iter = remaining_extents.into_iter();
         for (idx, page_id) in freelist_pages.iter().enumerate() {
+            pager_test_log!(
+                "[pager.freelist] writing freelist page {:?} (idx={})",
+                page_id,
+                idx
+            );
             let mut slot = Vec::new();
             for _ in 0..capacity {
                 if let Some(extent) = extent_iter.next() {
@@ -984,15 +1099,23 @@ impl Pager {
             };
             let mut buf = vec![0u8; self.page_size];
             write_free_page(&mut buf, *page_id, &inner.meta, next, &slot)?;
-            self.db_io
-                .write_at(page_offset(*page_id, self.page_size), &buf)?;
+            let offset = page_offset(*page_id, self.page_size);
+            pager_test_log!(
+                "[pager.freelist] write start page {:?} offset {}",
+                *page_id,
+                offset
+            );
+            self.db_io.write_at(offset, &buf)?;
+            pager_test_log!("[pager.freelist] write complete page {:?}", *page_id);
         }
+        pager_test_log!("[pager.freelist] freelist pages written");
 
         if truncated && inner.meta.next_page.0 < original_next_page.0 {
             let new_len = inner.meta.next_page.0 * self.page_size as u64;
             self.db_io.truncate(new_len)?;
         }
 
+        pager_test_log!("[pager.freelist] rebuild complete");
         Ok(())
     }
 
@@ -1041,7 +1164,7 @@ impl Pager {
             id,
             pager: self,
             frame_idx: idx,
-            guard: guard_buf,
+            guard: Some(guard_buf),
         })
     }
 
@@ -1075,6 +1198,58 @@ impl Pager {
         inner.meta_dirty = true;
         guard.allocated_pages.push(page);
         Ok(page)
+    }
+
+    fn allocate_extent_in_txn(&self, guard: &mut WriteGuard<'_>, len: u32) -> Result<Extent> {
+        if len == 0 {
+            return Err(SombraError::Invalid("extent length must be non-zero"));
+        }
+        let wal_frames = self.wal.stats().frames_appended;
+        let mut inner = self.inner.lock();
+        if let Some(extent) = inner.free_cache.pop_extent(len) {
+            self.record_extent_allocation(&mut inner, guard, extent);
+            return Ok(extent);
+        }
+        let should_reload = !inner.meta_dirty
+            && wal_frames == 0
+            && (inner.meta.free_head.0 != 0 || !inner.freelist_pages.is_empty());
+        if should_reload {
+            self.load_freelist_locked(&mut inner)?;
+            if let Some(extent) = inner.free_cache.pop_extent(len) {
+                self.record_extent_allocation(&mut inner, guard, extent);
+                return Ok(extent);
+            }
+        }
+        let start = inner.meta.next_page;
+        let extent = Extent::new(start, len);
+        let end = start
+            .0
+            .checked_add(len as u64)
+            .ok_or(SombraError::Invalid("extent allocation overflow"))?;
+        inner.meta.next_page = PageId(end);
+        inner.meta_dirty = true;
+        self.record_extent_allocation(&mut inner, guard, extent);
+        Ok(extent)
+    }
+
+    fn record_extent_allocation(
+        &self,
+        inner: &mut PagerInner,
+        guard: &mut WriteGuard<'_>,
+        extent: Extent,
+    ) {
+        let end = extent
+            .start
+            .0
+            .checked_add(extent.len as u64)
+            .expect("extent length overflow");
+        if end > inner.meta.next_page.0 {
+            inner.meta.next_page = PageId(end);
+        }
+        inner.meta_dirty = true;
+        for page in extent.iter_pages() {
+            guard.allocated_pages.push(page);
+        }
     }
 
     fn free_page_in_txn(&self, guard: &mut WriteGuard<'_>, id: PageId) -> Result<()> {
@@ -1255,6 +1430,18 @@ impl Pager {
     fn commit_txn(&self, mut guard: WriteGuard<'_>) -> Result<Lsn> {
         let _scope = profile_scope(StorageProfileKind::PagerCommit);
         let mut inner = self.inner.lock();
+        pager_test_log!(
+            "[pager.commit] start lsn={} dirty_pages={} meta_dirty={}",
+            inner.next_lsn.0,
+            guard.dirty_pages.len(),
+            inner.meta_dirty
+        );
+        debug!(
+            lsn = inner.next_lsn.0,
+            dirty_pages = guard.dirty_pages.len(),
+            meta_dirty = inner.meta_dirty,
+            "pager.commit_txn.start"
+        );
         let lsn = inner.next_lsn;
         let mut dirty_pages: Vec<PageId> = guard.dirty_pages.iter().copied().collect();
         if inner.meta_dirty && !dirty_pages.iter().any(|p| p.0 == 0) {
@@ -1263,15 +1450,17 @@ impl Pager {
         dirty_pages.sort_by_key(|p| p.0);
         dirty_pages.dedup();
 
-        let mut wal_frames = Vec::with_capacity(dirty_pages.len());
+        let mut wal_frames: Vec<PendingWalFrame> = Vec::with_capacity(dirty_pages.len());
+        let dirty_page_count = dirty_pages.len();
+        let mut borrowed_bytes = 0u64;
         for page_id in dirty_pages {
             if page_id.0 == 0 {
                 let mut payload = vec![0u8; self.page_size];
                 write_meta_page(&mut payload, &inner.meta)?;
-                wal_frames.push(WalFrameOwned {
+                wal_frames.push(PendingWalFrame {
                     lsn,
                     page_id,
-                    payload,
+                    payload: PendingPayload::Owned(payload),
                 });
                 continue;
             }
@@ -1281,30 +1470,49 @@ impl Pager {
                     return Err(SombraError::Invalid("page not cached"));
                 }
             };
-            let mut payload = vec![0u8; self.page_size];
-            {
-                let mut buf_guard = inner.frames[idx].buf.write();
-                page::clear_crc32(&mut buf_guard[..PAGE_HDR_LEN])?;
-                let crc = page_crc32(page_id.0, inner.meta.salt, &buf_guard);
-                buf_guard[page::header::CRC32].copy_from_slice(&crc.to_be_bytes());
-                payload.copy_from_slice(&buf_guard[..]);
-            }
+            let buf_guard = inner.frames[idx].buf.write_arc();
+            let mut buf_guard = buf_guard;
+            page::clear_crc32(&mut buf_guard[..PAGE_HDR_LEN])?;
+            let crc = page_crc32(page_id.0, inner.meta.salt, &buf_guard);
+            buf_guard[page::header::CRC32].copy_from_slice(&crc.to_be_bytes());
+            let lease_guard = ArcRwLockWriteGuard::downgrade(buf_guard);
             inner.frames[idx].pending_checkpoint = true;
-            wal_frames.push(WalFrameOwned {
+            wal_frames.push(PendingWalFrame {
                 lsn,
                 page_id,
-                payload,
+                payload: PendingPayload::Borrowed(PageImageLease { guard: lease_guard }),
             });
             inner.frames[idx].dirty = false;
             inner.stats.dirty_writebacks += 1;
+            borrowed_bytes = borrowed_bytes.saturating_add(self.page_size as u64);
         }
         inner.next_lsn = Lsn(lsn.0 + 1);
+        let borrowed_frames = wal_frames
+            .iter()
+            .filter(|frame| frame.payload.is_borrowed())
+            .count();
+        pager_test_log!(
+            "[pager.commit] frames built lsn={} frames={} borrowed_frames={}",
+            lsn.0,
+            wal_frames.len(),
+            borrowed_frames
+        );
+        debug!(
+            lsn = lsn.0,
+            wal_frames = wal_frames.len(),
+            borrowed_frames,
+            dirty_pages = dirty_page_count,
+            "pager.commit_txn.frames_built"
+        );
         drop(inner);
         let wal_frame_count = wal_frames.len() as u64;
         if wal_frame_count > 0 {
             record_pager_wal_frames(wal_frame_count);
             let payload_bytes = wal_frame_count.saturating_mul(self.page_size as u64);
             record_pager_wal_bytes(payload_bytes);
+            if borrowed_bytes > 0 {
+                record_pager_commit_borrowed_bytes(borrowed_bytes.min(payload_bytes));
+            }
         }
 
         let synchronous = {
@@ -1316,11 +1524,95 @@ impl Pager {
             Synchronous::Normal => WalSyncMode::Deferred,
             Synchronous::Off => WalSyncMode::Off,
         };
-        let ticket = self.wal_committer.enqueue(wal_frames, sync_mode);
+        let has_borrowed = wal_frames.iter().any(|frame| frame.payload.is_borrowed());
+        if has_borrowed {
+            pager_test_log!(
+                "[pager.commit] flushing borrowed frames lsn={} frames={}",
+                lsn.0,
+                wal_frames.len()
+            );
+            debug!(
+                lsn = lsn.0,
+                frames = wal_frames.len(),
+                "pager.commit_txn.borrowed_flush_start"
+            );
+            self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
+            pager_test_log!(
+                "[pager.commit] flush complete lsn={} frames={}",
+                lsn.0,
+                wal_frames.len()
+            );
+            debug!(
+                lsn = lsn.0,
+                frames = wal_frames.len(),
+                "pager.commit_txn.borrowed_flush_complete"
+            );
+            guard.release_writer_lock();
+            pager_test_log!(
+                "[pager.commit] writer lock released (borrowed) lsn={}",
+                lsn.0
+            );
+            debug!(lsn = lsn.0, "pager.commit_txn.writer_lock_released");
+            if matches!(synchronous, Synchronous::Normal) {
+                self.schedule_normal_sync()?;
+            }
+            guard.committed = true;
+            drop(guard);
+            pager_test_log!("[pager.commit] borrowed path done lsn={}", lsn.0);
+            debug!(lsn = lsn.0, "pager.commit_txn.borrowed_commit_done");
+            drop(wal_frames);
+            self.maybe_autocheckpoint()?;
+            return Ok(lsn);
+        }
+        let owned_frames: Vec<WalFrameOwned> = wal_frames
+            .into_iter()
+            .map(|frame| WalFrameOwned {
+                lsn: frame.lsn,
+                page_id: frame.page_id,
+                payload: frame.payload.into_owned(),
+            })
+            .collect();
+        pager_test_log!(
+            "[pager.commit] enqueue owned frames lsn={} frames={}",
+            lsn.0,
+            owned_frames.len()
+        );
+        debug!(
+            lsn = lsn.0,
+            frames = owned_frames.len(),
+            "pager.commit_txn.enqueue_start"
+        );
+        let ticket = self.wal_committer.enqueue(owned_frames, sync_mode);
         guard.release_writer_lock();
+        pager_test_log!(
+            "[pager.commit] writer lock released lsn={} ticket_present={}",
+            lsn.0,
+            ticket.is_some()
+        );
+        debug!(
+            lsn = lsn.0,
+            has_ticket = ticket.is_some(),
+            "pager.commit_txn.writer_lock_released"
+        );
         let commit_result = match ticket {
-            Some(waiter) => waiter.wait(),
-            None => Ok(()),
+            Some(waiter) => {
+                pager_test_log!("[pager.commit] waiting on WAL ticket lsn={}", lsn.0);
+                debug!(lsn = lsn.0, "pager.commit_txn.waiting_on_ticket");
+                let result = waiter.wait();
+                if let Err(err) = &result {
+                    pager_test_log!("[pager.commit] ticket error lsn={} err={}", lsn.0, err);
+                    debug!(lsn = lsn.0, error = %err, "pager.commit_txn.ticket_error");
+                } else {
+                    pager_test_log!("[pager.commit] ticket done lsn={}", lsn.0);
+                    debug!(lsn = lsn.0, "pager.commit_txn.ticket_done");
+                }
+                result
+            }
+            None => {
+                pager_test_log!("[pager.commit] no ticket needed lsn={}", lsn.0);
+                debug!(lsn = lsn.0, "pager.commit_txn.no_ticket_needed");
+                Ok(())
+            }
         };
         if let Err(err) = commit_result {
             guard.reacquire_writer_lock()?;
@@ -1331,30 +1623,95 @@ impl Pager {
         }
         guard.committed = true;
         drop(guard);
+        pager_test_log!("[pager.commit] commit complete lsn={}", lsn.0);
+        debug!(lsn = lsn.0, "pager.commit_txn.commit_complete");
         self.maybe_autocheckpoint()?;
         Ok(lsn)
     }
 
+    fn flush_pending_wal_frames(
+        &self,
+        frames: &[PendingWalFrame],
+        sync_mode: WalSyncMode,
+    ) -> Result<()> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let mut refs: Vec<WalFrame<'_>> = Vec::with_capacity(frames.len());
+        for frame in frames {
+            refs.push(WalFrame {
+                lsn: frame.lsn,
+                page_id: frame.page_id,
+                payload: frame.payload.as_slice(),
+            });
+        }
+        self.wal.append_frame_batch(&refs)?;
+        if matches!(sync_mode, WalSyncMode::Immediate) {
+            self.wal.sync()?;
+        }
+        Ok(())
+    }
+
     fn run_checkpoint(&self, mode: CheckpointMode) -> Result<()> {
+        pager_test_log!("[pager.checkpoint] start mode={:?}", mode);
+        debug!(mode = ?mode, "pager.run_checkpoint.start");
         let checkpoint_guard = match mode {
             CheckpointMode::Force => loop {
                 if let Some(guard) = self.locks.try_acquire_checkpoint()? {
+                    pager_test_log!("[pager.checkpoint] force guard acquired mode={:?}", mode);
+                    debug!(mode = ?mode, "pager.run_checkpoint.force_acquired");
                     break guard;
                 }
+                pager_test_log!("[pager.checkpoint] waiting for force guard mode={:?}", mode);
+                debug!(
+                    mode = ?mode,
+                    "pager.run_checkpoint.force_waiting_for_guard"
+                );
                 std::thread::sleep(Duration::from_millis(10));
             },
             CheckpointMode::BestEffort => match self.locks.try_acquire_checkpoint()? {
-                Some(guard) => guard,
-                None => return Ok(()),
+                Some(guard) => {
+                    pager_test_log!(
+                        "[pager.checkpoint] best-effort guard acquired mode={:?}",
+                        mode
+                    );
+                    debug!(mode = ?mode, "pager.run_checkpoint.best_effort_acquired");
+                    guard
+                }
+                None => {
+                    pager_test_log!(
+                        "[pager.checkpoint] best-effort guard unavailable mode={:?}",
+                        mode
+                    );
+                    debug!(
+                        mode = ?mode,
+                        "pager.run_checkpoint.best_effort_guard_unavailable"
+                    );
+                    return Ok(());
+                }
             },
         };
         let result = self.perform_checkpoint();
         drop(checkpoint_guard);
+        pager_test_log!(
+            "[pager.checkpoint] guard released mode={:?} success={}",
+            mode,
+            result.is_ok()
+        );
+        match &result {
+            Ok(()) => debug!(mode = ?mode, "pager.run_checkpoint.complete"),
+            Err(err) => debug!(mode = ?mode, error = %err, "pager.run_checkpoint.error"),
+        }
         result
     }
 
     fn perform_checkpoint(&self) -> Result<()> {
+        pager_test_log!("[pager.checkpoint] perform begin");
         let mut inner = self.inner.lock();
+        pager_test_log!(
+            "[pager.checkpoint] meta before checkpoint last_lsn={}",
+            inner.meta.last_checkpoint_lsn.0
+        );
         let mut iter = self.wal.iter()?;
         let mut frames = Vec::new();
         let mut max_lsn = inner.meta.last_checkpoint_lsn;
@@ -1367,36 +1724,86 @@ impl Pager {
             }
             frames.push(frame);
         }
+        pager_test_log!("[pager.checkpoint] frames collected={}", frames.len());
+        debug!(
+            pending_frames = frames.len(),
+            last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
+            "pager.perform_checkpoint.frames_collected"
+        );
         if frames.is_empty() {
             self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
             inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
+            pager_test_log!("[pager.checkpoint] no frames; reset wal");
+            debug!("pager.perform_checkpoint.no_frames");
             return Ok(());
         }
-        for frame in &frames {
+        for (idx, frame) in frames.iter().enumerate() {
+            let payload = frame.payload.as_slice();
             let offset = page_offset(frame.page_id, self.page_size);
-            self.db_io.write_at(offset, &frame.payload)?;
-            if let Some(&idx) = inner.page_table.get(&frame.page_id) {
+            pager_test_log!(
+                "[pager.checkpoint] applying frame {:?} ({}/{})",
+                frame.page_id,
+                idx + 1,
+                frames.len()
+            );
+            pager_test_log!(
+                "[pager.checkpoint] writing page {:?} at offset {}",
+                frame.page_id,
+                offset
+            );
+            self.db_io.write_at(offset, payload)?;
+            pager_test_log!("[pager.checkpoint] write complete page {:?}", frame.page_id);
+            if let Some(&frame_idx) = inner.page_table.get(&frame.page_id) {
+                pager_test_log!(
+                    "[pager.checkpoint] refreshing cached frame {:?} idx={}",
+                    frame.page_id,
+                    frame_idx
+                );
                 {
-                    let mut buf = inner.frames[idx].buf.write();
-                    buf.copy_from_slice(&frame.payload);
+                    let mut buf = inner.frames[frame_idx].buf.write();
+                    buf.copy_from_slice(payload);
                 }
-                inner.frames[idx].dirty = false;
-                inner.frames[idx].pending_checkpoint = false;
-                inner.frames[idx].newly_allocated = false;
-                inner.frames[idx].needs_refresh = true;
+                pager_test_log!(
+                    "[pager.checkpoint] cached frame refreshed {:?}",
+                    frame.page_id
+                );
+                inner.frames[frame_idx].dirty = false;
+                inner.frames[frame_idx].pending_checkpoint = false;
+                inner.frames[frame_idx].newly_allocated = false;
+                inner.frames[frame_idx].needs_refresh = true;
             }
+            pager_test_log!(
+                "[pager.checkpoint] frame {:?} applied ({}/{})",
+                frame.page_id,
+                idx + 1,
+                frames.len()
+            );
         }
         self.rebuild_freelist(&mut inner)?;
+        pager_test_log!("[pager.checkpoint] freelist rebuilt");
+        pager_test_log!("[pager.checkpoint] syncing db file (data pages)");
         self.db_io.sync_all()?;
+        pager_test_log!("[pager.checkpoint] db file synced (data pages)");
         inner.meta.last_checkpoint_lsn = max_lsn;
         let mut meta_buf = vec![0u8; self.page_size];
         write_meta_page(&mut meta_buf, &inner.meta)?;
         self.db_io.write_at(0, &meta_buf)?;
         self.db_io.sync_all()?;
+        pager_test_log!("[pager.checkpoint] meta page written+synced");
         self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
         inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
         inner.meta_dirty = false;
         *self.last_autocheckpoint.lock() = Some(Instant::now());
+        pager_test_log!(
+            "[pager.checkpoint] complete applied_frames={} new_last_lsn={}",
+            frames.len(),
+            inner.meta.last_checkpoint_lsn.0
+        );
+        debug!(
+            applied_frames = frames.len(),
+            new_last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
+            "pager.perform_checkpoint.applied"
+        );
         Ok(())
     }
 
@@ -1434,11 +1841,33 @@ impl Pager {
             (options.autocheckpoint_pages, options.autocheckpoint_ms)
         };
         let mut should_checkpoint = false;
+        let mut pages_triggered = false;
+        let mut timer_triggered = false;
         if autocheckpoint_pages > 0 {
             let wal_len = self.wal.len()?;
             let threshold = (autocheckpoint_pages as u64).saturating_mul(self.page_size as u64);
             if wal_len >= threshold {
                 should_checkpoint = true;
+                pages_triggered = true;
+                pager_test_log!(
+                    "[pager.autockpt] wal_len {} >= threshold {} (pages)",
+                    wal_len,
+                    threshold
+                );
+                debug!(
+                    wal_len,
+                    threshold, "pager.autocheckpoint.pages_threshold_met"
+                );
+            } else {
+                pager_test_log!(
+                    "[pager.autockpt] wal_len {} < threshold {} (pages)",
+                    wal_len,
+                    threshold
+                );
+                debug!(
+                    wal_len,
+                    threshold, "pager.autocheckpoint.pages_below_threshold"
+                );
             }
         }
         if let Some(ms) = autocheckpoint_ms {
@@ -1446,15 +1875,46 @@ impl Pager {
             match *last {
                 Some(prev) if prev.elapsed() >= Duration::from_millis(ms) => {
                     should_checkpoint = true;
+                    timer_triggered = true;
+                    pager_test_log!(
+                        "[pager.autockpt] timer expired elapsed={}ms threshold={}ms",
+                        prev.elapsed().as_millis(),
+                        ms
+                    );
+                    debug!(
+                        elapsed_ms = prev.elapsed().as_millis() as u64,
+                        ms, "pager.autocheckpoint.timer_triggered"
+                    );
                 }
                 None => {
                     *last = Some(Instant::now());
+                    pager_test_log!("[pager.autockpt] timer armed for {}ms", ms);
+                    debug!(ms, "pager.autocheckpoint.timer_armed");
                 }
                 _ => {}
             }
         }
         if should_checkpoint {
+            pager_test_log!(
+                "[pager.autockpt] requesting checkpoint pages_triggered={} timer_triggered={}",
+                pages_triggered,
+                timer_triggered
+            );
+            debug!(
+                pages_triggered,
+                timer_triggered, "pager.autocheckpoint.requesting_checkpoint"
+            );
             let _ = self.run_checkpoint(CheckpointMode::BestEffort);
+        } else {
+            pager_test_log!(
+                "[pager.autockpt] no checkpoint needed pages_triggered={} timer_triggered={}",
+                pages_triggered,
+                timer_triggered
+            );
+            debug!(
+                pages_triggered,
+                timer_triggered, "pager.autocheckpoint.no_checkpoint_needed"
+            );
         }
         Ok(())
     }
@@ -1690,7 +2150,9 @@ mod tests {
     use rand::Rng;
     use std::collections::HashSet;
     use std::fs::metadata;
+    use std::sync::Once;
     use tempfile::tempdir;
+    use tracing_subscriber::EnvFilter;
 
     fn write_test_payload(pager: &Pager, guard: &mut WriteGuard<'_>, id: PageId) -> Result<()> {
         let meta = pager.meta()?;
@@ -1701,6 +2163,19 @@ mod tests {
         header.encode(&mut buf[..PAGE_HDR_LEN])?;
         buf[PAGE_HDR_LEN..PAGE_HDR_LEN + 4].copy_from_slice(b"DATA");
         Ok(())
+    }
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("pager=debug"));
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .try_init();
+        });
     }
 
     #[test]
@@ -1839,6 +2314,7 @@ mod tests {
 
     #[test]
     fn autocheckpoint_ms_triggers_checkpoint() -> Result<()> {
+        init_tracing();
         let dir = tempdir().unwrap();
         let path = dir.path().join("auto_ms.db");
         let options = PagerOptions {
@@ -1848,22 +2324,52 @@ mod tests {
             synchronous: Synchronous::Full,
             ..PagerOptions::default()
         };
+        eprintln!(
+            "[autockpt_ms] creating pager at {:?} with autocheckpoint_ms={:?}",
+            path, options.autocheckpoint_ms
+        );
         let pager = Pager::create(&path, options)?;
+        eprintln!(
+            "[autockpt_ms] pager created; last_checkpoint_lsn={:?}",
+            pager.last_checkpoint_lsn()
+        );
         let page = {
+            eprintln!("[autockpt_ms] begin initial seed write");
             let mut write = pager.begin_write()?;
+            eprintln!("[autockpt_ms] begin_write acquired (seed)");
             let page = write.allocate_page()?;
+            eprintln!("[autockpt_ms] allocate_page returned {:?}", page);
             write_test_payload(&pager, &mut write, page)?;
+            eprintln!("[autockpt_ms] payload written to {:?}", page);
+            eprintln!("[autockpt_ms] committing seed transaction");
             pager.commit(write)?;
+            eprintln!("[autockpt_ms] seed commit complete");
+            eprintln!(
+                "[autockpt_ms] seeded page {:?}; wal_stats={:?}",
+                page,
+                pager.wal.stats()
+            );
             page
         };
         assert_eq!(pager.last_checkpoint_lsn(), Lsn(0));
+        eprintln!("[autockpt_ms] sleeping to let timer elapse");
         thread::sleep(Duration::from_millis(15));
+        eprintln!("[autockpt_ms] starting timed write");
         let mut write = pager.begin_write()?;
+        eprintln!("[autockpt_ms] begin_write acquired (timer)");
+        eprintln!("[autockpt_ms] modifying tracked page {:?}", page);
         {
             let mut page_mut = write.page_mut(page)?;
             page_mut.data_mut()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4].copy_from_slice(b"TIME");
         }
+        eprintln!("[autockpt_ms] page modification complete, committing");
         let lsn = pager.commit(write)?;
+        eprintln!(
+            "[autockpt_ms] commit complete lsn={:?}; last_checkpoint_lsn={:?}; wal_stats={:?}",
+            lsn,
+            pager.last_checkpoint_lsn(),
+            pager.wal.stats()
+        );
         assert_eq!(pager.last_checkpoint_lsn(), lsn);
         assert_eq!(pager.wal.stats().frames_appended, 0);
         Ok(())
@@ -1917,6 +2423,7 @@ mod tests {
 
     #[test]
     fn pager_random_workload() -> Result<()> {
+        init_tracing();
         let dir = tempdir().unwrap();
         let path = dir.path().join("stage2_random.db");
         let options = PagerOptions {
@@ -1928,6 +2435,10 @@ mod tests {
             autocheckpoint_ms: None,
             ..PagerOptions::default()
         };
+        eprintln!(
+            "[random_workload] starting test at {:?} with cache_pages={}",
+            path, options.cache_pages
+        );
         let pager = Pager::create(&path, options.clone())?;
         let mut rng = rand::thread_rng();
         let mut allocated = Vec::new();
@@ -1936,36 +2447,98 @@ mod tests {
         for step in 0..500 {
             let do_alloc = allocated.is_empty() || rng.gen_bool(0.6);
             if do_alloc {
+                eprintln!(
+                    "[random_workload] step {step}: allocating (allocated_before={})",
+                    allocated.len()
+                );
+                eprintln!("[random_workload] step {step}: begin_write (alloc path)");
                 let mut write = pager.begin_write()?;
+                eprintln!("[random_workload] step {step}: begin_write acquired (alloc path)");
+                eprintln!("[random_workload] step {step}: calling allocate_page (alloc path)");
                 let page = write.allocate_page()?;
+                eprintln!(
+                    "[random_workload] step {step}: allocate_page returned {:?}",
+                    page
+                );
+                eprintln!(
+                    "[random_workload] step {step}: writing payload to {:?}",
+                    page
+                );
                 write_test_payload(&pager, &mut write, page)?;
+                eprintln!("[random_workload] step {step}: payload write complete");
+                eprintln!("[random_workload] step {step}: committing transaction (alloc path)");
                 pager.commit(write)?;
+                eprintln!("[random_workload] step {step}: commit complete (alloc path)");
                 allocated.push(page);
+                eprintln!(
+                    "[random_workload] step {step}: allocated page {:?} (allocated_after={})",
+                    page,
+                    allocated.len()
+                );
                 if page.0 > max_page.0 {
                     max_page = page;
                 }
             } else {
+                let before = allocated.len();
                 let idx = rng.gen_range(0..allocated.len());
                 let page = allocated.swap_remove(idx);
+                eprintln!(
+                    "[random_workload] step {step}: freeing page {:?} (allocated_before={before}, remaining_after={})",
+                    page,
+                    allocated.len()
+                );
+                eprintln!("[random_workload] step {step}: begin_write (free path)");
                 let mut write = pager.begin_write()?;
+                eprintln!("[random_workload] step {step}: begin_write acquired (free path)");
+                eprintln!(
+                    "[random_workload] step {step}: freeing {:?} inside txn",
+                    page
+                );
                 write.free_page(page)?;
+                eprintln!("[random_workload] step {step}: page {:?} marked free", page);
+                eprintln!("[random_workload] step {step}: committing transaction (free path)");
                 pager.commit(write)?;
-                let _ = pager.checkpoint(CheckpointMode::BestEffort);
+                eprintln!("[random_workload] step {step}: commit complete (free path)");
+                match pager.checkpoint(CheckpointMode::BestEffort) {
+                    Ok(()) => eprintln!(
+                        "[random_workload] step {step}: free-triggered checkpoint completed"
+                    ),
+                    Err(err) => eprintln!(
+                        "[random_workload] step {step}: free-triggered checkpoint error: {err}"
+                    ),
+                }
             }
             if step % 50 == 0 {
-                let _ = pager.checkpoint(CheckpointMode::BestEffort);
+                eprintln!(
+                    "[random_workload] step {step}: running periodic checkpoint (allocated={})",
+                    allocated.len()
+                );
+                match pager.checkpoint(CheckpointMode::BestEffort) {
+                    Ok(()) => {
+                        eprintln!("[random_workload] step {step}: periodic checkpoint completed")
+                    }
+                    Err(err) => {
+                        eprintln!("[random_workload] step {step}: periodic checkpoint error: {err}")
+                    }
+                }
             }
         }
 
         for page in allocated.drain(..) {
+            eprintln!("[random_workload] draining page {:?}", page);
             let mut write = pager.begin_write()?;
             write.free_page(page)?;
             pager.commit(write)?;
         }
         pager.checkpoint(CheckpointMode::Force)?;
+        eprintln!(
+            "[random_workload] force checkpoint complete; wal_stats={:?}",
+            pager.wal.stats()
+        );
         assert!(metadata(&path).unwrap().len() >= pager.page_size() as u64);
         drop(pager);
 
+        eprintln!("[random_workload] reopening pager");
         let pager = Pager::open(&path, options)?;
         let mut ids = Vec::new();
         for _ in 0..16 {
@@ -1973,6 +2546,7 @@ mod tests {
             let page = write.allocate_page()?;
             pager.commit(write)?;
             ids.push(page);
+            eprintln!("[random_workload] reopen allocated page {:?}", page);
         }
         let set: HashSet<_> = ids.iter().copied().collect();
         assert_eq!(set.len(), ids.len());
@@ -2005,5 +2579,54 @@ mod tests {
         pager.set_wal_coalesce_ms(10);
         assert_eq!(pager.wal_coalesce_ms(), 10);
         Ok(())
+    }
+
+    #[test]
+    fn pager_allocate_extent_reuses_free_cache() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("extent_reuse.db");
+        let mut options = PagerOptions::default();
+        options.autocheckpoint_pages = usize::MAX;
+        let pager = Pager::create(&path, options)?;
+        let (page_a, page_b) = {
+            let mut write = pager.begin_write()?;
+            let a = write.allocate_page()?;
+            let b = write.allocate_page()?;
+            pager.commit(write)?;
+            (a, b)
+        };
+        {
+            let mut write = pager.begin_write()?;
+            write.free_page(page_a)?;
+            write.free_page(page_b)?;
+            pager.commit(write)?;
+        }
+        pager.checkpoint(CheckpointMode::Force)?;
+        let mut write = pager.begin_write()?;
+        let extent = write.allocate_extent(2)?;
+        assert_eq!(extent.start, page_a);
+        assert_eq!(extent.len, 2);
+        pager.commit(write)?;
+        Ok(())
+    }
+
+    #[test]
+    fn page_image_lease_blocks_writes_until_dropped() {
+        use parking_lot::RwLock;
+
+        let buf = Arc::new(RwLock::new(vec![0u8; 64].into_boxed_slice()));
+        let write_guard = buf.write_arc();
+        let lease = PageImageLease {
+            guard: ArcRwLockWriteGuard::downgrade(write_guard),
+        };
+        assert!(
+            buf.try_write_arc().is_none(),
+            "write arc should be blocked while lease holds read lock"
+        );
+        drop(lease);
+        assert!(
+            buf.try_write_arc().is_some(),
+            "write arc should succeed after lease drop"
+        );
     }
 }

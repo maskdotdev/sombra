@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// Snapshot of storage profiling metrics.
@@ -45,6 +46,18 @@ pub struct StorageProfileSnapshot {
     pub pager_wal_bytes: u64,
     /// Number of fsync calls issued by the pager.
     pub pager_fsync_count: u64,
+    /// Number of leaf rebalances that completed without rebuilding.
+    pub btree_leaf_rebalance_in_place: u64,
+    /// Number of leaf rebalances that rewrote whole leaves.
+    pub btree_leaf_rebalance_rebuilds: u64,
+    /// Number of WAL write batches emitted via writev
+    pub wal_coalesced_writes: u64,
+    /// Bytes flushed via borrowed page images during commits
+    pub pager_commit_borrowed_bytes: u64,
+    /// Median WAL batch size (frames) since last snapshot
+    pub wal_commit_group_p50: u64,
+    /// 95th percentile WAL batch size (frames) since last snapshot
+    pub wal_commit_group_p95: u64,
 }
 
 #[derive(Default)]
@@ -69,10 +82,16 @@ struct StorageProfileCounters {
     pager_wal_frames: AtomicU64,
     pager_wal_bytes: AtomicU64,
     pager_fsync_count: AtomicU64,
+    btree_leaf_rebalance_in_place: AtomicU64,
+    btree_leaf_rebalance_rebuilds: AtomicU64,
+    wal_coalesced_writes: AtomicU64,
+    pager_commit_borrowed_bytes: AtomicU64,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
 static PROFILE_COUNTERS: OnceLock<StorageProfileCounters> = OnceLock::new();
+static WAL_IO_SAMPLES: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
+const WAL_SAMPLE_WINDOW: usize = 512;
 
 pub fn profiling_enabled() -> bool {
     *PROFILE_ENABLED.get_or_init(|| std::env::var_os("SOMBRA_PROFILE").is_some())
@@ -179,6 +198,7 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
             counter.load(Ordering::Relaxed)
         }
     };
+    let (wal_p50, wal_p95) = wal_sample_snapshot(reset);
     Some(StorageProfileSnapshot {
         prop_index_lookup_ns: load(&counters.prop_index_lookup_ns),
         prop_index_lookup_count: load(&counters.prop_index_lookup_count),
@@ -200,6 +220,12 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         pager_wal_frames: load(&counters.pager_wal_frames),
         pager_wal_bytes: load(&counters.pager_wal_bytes),
         pager_fsync_count: load(&counters.pager_fsync_count),
+        btree_leaf_rebalance_in_place: load(&counters.btree_leaf_rebalance_in_place),
+        btree_leaf_rebalance_rebuilds: load(&counters.btree_leaf_rebalance_rebuilds),
+        wal_coalesced_writes: load(&counters.wal_coalesced_writes),
+        pager_commit_borrowed_bytes: load(&counters.pager_commit_borrowed_bytes),
+        wal_commit_group_p50: wal_p50,
+        wal_commit_group_p95: wal_p95,
     })
 }
 
@@ -239,6 +265,81 @@ pub fn record_btree_leaf_memcopy_bytes(bytes: u64) {
     }
 }
 
+/// Records the number of coalesced WAL write batches.
+pub fn record_wal_coalesced_writes(count: u64) {
+    if count == 0 {
+        return;
+    }
+    if let Some(counters) = counters() {
+        counters
+            .wal_coalesced_writes
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records how many bytes were flushed via borrowed page images during commit.
+pub fn record_pager_commit_borrowed_bytes(bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+    if let Some(counters) = counters() {
+        counters
+            .pager_commit_borrowed_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+/// Stores a WAL batch length sample used for p50/p95 reporting.
+pub fn record_wal_io_group_sample(len: u64) {
+    if len == 0 {
+        return;
+    }
+    let Some(samples) = wal_samples() else {
+        return;
+    };
+    let mut guard = samples.lock().expect("wal sample mutex poisoned");
+    if guard.len() >= WAL_SAMPLE_WINDOW {
+        guard.pop_front();
+    }
+    guard.push_back(len);
+}
+
+fn wal_samples() -> Option<&'static Mutex<VecDeque<u64>>> {
+    profiling_enabled().then(|| {
+        WAL_IO_SAMPLES.get_or_init(|| Mutex::new(VecDeque::with_capacity(WAL_SAMPLE_WINDOW)))
+    })
+}
+
+fn wal_sample_snapshot(reset: bool) -> (u64, u64) {
+    let Some(samples) = WAL_IO_SAMPLES.get() else {
+        return (0, 0);
+    };
+    let mut guard = samples.lock().expect("wal sample mutex poisoned");
+    if guard.is_empty() {
+        if reset {
+            guard.clear();
+        }
+        return (0, 0);
+    }
+    let mut data: Vec<u64> = guard.iter().copied().collect();
+    data.sort_unstable();
+    let p50 = percentile(&data, 0.5);
+    let p95 = percentile(&data, 0.95);
+    if reset {
+        guard.clear();
+    }
+    (p50, p95)
+}
+
+fn percentile(values: &[u64], pct: f64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let max_index = values.len() - 1;
+    let idx = ((max_index as f64) * pct).round() as usize;
+    values[idx.min(max_index)]
+}
+
 /// Records the number of WAL frames emitted during a commit.
 pub fn record_pager_wal_frames(frames: u64) {
     if frames == 0 {
@@ -265,6 +366,30 @@ pub fn record_pager_wal_bytes(bytes: u64) {
 pub fn record_pager_fsync() {
     if let Some(counters) = counters() {
         counters.pager_fsync_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records that a leaf rebalance completed using the in-place slot directory path.
+pub fn record_btree_leaf_rebalance_in_place(count: u64) {
+    if count == 0 {
+        return;
+    }
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_rebalance_in_place
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records that a leaf rebalance rebuilt one or more pages.
+pub fn record_btree_leaf_rebalance_rebuilds(count: u64) {
+    if count == 0 {
+        return;
+    }
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_rebalance_rebuilds
+            .fetch_add(count, Ordering::Relaxed);
     }
 }
 

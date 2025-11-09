@@ -47,7 +47,7 @@ impl CatalogMetadata {
         store: Arc<dyn PageStore>,
         catalog_root: PageId,
     ) -> Result<Self> {
-        let (catalog, _) = IndexCatalog::open(&store, catalog_root)?;
+        let (catalog, _) = IndexCatalog::open(&store, catalog_root, false)?;
         Ok(Self {
             dict,
             catalog: Arc::new(catalog),

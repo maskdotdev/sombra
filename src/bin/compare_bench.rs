@@ -207,13 +207,15 @@ impl BenchResult {
                 profile.btree_leaf_insert_count,
             );
             println!(
-                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3}",
+                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3}",
                 profile.pager_wal_frames,
                 profile.pager_wal_bytes,
                 profile.pager_fsync_count,
                 profile.btree_leaf_key_decodes,
                 profile.btree_leaf_key_cmps,
                 profile.btree_leaf_memcopy_bytes,
+                profile.btree_leaf_rebalance_in_place,
+                profile.btree_leaf_rebalance_rebuilds,
                 commit_avg_ms,
                 search_avg_us,
                 insert_avg_us,

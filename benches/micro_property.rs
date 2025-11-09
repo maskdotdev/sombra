@@ -53,7 +53,7 @@ impl PropertyHarness {
         let path = tmpdir.path().join("property.sombra");
         let pager = Arc::new(Pager::create(&path, PagerOptions::default()).expect("pager"));
         let store: Arc<dyn PageStore> = pager.clone();
-        let graph = Graph::open(GraphOptions::new(store)).expect("graph");
+        let graph = Graph::open(GraphOptions::new(store).btree_inplace(true)).expect("graph");
         let label = LabelId(1);
         let prop = PropId(1);
         let mut rng = ChaCha8Rng::seed_from_u64(0xC0FFEE);

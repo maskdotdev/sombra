@@ -112,6 +112,28 @@ impl FreeCache {
         Some(page)
     }
 
+    /// Removes up to `len` contiguous pages from the cache, returning the extent.
+    pub fn pop_extent(&mut self, len: u32) -> Option<Extent> {
+        if len == 0 {
+            return None;
+        }
+        let (idx, extent) = self
+            .extents
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, extent)| extent.len)?;
+        let take = len.min(extent.len);
+        let result = Extent::new(extent.start, take);
+        if extent.len == take {
+            self.extents.remove(idx);
+        } else {
+            self.extents[idx].start.0 += take as u64;
+            self.extents[idx].len -= take;
+        }
+        self.rebuild();
+        Some(result)
+    }
+
     pub fn extend(&mut self, mut extents: Vec<Extent>) {
         if extents.is_empty() {
             return;

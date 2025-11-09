@@ -53,6 +53,8 @@ impl ImportHarness {
                 type_column: None,
                 static_type: Some("FOLLOWS".into()),
                 prop_columns: None,
+                trusted_endpoints: false,
+                exists_cache_capacity: 1024,
             }),
         };
         let summary = run_import(&config, &self.opts).expect("import");

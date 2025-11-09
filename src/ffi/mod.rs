@@ -318,7 +318,7 @@ impl Database {
         };
 
         let store: Arc<dyn PageStore> = pager.clone();
-        let mut graph_opts = GraphOptions::new(Arc::clone(&store));
+        let mut graph_opts = GraphOptions::new(Arc::clone(&store)).btree_inplace(true);
         graph_opts = graph_opts.distinct_neighbors_default(opts.distinct_neighbors_default);
         let graph = Arc::new(Graph::open(graph_opts)?);
 

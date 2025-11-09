@@ -15,6 +15,14 @@ pub struct BTreeStatsSnapshot {
     pub leaf_merges: u64,
     /// Number of internal page merges performed
     pub internal_merges: u64,
+    /// Number of inserts applied by rewriting the entire leaf
+    pub leaf_rebuilds: u64,
+    /// Number of inserts applied in-place without rebuilding
+    pub leaf_in_place_edits: u64,
+    /// Number of leaf rebalances handled in-place.
+    pub leaf_rebalance_in_place: u64,
+    /// Number of leaf rebalances that rebuilt one or more pages.
+    pub leaf_rebalance_rebuilds: u64,
 }
 
 /// Thread-safe statistics tracking for B+ tree operations.
@@ -26,6 +34,10 @@ pub struct BTreeStats {
     internal_splits: AtomicU64,
     leaf_merges: AtomicU64,
     internal_merges: AtomicU64,
+    leaf_rebuilds: AtomicU64,
+    leaf_in_place_edits: AtomicU64,
+    leaf_rebalance_in_place: AtomicU64,
+    leaf_rebalance_rebuilds: AtomicU64,
 }
 
 impl BTreeStats {
@@ -59,6 +71,26 @@ impl BTreeStats {
         self.internal_merges.load(AtomicOrdering::Relaxed)
     }
 
+    /// Returns the number of inserts that rewrote the entire leaf page.
+    pub fn leaf_rebuilds(&self) -> u64 {
+        self.leaf_rebuilds.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Returns the number of inserts that completed using the in-place path.
+    pub fn leaf_in_place_edits(&self) -> u64 {
+        self.leaf_in_place_edits.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Returns the number of leaf rebalances that succeeded via the in-place fast path.
+    pub fn leaf_rebalance_in_place(&self) -> u64 {
+        self.leaf_rebalance_in_place.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Returns the number of leaf rebalances that rebuilt one or both leaves.
+    pub fn leaf_rebalance_rebuilds(&self) -> u64 {
+        self.leaf_rebalance_rebuilds.load(AtomicOrdering::Relaxed)
+    }
+
     pub(crate) fn inc_leaf_searches(&self) {
         self.leaf_searches.fetch_add(1, AtomicOrdering::Relaxed);
     }
@@ -83,6 +115,25 @@ impl BTreeStats {
         self.internal_merges.fetch_add(1, AtomicOrdering::Relaxed);
     }
 
+    pub(crate) fn inc_leaf_rebuilds(&self) {
+        self.leaf_rebuilds.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_leaf_in_place_edits(&self) {
+        self.leaf_in_place_edits
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_leaf_rebalance_in_place(&self) {
+        self.leaf_rebalance_in_place
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn inc_leaf_rebalance_rebuilds(&self) {
+        self.leaf_rebalance_rebuilds
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
     /// Creates a snapshot of all current statistics.
     pub fn snapshot(&self) -> BTreeStatsSnapshot {
         BTreeStatsSnapshot {
@@ -92,6 +143,10 @@ impl BTreeStats {
             internal_splits: self.internal_splits(),
             leaf_merges: self.leaf_merges(),
             internal_merges: self.internal_merges(),
+            leaf_rebuilds: self.leaf_rebuilds(),
+            leaf_in_place_edits: self.leaf_in_place_edits(),
+            leaf_rebalance_in_place: self.leaf_rebalance_in_place(),
+            leaf_rebalance_rebuilds: self.leaf_rebalance_rebuilds(),
         }
     }
 
@@ -106,6 +161,10 @@ impl BTreeStats {
             internal_splits = snapshot.internal_splits,
             leaf_merges = snapshot.leaf_merges,
             internal_merges = snapshot.internal_merges,
+            leaf_rebuilds = snapshot.leaf_rebuilds,
+            leaf_in_place_edits = snapshot.leaf_in_place_edits,
+            leaf_rebalance_in_place = snapshot.leaf_rebalance_in_place,
+            leaf_rebalance_rebuilds = snapshot.leaf_rebalance_rebuilds,
             "btree stats snapshot"
         );
     }

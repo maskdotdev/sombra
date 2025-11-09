@@ -1,8 +1,29 @@
 #![forbid(unsafe_code)]
 
-use std::{fs::File, io, path::Path, sync::Arc};
+use std::{
+    fs::File,
+    io::{self, IoSlice},
+    path::Path,
+    sync::Arc,
+};
 
 use crate::types::{Result, SombraError};
+
+#[cfg(test)]
+macro_rules! io_test_log {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! io_test_log {
+    ($($arg:tt)*) => {
+        if false {
+            let _ = format_args!($($arg)*);
+        }
+    };
+}
 
 /// Trait for performing positioned file I/O operations.
 pub trait FileIo: Send + Sync + 'static {
@@ -10,6 +31,19 @@ pub trait FileIo: Send + Sync + 'static {
     fn read_at(&self, off: u64, dst: &mut [u8]) -> Result<()>;
     /// Writes bytes to the file at the specified offset from the buffer.
     fn write_at(&self, off: u64, src: &[u8]) -> Result<()>;
+    /// Writes multiple buffers to the file at the specified offset.
+    fn writev_at(&self, mut off: u64, bufs: &[IoSlice<'_>]) -> Result<()> {
+        for slice in bufs {
+            if slice.is_empty() {
+                continue;
+            }
+            self.write_at(off, slice)?;
+            off = off
+                .checked_add(slice.len() as u64)
+                .ok_or_else(|| SombraError::Invalid("writev offset overflow"))?;
+        }
+        Ok(())
+    }
     /// Synchronizes all file data and metadata to disk.
     fn sync_all(&self) -> Result<()>;
     /// Returns the current length of the file in bytes.
@@ -50,9 +84,15 @@ pub mod stdio_unix {
 
     /// Reads exact number of bytes at offset using Unix pread semantics.
     pub fn read_exact(file: &File, mut off: u64, mut dst: &mut [u8]) -> io::Result<()> {
+        io_test_log!("[io.read_exact] start off={} len={}", off, dst.len());
         while !dst.is_empty() {
             let read = file.read_at(dst, off)?;
             if read == 0 {
+                io_test_log!(
+                    "[io.read_exact] zero bytes read off={} remaining={}",
+                    off,
+                    dst.len()
+                );
                 return Err(io::Error::new(
                     ErrorKind::UnexpectedEof,
                     "read_at reached EOF",
@@ -62,14 +102,24 @@ pub mod stdio_unix {
             dst = tail;
             off += read as u64;
         }
+        io_test_log!("[io.read_exact] complete");
         Ok(())
     }
 
     /// Writes all bytes at offset using Unix pwrite semantics.
     pub fn write_all(file: &File, mut off: u64, mut src: &[u8]) -> io::Result<()> {
+        let start_off = off;
+        let total = src.len();
+        io_test_log!("[io.write_all] start off={} len={}", off, total);
         while !src.is_empty() {
+            io_test_log!("[io.write_all] chunk off={} remaining={}", off, src.len());
             let written = file.write_at(src, off)?;
             if written == 0 {
+                io_test_log!(
+                    "[io.write_all] zero bytes written off={} remaining={}",
+                    off,
+                    src.len()
+                );
                 return Err(io::Error::new(
                     ErrorKind::WriteZero,
                     "write_at wrote zero bytes",
@@ -78,6 +128,11 @@ pub mod stdio_unix {
             src = &src[written..];
             off += written as u64;
         }
+        io_test_log!(
+            "[io.write_all] complete start_off={} bytes={}",
+            start_off,
+            total
+        );
         Ok(())
     }
 }
@@ -219,7 +274,17 @@ impl FileIo for StdFileIo {
     }
 
     fn sync_all(&self) -> Result<()> {
-        self.file().sync_all().map_err(SombraError::from)
+        io_test_log!("[io.sync_all] start");
+        let result = self.file().sync_all().map_err(SombraError::from);
+        match &result {
+            Ok(()) => {
+                io_test_log!("[io.sync_all] complete");
+            }
+            Err(err) => {
+                io_test_log!("[io.sync_all] error: {}", err);
+            }
+        }
+        result
     }
 
     fn len(&self) -> Result<u64> {

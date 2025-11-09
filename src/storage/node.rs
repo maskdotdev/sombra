@@ -141,7 +141,9 @@ pub fn decode(data: &[u8]) -> Result<NodeRow> {
                     "node inline property payload truncated",
                 ));
             }
-            PropStorage::Inline(data[offset..offset + len].to_vec())
+            let value = data[offset..offset + len].to_vec();
+            offset += len;
+            PropStorage::Inline(value)
         }
         ROW_STORAGE_VREF => {
             if offset + 20 > data.len() {
@@ -154,6 +156,7 @@ pub fn decode(data: &[u8]) -> Result<NodeRow> {
             let len = u32_from_be(&data[offset..offset + 4]);
             offset += 4;
             let checksum = u32_from_be(&data[offset..offset + 4]);
+            offset += 4;
             PropStorage::VRef(VRef {
                 start_page: crate::types::PageId(start_page),
                 n_pages,

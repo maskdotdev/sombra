@@ -50,6 +50,7 @@ proptest = "1.9.0"
 tempfile = "3.10.1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 rand_chacha = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dependencies.tempfile]
 version = "3.10.1"

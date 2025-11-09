@@ -1,0 +1,8 @@
+
+READS-ONLY
+DATABASE     MODE                 DOCS            TIME         OPS/SEC        µS/OP
+----------------------------------------------------------------------------------------
+Sombra       reads-only          10000        21.72 ms          460441          2.2
+    metrics: wal_frames=0 wal_bytes=0 fsyncs=0 key_decodes=67734 key_cmps=67734 memcopy_bytes=0 rebalance_in_place=0 rebalance_rebuilds=0 commit_avg_ms=0.000 search_avg_us=1.177 insert_avg_us=0.000
+    pager: hits=49833 misses=51 evictions=0 dirty_writebacks=51
+SQLite       reads-only          10000        21.03 ms          475590          2.1

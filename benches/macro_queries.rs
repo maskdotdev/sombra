@@ -86,6 +86,8 @@ mod bench {
                 type_column: None,
                 static_type: Some("FOLLOWS".into()),
                 prop_columns: None,
+                trusted_endpoints: false,
+                exists_cache_capacity: 1024,
             }),
         }
     }

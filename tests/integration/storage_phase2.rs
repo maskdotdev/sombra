@@ -10,7 +10,7 @@ use tempfile::tempdir;
 fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Graph)> {
     let pager = Arc::new(Pager::create(path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let graph = Graph::open(GraphOptions::new(store))?;
+    let graph = Graph::open(GraphOptions::new(store).btree_inplace(true))?;
     Ok((pager, graph))
 }
 

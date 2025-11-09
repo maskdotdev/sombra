@@ -24,7 +24,8 @@ fn seed_demo(path: &Path) -> sombra::types::Result<()> {
     let graph = Graph::open(
         GraphOptions::new(store.clone())
             .inline_prop_blob(256)
-            .inline_prop_value(64),
+            .inline_prop_value(64)
+            .btree_inplace(true),
     )?;
 
     let mut write = pager.begin_write()?;

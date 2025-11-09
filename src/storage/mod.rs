@@ -74,8 +74,9 @@ pub use profile::profile_snapshot as storage_profile_snapshot;
 /// Storage layer profiling and statistics.
 pub use profile::{
     profile_scope, profile_snapshot, record_btree_leaf_key_cmps, record_btree_leaf_key_decodes,
-    record_btree_leaf_memcopy_bytes, record_pager_fsync, record_pager_wal_bytes,
-    record_pager_wal_frames, StorageProfileKind, StorageProfileSnapshot,
+    record_btree_leaf_memcopy_bytes, record_pager_commit_borrowed_bytes, record_pager_fsync,
+    record_pager_wal_bytes, record_pager_wal_frames, record_wal_coalesced_writes,
+    record_wal_io_group_sample, StorageProfileKind, StorageProfileSnapshot,
 };
 
 /// Node, edge, and property data types and operations.

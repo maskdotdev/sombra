@@ -2,13 +2,14 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::io;
+use std::io::{self, IoSlice};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use tracing::debug;
 
 use crate::primitives::io::FileIo;
-use crate::storage::record_pager_fsync;
+use crate::storage::{record_pager_fsync, record_wal_coalesced_writes, record_wal_io_group_sample};
 use crate::types::{Checksum, Crc32Fast, Lsn, PageId, Result, SombraError};
 use parking_lot::{Condvar, Mutex};
 
@@ -16,6 +17,7 @@ const WAL_MAGIC: [u8; 4] = *b"SOMW";
 const WAL_FORMAT_VERSION: u16 = 1;
 const FILE_HEADER_LEN: usize = 32;
 const FRAME_HEADER_LEN: usize = 32;
+const WAL_MAX_IO_SLICES: usize = 512;
 
 /// Configuration options for opening a write-ahead log.
 #[derive(Clone, Debug)]
@@ -58,6 +60,8 @@ pub struct WalStats {
     pub bytes_appended: u64,
     /// Number of sync operations performed
     pub syncs: u64,
+    /// Number of coalesced write batches executed
+    pub coalesced_writes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -273,36 +277,64 @@ impl Wal {
     /// The frame payload must match the configured page size. This method does not
     /// sync to disk; call `sync()` to ensure durability.
     pub fn append_frame(&self, frame: WalFrame<'_>) -> Result<()> {
-        if frame.payload.len() != self.page_size {
-            return Err(SombraError::Invalid("wal frame payload size mismatch"));
+        let frames = [frame];
+        self.append_frame_batch(&frames)
+    }
+
+    /// Appends a batch of frames, coalescing writes when possible.
+    pub fn append_frame_batch(&self, frames: &[WalFrame<'_>]) -> Result<()> {
+        if frames.is_empty() {
+            return Ok(());
         }
         let mut state = self.state.lock();
-        if frame.lsn.0 < state.header.start_lsn.0 {
-            return Err(SombraError::Invalid("wal frame lsn below start_lsn"));
+        for frame in frames {
+            if frame.payload.len() != self.page_size {
+                return Err(SombraError::Invalid("wal frame payload size mismatch"));
+            }
+            if frame.lsn.0 < state.header.start_lsn.0 {
+                return Err(SombraError::Invalid("wal frame lsn below start_lsn"));
+            }
         }
-        if state.stats.frames_appended == 0 && frame.lsn.0 > state.header.start_lsn.0 {
-            state.header.start_lsn = frame.lsn;
+        if state.stats.frames_appended == 0 && frames[0].lsn.0 > state.header.start_lsn.0 {
+            state.header.start_lsn = frames[0].lsn;
             self.io.write_at(0, &state.header.encode())?;
         }
-        let payload_crc32 = compute_crc32(&[frame.payload]);
-        let mut header =
-            FrameHeader::new(frame.lsn, frame.page_id, state.prev_chain, payload_crc32);
-        let encoded_header = header.encode_with_crc();
-        header.header_crc32 = u32::from_be_bytes(encoded_header[28..32].try_into().unwrap());
         let frame_size = FRAME_HEADER_LEN + self.page_size;
-        let mut chain_hasher = Crc32Fast::default();
-        chain_hasher.update(&state.prev_chain.to_be_bytes());
-        chain_hasher.update(&encoded_header);
-        chain_hasher.update(frame.payload);
-        let chain_crc = chain_hasher.finalize();
-        let new_chain = ((frame_size as u64) << 32) | u64::from(chain_crc);
-        self.io.write_at(state.append_offset, &encoded_header)?;
-        self.io
-            .write_at(state.append_offset + FRAME_HEADER_LEN as u64, frame.payload)?;
-        state.append_offset += frame_size as u64;
-        state.prev_chain = new_chain;
-        state.stats.frames_appended += 1;
-        state.stats.bytes_appended += frame_size as u64;
+        let mut index = 0usize;
+        while index < frames.len() {
+            let remaining = frames.len() - index;
+            let chunk_frames = remaining.min(WAL_MAX_IO_SLICES / 2).max(1);
+            let slice_end = index + chunk_frames;
+            let chunk = &frames[index..slice_end];
+            let mut header_bufs: Vec<[u8; FRAME_HEADER_LEN]> = Vec::with_capacity(chunk.len());
+            for frame in chunk {
+                let payload_crc32 = compute_crc32(&[frame.payload]);
+                let header =
+                    FrameHeader::new(frame.lsn, frame.page_id, state.prev_chain, payload_crc32);
+                let encoded_header = header.encode_with_crc();
+                let mut chain_hasher = Crc32Fast::default();
+                chain_hasher.update(&state.prev_chain.to_be_bytes());
+                chain_hasher.update(&encoded_header);
+                chain_hasher.update(frame.payload);
+                let chain_crc = chain_hasher.finalize();
+                state.prev_chain = ((frame_size as u64) << 32) | u64::from(chain_crc);
+                header_bufs.push(encoded_header);
+            }
+            let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(chunk.len() * 2);
+            for (idx, frame) in chunk.iter().enumerate() {
+                slices.push(IoSlice::new(&header_bufs[idx]));
+                slices.push(IoSlice::new(frame.payload));
+            }
+            let chunk_bytes = chunk.len() * frame_size;
+            self.io.writev_at(state.append_offset, &slices)?;
+            state.append_offset += chunk_bytes as u64;
+            state.stats.frames_appended += chunk.len() as u64;
+            state.stats.bytes_appended += chunk_bytes as u64;
+            state.stats.coalesced_writes += 1;
+            record_wal_coalesced_writes(1);
+            record_wal_io_group_sample(chunk.len() as u64);
+            index = slice_end;
+        }
         Ok(())
     }
 
@@ -484,6 +516,13 @@ impl WalCommitter {
         {
             let mut state = self.state.lock();
             state.pending.push_back(Arc::clone(&request));
+            debug!(
+                frames = request.frames.len(),
+                sync_mode = ?sync_mode,
+                pending = state.pending.len(),
+                worker_running = state.worker_running,
+                "wal.committer.enqueue"
+            );
             if !state.worker_running {
                 state.worker_running = true;
                 Self::spawn_worker(
@@ -538,12 +577,22 @@ impl WalCommitter {
                 let mut guard = state.lock();
                 let Some(first) = guard.pending.pop_front() else {
                     guard.worker_running = false;
+                    debug!("wal.committer.worker_exit");
                     break;
                 };
+                debug!(
+                    pending_remaining = guard.pending.len(),
+                    "wal.committer.worker_batch_head"
+                );
                 batch.push(first);
             }
             let config_snapshot = *config.lock();
             Self::coalesce_batch(&state, &wakeup, &mut batch, config_snapshot);
+            let total_frames: usize = batch.iter().map(|r| r.frames.len()).sum();
+            debug!(
+                batch_commits = batch.len(),
+                total_frames, "wal.committer.worker_batch_ready"
+            );
             if let Err(err) = Self::apply_batch(&wal, &batch) {
                 Self::fail_batch(&batch, &err);
                 Self::fail_pending(&state, &err);
@@ -589,20 +638,35 @@ impl WalCommitter {
     }
 
     fn apply_batch(wal: &Wal, batch: &[Arc<CommitRequest>]) -> Result<()> {
-        for req in batch {
-            for frame in &req.frames {
-                wal.append_frame(WalFrame {
-                    lsn: frame.lsn,
-                    page_id: frame.page_id,
-                    payload: &frame.payload,
-                })?;
+        let total_frames: usize = batch.iter().map(|req| req.frames.len()).sum();
+        debug!(
+            batch_commits = batch.len(),
+            total_frames, "wal.committer.apply_batch.start"
+        );
+        if total_frames > 0 {
+            let mut flat: Vec<WalFrame<'_>> = Vec::with_capacity(total_frames);
+            for req in batch {
+                for frame in &req.frames {
+                    flat.push(WalFrame {
+                        lsn: frame.lsn,
+                        page_id: frame.page_id,
+                        payload: frame.payload.as_slice(),
+                    });
+                }
             }
+            wal.append_frame_batch(&flat)?;
+            debug!(
+                frames = flat.len(),
+                "wal.committer.apply_batch.appended_frames"
+            );
         }
         if batch
             .iter()
             .any(|req| matches!(req.sync_mode, WalSyncMode::Immediate))
         {
+            debug!("wal.committer.apply_batch.sync_start");
             wal.sync()?;
+            debug!("wal.committer.apply_batch.sync_complete");
         }
         Ok(())
     }
@@ -855,6 +919,7 @@ mod tests {
         };
         committer.commit(vec![frame], WalSyncMode::Immediate)?;
         assert_eq!(wal.stats().frames_appended, 1);
+        assert_eq!(wal.stats().coalesced_writes, 1);
         assert_eq!(wal.stats().syncs, 1);
         let mut iter = wal.iter()?;
         let frame = iter.next_frame()?.expect("frame available");
@@ -897,6 +962,7 @@ mod tests {
             WalSyncMode::Immediate,
         )?;
         assert_eq!(wal.stats().frames_appended, 1);
+        assert_eq!(wal.stats().coalesced_writes, 1);
         Ok(())
     }
 }

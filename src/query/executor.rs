@@ -1210,7 +1210,7 @@ mod tests {
         let path = dir.path().join("executor.db");
         let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
         let store: Arc<dyn crate::primitives::pager::PageStore> = pager.clone();
-        let graph = Arc::new(Graph::open(GraphOptions::new(store))?);
+        let graph = Arc::new(Graph::open(GraphOptions::new(store).btree_inplace(true))?);
         Ok((dir, pager, graph))
     }
 

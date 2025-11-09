@@ -10,7 +10,8 @@ use super::super::stats::{BTreeStats, BTreeStatsSnapshot};
 use crate::primitives::pager::{PageMut, PageRef, PageStore, ReadGuard, WriteGuard};
 use crate::storage::profile::{
     profile_scope, record_btree_leaf_key_cmps, record_btree_leaf_key_decodes,
-    record_btree_leaf_memcopy_bytes, StorageProfileKind,
+    record_btree_leaf_memcopy_bytes, record_btree_leaf_rebalance_in_place,
+    record_btree_leaf_rebalance_rebuilds, StorageProfileKind,
 };
 use crate::types::{
     page::PAGE_HDR_LEN,
@@ -50,6 +51,8 @@ pub struct BTreeOptions {
     pub checksum_verify_on_read: bool,
     /// Optional root page ID for an existing tree
     pub root_page: Option<PageId>,
+    /// Whether to attempt in-place leaf edits (insert/delete) before rebuilding
+    pub in_place_leaf_edits: bool,
 }
 
 impl Default for BTreeOptions {
@@ -59,6 +62,7 @@ impl Default for BTreeOptions {
             internal_min_fill: 40,
             checksum_verify_on_read: true,
             root_page: None,
+            in_place_leaf_edits: false,
         }
     }
 }
@@ -300,76 +304,127 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let needs_rebalance = if entries.is_empty() {
             let mut page = tx.page_mut(leaf_id)?;
             self.write_leaf_empty(&mut page, &header, &[], high_fence.as_slice())?;
+            self.stats.inc_leaf_rebuilds();
             drop(page);
             true
         } else {
             let new_low = entries[0].0.clone();
             first_key_changed =
                 K::compare_encoded(new_low.as_slice(), low_fence.as_slice()) != Ordering::Equal;
-            let high_slice = high_fence.as_slice();
-            let primary_layout =
-                self.build_leaf_layout(payload_len, new_low.as_slice(), high_slice, &entries)?;
-            let local_rebalance = match primary_layout {
-                Some(layout) => {
-                    let fences_end = page::PAYLOAD_HEADER_LEN + new_low.len() + high_fence.len();
-                    {
-                        let mut page = tx.page_mut(leaf_id)?;
-                        self.apply_leaf_layout(&mut page, &header, fences_end, &layout)?;
-                        let high_opt = if high_fence.is_empty() {
-                            None
-                        } else {
-                            Some(high_slice)
-                        };
-                        self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
-                    }
-                    let fill = Self::fill_percent(payload_len, layout.free_start, layout.free_end);
-                    has_parent && fill < self.options.page_fill_target
-                }
-                None => {
-                    let fallback_layout = self.build_leaf_layout(
-                        payload_len,
-                        low_fence.as_slice(),
-                        high_slice,
-                        &entries,
-                    )?;
-                    match fallback_layout {
-                        Some(layout) => {
-                            {
-                                let mut page = tx.page_mut(leaf_id)?;
-                                let fences_end =
-                                    page::PAYLOAD_HEADER_LEN + low_fence.len() + high_fence.len();
-                                self.apply_leaf_layout(&mut page, &header, fences_end, &layout)?;
-                                let high_opt = if high_fence.is_empty() {
-                                    None
-                                } else {
-                                    Some(high_slice)
-                                };
-                                self.apply_leaf_fences(&mut page, low_fence.as_slice(), high_opt)?;
-                            }
-                            let fill =
-                                Self::fill_percent(payload_len, layout.free_start, layout.free_end);
-                            first_key_changed = false;
-                            has_parent && fill < self.options.page_fill_target
+            let mut local_rebalance = false;
+            let removed_first = position == 0;
+            let mut applied_in_place = false;
+            if self.options.in_place_leaf_edits {
+                let can_update_fence =
+                    !removed_first || !first_key_changed || header.low_fence_len == new_low.len();
+                if can_update_fence {
+                    let mut page = tx.page_mut(leaf_id)?;
+                    if let Some(result) = self.try_delete_leaf_in_place(
+                        &mut page,
+                        &header,
+                        key_buf.as_slice(),
+                        removed_first && first_key_changed,
+                        removed_first.then_some(new_low.as_slice()),
+                    )? {
+                        applied_in_place = true;
+                        self.stats.inc_leaf_in_place_edits();
+                        if first_key_changed {
+                            parent_update_key = Some(new_low.clone());
                         }
-                        None => {
-                            if !has_parent {
-                                return Err(SombraError::Invalid(
-                                    "leaf layout after delete exceeds capacity",
-                                ));
-                            }
+                        let fill =
+                            Self::fill_percent(payload_len, result.free_start, result.free_end);
+                        local_rebalance = has_parent && fill < self.options.page_fill_target;
+                        if local_rebalance {
                             rebalance_snapshot = Some(LeafSnapshot {
                                 entries: entries.clone(),
                                 low_fence: new_low.clone(),
                                 high_fence: high_fence.clone(),
                             });
-                            true
                         }
                     }
                 }
-            };
+            }
 
-            if first_key_changed {
-                parent_update_key = Some(new_low);
+            if !applied_in_place {
+                let high_slice = high_fence.as_slice();
+                let primary_layout =
+                    self.build_leaf_layout(payload_len, new_low.as_slice(), high_slice, &entries)?;
+                local_rebalance = match primary_layout {
+                    Some(layout) => {
+                        let fences_end =
+                            page::PAYLOAD_HEADER_LEN + new_low.len() + high_fence.len();
+                        {
+                            let mut page = tx.page_mut(leaf_id)?;
+                            self.apply_leaf_layout(&mut page, &header, fences_end, &layout)?;
+                            let high_opt = if high_fence.is_empty() {
+                                None
+                            } else {
+                                Some(high_slice)
+                            };
+                            self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
+                        }
+                        self.stats.inc_leaf_rebuilds();
+                        let fill =
+                            Self::fill_percent(payload_len, layout.free_start, layout.free_end);
+                        has_parent && fill < self.options.page_fill_target
+                    }
+                    None => {
+                        let fallback_layout = self.build_leaf_layout(
+                            payload_len,
+                            low_fence.as_slice(),
+                            high_slice,
+                            &entries,
+                        )?;
+                        match fallback_layout {
+                            Some(layout) => {
+                                {
+                                    let mut page = tx.page_mut(leaf_id)?;
+                                    let fences_end = page::PAYLOAD_HEADER_LEN
+                                        + low_fence.len()
+                                        + high_fence.len();
+                                    self.apply_leaf_layout(
+                                        &mut page, &header, fences_end, &layout,
+                                    )?;
+                                    let high_opt = if high_fence.is_empty() {
+                                        None
+                                    } else {
+                                        Some(high_slice)
+                                    };
+                                    self.apply_leaf_fences(
+                                        &mut page,
+                                        low_fence.as_slice(),
+                                        high_opt,
+                                    )?;
+                                }
+                                self.stats.inc_leaf_rebuilds();
+                                let fill = Self::fill_percent(
+                                    payload_len,
+                                    layout.free_start,
+                                    layout.free_end,
+                                );
+                                first_key_changed = false;
+                                has_parent && fill < self.options.page_fill_target
+                            }
+                            None => {
+                                if !has_parent {
+                                    return Err(SombraError::Invalid(
+                                        "leaf layout after delete exceeds capacity",
+                                    ));
+                                }
+                                rebalance_snapshot = Some(LeafSnapshot {
+                                    entries: entries.clone(),
+                                    low_fence: new_low.clone(),
+                                    high_fence: high_fence.clone(),
+                                });
+                                true
+                            }
+                        }
+                    }
+                };
+
+                if first_key_changed {
+                    parent_update_key = Some(new_low);
+                }
             }
             local_rebalance
         };
@@ -644,12 +699,25 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         value: Vec<u8>,
     ) -> Result<LeafInsert> {
         let _scope = profile_scope(StorageProfileKind::BTreeLeafInsert);
+        if self.options.in_place_leaf_edits {
+            if self.try_insert_leaf_in_place(
+                &mut page,
+                &header,
+                key.as_slice(),
+                value.as_slice(),
+            )? {
+                self.stats.inc_leaf_in_place_edits();
+                return Ok(LeafInsert::Done);
+            }
+        }
+
         let data = page.data();
         let payload = page::payload(data)?;
         let slots = header.slot_directory(data)?;
         let (low_fence, high_fence) = header.fence_slices(data)?;
         let low_fence_vec = low_fence.to_vec();
         let high_fence_vec = high_fence.to_vec();
+
         let mut entries = Vec::with_capacity(slots.len());
         for idx in 0..slots.len() {
             let rec_slice = page::record_slice_from_parts(&header, payload, &slots, idx)?;
@@ -687,6 +755,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 Some(high_fence_vec.as_slice())
             };
             self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
+            self.stats.inc_leaf_rebuilds();
             return Ok(LeafInsert::Done);
         }
 
@@ -803,6 +872,273 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             right_min,
             right_page: new_page_id,
         })
+    }
+
+    fn try_insert_leaf_in_place(
+        &self,
+        page: &mut PageMut<'_>,
+        header: &page::Header,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool> {
+        if header.kind != page::BTreePageKind::Leaf {
+            return Ok(false);
+        }
+        let free_start = header.free_start as usize;
+        let free_end = header.free_end as usize;
+        if free_end < free_start {
+            return Ok(false);
+        }
+        let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
+        let total_needed = record_len
+            .checked_add(page::SLOT_ENTRY_LEN)
+            .ok_or_else(|| SombraError::Invalid("leaf insert size overflow"))?;
+        if free_end - free_start < total_needed {
+            return Ok(false);
+        }
+
+        let (slot_offsets, insert_idx, has_existing) = {
+            let data = page.data();
+            let payload = page::payload(data)?;
+            let slots = header.slot_directory(data)?;
+            let mut offsets = Vec::with_capacity(slots.len());
+            for offset in slots.iter() {
+                offsets.push(offset);
+            }
+            let mut lo = 0usize;
+            let mut hi = slots.len();
+            let mut existing = None;
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let rec_slice = page::record_slice_from_parts(&header, payload, &slots, mid)?;
+                record_btree_leaf_key_decodes(1);
+                let record = page::decode_leaf_record(rec_slice)?;
+                record_btree_leaf_key_cmps(1);
+                match K::compare_encoded(record.key, key) {
+                    Ordering::Less => lo = mid + 1,
+                    Ordering::Greater => hi = mid,
+                    Ordering::Equal => {
+                        existing = Some(mid);
+                        break;
+                    }
+                }
+            }
+            (offsets, existing.unwrap_or(lo), existing.is_some())
+        };
+
+        if has_existing {
+            return Ok(false);
+        }
+
+        if insert_idx == 0 {
+            if header.low_fence_len == 0 || header.low_fence_len != key.len() {
+                return Ok(false);
+            }
+        }
+
+        let insert_offset = if insert_idx == slot_offsets.len() {
+            free_start
+        } else {
+            slot_offsets[insert_idx] as usize
+        };
+
+        let mut record = Vec::with_capacity(record_len);
+        page::encode_leaf_record(key, value, &mut record)?;
+        debug_assert_eq!(record.len(), record_len);
+
+        {
+            let payload = page::payload_mut(page.data_mut())?;
+            let moved = free_start - insert_offset;
+            payload.copy_within(insert_offset..free_start, insert_offset + record_len);
+            record_btree_leaf_memcopy_bytes(moved as u64);
+            payload[insert_offset..insert_offset + record_len].copy_from_slice(&record);
+            record_btree_leaf_memcopy_bytes(record_len as u64);
+
+            let new_free_start = free_start + record_len;
+            let new_free_end = free_end - page::SLOT_ENTRY_LEN;
+            let new_free_start_u16 = u16::try_from(new_free_start)
+                .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
+            let new_free_end_u16 = u16::try_from(new_free_end)
+                .map_err(|_| SombraError::Invalid("leaf free_end overflow"))?;
+            page::set_free_start(payload, new_free_start_u16);
+            page::set_free_end(payload, new_free_end_u16);
+
+            let new_slot_count = slot_offsets.len() + 1;
+            let new_slot_count_u16 = u16::try_from(new_slot_count)
+                .map_err(|_| SombraError::Invalid("leaf slot count overflow"))?;
+            page::set_slot_count(payload, new_slot_count_u16);
+
+            let mut new_offsets = Vec::with_capacity(new_slot_count);
+            for i in 0..new_slot_count {
+                if i == insert_idx {
+                    let offset_u16 = u16::try_from(insert_offset)
+                        .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
+                    new_offsets.push(offset_u16);
+                } else {
+                    let old_idx = if i < insert_idx { i } else { i - 1 };
+                    let mut offset = slot_offsets[old_idx] as usize;
+                    if old_idx >= insert_idx {
+                        offset += record_len;
+                    }
+                    let offset_u16 = u16::try_from(offset)
+                        .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
+                    new_offsets.push(offset_u16);
+                }
+            }
+            let payload_len = payload.len();
+            let new_slot_bytes = new_offsets.len() * page::SLOT_ENTRY_LEN;
+            let slot_dir_start = payload_len
+                .checked_sub(new_slot_bytes)
+                .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+            for (idx, offset) in new_offsets.iter().enumerate() {
+                let pos = slot_dir_start + idx * page::SLOT_ENTRY_LEN;
+                payload[pos..pos + page::SLOT_ENTRY_LEN].copy_from_slice(&offset.to_be_bytes());
+            }
+
+            if insert_idx == 0 {
+                page::set_low_fence(payload, key)?;
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn try_delete_leaf_in_place(
+        &self,
+        page: &mut PageMut<'_>,
+        header: &page::Header,
+        key: &[u8],
+        removed_first_key: bool,
+        new_first_key: Option<&[u8]>,
+    ) -> Result<Option<InPlaceDeleteResult>> {
+        if header.kind != page::BTreePageKind::Leaf {
+            return Ok(None);
+        }
+        if header.slot_count == 0 {
+            return Ok(None);
+        }
+        if removed_first_key {
+            let Some(new_key) = new_first_key else {
+                return Ok(None);
+            };
+            if header.low_fence_len != new_key.len() {
+                return Ok(None);
+            }
+        }
+        let (slot_offsets, target_idx, payload_len) = {
+            let data = page.data();
+            let payload = page::payload(data)?;
+            let slots = header.slot_directory(data)?;
+            let mut offsets = Vec::with_capacity(slots.len());
+            for idx in 0..slots.len() {
+                offsets.push(slots.get(idx)?);
+            }
+            let mut lo = 0usize;
+            let mut hi = slots.len();
+            let mut found = None;
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let rec_slice = page::record_slice_from_parts(header, payload, &slots, mid)?;
+                let record = page::decode_leaf_record(rec_slice)?;
+                match K::compare_encoded(record.key, key) {
+                    Ordering::Less => lo = mid + 1,
+                    Ordering::Greater => hi = mid,
+                    Ordering::Equal => {
+                        found = Some(mid);
+                        break;
+                    }
+                }
+            }
+            let Some(idx) = found else {
+                return Ok(None);
+            };
+            (offsets, idx, payload.len())
+        };
+        if slot_offsets.len() <= 1 {
+            return Ok(None);
+        }
+        let record_start = slot_offsets[target_idx] as usize;
+        let record_end = if target_idx + 1 < slot_offsets.len() {
+            slot_offsets[target_idx + 1] as usize
+        } else {
+            header.free_start as usize
+        };
+        if record_end < record_start {
+            return Err(SombraError::Corruption("leaf record extent inverted"));
+        }
+        let record_len = record_end - record_start;
+        if record_len == 0 {
+            return Ok(None);
+        }
+        let payload = page::payload_mut(page.data_mut())?;
+        let free_start = header.free_start as usize;
+        let free_end = header.free_end as usize;
+        if record_end > free_start || free_start > payload.len() || free_end > payload.len() {
+            return Err(SombraError::Corruption("leaf free space pointers invalid"));
+        }
+        let bytes_to_move = free_start - record_end;
+        if bytes_to_move > 0 {
+            payload.copy_within(record_end..free_start, record_start);
+            record_btree_leaf_memcopy_bytes(bytes_to_move as u64);
+        }
+        if record_len > 0 {
+            let clear_start = free_start - record_len;
+            payload[clear_start..free_start].fill(0);
+        }
+        let new_free_start = free_start
+            .checked_sub(record_len)
+            .ok_or_else(|| SombraError::Corruption("leaf free_start underflow"))?;
+        let new_free_end = free_end
+            .checked_add(page::SLOT_ENTRY_LEN)
+            .ok_or_else(|| SombraError::Corruption("leaf free_end overflow"))?;
+        let new_free_start_u16 = u16::try_from(new_free_start)
+            .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
+        let new_free_end_u16 = u16::try_from(new_free_end)
+            .map_err(|_| SombraError::Invalid("leaf free_end overflow"))?;
+        page::set_free_start(payload, new_free_start_u16);
+        page::set_free_end(payload, new_free_end_u16);
+
+        let mut new_offsets = Vec::with_capacity(slot_offsets.len() - 1);
+        for (idx, offset) in slot_offsets.iter().enumerate() {
+            if idx == target_idx {
+                continue;
+            }
+            let mut adjusted = *offset as usize;
+            if idx > target_idx {
+                adjusted = adjusted
+                    .checked_sub(record_len)
+                    .ok_or_else(|| SombraError::Corruption("slot offset underflow"))?;
+            }
+            let offset_u16 = u16::try_from(adjusted)
+                .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
+            new_offsets.push(offset_u16);
+        }
+        let new_slot_count_u16 = u16::try_from(new_offsets.len())
+            .map_err(|_| SombraError::Invalid("leaf slot count overflow"))?;
+        page::set_slot_count(payload, new_slot_count_u16);
+        let new_slot_bytes = new_offsets.len() * page::SLOT_ENTRY_LEN;
+        let new_slot_start = payload_len
+            .checked_sub(new_slot_bytes)
+            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+        let old_slot_start = payload_len
+            .checked_sub(slot_offsets.len() * page::SLOT_ENTRY_LEN)
+            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+        if new_slot_start > old_slot_start {
+            payload[old_slot_start..new_slot_start].fill(0);
+        }
+        for (idx, offset) in new_offsets.iter().enumerate() {
+            let pos = new_slot_start + idx * page::SLOT_ENTRY_LEN;
+            payload[pos..pos + page::SLOT_ENTRY_LEN].copy_from_slice(&offset.to_be_bytes());
+        }
+        if removed_first_key {
+            if let Some(first) = new_first_key {
+                page::set_low_fence(payload, first)?;
+            }
+        }
+        Ok(Some(InPlaceDeleteResult {
+            free_start: new_free_start_u16,
+            free_end: new_free_end_u16,
+        }))
     }
 
     fn propagate_split(
@@ -1166,6 +1502,11 @@ struct InternalLayout {
     free_end: u16,
 }
 
+struct InPlaceDeleteResult {
+    free_start: u16,
+    free_end: u16,
+}
+
 struct LeafSnapshot {
     entries: Vec<(Vec<u8>, Vec<u8>)>,
     low_fence: Vec<u8>,
@@ -1489,6 +1830,40 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         parent_frame: &PathEntry,
         left_id: PageId,
     ) -> Result<BorrowResult> {
+        if self.options.in_place_leaf_edits
+            && self.borrow_from_left_in_place(tx, leaf_id, leaf_header, parent_frame, left_id)?
+        {
+            self.stats.inc_leaf_rebalance_in_place();
+            record_btree_leaf_rebalance_in_place(1);
+            return Ok(BorrowResult::Borrowed);
+        }
+
+        let result = self.borrow_from_left_rebuild(
+            tx,
+            leaf_id,
+            leaf_payload_len,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            left_id,
+        )?;
+        if matches!(result, BorrowResult::Borrowed) {
+            self.stats.inc_leaf_rebalance_rebuilds();
+            record_btree_leaf_rebalance_rebuilds(1);
+        }
+        Ok(result)
+    }
+
+    fn borrow_from_left_rebuild(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_payload_len: usize,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        left_id: PageId,
+    ) -> Result<BorrowResult> {
         let left_page = tx.page_mut(left_id)?;
         let left_header = page::Header::parse(left_page.data())?;
         if left_header.parent != leaf_header.parent {
@@ -1563,7 +1938,115 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(BorrowResult::Borrowed)
     }
 
-    fn try_borrow_from_right(
+    fn borrow_from_left_in_place(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_header: &page::Header,
+        parent_frame: &PathEntry,
+        left_id: PageId,
+    ) -> Result<bool> {
+        let mut left_page = tx.page_mut(left_id)?;
+        let left_header = page::Header::parse(left_page.data())?;
+        if left_header.parent != leaf_header.parent {
+            return Ok(false);
+        }
+        if left_header.slot_count <= 1 {
+            return Ok(false);
+        }
+
+        let left_data = left_page.data();
+        let payload = page::payload(left_data)?;
+        let slots = left_header.slot_directory(left_data)?;
+        if slots.len() == 0 {
+            return Ok(false);
+        }
+        let donor_idx = slots.len() - 1;
+        let rec_slice = page::record_slice_from_parts(&left_header, payload, &slots, donor_idx)?;
+        let record = page::decode_leaf_record(rec_slice)?;
+        let borrowed_key = record.key.to_vec();
+        let borrowed_val = record.value.to_vec();
+        let record_len =
+            page::plain_leaf_record_encoded_len(borrowed_key.len(), borrowed_val.len())?;
+
+        let free_gap =
+            (leaf_header.free_end as usize).saturating_sub(leaf_header.free_start as usize);
+        let needed = record_len
+            .checked_add(page::SLOT_ENTRY_LEN)
+            .ok_or_else(|| SombraError::Invalid("leaf borrow size overflow"))?;
+        if free_gap < needed {
+            return Ok(false);
+        }
+        if leaf_header.low_fence_len != borrowed_key.len()
+            || left_header.high_fence_len != borrowed_key.len()
+        {
+            return Ok(false);
+        }
+
+        // Delete from the donor first to ensure we can fall back by reinserting.
+        if self
+            .try_delete_leaf_in_place(
+                &mut left_page,
+                &left_header,
+                borrowed_key.as_slice(),
+                false,
+                None,
+            )?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        drop(left_page);
+
+        let mut applied = false;
+        {
+            let mut page = tx.page_mut(leaf_id)?;
+            if self.try_insert_leaf_in_place(
+                &mut page,
+                leaf_header,
+                borrowed_key.as_slice(),
+                borrowed_val.as_slice(),
+            )? {
+                applied = true;
+            }
+        }
+        if !applied {
+            // Reinsert into the left sibling to restore original state.
+            let mut left_page = tx.page_mut(left_id)?;
+            let refreshed_header = page::Header::parse(left_page.data())?;
+            let _ = self.try_insert_leaf_in_place(
+                &mut left_page,
+                &refreshed_header,
+                borrowed_key.as_slice(),
+                borrowed_val.as_slice(),
+            )?;
+            return Ok(false);
+        }
+
+        let mut left_page = tx.page_mut(left_id)?;
+        {
+            let payload = page::payload_mut(left_page.data_mut())?;
+            page::set_high_fence(payload, borrowed_key.as_slice())?;
+        }
+        drop(left_page);
+
+        self.update_parent_separator(tx, parent_frame, borrowed_key.as_slice())?;
+        Ok(true)
+    }
+
+    fn leaf_append_cost(entries: &[(Vec<u8>, Vec<u8>)]) -> Result<usize> {
+        let mut total = 0usize;
+        for (key, value) in entries {
+            let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
+            total = total
+                .checked_add(record_len)
+                .and_then(|acc| acc.checked_add(page::SLOT_ENTRY_LEN))
+                .ok_or_else(|| SombraError::Invalid("leaf append size overflow"))?;
+        }
+        Ok(total)
+    }
+
+    fn borrow_from_right_rebuild(
         &self,
         tx: &mut WriteGuard<'_>,
         leaf_id: PageId,
@@ -1660,6 +2143,164 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(true)
     }
 
+    fn borrow_from_right_in_place(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        right_id: PageId,
+    ) -> Result<bool> {
+        let mut right_page = tx.page_mut(right_id)?;
+        let right_header = page::Header::parse(right_page.data())?;
+        if right_header.parent != leaf_header.parent {
+            return Ok(false);
+        }
+        if right_header.slot_count <= 1 {
+            return Ok(false);
+        }
+
+        let right_data = right_page.data();
+        let payload = page::payload(right_data)?;
+        let slots = right_header.slot_directory(right_data)?;
+        if slots.len() < 2 {
+            return Ok(false);
+        }
+        let first_slice = page::record_slice_from_parts(&right_header, payload, &slots, 0)?;
+        let record = page::decode_leaf_record(first_slice)?;
+        let borrowed_key = record.key.to_vec();
+        let borrowed_val = record.value.to_vec();
+        let record_len =
+            page::plain_leaf_record_encoded_len(borrowed_key.len(), borrowed_val.len())?;
+
+        let second_slice = page::record_slice_from_parts(&right_header, payload, &slots, 1)?;
+        let next_record = page::decode_leaf_record(second_slice)?;
+        let right_new_first = next_record.key.to_vec();
+
+        if right_header.low_fence_len != right_new_first.len()
+            || leaf_header.high_fence_len != right_new_first.len()
+        {
+            return Ok(false);
+        }
+
+        let free_gap =
+            (leaf_header.free_end as usize).saturating_sub(leaf_header.free_start as usize);
+        let needed = record_len
+            .checked_add(page::SLOT_ENTRY_LEN)
+            .ok_or_else(|| SombraError::Invalid("leaf borrow size overflow"))?;
+        if free_gap < needed {
+            return Ok(false);
+        }
+
+        // Insert into the recipient before deleting from the donor so we can bail out cleanly.
+        let mut appended = false;
+        {
+            let mut page = tx.page_mut(leaf_id)?;
+            if self.try_insert_leaf_in_place(
+                &mut page,
+                leaf_header,
+                borrowed_key.as_slice(),
+                borrowed_val.as_slice(),
+            )? {
+                appended = true;
+            }
+        }
+        if !appended {
+            return Ok(false);
+        }
+
+        let delete_result = self.try_delete_leaf_in_place(
+            &mut right_page,
+            &right_header,
+            borrowed_key.as_slice(),
+            true,
+            Some(right_new_first.as_slice()),
+        )?;
+        if delete_result.is_none() {
+            // Remove the appended key to keep state consistent.
+            let mut page = tx.page_mut(leaf_id)?;
+            let refreshed = page::Header::parse(page.data())?;
+            let _ = self.try_delete_leaf_in_place(
+                &mut page,
+                &refreshed,
+                borrowed_key.as_slice(),
+                false,
+                None,
+            )?;
+            return Ok(false);
+        }
+        drop(right_page);
+
+        {
+            let mut page = tx.page_mut(leaf_id)?;
+            let payload = page::payload_mut(page.data_mut())?;
+            page::set_high_fence(payload, right_new_first.as_slice())?;
+        }
+
+        let new_leaf_first = if let Some((key, _)) = leaf_snapshot.entries.first() {
+            key.clone()
+        } else {
+            borrowed_key.clone()
+        };
+        if leaf_snapshot.entries.is_empty()
+            || K::compare_encoded(
+                new_leaf_first.as_slice(),
+                leaf_snapshot.low_fence.as_slice(),
+            ) != Ordering::Equal
+        {
+            self.update_parent_separator(tx, parent_frame, new_leaf_first.as_slice())?;
+        }
+        self.update_parent_separator_at_index(
+            tx,
+            parent_frame.page_id,
+            parent_frame.slot_index + 1,
+            right_new_first.as_slice(),
+        )?;
+        Ok(true)
+    }
+
+    fn try_borrow_from_right(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_payload_len: usize,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        right_id: PageId,
+    ) -> Result<bool> {
+        if self.options.in_place_leaf_edits
+            && self.borrow_from_right_in_place(
+                tx,
+                leaf_id,
+                leaf_header,
+                leaf_snapshot,
+                parent_frame,
+                right_id,
+            )?
+        {
+            self.stats.inc_leaf_rebalance_in_place();
+            record_btree_leaf_rebalance_in_place(1);
+            return Ok(true);
+        }
+
+        let result = self.borrow_from_right_rebuild(
+            tx,
+            leaf_id,
+            leaf_payload_len,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            right_id,
+        )?;
+        if result {
+            self.stats.inc_leaf_rebalance_rebuilds();
+            record_btree_leaf_rebalance_rebuilds(1);
+        }
+        Ok(result)
+    }
+
     fn merge_leaf_with_left(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -1681,6 +2322,63 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let left_snapshot = self.snapshot_leaf(&left_header, left_page.data())?;
         drop(left_page);
 
+        if self.options.in_place_leaf_edits
+            && self.merge_leaf_with_left_in_place(
+                tx,
+                leaf_id,
+                leaf_header,
+                leaf_snapshot,
+                parent_frame,
+                path,
+                left_id,
+                &left_snapshot,
+            )?
+        {
+            self.stats.inc_leaf_merges();
+            self.stats.inc_leaf_rebalance_in_place();
+            record_btree_leaf_rebalance_in_place(1);
+            tracing::trace!(
+                target: "sombra_btree::merge",
+                survivor = left_id.0,
+                removed = leaf_id.0,
+                direction = "left",
+                "merged leaf into left sibling (in-place)"
+            );
+            return Ok(true);
+        }
+
+        let merged = self.merge_leaf_with_left_rebuild(
+            tx,
+            leaf_id,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            path,
+            left_id,
+            left_payload_len,
+            &left_header,
+            &left_snapshot,
+        )?;
+        if merged {
+            self.stats.inc_leaf_rebalance_rebuilds();
+            record_btree_leaf_rebalance_rebuilds(1);
+        }
+        Ok(merged)
+    }
+
+    fn merge_leaf_with_left_rebuild(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        path: &[PathEntry],
+        left_id: PageId,
+        left_payload_len: usize,
+        left_header: &page::Header,
+        left_snapshot: &LeafSnapshot,
+    ) -> Result<bool> {
         let removal_index = parent_frame.slot_index;
         let mut combined = left_snapshot.entries.clone();
         combined.extend_from_slice(&leaf_snapshot.entries);
@@ -1725,7 +2423,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let mut page = tx.page_mut(left_id)?;
             let fences_end =
                 page::PAYLOAD_HEADER_LEN + new_low.len() + leaf_snapshot.high_fence.len();
-            self.apply_leaf_layout(&mut page, &left_header, fences_end, &layout)?;
+            self.apply_leaf_layout(&mut page, left_header, fences_end, &layout)?;
             let high_opt = if leaf_snapshot.high_fence.is_empty() {
                 None
             } else {
@@ -1770,6 +2468,88 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         Ok(true)
     }
 
+    fn merge_leaf_with_left_in_place(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        path: &[PathEntry],
+        left_id: PageId,
+        left_snapshot: &LeafSnapshot,
+    ) -> Result<bool> {
+        let mut left_page = tx.page_mut(left_id)?;
+        let left_header = page::Header::parse(left_page.data())?;
+        if left_header.parent != leaf_header.parent {
+            return Err(SombraError::Corruption(
+                "left sibling parent mismatch during merge",
+            ));
+        }
+
+        let total_cost = Self::leaf_append_cost(&leaf_snapshot.entries)?;
+        let free_gap =
+            (left_header.free_end as usize).saturating_sub(left_header.free_start as usize);
+        if free_gap < total_cost {
+            return Ok(false);
+        }
+        if left_header.high_fence_len != leaf_snapshot.high_fence.len() {
+            return Ok(false);
+        }
+
+        for (key, value) in &leaf_snapshot.entries {
+            let header = page::Header::parse(left_page.data())?;
+            if !self.try_insert_leaf_in_place(
+                &mut left_page,
+                &header,
+                key.as_slice(),
+                value.as_slice(),
+            )? {
+                return Ok(false);
+            }
+        }
+        {
+            let payload = page::payload_mut(left_page.data_mut())?;
+            page::set_right_sibling(payload, leaf_header.right_sibling);
+            page::set_high_fence(payload, leaf_snapshot.high_fence.as_slice())?;
+        }
+        drop(left_page);
+
+        if let Some(right_id) = leaf_header.right_sibling {
+            let mut right_page = tx.page_mut(right_id)?;
+            let payload = page::payload_mut(right_page.data_mut())?;
+            page::set_left_sibling(payload, Some(left_id));
+        }
+        tx.free_page(leaf_id)?;
+
+        let removal_index = parent_frame.slot_index;
+        if removal_index == 0 {
+            return Err(SombraError::Corruption(
+                "expected left sibling to precede current child",
+            ));
+        }
+        let left_index = removal_index - 1;
+        let new_low = if let Some((key, _)) = left_snapshot.entries.first() {
+            key.clone()
+        } else if let Some((key, _)) = leaf_snapshot.entries.first() {
+            key.clone()
+        } else {
+            return Ok(false);
+        };
+        if K::compare_encoded(new_low.as_slice(), left_snapshot.low_fence.as_slice())
+            != Ordering::Equal
+        {
+            self.update_parent_separator_at_index(
+                tx,
+                parent_frame.page_id,
+                left_index,
+                new_low.as_slice(),
+            )?;
+        }
+        self.remove_child_entry(tx, path.to_vec(), parent_frame.clone(), removal_index)?;
+        Ok(true)
+    }
+
     fn merge_leaf_with_right(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -1791,6 +2571,64 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let right_snapshot = self.snapshot_leaf(&right_header, right_page.data())?;
         drop(right_page);
 
+        if self.options.in_place_leaf_edits
+            && self.merge_leaf_with_right_in_place(
+                tx,
+                leaf_id,
+                leaf_header,
+                leaf_snapshot,
+                parent_frame,
+                path,
+                right_id,
+                &right_header,
+                &right_snapshot,
+            )?
+        {
+            self.stats.inc_leaf_merges();
+            self.stats.inc_leaf_rebalance_in_place();
+            record_btree_leaf_rebalance_in_place(1);
+            tracing::trace!(
+                target: "sombra_btree::merge",
+                survivor = leaf_id.0,
+                removed = right_id.0,
+                direction = "right",
+                "merged right leaf into current leaf (in-place)"
+            );
+            return Ok(true);
+        }
+
+        let merged = self.merge_leaf_with_right_rebuild(
+            tx,
+            leaf_id,
+            leaf_payload_len,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            path,
+            right_id,
+            &right_header,
+            &right_snapshot,
+        )?;
+        if merged {
+            self.stats.inc_leaf_rebalance_rebuilds();
+            record_btree_leaf_rebalance_rebuilds(1);
+        }
+        Ok(merged)
+    }
+
+    fn merge_leaf_with_right_rebuild(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_payload_len: usize,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        path: &[PathEntry],
+        right_id: PageId,
+        right_header: &page::Header,
+        right_snapshot: &LeafSnapshot,
+    ) -> Result<bool> {
         let removal_index = parent_frame.slot_index + 1;
         let mut combined = leaf_snapshot.entries.clone();
         combined.extend_from_slice(&right_snapshot.entries);
@@ -1866,6 +2704,73 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             "merged right leaf into current leaf"
         );
         self.remove_child_entry(tx, path.to_vec(), parent_frame.clone(), removal_index)?;
+        Ok(true)
+    }
+
+    fn merge_leaf_with_right_in_place(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        leaf_id: PageId,
+        leaf_header: &page::Header,
+        leaf_snapshot: &LeafSnapshot,
+        parent_frame: &PathEntry,
+        path: &[PathEntry],
+        right_id: PageId,
+        right_header: &page::Header,
+        right_snapshot: &LeafSnapshot,
+    ) -> Result<bool> {
+        let mut leaf_page = tx.page_mut(leaf_id)?;
+        let total_cost = Self::leaf_append_cost(&right_snapshot.entries)?;
+        let free_gap =
+            (leaf_header.free_end as usize).saturating_sub(leaf_header.free_start as usize);
+        if free_gap < total_cost {
+            return Ok(false);
+        }
+        if leaf_header.high_fence_len != right_snapshot.high_fence.len() {
+            return Ok(false);
+        }
+
+        for (key, value) in &right_snapshot.entries {
+            let header = page::Header::parse(leaf_page.data())?;
+            if !self.try_insert_leaf_in_place(
+                &mut leaf_page,
+                &header,
+                key.as_slice(),
+                value.as_slice(),
+            )? {
+                return Ok(false);
+            }
+        }
+        {
+            let payload = page::payload_mut(leaf_page.data_mut())?;
+            page::set_right_sibling(payload, right_header.right_sibling);
+            page::set_high_fence(payload, right_snapshot.high_fence.as_slice())?;
+        }
+        drop(leaf_page);
+
+        if let Some(next_id) = right_header.right_sibling {
+            let mut next_page = tx.page_mut(next_id)?;
+            let payload = page::payload_mut(next_page.data_mut())?;
+            page::set_left_sibling(payload, Some(leaf_id));
+        }
+        tx.free_page(right_id)?;
+
+        let removal_index = parent_frame.slot_index + 1;
+        self.remove_child_entry(tx, path.to_vec(), parent_frame.clone(), removal_index)?;
+
+        let new_low = if let Some((key, _)) = leaf_snapshot.entries.first() {
+            key.clone()
+        } else if let Some((key, _)) = right_snapshot.entries.first() {
+            key.clone()
+        } else {
+            return Ok(false);
+        };
+        if leaf_snapshot.entries.is_empty()
+            || K::compare_encoded(new_low.as_slice(), leaf_snapshot.low_fence.as_slice())
+                != Ordering::Equal
+        {
+            self.update_parent_separator(tx, parent_frame, new_low.as_slice())?;
+        }
         Ok(true)
     }
 

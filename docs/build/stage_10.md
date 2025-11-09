@@ -1,11 +1,12 @@
 # 📄 STAGE 10 — MVCC Prototype (Feature: `mvcc`) - NOT MVP
 
-**Crates:**
+**Modules:**
 
-* `sombra-concurrency` (new impl: `MvccCow`)
-* `sombra-pager` (version‑aware reads)
-* `sombra-wal` (reused as **MVCC log** with visibility records) or new `sombra-mvl`
-* uses: everything above
+* `primitives::concurrency` (new impl: `MvccCow` alongside existing `SingleWriter`)
+* `primitives::pager` (add version‑aware reads via `VersionedPageStore` trait)
+* `primitives::wal` (extend existing WAL or add new `mvl` module for **MVCC log** with commit records)
+* `admin` (update checkpoint, stats to support MVCC)
+* `storage` (integrate MVCC transaction manager)
 
 **Outcome:** **multi‑writer** prototype using **copy‑on‑write pages** with version visibility by `LSN`. Readers pin an **epoch** (snapshot LSN) and read the newest page version ≤ their snapshot. Writers commit in parallel when touching **disjoint pages**; conflicts at page granularity abort.
 
@@ -32,7 +33,7 @@
 
 ### 1.1 Version Log (MVL)
 
-Either reuse WAL with small additions or add `graph.sombra-mvl`. We’ll describe as **MVL**:
+Either extend existing `primitives::wal` module with MVCC support or add new `primitives::mvl` module. For separate file, use `graph.sombra-mvl`. We'll describe as **MVL**:
 
 **MVL header** (same as WAL header with a different magic, e.g., `b"SOMV"`).
 **MVL frame** = WAL frame + an extra **vis** flag in a small **txn commit record**:
@@ -61,13 +62,20 @@ LastWriter: HashMap<PageId, Lsn> // for conflict detection
 
 ## 2) Txn lifecycle (MvccCow)
 
+Implement a new `MvccCow` type in `primitives::concurrency` that provides multi-writer capability alongside the existing `SingleWriter`. Add a transaction manager interface:
+
 ```rust
+// In primitives::concurrency::mvcc
 pub trait TxnManager {
     type R<'a>: ReadTxn;
     type W<'a>: WriteTxn;
 
     fn begin_read(&self)  -> Result<Self::R<'_>>;
     fn begin_write(&self) -> Result<Self::W<'_>>;
+}
+
+pub struct MvccCow {
+    // Epoch management, VPT, LastWriter tracking
 }
 ```
 
@@ -85,7 +93,7 @@ pub trait TxnManager {
 
 **Read for write (RFW)**
 
-* To modify page `p`, read **visible version** at `snapshot_lsn` into the txn’s buffer; apply mutations → new image buffered.
+* To modify page `p`, read **visible version** at `snapshot_lsn` into the txn's buffer; apply mutations → new image buffered.
 
 **Commit**
 
@@ -114,6 +122,8 @@ pub trait TxnManager {
 ## 3) Checkpoint & GC
 
 ### 3.1 Checkpoint
+
+Extend existing `admin::checkpoint` to support MVCC mode:
 
 * Choose a **stable_lsn** = min(snapshot_lsn of active readers).
 * For each page with versions `≤ stable_lsn` and newer than base:
@@ -147,15 +157,17 @@ pub trait TxnManager {
 
 ## 5) PageStore & read path changes
 
-Add **version‑aware read** in pager layer under `mvcc` feature:
+Add **version‑aware read** in `primitives::pager` module under `mvcc` feature:
 
 ```rust
-pub trait VersionedReads {
+// In primitives::pager::mod.rs (behind #[cfg(feature = "mvcc")])
+pub trait VersionedPageStore {
     fn read_page_at(&self, id: PageId, lsn: Lsn) -> Result<PageRef<'_>>;
 }
 ```
 
-* `PageStore` uses `VPT` to locate newest ≤ `lsn`.
+* Implement `VersionedPageStore` for the existing `PageStore` type
+* Uses `VPT` to locate newest ≤ `lsn`.
 * Cache key becomes `(page_id, lsn_bucket)` to avoid mixing snapshots; simple strategy is to cache latest committed image and re‑validate against requests.
 
 ---
@@ -185,10 +197,12 @@ On open:
 
 ## 8) Observability
 
+Extend existing `admin::stats` module to include MVCC metrics:
+
 * `mvcc.current_lsn`, `mvcc.active_readers`, `mvcc.active_writers`
 * `mvcc.commit_bytes`, `mvcc.frames`, `mvcc.conflicts` (counter + reasons)
 * `mvcc.gc_versions_removed`, `mvcc.gc_last_stable_lsn`
-* Expose via `PRAGMA stats` and a new `PRAGMA mvcc`.
+* Add to `StatsReport` struct and expose via CLI `stats` command.
 
 ---
 
@@ -213,33 +227,48 @@ On open:
 
 **Acceptance (Stage 10)**
 
-* “Disjoint writers commit independently” test passes repeatedly (hundreds of runs).
-* “Conflict abort” test deterministically aborts loser; no torn data.
+* "Disjoint writers commit independently" test passes repeatedly (hundreds of runs).
+* "Conflict abort" test deterministically aborts loser; no torn data.
 * Readers see consistent snapshots at selected LSN.
 * GC reclaims old versions without impacting active readers.
 
 ---
 
-## 10) Hooks you should already have (and how they’re used)
+## 10) Existing architecture & integration points
 
-1. **Stable traits (`PageStore`, `TxnManager`)**
+1. **Concurrency foundation**
 
-   * `MvccCow` plugs into `TxnManager` without changing storage/query code.
-2. **Commit LSN everywhere**
+   * Existing `primitives::concurrency::SingleWriter` provides the single-writer baseline
+   * `MvccCow` will be a new implementation in the same module, selected via feature flag or at database open time
 
-   * B+ tree page mutations stamped with LSN; VPT indexes by `PageId, Lsn`.
-3. **Meta root indirection**
+2. **WAL infrastructure**
 
-   * Root table (array) in meta; MVCC publishes root changes via commit record; checkpoint folds latest root ≤ `stable_lsn` back into meta.
-4. **Order‑preserving key encodings**
+   * Existing `primitives::wal` module has frame-based structure with LSN tracking (`WalFrame`, `WalIterator`)
+   * Extend with commit records or create parallel `primitives::mvl` module
+   * `WalCommitter` already provides batching infrastructure
 
-   * Enables range partitioning later if you shard trees (reduce conflicts).
-5. **No global singletons**
+3. **Pager system**
 
-   * `Db` holds `Arc`s to managers; swapping `SingleWriter` → `MvccCow` is a constructor choice.
-6. **Epoch plumbing**
+   * `primitives::pager::PageStore` manages pages and cache
+   * Add `VersionedPageStore` trait for MVCC reads
+   * Meta system in `primitives::pager::meta` tracks root pages
 
-   * Read txns hold `EpochGuard`; `stable_lsn = min_epoch_lsn()` drives GC; MVCC simply implements the real epoch manager where Stage 3 used a no‑op.
+4. **Storage layer**
+
+   * `storage::graph::Graph` uses `Arc<dyn PageStore>` 
+   * Can swap to MVCC-aware pager without changing storage code
+   * B+ trees in `storage::btree` already work with page abstraction
+
+5. **Admin operations**
+
+   * `admin::checkpoint` handles existing WAL checkpointing
+   * Extend for MVCC stable_lsn and version GC
+   * `admin::stats` provides `StatsReport` structure for metrics
+
+6. **Feature flag system**
+
+   * Use existing `Cargo.toml` feature mechanism (currently has `degree-cache`, `ffi-benches`)
+   * Add `mvcc` feature to conditionally compile MVCC code
 
 ---
 
@@ -247,12 +276,14 @@ On open:
 
 **A. MVL & VPT**
 
-* [ ] Implement `sombra-mvl` (or extend `sombra-wal`) with **commit record**.
-* [ ] Implement `VPT` (in‑memory) + builder from MVL scan on open.
-* [ ] Implement append allocator for MVL (atomic offset).
+* [ ] Extend `primitives::wal` or create `primitives::mvl` module with **commit record**.
+* [ ] Implement `VPT` (in‑memory) + builder from MVL scan on open in `primitives::concurrency::mvcc`.
+* [ ] Implement append allocator for MVL (atomic offset) - can reuse patterns from existing `Wal::append_frame`.
 
 **B. TxnManager::MvccCow**
 
+* [ ] Create `primitives::concurrency::mvcc` submodule.
+* [ ] Implement `MvccCow` struct with VPT, LastWriter, epoch tracking.
 * [ ] Read tx: `snapshot_lsn`, `EpochGuard`, versioned reads.
 * [ ] Write tx: dirty map, `read_version` capture on first touch.
 * [ ] Commit: assign `commit_lsn`, validate, append frames, append commit, fsync per mode, publish `LastWriter` updates.
@@ -260,31 +291,70 @@ On open:
 
 **C. Pager integration**
 
-* [ ] `read_page_at(id, lsn)` path; cache policy; checksums.
+* [ ] Add `VersionedPageStore` trait to `primitives::pager`.
+* [ ] Implement `read_page_at(id, lsn)` path; cache policy; checksums.
+* [ ] Update `PageStore` to optionally support versioned reads behind `mvcc` feature.
 
 **D. Checkpoint & GC**
 
+* [ ] Extend `admin::checkpoint::checkpoint()` for MVCC mode.
 * [ ] Compute `stable_lsn` from epochs; fold versions ≤ stable to base; truncate MVL.
 * [ ] Optional: persist compact VPT checkpoint state.
 
 **E. Tests**
 
+* [ ] Add `tests/integration/mvcc_*.rs` test files.
 * [ ] Disjoint vs overlapping writer scenarios.
 * [ ] Crash windows around commit and checkpoint.
 * [ ] Reader snapshot consistency.
 
 **F. Observability & CLI**
 
-* [ ] `PRAGMA mvcc` to expose counters.
-* [ ] `sombra checkpoint` honors MVCC path.
+* [ ] Extend `admin::stats::StatsReport` with MVCC section.
+* [ ] Update `cli` commands to show MVCC stats.
+* [ ] Ensure `checkpoint` command works with MVCC databases.
 
 ---
 
 ## 12) Migration & Feature Flagging
 
-* Build `sombra` with `--features mvcc` to enable MVCC; default remains single‑writer.
-* On a DB created without MVCC, enabling MVCC creates `graph.sombra-mvl` on first write; disabling MVCC requires a `VACUUM INTO` to fold all versions.
+* Add `mvcc` feature to `Cargo.toml` features section
+* Build `sombra` with `--features mvcc` to enable MVCC; default remains single‑writer (`SingleWriter`)
+* Database opening can detect MVCC mode from file metadata and instantiate appropriate transaction manager
+* On a DB created without MVCC, enabling MVCC creates `graph.sombra-mvl` on first write; disabling MVCC requires using `admin::vacuum::vacuum_into()` to fold all versions
+* Update `storage::graph::Graph` constructor to accept either `SingleWriter` or `MvccCow` based on configuration
 
 ---
 
-These two documents align with your earlier stages and keep interfaces narrow so you can evolve safely. If you want, I can also generate **crate/file skeletons** (CLI parsing, admin library traits, fuzz targets, and MVCC struct scaffolds) so your coding agent can start coding immediately.
+## 13) File Structure
+
+Expected new/modified files in the monolithic `sombra` crate:
+
+```
+src/
+  primitives/
+    concurrency/
+      mod.rs              # Update with mvcc module export
+      mvcc.rs             # New: MvccCow, VPT, TxnManager trait
+    wal/
+      mod.rs              # Potentially extend for commit records
+    mvl/                  # Alternative: separate MVL module
+      mod.rs              # New MVL implementation
+    pager/
+      mod.rs              # Add VersionedPageStore trait
+      versioned.rs        # New: version-aware page reads
+  storage/
+    graph.rs              # Update to support MVCC transaction manager
+  admin/
+    checkpoint.rs         # Extend for MVCC checkpointing
+    stats.rs              # Add MVCC metrics to StatsReport
+tests/
+  integration/
+    mvcc_concurrent.rs    # New: concurrent writer tests
+    mvcc_recovery.rs      # New: crash recovery tests
+    mvcc_snapshot.rs      # New: snapshot isolation tests
+```
+
+---
+
+This document aligns with the current monolithic architecture while maintaining the detailed MVCC design from the original. The implementation can now reference actual existing modules and extend them appropriately.

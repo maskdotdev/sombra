@@ -15,9 +15,14 @@ pub struct IndexCatalog {
 
 impl IndexCatalog {
     /// Opens an existing catalog or creates a new one if the root is invalid.
-    pub fn open(store: &Arc<dyn PageStore>, root: PageId) -> Result<(Self, PageId)> {
+    pub fn open(
+        store: &Arc<dyn PageStore>,
+        root: PageId,
+        in_place: bool,
+    ) -> Result<(Self, PageId)> {
         let mut opts = BTreeOptions::default();
         opts.root_page = (root.0 != 0).then_some(root);
+        opts.in_place_leaf_edits = in_place;
         let tree = BTree::open_or_create(store, opts)?;
         let root_page = tree.root_page();
         let catalog = Self {

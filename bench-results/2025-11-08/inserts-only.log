@@ -1,0 +1,8 @@
+
+INSERTS-ONLY
+DATABASE     MODE                 DOCS            TIME         OPS/SEC        µS/OP
+----------------------------------------------------------------------------------------
+Sombra       inserts-only        10000         39.95 s             250       3995.2
+    metrics: wal_frames=25098 wal_bytes=205602816 fsyncs=10000 key_decodes=2994816 key_cmps=96888 memcopy_bytes=23958528 rebalance_in_place=0 rebalance_rebuilds=0 commit_avg_ms=3.906 search_avg_us=0.000 insert_avg_us=87.215
+    pager: hits=29833 misses=51 evictions=0 dirty_writebacks=19644
+SQLite       inserts-only        10000       518.59 ms           19282         51.9

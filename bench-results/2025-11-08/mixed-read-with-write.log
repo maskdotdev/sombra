@@ -1,0 +1,8 @@
+
+MIXED
+DATABASE     MODE                 DOCS            TIME         OPS/SEC        µS/OP
+----------------------------------------------------------------------------------------
+Sombra       mixed               10000       578.42 ms           17288         57.8
+    metrics: wal_frames=36 wal_bytes=294912 fsyncs=1 key_decodes=2093903 key_cmps=88996 memcopy_bytes=16578192 rebalance_in_place=0 rebalance_rebuilds=0 commit_avg_ms=4.165 search_avg_us=1.438 insert_avg_us=81.369
+    pager: hits=29587 misses=36 evictions=0 dirty_writebacks=36
+SQLite       mixed               10000         8.04 ms         1244251          0.8

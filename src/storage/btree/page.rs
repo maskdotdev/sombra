@@ -18,10 +18,12 @@ const LEFT_SIB_OFFSET: usize = 24;
 const LOW_FENCE_LEN_OFFSET: usize = 32;
 const HIGH_FENCE_LEN_OFFSET: usize = 40;
 const FENCE_DATA_OFFSET: usize = PAYLOAD_HEADER_LEN;
-const SLOT_ENTRY_LEN: usize = 2;
 
 /// Internal record header length (`child:u64` + `sep_len:u16`).
 pub const INTERNAL_RECORD_HEADER_LEN: usize = 10;
+
+/// Size in bytes of a single slot directory entry.
+pub const SLOT_ENTRY_LEN: usize = 2;
 
 /// Logical kind for a B+ tree page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

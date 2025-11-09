@@ -218,6 +218,71 @@ fn put_many_inserts_sorted_keys() -> Result<()> {
 }
 
 #[test]
+fn in_place_leaf_edits_updates_stats() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_in_place_stats.db");
+    let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let mut tree_opts = BTreeOptions::default();
+    tree_opts.in_place_leaf_edits = true;
+    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+
+    {
+        let mut write = pager.begin_write()?;
+        for key in 0..8 {
+            tree.put(&mut write, &key, &(key * 10))?;
+        }
+        pager.commit(write)?;
+    }
+    pager.checkpoint(CheckpointMode::Force)?;
+    let stats = tree.stats_snapshot();
+    assert!(
+        stats.leaf_in_place_edits >= 1,
+        "expected at least one in-place insert, got {stats:?}"
+    );
+    assert!(
+        stats.leaf_rebuilds >= 1,
+        "expected initial rebuild to be counted, got {stats:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn in_place_leaf_delete_updates_stats() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_in_place_delete.db");
+    let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let mut tree_opts = BTreeOptions::default();
+    tree_opts.in_place_leaf_edits = true;
+    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+
+    let before_stats = {
+        let mut write = pager.begin_write()?;
+        for key in 0..8 {
+            tree.put(&mut write, &key, &(key * 100))?;
+        }
+        pager.commit(write)?;
+        tree.stats_snapshot()
+    };
+    {
+        let mut write = pager.begin_write()?;
+        assert!(tree.delete(&mut write, &3)?);
+        pager.commit(write)?;
+    }
+    pager.checkpoint(CheckpointMode::Force)?;
+    let stats = tree.stats_snapshot();
+    assert!(
+        stats.leaf_in_place_edits > before_stats.leaf_in_place_edits,
+        "expected delete to increment in-place stats, before={:?} after={stats:?}",
+        before_stats
+    );
+    let read = pager.begin_read()?;
+    assert!(tree.get(&read, &3)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn range_iterates_with_bounds() -> Result<()> {
     let dir = tempdir().map_err(SombraError::Io)?;
     let path = dir.path().join("btree_range.db");
@@ -596,6 +661,111 @@ fn delete_merges_leftmost_leaf_with_right_sibling() -> Result<()> {
     drop(read);
 
     assert_tree_matches_reference(&tree, &pager, &reference, 89)?;
+    Ok(())
+}
+
+#[test]
+fn borrow_in_place_updates_stats() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_delete_borrow_stats.db");
+    let mut pager_opts = PagerOptions::default();
+    pager_opts.page_size = 256;
+    let pager = Arc::new(Pager::create(&path, pager_opts)?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let mut tree_opts = BTreeOptions::default();
+    tree_opts.page_fill_target = 99;
+    tree_opts.in_place_leaf_edits = true;
+    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+
+    for key in 0u64..80 {
+        let mut write = pager.begin_write()?;
+        tree.put(&mut write, &key, &(key + 1_000))?;
+        pager.commit(write)?;
+    }
+    pager.checkpoint(CheckpointMode::Force)?;
+
+    let stats_before = tree.stats_snapshot();
+
+    let read = pager.begin_read()?;
+    let leaves = collect_leaf_snapshots(&pager, &read, tree.root_page())?;
+    let (left_info, right_info) = leaves
+        .windows(2)
+        .filter_map(|window| {
+            let left = window[0].clone();
+            let right = window[1].clone();
+            if left.1.parent == right.1.parent && left.1.parent.is_some() {
+                Some((left, right))
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("expected adjacent leaves");
+    let (_, left_header, _) = left_info;
+    let (_right_id, _, right_keys) = right_info;
+    drop(read);
+
+    for key in right_keys {
+        let mut write = pager.begin_write()?;
+        let _ = tree.delete(&mut write, &key)?;
+        pager.commit(write)?;
+    }
+
+    pager.checkpoint(CheckpointMode::Force)?;
+    let stats_after = tree.stats_snapshot();
+    assert!(
+        stats_after.leaf_rebalance_in_place > stats_before.leaf_rebalance_in_place,
+        "expected in-place rebalance counter to increase"
+    );
+    assert_eq!(
+        stats_after.leaf_rebalance_rebuilds, stats_before.leaf_rebalance_rebuilds,
+        "borrow path should not rebuild leaves"
+    );
+    let read = pager.begin_read()?;
+    let _ = pager.get_page(&read, left_header.parent.expect("parent"))?;
+    drop(read);
+    Ok(())
+}
+
+#[test]
+fn merge_in_place_updates_stats() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_delete_merge_stats.db");
+    let mut pager_opts = PagerOptions::default();
+    pager_opts.page_size = 256;
+    let pager = Arc::new(Pager::create(&path, pager_opts)?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let mut tree_opts = BTreeOptions::default();
+    tree_opts.page_fill_target = 100;
+    tree_opts.in_place_leaf_edits = true;
+    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+
+    for key in 0u64..64 {
+        let mut write = pager.begin_write()?;
+        tree.put(&mut write, &key, &(key + 10_000))?;
+        pager.commit(write)?;
+    }
+    pager.checkpoint(CheckpointMode::Force)?;
+
+    let stats_before = tree.stats_snapshot();
+
+    let read = pager.begin_read()?;
+    let leaves = collect_leaf_snapshots(&pager, &read, tree.root_page())?;
+    let (_, _, right_keys) = leaves.last().cloned().expect("expected at least one leaf");
+    drop(read);
+
+    for key in right_keys {
+        let mut write = pager.begin_write()?;
+        let _ = tree.delete(&mut write, &key)?;
+        pager.commit(write)?;
+    }
+
+    pager.checkpoint(CheckpointMode::Force)?;
+    let stats_after = tree.stats_snapshot();
+    assert!(
+        stats_after.leaf_rebalance_in_place > stats_before.leaf_rebalance_in_place,
+        "expected merge to use in-place path"
+    );
     Ok(())
 }
 
