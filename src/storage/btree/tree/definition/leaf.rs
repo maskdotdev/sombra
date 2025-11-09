@@ -149,14 +149,17 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
     ) -> Result<LeafInsert> {
         let _scope = profile_scope(StorageProfileKind::BTreeLeafInsert);
         if self.options.in_place_leaf_edits {
-            if self.try_insert_leaf_in_place(
+            match self.try_insert_leaf_in_place(
                 &mut page,
                 &header,
                 key.as_slice(),
                 value.as_slice(),
             )? {
-                self.stats.inc_leaf_in_place_edits();
-                return Ok(LeafInsert::Done);
+                InPlaceInsertResult::Applied { new_first_key } => {
+                    self.stats.inc_leaf_in_place_edits();
+                    return Ok(LeafInsert::Done { new_first_key });
+                }
+                InPlaceInsertResult::NotApplied => {}
             }
         }
 
@@ -205,7 +208,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             };
             self.apply_leaf_fences(&mut page, new_low.as_slice(), high_opt)?;
             self.stats.inc_leaf_rebuilds();
-            return Ok(LeafInsert::Done);
+            let first_key_changed = K::compare_encoded(
+                new_low.as_slice(),
+                low_fence_vec.as_slice(),
+            ) != Ordering::Equal;
+            let new_first_key = first_key_changed.then_some(new_low);
+            return Ok(LeafInsert::Done { new_first_key });
         }
 
         // Need to split this leaf.
@@ -329,134 +337,61 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         header: &page::Header,
         key: &[u8],
         value: &[u8],
-    ) -> Result<bool> {
+    ) -> Result<InPlaceInsertResult> {
         if header.kind != page::BTreePageKind::Leaf {
-            return Ok(false);
+            return Ok(InPlaceInsertResult::NotApplied);
         }
-        let free_start = header.free_start as usize;
-        let free_end = header.free_end as usize;
-        if free_end < free_start {
-            return Ok(false);
-        }
-        let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
-        let total_needed = record_len
-            .checked_add(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("leaf insert size overflow"))?;
-        if free_end - free_start < total_needed {
-            return Ok(false);
-        }
+        let low_fence_bytes = {
+            let fences = page.data();
+            header.fence_slices(fences)?.0.to_vec()
+        };
 
-        let (slot_entries, insert_idx, has_existing) = {
-            let data = page.data();
-            let slot_view = SlotView::new(&header, data)?;
-            let mut entries = Vec::with_capacity(slot_view.len());
-            for idx in 0..slot_view.len() {
-                let (start, len) = slot_view.slots().extent(idx)?;
-                entries.push((start as usize, len as usize));
-            }
-            let mut lo = 0usize;
-            let mut hi = slot_view.len();
-            let mut existing = None;
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                let rec_slice = slot_view.slice(mid)?;
-                record_btree_leaf_key_decodes(1);
-                let record = page::decode_leaf_record(rec_slice)?;
-                record_btree_leaf_key_cmps(1);
-                match K::compare_encoded(record.key, key) {
-                    Ordering::Less => lo = mid + 1,
-                    Ordering::Greater => hi = mid,
-                    Ordering::Equal => {
-                        existing = Some(mid);
-                        break;
-                    }
+        let mut allocator = LeafAllocator::new(page.data_mut(), header.clone())?;
+        let mut lo = 0usize;
+        let mut hi = allocator.slot_count();
+        let mut existing = None;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            record_btree_leaf_key_decodes(1);
+            let record = allocator.leaf_record(mid)?;
+            record_btree_leaf_key_cmps(1);
+            match K::compare_encoded(record.key, key) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => {
+                    existing = Some(mid);
+                    break;
                 }
             }
-            (entries, existing.unwrap_or(lo), existing.is_some())
-        };
-
-        if has_existing {
-            return Ok(false);
         }
+        let insert_idx = existing.unwrap_or(lo);
+        let requires_fence_update = existing.is_none()
+            && insert_idx == 0
+            && (header.low_fence_len != key.len()
+                || K::compare_encoded(low_fence_bytes.as_slice(), key) != Ordering::Equal);
 
-        if insert_idx == 0 {
-            if header.low_fence_len == 0 || header.low_fence_len != key.len() {
-                return Ok(false);
-            }
-        }
-
-        let insert_offset = if insert_idx == slot_entries.len() {
-            free_start
-        } else {
-            slot_entries[insert_idx].0
-        };
-
-        let mut record = Vec::with_capacity(record_len);
+        let mut record = Vec::new();
         page::encode_leaf_record(key, value, &mut record)?;
-        debug_assert_eq!(record.len(), record_len);
 
-        {
-            let payload = page::payload_mut(page.data_mut())?;
-            let moved = free_start - insert_offset;
-            payload.copy_within(insert_offset..free_start, insert_offset + record_len);
-            record_btree_leaf_memcopy_bytes(moved as u64);
-            payload[insert_offset..insert_offset + record_len].copy_from_slice(&record);
-            record_btree_leaf_memcopy_bytes(record_len as u64);
-
-            let new_free_start = free_start + record_len;
-            let new_free_end = free_end - page::SLOT_ENTRY_LEN;
-            let new_free_start_u16 = u16::try_from(new_free_start)
-                .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
-            let new_free_end_u16 = u16::try_from(new_free_end)
-                .map_err(|_| SombraError::Invalid("leaf free_end overflow"))?;
-            page::set_free_start(payload, new_free_start_u16);
-            page::set_free_end(payload, new_free_end_u16);
-
-            let new_slot_count = slot_entries.len() + 1;
-            let new_slot_count_u16 = u16::try_from(new_slot_count)
-                .map_err(|_| SombraError::Invalid("leaf slot count overflow"))?;
-            page::set_slot_count(payload, new_slot_count_u16);
-
-            let record_len_u16 = u16::try_from(record_len)
-                .map_err(|_| SombraError::Invalid("leaf slot length overflow"))?;
-            let mut new_entries = Vec::with_capacity(new_slot_count);
-            for i in 0..new_slot_count {
-                if i == insert_idx {
-                    let offset_u16 = u16::try_from(insert_offset)
-                        .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
-                    new_entries.push((offset_u16, record_len_u16));
-                } else {
-                    let old_idx = if i < insert_idx { i } else { i - 1 };
-                    let (old_offset, old_len) = slot_entries[old_idx];
-                    let mut offset = old_offset;
-                    if old_idx >= insert_idx {
-                        offset = offset
-                            .checked_add(record_len)
-                            .ok_or_else(|| SombraError::Invalid("leaf slot offset overflow"))?;
-                    }
-                    let offset_u16 = u16::try_from(offset)
-                        .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
-                    let len_u16 = u16::try_from(old_len)
-                        .map_err(|_| SombraError::Invalid("leaf slot length overflow"))?;
-                    new_entries.push((offset_u16, len_u16));
+        let result = if let Some(idx) = existing {
+            allocator.replace_slot(idx, &record)
+        } else {
+            allocator.insert_slot(insert_idx, &record)
+        };
+        match result {
+            Ok(()) => {
+                let mut new_first_key = None;
+                if requires_fence_update {
+                    allocator.update_low_fence(key)?;
+                    new_first_key = Some(key.to_vec());
                 }
+                Ok(InPlaceInsertResult::Applied { new_first_key })
             }
-            let payload_len = payload.len();
-            let new_slot_bytes = new_entries.len() * page::SLOT_ENTRY_LEN;
-            let slot_dir_start = payload_len
-                .checked_sub(new_slot_bytes)
-                .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
-            for (idx, (offset, len)) in new_entries.iter().enumerate() {
-                let pos = slot_dir_start + idx * page::SLOT_ENTRY_LEN;
-                page::write_slot_entry(payload, pos, *offset, *len);
+            Err(err) if allocator_capacity_error(&err) => {
+                Ok(InPlaceInsertResult::NotApplied)
             }
-
-            if insert_idx == 0 {
-                page::set_low_fence(payload, key)?;
-            }
+            Err(err) => Err(err),
         }
-
-        Ok(true)
     }
 
     fn try_delete_leaf_in_place(
@@ -473,126 +408,57 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if header.slot_count == 0 {
             return Ok(None);
         }
-        if removed_first_key {
-            let Some(new_key) = new_first_key else {
-                return Ok(None);
-            };
-            if header.low_fence_len != new_key.len() {
-                return Ok(None);
-            }
+        if removed_first_key && new_first_key.is_none() {
+            return Ok(None);
         }
-        let (slot_entries, target_idx, payload_len) = {
-            let data = page.data();
-            let slot_view = SlotView::new(header, data)?;
-            let mut entries = Vec::with_capacity(slot_view.len());
-            for idx in 0..slot_view.len() {
-                let (start, len) = slot_view.slots().extent(idx)?;
-                entries.push((start as usize, len as usize));
-            }
-            let mut lo = 0usize;
-            let mut hi = slot_view.len();
-            let mut found = None;
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                let rec_slice = slot_view.slice(mid)?;
-                let record = page::decode_leaf_record(rec_slice)?;
-                match K::compare_encoded(record.key, key) {
-                    Ordering::Less => lo = mid + 1,
-                    Ordering::Greater => hi = mid,
-                    Ordering::Equal => {
-                        found = Some(mid);
-                        break;
-                    }
+        if header.slot_count <= 1 {
+            return Ok(None);
+        }
+        let mut allocator = LeafAllocator::new(page.data_mut(), header.clone())?;
+        if allocator.slot_count() <= 1 {
+            return Ok(None);
+        }
+        let mut lo = 0usize;
+        let mut hi = allocator.slot_count();
+        let mut found = None;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            record_btree_leaf_key_decodes(1);
+            let record = allocator.leaf_record(mid)?;
+            match K::compare_encoded(record.key, key) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => {
+                    found = Some(mid);
+                    break;
                 }
             }
-            let Some(idx) = found else {
-                return Ok(None);
-            };
-            (entries, idx, slot_view.payload().len())
+        }
+        let Some(target_idx) = found else {
+            return Ok(None);
         };
-        if slot_entries.len() <= 1 {
-            return Ok(None);
-        }
-        let (record_start, record_len) = slot_entries[target_idx];
-        let record_end = record_start
-            .checked_add(record_len)
-            .ok_or_else(|| SombraError::Corruption("leaf record extent overflow"))?;
-        if record_end < record_start {
-            return Err(SombraError::Corruption("leaf record extent inverted"));
-        }
-        if record_len == 0 {
-            return Ok(None);
-        }
-        let payload = page::payload_mut(page.data_mut())?;
-        let free_start = header.free_start as usize;
-        let free_end = header.free_end as usize;
-        if record_end > free_start || free_start > payload.len() || free_end > payload.len() {
-            return Err(SombraError::Corruption("leaf free space pointers invalid"));
-        }
-        let bytes_to_move = free_start - record_end;
-        if bytes_to_move > 0 {
-            payload.copy_within(record_end..free_start, record_start);
-            record_btree_leaf_memcopy_bytes(bytes_to_move as u64);
-        }
-        if record_len > 0 {
-            let clear_start = free_start - record_len;
-            payload[clear_start..free_start].fill(0);
-        }
-        let new_free_start = free_start
-            .checked_sub(record_len)
-            .ok_or_else(|| SombraError::Corruption("leaf free_start underflow"))?;
-        let new_free_end = free_end
-            .checked_add(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Corruption("leaf free_end overflow"))?;
-        let new_free_start_u16 = u16::try_from(new_free_start)
-            .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
-        let new_free_end_u16 = u16::try_from(new_free_end)
-            .map_err(|_| SombraError::Invalid("leaf free_end overflow"))?;
-        page::set_free_start(payload, new_free_start_u16);
-        page::set_free_end(payload, new_free_end_u16);
 
-        let mut new_entries = Vec::with_capacity(slot_entries.len() - 1);
-        for (idx, (offset, len)) in slot_entries.iter().enumerate() {
-            if idx == target_idx {
-                continue;
-            }
-            let mut adjusted = *offset;
-            if idx > target_idx {
-                adjusted = adjusted
-                    .checked_sub(record_len)
-                    .ok_or_else(|| SombraError::Corruption("slot offset underflow"))?;
-            }
-            let offset_u16 = u16::try_from(adjusted)
-                .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
-            let len_u16 = u16::try_from(*len)
-                .map_err(|_| SombraError::Invalid("leaf slot length overflow"))?;
-            new_entries.push((offset_u16, len_u16));
-        }
-        let new_slot_count_u16 = u16::try_from(new_entries.len())
-            .map_err(|_| SombraError::Invalid("leaf slot count overflow"))?;
-        page::set_slot_count(payload, new_slot_count_u16);
-        let new_slot_bytes = new_entries.len() * page::SLOT_ENTRY_LEN;
-        let new_slot_start = payload_len
-            .checked_sub(new_slot_bytes)
-            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
-        let old_slot_start = payload_len
-            .checked_sub(slot_entries.len() * page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
-        if new_slot_start > old_slot_start {
-            payload[old_slot_start..new_slot_start].fill(0);
-        }
-        for (idx, (offset, len)) in new_entries.iter().enumerate() {
-            let pos = new_slot_start + idx * page::SLOT_ENTRY_LEN;
-            page::write_slot_entry(payload, pos, *offset, *len);
-        }
+        allocator.delete_slot(target_idx)?;
         if removed_first_key {
             if let Some(first) = new_first_key {
-                page::set_low_fence(payload, first)?;
+                allocator.update_low_fence(first)?;
+            } else {
+                return Ok(None);
             }
         }
+        let updated = allocator.header();
         Ok(Some(InPlaceDeleteResult {
-            free_start: new_free_start_u16,
-            free_end: new_free_end_u16,
+            free_start: updated.free_start,
+            free_end: updated.free_end,
         }))
     }
+}
+
+fn allocator_capacity_error(err: &SombraError) -> bool {
+    matches!(
+        err,
+        SombraError::Invalid("slot directory exceeds payload")
+            | SombraError::Invalid("leaf payload exhausted")
+            | SombraError::Invalid("leaf page full")
+    )
 }
