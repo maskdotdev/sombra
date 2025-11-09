@@ -25,7 +25,6 @@ include!("api.rs");
 include!("leaf.rs");
 include!("leaf_allocator.rs");
 include!("leaf_allocator_cache.rs");
-include!("split_builder.rs");
 include!("internal.rs");
 include!("maintenance.rs");
 

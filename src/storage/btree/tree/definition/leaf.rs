@@ -6,8 +6,34 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         high_fence: &[u8],
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<bool> {
-        LeafSplitBuilder::build_from_entries(payload_len, low_fence, high_fence, entries)
-            .map(|layout| layout.is_some())
+        let fences_end = page::PAYLOAD_HEADER_LEN + low_fence.len() + high_fence.len();
+        if fences_end > payload_len {
+            return Ok(false);
+        }
+        let slot_bytes = entries
+            .len()
+            .checked_mul(page::SLOT_ENTRY_LEN)
+            .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
+        if slot_bytes > payload_len {
+            return Ok(false);
+        }
+        let new_free_end = payload_len
+            .checked_sub(slot_bytes)
+            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+        if new_free_end < fences_end {
+            return Ok(false);
+        }
+        let mut total_records = 0usize;
+        for (key, value) in entries {
+            let len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
+            total_records = total_records
+                .checked_add(len)
+                .ok_or_else(|| SombraError::Invalid("leaf records overflow payload"))?;
+            if fences_end + total_records > new_free_end {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn rebuild_leaf_payload(

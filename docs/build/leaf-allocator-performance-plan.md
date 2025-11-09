@@ -72,13 +72,12 @@ Code review points to three dominant costs:
 
 ### Phase C — Make Allocator Universal
 
-1. **Switch splits to `LeafAllocator`.** When a leaf needs to split, feed the
-   allocator with half ranges instead of rebuilding via `build_leaf_layout`.
-   This eliminates the copy-heavy `LeafSplitBuilder` path and lets us compact
-   only when necessary.
-2. **(In progress)** Deletes + borrow/merge now reuse the allocator cache, but
-   splits still fall back to `build_leaf_layout`. Port the split logic and then
-   delete the rebuild helpers entirely.
+1. **(Done)** Splits now stream both halves through `LeafAllocator`, so we no
+   longer emit `LeafLayout`s or touch `LeafSplitBuilder`. Right-page creation
+   reuses the same helper, keeping snapshots hot in the cache.
+2. **(Done)** Deletes + borrow/merge fallbacks now call `rebuild_from_entries`
+   directly, so the entire leaf lifecycle runs through the allocator and
+   `build_leaf_layout` has been deleted.
 3. **Flip `BTreeOptions::in_place_leaf_edits` to default `true`.** With the old
    path removed there is no configuration switch; we can migrate existing trees
    once the allocator is stable.
@@ -94,8 +93,10 @@ Code review points to three dominant costs:
 
 ## 4. Immediate Tasks
 
-1. Implement SlotExtents handoff + allocator scratch cache (Phase B items 1–2).
-2. Port split path to the allocator, reusing the same metadata (Phase C.1).
+1. Implement SlotExtents handoff so cold-cache allocator builds skip the second
+   extent scan (Phase B.2).
+2. Flip `btree_inplace` on by default once allocator metrics show zero failures
+   on steady workloads (Phase C.3).
 3. Add allocator-specific telemetry to tests/benchmarks so we can assert no
    allocator failures occur on steady workloads (Phase D.1).
 

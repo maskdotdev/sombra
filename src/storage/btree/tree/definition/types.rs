@@ -144,15 +144,6 @@ enum InternalInsert {
     },
 }
 
-#[allow(dead_code)]
-struct LeafLayout {
-    records: Vec<u8>,
-    offsets: Vec<u16>,
-    lengths: Vec<u16>,
-    free_start: u16,
-    free_end: u16,
-}
-
 struct InternalLayout {
     records: Vec<u8>,
     offsets: Vec<u16>,

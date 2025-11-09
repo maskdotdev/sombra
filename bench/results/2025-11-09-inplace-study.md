@@ -38,6 +38,10 @@ Running the same workload after the borrow/merge cache changes still sits in the
 ballpark (15.05 ms / 665 k ops/s, `insert_avg_us=0.626`), confirming that those paths
 don’t affect inserts-only behaviour but also didn’t regress the fast path.
 
+After deleting `LeafSplitBuilder` entirely and rebuilding splits via the allocator the
+inserts-only run remains stable (14.9 ms / 669 k ops/s, `insert_avg_us=0.777`), so the
+legacy layouts are officially gone without hurting throughput.
+
 ## Raw Output
 
 ```
