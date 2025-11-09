@@ -3,9 +3,12 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::convert::TryFrom;
+use std::num::NonZeroUsize;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use lru::LruCache;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
@@ -112,17 +115,19 @@ impl Graph {
         let inline_prop_blob = inline_blob_u32 as usize;
         let inline_prop_value = inline_value_u32 as usize;
 
-        let nodes = open_u64_vec_tree(&store, meta.storage_nodes_root)?;
-        let edges = open_u64_vec_tree(&store, meta.storage_edges_root)?;
-        let adj_fwd = open_unit_tree(&store, meta.storage_adj_fwd_root)?;
-        let adj_rev = open_unit_tree(&store, meta.storage_adj_rev_root)?;
+        let btree_inplace = opts.btree_inplace;
+        let nodes = open_u64_vec_tree(&store, meta.storage_nodes_root, btree_inplace)?;
+        let edges = open_u64_vec_tree(&store, meta.storage_edges_root, btree_inplace)?;
+        let adj_fwd = open_unit_tree(&store, meta.storage_adj_fwd_root, btree_inplace)?;
+        let adj_rev = open_unit_tree(&store, meta.storage_adj_rev_root, btree_inplace)?;
         let index_roots = IndexRoots {
             catalog: meta.storage_index_catalog_root,
             label: meta.storage_label_index_root,
             prop_chunk: meta.storage_prop_chunk_root,
             prop_btree: meta.storage_prop_btree_root,
         };
-        let (indexes, index_roots_actual) = IndexStore::open(Arc::clone(&store), index_roots)?;
+        let (indexes, index_roots_actual) =
+            IndexStore::open(Arc::clone(&store), index_roots, btree_inplace)?;
 
         #[cfg(feature = "degree-cache")]
         let mut degree_cache_enabled = opts.degree_cache
@@ -133,7 +138,7 @@ impl Graph {
 
         #[cfg(feature = "degree-cache")]
         let degree_tree = if degree_cache_enabled || meta.storage_degree_root.0 != 0 {
-            let tree = open_degree_tree(&store, meta.storage_degree_root)?;
+            let tree = open_degree_tree(&store, meta.storage_degree_root, btree_inplace)?;
             Some(tree)
         } else {
             None
@@ -710,6 +715,10 @@ impl Graph {
     pub fn create_edge(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
         self.ensure_node_exists(tx, spec.src, "edge source node missing")?;
         self.ensure_node_exists(tx, spec.dst, "edge destination node missing")?;
+        self.insert_edge_unchecked(tx, spec)
+    }
+
+    fn insert_edge_unchecked(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
         let (prop_bytes, spill_vrefs) = self.encode_property_map(tx, spec.props)?;
         let mut map_vref: Option<VRef> = None;
         let payload = if prop_bytes.len() <= self.inline_prop_blob {
@@ -951,11 +960,20 @@ impl Graph {
         node: NodeId,
         context: &'static str,
     ) -> Result<()> {
-        if self.nodes.get_with_write(tx, &node.0)?.is_some() {
+        if self.node_exists_with_write(tx, node)? {
             Ok(())
         } else {
             Err(SombraError::Invalid(context))
         }
+    }
+
+    /// Returns true if the node exists using a read guard.
+    pub fn node_exists(&self, tx: &ReadGuard, node: NodeId) -> Result<bool> {
+        Ok(self.nodes.get(tx, &node.0)?.is_some())
+    }
+
+    fn node_exists_with_write(&self, tx: &mut WriteGuard<'_>, node: NodeId) -> Result<bool> {
+        Ok(self.nodes.get_with_write(tx, &node.0)?.is_some())
     }
 
     fn insert_adjacencies(
@@ -1263,9 +1281,7 @@ impl Graph {
         match props {
             EdgePropStorage::Inline(bytes) => self.free_prop_values_from_bytes(tx, &bytes),
             EdgePropStorage::VRef(vref) => {
-                let read = self.store.begin_read()?;
-                let bytes = self.vstore.read(&read, vref)?;
-                drop(read);
+                let bytes = self.vstore.read_with_write(tx, vref)?;
                 self.free_prop_values_from_bytes(tx, &bytes)?;
                 self.vstore.free(tx, vref)
             }
@@ -1289,9 +1305,7 @@ impl Graph {
         match props {
             NodePropStorage::Inline(bytes) => self.free_prop_values_from_bytes(tx, &bytes),
             NodePropStorage::VRef(vref) => {
-                let read = self.store.begin_read()?;
-                let bytes = self.vstore.read(&read, vref)?;
-                drop(read);
+                let bytes = self.vstore.read_with_write(tx, vref)?;
                 self.free_prop_values_from_bytes(tx, &bytes)?;
                 self.vstore.free(tx, vref)
             }
@@ -1387,22 +1401,172 @@ impl Graph {
     }
 }
 
-fn open_u64_vec_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<u64, Vec<u8>>> {
+const TRUST_VALIDATOR_REQUIRED: &str = "trusted endpoints require validator";
+const TRUST_BATCH_REQUIRED: &str = "trusted endpoints batch must be validated";
+
+/// Options controlling how [`GraphWriter`] inserts edges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CreateEdgeOptions {
+    /// Whether edge endpoints have been validated externally and can skip lookups.
+    pub trusted_endpoints: bool,
+    /// Capacity of the node-existence cache when validation is required.
+    pub exists_cache_capacity: usize,
+}
+
+impl Default for CreateEdgeOptions {
+    fn default() -> Self {
+        Self {
+            trusted_endpoints: false,
+            exists_cache_capacity: 1024,
+        }
+    }
+}
+
+/// Aggregate statistics captured by [`GraphWriter`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphWriterStats {
+    /// Number of cache hits for endpoint existence checks.
+    pub exists_cache_hits: u64,
+    /// Number of cache misses for endpoint existence checks.
+    pub exists_cache_misses: u64,
+    /// Number of edges inserted using trusted endpoints.
+    pub trusted_edges: u64,
+}
+
+/// Validator used by [`GraphWriter`] to confirm endpoints exist before trusting batches.
+pub trait BulkEdgeValidator {
+    /// Validates a batch of `(src, dst)` pairs before inserts begin.
+    fn validate_batch(&self, edges: &[(NodeId, NodeId)]) -> Result<()>;
+}
+
+/// Batched edge writer that amortizes endpoint probes and supports trusted inserts.
+pub struct GraphWriter<'a> {
+    graph: &'a Graph,
+    opts: CreateEdgeOptions,
+    exists_cache: Option<LruCache<NodeId, bool>>,
+    validator: Option<Box<dyn BulkEdgeValidator + 'a>>,
+    stats: GraphWriterStats,
+    trust_budget: usize,
+}
+
+impl<'a> GraphWriter<'a> {
+    /// Constructs a new writer for the provided [`Graph`].
+    pub fn try_new(
+        graph: &'a Graph,
+        opts: CreateEdgeOptions,
+        validator: Option<Box<dyn BulkEdgeValidator + 'a>>,
+    ) -> Result<Self> {
+        if opts.trusted_endpoints && validator.is_none() {
+            return Err(SombraError::Invalid(TRUST_VALIDATOR_REQUIRED));
+        }
+        let exists_cache = NonZeroUsize::new(opts.exists_cache_capacity).map(LruCache::new);
+        Ok(Self {
+            graph,
+            opts,
+            exists_cache,
+            validator,
+            stats: GraphWriterStats::default(),
+            trust_budget: 0,
+        })
+    }
+
+    /// Returns the options associated with this writer.
+    pub fn options(&self) -> &CreateEdgeOptions {
+        &self.opts
+    }
+
+    /// Returns current statistics collected by the writer.
+    pub fn stats(&self) -> GraphWriterStats {
+        self.stats
+    }
+
+    /// Validates a batch of edges before inserting them in trusted mode.
+    pub fn validate_trusted_batch(&mut self, edges: &[(NodeId, NodeId)]) -> Result<()> {
+        if !self.opts.trusted_endpoints {
+            return Ok(());
+        }
+        let Some(validator) = self.validator.as_ref() else {
+            return Err(SombraError::Invalid(TRUST_VALIDATOR_REQUIRED));
+        };
+        validator.validate_batch(edges)?;
+        self.trust_budget = edges.len();
+        Ok(())
+    }
+
+    /// Creates an edge with the configured validation strategy.
+    pub fn create_edge(&mut self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
+        if self.opts.trusted_endpoints {
+            if self.trust_budget == 0 {
+                return Err(SombraError::Invalid(TRUST_BATCH_REQUIRED));
+            }
+            self.trust_budget -= 1;
+            self.stats.trusted_edges = self.stats.trusted_edges.saturating_add(1);
+        } else {
+            self.ensure_endpoint(tx, spec.src, "edge source node missing")?;
+            self.ensure_endpoint(tx, spec.dst, "edge destination node missing")?;
+        }
+        self.graph.insert_edge_unchecked(tx, spec)
+    }
+
+    fn ensure_endpoint(
+        &mut self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        context: &'static str,
+    ) -> Result<()> {
+        if let Some(cache) = self.exists_cache.as_mut() {
+            if let Some(hit) = cache.get(&node).copied() {
+                self.stats.exists_cache_hits = self.stats.exists_cache_hits.saturating_add(1);
+                if hit {
+                    return Ok(());
+                }
+                return Err(SombraError::Invalid(context));
+            }
+        }
+        let exists = self.graph.node_exists_with_write(tx, node)?;
+        if let Some(cache) = self.exists_cache.as_mut() {
+            cache.put(node, exists);
+        }
+        self.stats.exists_cache_misses = self.stats.exists_cache_misses.saturating_add(1);
+        if exists {
+            Ok(())
+        } else {
+            Err(SombraError::Invalid(context))
+        }
+    }
+}
+
+fn open_u64_vec_tree(
+    store: &Arc<dyn PageStore>,
+    root: PageId,
+    inplace: bool,
+) -> Result<BTree<u64, Vec<u8>>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
+    opts.in_place_leaf_edits = inplace;
     BTree::open_or_create(store, opts)
 }
 
-fn open_unit_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Vec<u8>, UnitValue>> {
+fn open_unit_tree(
+    store: &Arc<dyn PageStore>,
+    root: PageId,
+    inplace: bool,
+) -> Result<BTree<Vec<u8>, UnitValue>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
+    opts.in_place_leaf_edits = inplace;
     BTree::open_or_create(store, opts)
 }
 
 #[cfg(feature = "degree-cache")]
-fn open_degree_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Vec<u8>, u64>> {
+fn open_degree_tree(
+    store: &Arc<dyn PageStore>,
+    root: PageId,
+    inplace: bool,
+) -> Result<BTree<Vec<u8>, u64>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
+    opts.in_place_leaf_edits = inplace;
     BTree::open_or_create(store, opts)
 }
 

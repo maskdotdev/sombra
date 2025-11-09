@@ -21,6 +21,9 @@ pub struct VStoreMetrics {
     pages_freed: AtomicU64,
     bytes_written: AtomicU64,
     bytes_read: AtomicU64,
+    extent_writes: AtomicU64,
+    extent_segments: AtomicU64,
+    extent_pages: AtomicU64,
 }
 
 /// Snapshot of variable-length value storage metrics at a point in time.
@@ -34,6 +37,12 @@ pub struct VStoreMetricsSnapshot {
     pub bytes_written: u64,
     /// Total bytes read from overflow pages
     pub bytes_read: u64,
+    /// Number of writes that used at least one extent
+    pub extent_writes: u64,
+    /// Total number of extent segments allocated
+    pub extent_segments: u64,
+    /// Total number of pages covered by extent allocations
+    pub extent_pages: u64,
 }
 
 impl VStoreMetricsSnapshot {
@@ -105,6 +114,21 @@ impl VStoreMetrics {
         self.bytes_read.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of writes that used at least one extent segment.
+    pub fn extent_writes(&self) -> u64 {
+        self.extent_writes.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total extent segment count.
+    pub fn extent_segments(&self) -> u64 {
+        self.extent_segments.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total number of pages covered by extent allocations.
+    pub fn extent_pages(&self) -> u64 {
+        self.extent_pages.load(Ordering::Relaxed)
+    }
+
     /// Creates a snapshot of the current metrics.
     pub fn snapshot(&self) -> VStoreMetricsSnapshot {
         VStoreMetricsSnapshot {
@@ -112,6 +136,9 @@ impl VStoreMetrics {
             pages_freed: self.pages_freed(),
             bytes_written: self.bytes_written(),
             bytes_read: self.bytes_read(),
+            extent_writes: self.extent_writes(),
+            extent_segments: self.extent_segments(),
+            extent_pages: self.extent_pages(),
         }
     }
 
@@ -137,6 +164,15 @@ impl VStoreMetrics {
         if delta != 0 {
             self.bytes_read.fetch_add(delta, Ordering::Relaxed);
         }
+    }
+
+    fn add_extent_stats(&self, segments: u64, pages: u64) {
+        if segments == 0 || pages == 0 {
+            return;
+        }
+        self.extent_writes.fetch_add(1, Ordering::Relaxed);
+        self.extent_segments.fetch_add(segments, Ordering::Relaxed);
+        self.extent_pages.fetch_add(pages, Ordering::Relaxed);
     }
 }
 
@@ -197,11 +233,22 @@ impl VStore {
             }
             required.max(1)
         };
-        let mut pages = Vec::with_capacity(needed_pages);
-        for _ in 0..needed_pages {
-            let page = tx.allocate_page()?;
-            pages.push(page);
+        let mut remaining = u32::try_from(needed_pages)
+            .map_err(|_| SombraError::Invalid("page count exceeds u32::MAX"))?;
+        let mut extents = Vec::new();
+        while remaining > 0 {
+            let extent = tx.allocate_extent(remaining)?;
+            if extent.len == 0 {
+                return Err(SombraError::Invalid("allocator returned empty extent"));
+            }
+            remaining = remaining.saturating_sub(extent.len);
+            extents.push(extent);
         }
+        let mut pages = Vec::with_capacity(needed_pages);
+        for extent in &extents {
+            pages.extend(extent.iter_pages());
+        }
+        debug_assert_eq!(pages.len(), needed_pages);
         let mut checksum = Crc32Fast::default();
         let mut offset = 0usize;
         for (idx, page_id) in pages.iter().enumerate() {
@@ -219,6 +266,8 @@ impl VStore {
             offset += chunk_len;
         }
         debug_assert_eq!(offset, bytes.len());
+        self.metrics
+            .add_extent_stats(extents.len() as u64, pages.len() as u64);
         self.metrics.add_pages_allocated(pages.len() as u64);
         self.metrics.add_bytes_written(bytes.len() as u64);
         trace!(pages = pages.len(), len = bytes.len(), "vstore.write");
@@ -541,5 +590,30 @@ impl VStore {
             return Err(SombraError::Corruption("overflow payload truncated"));
         }
         Ok((next, used, &payload[OVERFLOW_HEADER_LEN..data_end]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::pager::{PageStore, Pager, PagerOptions};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn vstore_large_write_tracks_extent_metrics() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vstore_extents.db");
+        let pager: Arc<dyn PageStore> = Arc::new(Pager::create(&path, PagerOptions::default())?);
+        let vstore = VStore::open(Arc::clone(&pager))?;
+        let mut write = pager.begin_write()?;
+        let payload = vec![7u8; (pager.page_size() as usize * 2) + 256];
+        let vref = vstore.write(&mut write, &payload)?;
+        pager.commit(write)?;
+        let snapshot = vstore.metrics_snapshot();
+        assert_eq!(snapshot.extent_writes, 1);
+        assert!(snapshot.extent_segments >= 1);
+        assert_eq!(snapshot.extent_pages, vref.n_pages as u64);
+        Ok(())
     }
 }

@@ -108,6 +108,17 @@ struct ImportCmd {
     )]
     edge_props: Option<String>,
 
+    #[arg(long, help = "Trust edge endpoints after each validated batch")]
+    trusted_endpoints: bool,
+
+    #[arg(
+        long,
+        value_name = "ENTRIES",
+        default_value_t = 1024,
+        help = "Endpoint existence cache size (0 disables caching)"
+    )]
+    edge_exists_cache: usize,
+
     #[arg(long, help = "Create the database if it does not exist")]
     create: bool,
 }
@@ -356,6 +367,8 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
             type_column: cmd.edge_type_column.clone(),
             static_type: cmd.edge_type.as_ref().map(|s| s.trim().to_string()),
             prop_columns: parse_prop_option(&cmd.edge_props),
+            trusted_endpoints: cmd.trusted_endpoints,
+            exists_cache_capacity: cmd.edge_exists_cache,
         })
     } else {
         None

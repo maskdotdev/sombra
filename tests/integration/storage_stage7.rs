@@ -4,16 +4,17 @@ use std::sync::Arc;
 use sombra::storage::index::{collect_all, intersect_k, intersect_sorted, PostingStream};
 use sombra::primitives::pager::{PageStore, Pager, PagerOptions};
 use sombra::storage::{
-    DeleteNodeOpts, Graph, GraphOptions, IndexDef, IndexKind, LabelScan, NodeSpec, PropEntry,
-    PropPatch, PropPatchOp, PropValue, PropValueOwned, TypeTag,
+    BulkEdgeValidator, CreateEdgeOptions, DeleteNodeOpts, EdgeSpec, Graph, GraphOptions,
+    GraphWriter, IndexDef, IndexKind, LabelScan, NodeSpec, PropEntry, PropPatch, PropPatchOp,
+    PropValue, PropValueOwned, TypeTag,
 };
-use sombra::types::{LabelId, PropId, Result};
+use sombra::types::{LabelId, PropId, Result, SombraError, TypeId};
 use tempfile::tempdir;
 
 fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Graph)> {
     let pager = Arc::new(Pager::create(path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let graph = Graph::open(GraphOptions::new(store))?;
+    let graph = Graph::open(GraphOptions::new(store).btree_inplace(true))?;
     Ok((pager, graph))
 }
 
@@ -781,4 +782,112 @@ fn posting_stream_intersection_btree() -> Result<()> {
     assert_eq!(intersection, vec![node_a, node_c]);
 
     Ok(())
+}
+
+#[test]
+fn graph_writer_requires_validation_before_trust() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("trusted_writer.db");
+    let (pager, graph) = setup_graph(&path)?;
+
+    let mut write = pager.begin_write()?;
+    let src = graph.create_node(
+        &mut write,
+        NodeSpec {
+            labels: &[LabelId(1)],
+            props: &[],
+        },
+    )?;
+    let dst = graph.create_node(
+        &mut write,
+        NodeSpec {
+            labels: &[LabelId(1)],
+            props: &[],
+        },
+    )?;
+    pager.commit(write)?;
+
+    let opts = CreateEdgeOptions {
+        trusted_endpoints: true,
+        exists_cache_capacity: 0,
+    };
+    let mut writer = GraphWriter::try_new(&graph, opts, Some(Box::new(NoopValidator)))?;
+    let edge_spec = EdgeSpec {
+        src,
+        dst,
+        ty: TypeId(1),
+        props: &[],
+    };
+
+    let mut write = pager.begin_write()?;
+    let err = writer
+        .create_edge(&mut write, edge_spec.clone())
+        .expect_err("missing validation must error");
+    match err {
+        SombraError::Invalid(msg) => {
+            assert_eq!(msg, "trusted endpoints batch must be validated");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    writer.validate_trusted_batch(&[(src, dst)])?;
+    writer.create_edge(&mut write, edge_spec)?;
+    pager.commit(write)?;
+    assert_eq!(writer.stats().trusted_edges, 1);
+    Ok(())
+}
+
+#[test]
+fn graph_writer_node_cache_tracks_hits() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("writer_cache.db");
+    let (pager, graph) = setup_graph(&path)?;
+
+    let mut write = pager.begin_write()?;
+    let src = graph.create_node(
+        &mut write,
+        NodeSpec {
+            labels: &[LabelId(1)],
+            props: &[],
+        },
+    )?;
+    let dst = graph.create_node(
+        &mut write,
+        NodeSpec {
+            labels: &[LabelId(1)],
+            props: &[],
+        },
+    )?;
+    pager.commit(write)?;
+
+    let opts = CreateEdgeOptions {
+        trusted_endpoints: false,
+        exists_cache_capacity: 8,
+    };
+    let mut writer = GraphWriter::try_new(&graph, opts, None)?;
+    let spec = EdgeSpec {
+        src,
+        dst,
+        ty: TypeId(1),
+        props: &[],
+    };
+
+    let mut write = pager.begin_write()?;
+    writer.create_edge(&mut write, spec.clone())?;
+    writer.create_edge(&mut write, spec)?;
+    pager.commit(write)?;
+    let stats = writer.stats();
+    assert_eq!(stats.exists_cache_misses, 2);
+    assert_eq!(stats.exists_cache_hits, 2);
+    Ok(())
+}
+
+struct NoopValidator;
+
+impl BulkEdgeValidator for NoopValidator {
+    fn validate_batch(
+        &self,
+        _: &[(sombra::types::NodeId, sombra::types::NodeId)],
+    ) -> Result<()> {
+        Ok(())
+    }
 }

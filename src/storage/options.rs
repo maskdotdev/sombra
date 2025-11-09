@@ -19,6 +19,8 @@ pub struct GraphOptions {
     pub metrics: Option<Arc<dyn super::metrics::StorageMetrics>>,
     /// Whether to append SipHash64 footers to node/edge rows.
     pub row_hash_header: bool,
+    /// Whether to attempt in-place inserts for B-tree write paths.
+    pub btree_inplace: bool,
 }
 
 impl GraphOptions {
@@ -32,6 +34,7 @@ impl GraphOptions {
             distinct_neighbors_default: false,
             metrics: None,
             row_hash_header: false,
+            btree_inplace: false,
         }
     }
 
@@ -68,6 +71,12 @@ impl GraphOptions {
     /// Enables or disables SipHash64 footers on node and edge rows.
     pub fn row_hash_header(mut self, enabled: bool) -> Self {
         self.row_hash_header = enabled;
+        self
+    }
+
+    /// Enables or disables in-place inserts for underlying B-trees.
+    pub fn btree_inplace(mut self, enabled: bool) -> Self {
+        self.btree_inplace = enabled;
         self
     }
 }

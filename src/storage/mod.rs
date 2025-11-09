@@ -54,7 +54,8 @@ pub use adjacency::{Dir, ExpandOpts, Neighbor, NeighborCursor};
 
 /// Core graph storage implementation.
 pub use graph::{
-    Graph, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE, STORAGE_FLAG_DEGREE_CACHE,
+    BulkEdgeValidator, CreateEdgeOptions, Graph, GraphWriter, GraphWriterStats,
+    DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE, STORAGE_FLAG_DEGREE_CACHE,
 };
 
 /// Index definitions and label scan operations.

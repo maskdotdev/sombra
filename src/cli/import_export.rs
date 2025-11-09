@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::admin::{open_graph, AdminOpenOptions, CheckpointMode, GraphHandle};
-use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
+use crate::primitives::pager::{PageStore, Pager, ReadGuard, WriteGuard};
 use crate::storage::catalog::Dict;
-use crate::storage::{EdgeSpec, NodeSpec, PropEntry, PropValue, PropValueOwned};
+use crate::storage::{
+    BulkEdgeValidator, CreateEdgeOptions, EdgeSpec, Graph, GraphWriter, NodeSpec, PropEntry,
+    PropValue, PropValueOwned,
+};
 use crate::types::{LabelId, NodeId, PropId, SombraError, StrId, TypeId};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use serde_json::{Map, Value};
@@ -62,6 +65,10 @@ pub struct EdgeImportConfig {
     /// Optional list of CSV columns to import as edge properties.
     /// If None, all columns except src, dst, and type columns are imported.
     pub prop_columns: Option<Vec<String>>,
+    /// Whether to trust endpoints after validator approval.
+    pub trusted_endpoints: bool,
+    /// Cache capacity for endpoint existence probes (0 disables caching).
+    pub exists_cache_capacity: usize,
 }
 
 /// Configuration for the complete import operation.
@@ -323,6 +330,18 @@ fn import_edges(
     }
     let prop_columns = resolve_prop_columns(&headers, &cfg.prop_columns, &skip)?;
 
+    let validator = cfg.trusted_endpoints.then(|| {
+        Box::new(SnapshotEdgeValidator::new(
+            Arc::clone(&handle.pager),
+            Arc::clone(&handle.graph),
+        )) as Box<dyn BulkEdgeValidator>
+    });
+    let writer_opts = CreateEdgeOptions {
+        trusted_endpoints: cfg.trusted_endpoints,
+        exists_cache_capacity: cfg.exists_cache_capacity,
+    };
+    let mut writer = GraphWriter::try_new(handle.graph.as_ref(), writer_opts, validator)?;
+
     let mut batch: Vec<EdgeInsert> = Vec::with_capacity(EDGE_BATCH_SIZE);
     let mut imported = 0u64;
 
@@ -356,11 +375,11 @@ fn import_edges(
         });
 
         if batch.len() >= EDGE_BATCH_SIZE {
-            imported += flush_edge_batch(handle, &mut batch)?;
+            imported += flush_edge_batch(handle, cfg, &mut writer, &mut batch)?;
         }
     }
 
-    imported += flush_edge_batch(handle, &mut batch)?;
+    imported += flush_edge_batch(handle, cfg, &mut writer, &mut batch)?;
     Ok(imported)
 }
 
@@ -395,9 +414,21 @@ fn flush_node_batch(
     Ok(created)
 }
 
-fn flush_edge_batch(handle: &GraphHandle, batch: &mut Vec<EdgeInsert>) -> Result<u64, CliError> {
+fn flush_edge_batch(
+    handle: &GraphHandle,
+    cfg: &EdgeImportConfig,
+    writer: &mut GraphWriter<'_>,
+    batch: &mut Vec<EdgeInsert>,
+) -> Result<u64, CliError> {
     if batch.is_empty() {
         return Ok(0);
+    }
+    if cfg.trusted_endpoints {
+        let pairs: Vec<(NodeId, NodeId)> = batch
+            .iter()
+            .map(|edge| (NodeId(edge.src), NodeId(edge.dst)))
+            .collect();
+        writer.validate_trusted_batch(&pairs)?;
     }
     let mut write = handle.pager.begin_write()?;
     let mut created = 0u64;
@@ -414,11 +445,44 @@ fn flush_edge_batch(handle: &GraphHandle, batch: &mut Vec<EdgeInsert>) -> Result
             ty: ty_id,
             props: &prop_entries,
         };
-        let _edge_id = handle.graph.create_edge(&mut write, spec)?;
+        let _edge_id = writer.create_edge(&mut write, spec)?;
         created += 1;
     }
     handle.pager.commit(write)?;
     Ok(created)
+}
+
+struct SnapshotEdgeValidator {
+    pager: Arc<Pager>,
+    graph: Arc<Graph>,
+}
+
+impl SnapshotEdgeValidator {
+    fn new(pager: Arc<Pager>, graph: Arc<Graph>) -> Self {
+        Self { pager, graph }
+    }
+}
+
+impl BulkEdgeValidator for SnapshotEdgeValidator {
+    fn validate_batch(&self, edges: &[(NodeId, NodeId)]) -> crate::types::Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let read = self.pager.begin_read()?;
+        for (src, dst) in edges {
+            if !self.graph.node_exists(&read, *src)? {
+                return Err(SombraError::Invalid(
+                    "trusted source endpoint missing during validation",
+                ));
+            }
+            if !self.graph.node_exists(&read, *dst)? {
+                return Err(SombraError::Invalid(
+                    "trusted destination endpoint missing during validation",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn resolve_labels(
