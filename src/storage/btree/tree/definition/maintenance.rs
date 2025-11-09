@@ -518,8 +518,15 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let original_high = original_high.to_vec();
 
         {
-            let mut allocator = LeafAllocator::new(left_page.data_mut(), left_header.clone())?;
+            let snapshot = self.leaf_allocator_cache(tx).take(left_id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(left_page.data_mut(), left_header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(left_page.data_mut(), left_header.clone())?
+            };
             allocator.delete_slot(donor_idx)?;
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(left_id, snapshot);
         }
         self.trace_leaf_slots("borrow_left.after_donor", left_id, left_page.data());
         drop(left_page);
@@ -529,15 +536,26 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             self.trace_leaf_slots("borrow_left.before_recipient", leaf_id, page.data());
             let recipient_header = page::Header::parse(page.data())?;
             let insert_idx = 0;
-            let mut allocator = LeafAllocator::new(page.data_mut(), recipient_header.clone())?;
+            let snapshot = self.leaf_allocator_cache(tx).take(leaf_id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(page.data_mut(), recipient_header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(page.data_mut(), recipient_header.clone())?
+            };
             let applied = match allocator.insert_slot(insert_idx, &record_bytes) {
                 Ok(()) => {
                     allocator.update_low_fence(borrowed_key.as_slice())?;
                     true
                 }
                 Err(err) if allocator_capacity_error(&err) => false,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let snapshot = allocator.into_snapshot();
+                    self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
+                    return Err(err);
+                }
             };
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
             self.trace_leaf_slots("borrow_left.after_recipient_attempt", leaf_id, page.data());
             applied
         };
@@ -546,9 +564,16 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let mut left_page = tx.page_mut(left_id)?;
             let refreshed_header = page::Header::parse(left_page.data())?;
             {
-                let mut allocator = LeafAllocator::new(left_page.data_mut(), refreshed_header.clone())?;
+                let snapshot = self.leaf_allocator_cache(tx).take(left_id);
+                let mut allocator = if let Some(snapshot) = snapshot {
+                    LeafAllocator::from_snapshot(left_page.data_mut(), refreshed_header.clone(), snapshot)?
+                } else {
+                    LeafAllocator::new(left_page.data_mut(), refreshed_header.clone())?
+                };
                 let reinstate_idx = allocator.slot_count();
                 allocator.insert_slot(reinstate_idx, &record_bytes)?;
+                let snapshot = allocator.into_snapshot();
+                self.leaf_allocator_cache(tx).insert(left_id, snapshot);
             }
             {
                 let payload = page::payload_mut(left_page.data_mut())?;
@@ -706,7 +731,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             self.trace_leaf_slots("borrow_right.before_recipient", leaf_id, page.data());
             let recipient_header = page::Header::parse(page.data())?;
             let insert_idx = recipient_header.slot_count as usize;
-            let mut allocator = LeafAllocator::new(page.data_mut(), recipient_header.clone())?;
+            let snapshot = self.leaf_allocator_cache(tx).take(leaf_id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(page.data_mut(), recipient_header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(page.data_mut(), recipient_header.clone())?
+            };
             let appended = match allocator.insert_slot(insert_idx, &record_bytes) {
                 Ok(()) => {
                     if insert_idx == 0 {
@@ -715,8 +745,14 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     true
                 }
                 Err(err) if allocator_capacity_error(&err) => false,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let snapshot = allocator.into_snapshot();
+                    self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
+                    return Err(err);
+                }
             };
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
             self.trace_leaf_slots("borrow_right.after_recipient_attempt", leaf_id, page.data());
             appended
         };
@@ -725,9 +761,16 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
 
         let donor_result: Result<()> = (|| {
-            let mut allocator = LeafAllocator::new(right_page.data_mut(), right_header.clone())?;
+            let snapshot = self.leaf_allocator_cache(tx).take(right_id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(right_page.data_mut(), right_header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(right_page.data_mut(), right_header.clone())?
+            };
             allocator.delete_slot(0)?;
             allocator.update_low_fence(right_new_first.as_slice())?;
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(right_id, snapshot);
             Ok(())
         })();
         if donor_result.is_err() {

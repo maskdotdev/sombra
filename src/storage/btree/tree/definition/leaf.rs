@@ -356,8 +356,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             header.fence_slices(fences)?.0.to_vec()
         };
 
-        let cache = self.leaf_allocator_cache(tx);
-        let snapshot = cache.take(page.id);
+        let snapshot = self.leaf_allocator_cache(tx).take(page.id);
         let allocator_header = header.clone();
         let mut allocator = if let Some(snapshot) = snapshot {
             LeafAllocator::from_snapshot(page.data_mut(), allocator_header, snapshot)?
@@ -403,13 +402,19 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     new_first_key = Some(key.to_vec());
                 }
                 let snapshot = allocator.into_snapshot();
-                cache.insert(page.id, snapshot);
+                self.leaf_allocator_cache(tx).insert(page.id, snapshot);
                 Ok(InPlaceInsertResult::Applied { new_first_key })
             }
             Err(err) if allocator_capacity_error(&err) => {
+                let snapshot = allocator.into_snapshot();
+                self.leaf_allocator_cache(tx).insert(page.id, snapshot);
                 Ok(InPlaceInsertResult::NotApplied)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                let snapshot = allocator.into_snapshot();
+                self.leaf_allocator_cache(tx).insert(page.id, snapshot);
+                Err(err)
+            }
         }
     }
 
@@ -434,8 +439,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if header.slot_count <= 1 {
             return Ok(None);
         }
-        let cache = self.leaf_allocator_cache(tx);
-        let snapshot = cache.take(page.id);
+        let snapshot = self.leaf_allocator_cache(tx).take(page.id);
         let mut allocator = if let Some(snapshot) = snapshot {
             LeafAllocator::from_snapshot(page.data_mut(), header.clone(), snapshot)?
         } else {
@@ -473,7 +477,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let free_start = updated.free_start;
         let free_end = updated.free_end;
         let snapshot = allocator.into_snapshot();
-        cache.insert(page.id, snapshot);
+        self.leaf_allocator_cache(tx).insert(page.id, snapshot);
         Ok(Some(InPlaceDeleteResult {
             free_start,
             free_end,
