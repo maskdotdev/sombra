@@ -182,6 +182,48 @@ impl<'page> LeafAllocator<'page> {
         Ok(())
     }
 
+    /// Clears slot metadata and reinitializes fences/free space pointers.
+    pub fn reset(&mut self, low: &[u8], high: &[u8]) -> Result<()> {
+        let new_arena_start = page::PAYLOAD_HEADER_LEN + low.len() + high.len();
+        if new_arena_start > self.payload_len {
+            return Err(SombraError::Invalid("leaf payload exhausted"));
+        }
+        self.slot_meta.clear();
+        self.free_regions.clear();
+        self.arena_start = new_arena_start;
+        self.header.low_fence_len = low.len();
+        self.header.high_fence_len = high.len();
+        {
+            let payload = page::payload_mut(self.page_bytes)?;
+            page::set_low_fence(payload, low)?;
+            page::set_high_fence(payload, high)?;
+            payload[self.arena_start..self.payload_len].fill(0);
+        }
+        self.header.free_start = u16::try_from(self.arena_start)
+            .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
+        self.header.free_end = u16::try_from(self.payload_len)
+            .map_err(|_| SombraError::Invalid("leaf free_end overflow"))?;
+        self.persist_slot_directory()?;
+        Ok(())
+    }
+
+    /// Rewrites the page contents with the provided entries.
+    pub fn rebuild_from_entries(
+        &mut self,
+        low: &[u8],
+        high: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        self.reset(low, high)?;
+        let mut record = Vec::new();
+        for (idx, (key, value)) in entries.iter().enumerate() {
+            record.clear();
+            page::encode_leaf_record(key.as_slice(), value.as_slice(), &mut record)?;
+            self.insert_slot(idx, &record)?;
+        }
+        Ok(())
+    }
+
     /// Renders the current header value (for testing/debugging).
     pub fn header(&self) -> &page::Header {
         &self.header

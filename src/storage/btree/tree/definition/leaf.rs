@@ -1,4 +1,15 @@
 impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
+    fn slice_fits(
+        &self,
+        payload_len: usize,
+        low_fence: &[u8],
+        high_fence: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<bool> {
+        LeafSplitBuilder::build_from_entries(payload_len, low_fence, high_fence, entries)
+            .map(|layout| layout.is_some())
+    }
+
     fn leaf_allocator_cache<'a>(&self, tx: &'a mut WriteGuard<'_>) -> &'a mut LeafAllocatorCache {
         if tx.extension_mut::<LeafAllocatorCache>().is_none() {
             tx.store_extension(LeafAllocatorCache::default());
@@ -235,8 +246,6 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let mut candidates: Vec<usize> = (1..len).collect();
         let mid = len / 2;
         candidates.sort_by_key(|idx| idx.abs_diff(mid));
-        let mut left_layout = None;
-        let mut right_layout = None;
         let mut split_at = None;
         for idx in candidates {
             let left_slice = &entries[..idx];
@@ -246,34 +255,33 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
             let left_high = right_slice.first().map(|(k, _)| k.as_slice()).unwrap();
             let right_low = right_slice.first().map(|(k, _)| k.as_slice()).unwrap();
-            let left_try = self.build_leaf_layout(
-                payload_len,
-                low_fence_vec.as_slice(),
-                left_high,
-                left_slice,
-            )?;
-            let right_try = self.build_leaf_layout(
-                payload_len,
-                right_low,
-                high_fence_vec.as_slice(),
-                right_slice,
-            )?;
-            if let (Some(l), Some(r)) = (left_try, right_try) {
+            let left_fits = self.slice_fits(payload_len, low_fence_vec.as_slice(), left_high, left_slice)?;
+            let right_fits = self.slice_fits(payload_len, right_low, high_fence_vec.as_slice(), right_slice)?;
+            if left_fits && right_fits {
                 split_at = Some(idx);
-                left_layout = Some(l);
-                right_layout = Some(r);
                 break;
             }
         }
         let split_at = split_at
             .ok_or_else(|| SombraError::Invalid("unable to split leaf into fitting halves"))?;
-        let left_layout = left_layout.expect("left layout");
-        let right_layout = right_layout.expect("right layout");
         let left_min = entries[0].0.clone();
         let right_min = entries[split_at].0.clone();
 
-        let left_fences_end = page::PAYLOAD_HEADER_LEN + low_fence_vec.len() + right_min.len();
-        self.apply_leaf_layout(&mut page, &header, left_fences_end, &left_layout)?;
+        {
+            let snapshot = self.leaf_allocator_cache(tx).take(page.id);
+            let mut allocator = if let Some(snapshot) = snapshot {
+                LeafAllocator::from_snapshot(page.data_mut(), header.clone(), snapshot)?
+            } else {
+                LeafAllocator::new(page.data_mut(), header.clone())?
+            };
+            allocator.rebuild_from_entries(
+                low_fence_vec.as_slice(),
+                right_min.as_slice(),
+                &entries[..split_at],
+            )?;
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(page.id, snapshot);
+        }
 
         let page_id = page.id;
         drop(page);
@@ -283,12 +291,14 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let mut right_page = tx.page_mut(new_page_id)?;
             self.init_leaf_page(new_page_id, &mut right_page)?;
             let right_header = page::Header::parse(right_page.data())?;
-            self.apply_leaf_layout(
-                &mut right_page,
-                &right_header,
-                page::PAYLOAD_HEADER_LEN + right_min.len() + high_fence_vec.len(),
-                &right_layout,
+            let mut allocator = LeafAllocator::new(right_page.data_mut(), right_header.clone())?;
+            allocator.rebuild_from_entries(
+                right_min.as_slice(),
+                high_fence_vec.as_slice(),
+                &entries[split_at..],
             )?;
+            let snapshot = allocator.into_snapshot();
+            self.leaf_allocator_cache(tx).insert(new_page_id, snapshot);
         }
 
         {
