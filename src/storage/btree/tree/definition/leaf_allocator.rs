@@ -1,5 +1,7 @@
 use crate::storage::profile::{
-    record_leaf_allocator_compaction, record_leaf_allocator_failure,
+    profile_timer, record_leaf_allocator_build, record_leaf_allocator_compaction,
+    record_leaf_allocator_failure, record_leaf_allocator_snapshot_reuse,
+    LeafAllocatorFailureKind,
 };
 
 #[allow(dead_code)]
@@ -22,6 +24,7 @@ pub(super) struct LeafAllocator<'page> {
 impl<'page> LeafAllocator<'page> {
     /// Builds a new allocator for `page_bytes` using the parsed `header`.
     pub fn new(page_bytes: &'page mut [u8], header: page::Header) -> Result<Self> {
+        let timer = profile_timer();
         let data = &*page_bytes;
         let slot_view = SlotView::new(&header, data)?;
         let payload_len = slot_view.payload().len();
@@ -40,6 +43,10 @@ impl<'page> LeafAllocator<'page> {
             free_regions: SmallVec::new(),
         };
         allocator.rebuild_free_regions()?;
+        let duration = timer
+            .map(|start| start.elapsed().as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        record_leaf_allocator_build(duration, allocator.free_regions.len() as u64);
         Ok(allocator)
     }
 
@@ -56,14 +63,16 @@ impl<'page> LeafAllocator<'page> {
             return Err(SombraError::Invalid("leaf allocator snapshot slot mismatch"));
         }
         let arena_start = snapshot.arena_start;
-        Ok(Self {
+        let allocator = Self {
             page_bytes,
             header,
             payload_len,
             arena_start,
             slot_meta: SmallVec::from_vec(snapshot.slot_meta),
             free_regions: SmallVec::from_vec(snapshot.free_regions),
-        })
+        };
+        record_leaf_allocator_snapshot_reuse(allocator.free_regions.len() as u64);
+        Ok(allocator)
     }
 
     /// Returns the number of slots currently tracked.
@@ -285,7 +294,7 @@ impl<'page> LeafAllocator<'page> {
             .checked_mul(page::SLOT_ENTRY_LEN)
             .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
         if slot_bytes > self.payload_len {
-            record_leaf_allocator_failure();
+            record_leaf_allocator_failure(LeafAllocatorFailureKind::SlotOverflow);
             return Err(SombraError::Invalid("slot directory exceeds payload"));
         }
         let usable = self
@@ -293,11 +302,11 @@ impl<'page> LeafAllocator<'page> {
             .checked_sub(slot_bytes)
             .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
         if arena_start > usable {
-            record_leaf_allocator_failure();
+            record_leaf_allocator_failure(LeafAllocatorFailureKind::PayloadExhausted);
             return Err(SombraError::Invalid("leaf payload exhausted"));
         }
         if used_bytes > usable - arena_start {
-            record_leaf_allocator_failure();
+            record_leaf_allocator_failure(LeafAllocatorFailureKind::PageFull);
             return Err(SombraError::Invalid("leaf page full"));
         }
         Ok(())

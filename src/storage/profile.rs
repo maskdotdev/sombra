@@ -30,6 +30,12 @@ pub struct StorageProfileSnapshot {
     pub btree_leaf_insert_ns: u64,
     /// Number of measured leaf insertions.
     pub btree_leaf_insert_count: u64,
+    /// Total nanoseconds spent building slot extents / slicing records.
+    pub btree_slot_extent_ns: u64,
+    /// Number of slot-extent builds measured.
+    pub btree_slot_extent_count: u64,
+    /// Total slots scanned while building slot extents.
+    pub btree_slot_extent_slots: u64,
     /// Total nanoseconds spent committing through the pager.
     pub pager_commit_ns: u64,
     /// Number of measured pager commits.
@@ -58,6 +64,28 @@ pub struct StorageProfileSnapshot {
     pub wal_commit_group_p50: u64,
     /// 95th percentile WAL batch size (frames) since last snapshot
     pub wal_commit_group_p95: u64,
+    /// Number of allocator compactions performed while editing leaves.
+    pub btree_leaf_allocator_compactions: u64,
+    /// Total bytes moved by the leaf allocator during compactions.
+    pub btree_leaf_allocator_bytes_moved: u64,
+    /// Number of times the leaf allocator could not satisfy a request.
+    pub btree_leaf_allocator_failures: u64,
+    /// Number of failures due to slot directory growth exceeding payload.
+    pub btree_leaf_allocator_failure_slot_overflow: u64,
+    /// Number of failures due to fences consuming all payload capacity.
+    pub btree_leaf_allocator_failure_payload: u64,
+    /// Number of failures because the leaf payload itself was full.
+    pub btree_leaf_allocator_failure_page_full: u64,
+    /// Total nanoseconds spent building new leaf allocator instances.
+    pub btree_leaf_allocator_build_ns: u64,
+    /// Number of times we rebuilt allocator metadata from scratch.
+    pub btree_leaf_allocator_build_count: u64,
+    /// Total free-region entries observed after allocator builds.
+    pub btree_leaf_allocator_build_free_regions: u64,
+    /// Number of times we reused an allocator snapshot.
+    pub btree_leaf_allocator_snapshot_reuse: u64,
+    /// Total free-region entries observed when reusing snapshots.
+    pub btree_leaf_allocator_snapshot_free_regions: u64,
 }
 
 #[derive(Default)]
@@ -74,6 +102,9 @@ struct StorageProfileCounters {
     btree_leaf_search_count: AtomicU64,
     btree_leaf_insert_ns: AtomicU64,
     btree_leaf_insert_count: AtomicU64,
+    btree_slot_extent_ns: AtomicU64,
+    btree_slot_extent_count: AtomicU64,
+    btree_slot_extent_slots: AtomicU64,
     pager_commit_ns: AtomicU64,
     pager_commit_count: AtomicU64,
     btree_leaf_key_decodes: AtomicU64,
@@ -86,6 +117,17 @@ struct StorageProfileCounters {
     btree_leaf_rebalance_rebuilds: AtomicU64,
     wal_coalesced_writes: AtomicU64,
     pager_commit_borrowed_bytes: AtomicU64,
+    btree_leaf_allocator_compactions: AtomicU64,
+    btree_leaf_allocator_bytes_moved: AtomicU64,
+    btree_leaf_allocator_failures: AtomicU64,
+    btree_leaf_allocator_failure_slot_overflow: AtomicU64,
+    btree_leaf_allocator_failure_payload: AtomicU64,
+    btree_leaf_allocator_failure_page_full: AtomicU64,
+    btree_leaf_allocator_build_ns: AtomicU64,
+    btree_leaf_allocator_build_count: AtomicU64,
+    btree_leaf_allocator_build_free_regions: AtomicU64,
+    btree_leaf_allocator_snapshot_reuse: AtomicU64,
+    btree_leaf_allocator_snapshot_free_regions: AtomicU64,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -120,6 +162,8 @@ pub enum StorageProfileKind {
     BTreeLeafSearch,
     /// B-tree leaf insertion (`insert_into_leaf`).
     BTreeLeafInsert,
+    /// Slot extent building / record slicing.
+    BTreeSlotExtent,
     /// Pager commit duration.
     PagerCommit,
 }
@@ -181,10 +225,27 @@ pub fn record_profile_timer(kind: StorageProfileKind, start: Option<Instant>) {
                 .btree_leaf_insert_count
                 .fetch_add(1, Ordering::Relaxed);
         }
+        StorageProfileKind::BTreeSlotExtent => {
+            counters
+                .btree_slot_extent_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .btree_slot_extent_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
         StorageProfileKind::PagerCommit => {
             counters.pager_commit_ns.fetch_add(nanos, Ordering::Relaxed);
             counters.pager_commit_count.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+/// Records how many slots were scanned while building slot extents.
+pub fn record_btree_slot_extent_slots(count: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_slot_extent_slots
+            .fetch_add(count, Ordering::Relaxed);
     }
 }
 
@@ -212,6 +273,9 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         btree_leaf_search_count: load(&counters.btree_leaf_search_count),
         btree_leaf_insert_ns: load(&counters.btree_leaf_insert_ns),
         btree_leaf_insert_count: load(&counters.btree_leaf_insert_count),
+        btree_slot_extent_ns: load(&counters.btree_slot_extent_ns),
+        btree_slot_extent_count: load(&counters.btree_slot_extent_count),
+        btree_slot_extent_slots: load(&counters.btree_slot_extent_slots),
         pager_commit_ns: load(&counters.pager_commit_ns),
         pager_commit_count: load(&counters.pager_commit_count),
         btree_leaf_key_decodes: load(&counters.btree_leaf_key_decodes),
@@ -226,6 +290,25 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         pager_commit_borrowed_bytes: load(&counters.pager_commit_borrowed_bytes),
         wal_commit_group_p50: wal_p50,
         wal_commit_group_p95: wal_p95,
+        btree_leaf_allocator_compactions: load(&counters.btree_leaf_allocator_compactions),
+        btree_leaf_allocator_bytes_moved: load(&counters.btree_leaf_allocator_bytes_moved),
+        btree_leaf_allocator_failures: load(&counters.btree_leaf_allocator_failures),
+        btree_leaf_allocator_failure_slot_overflow: load(
+            &counters.btree_leaf_allocator_failure_slot_overflow,
+        ),
+        btree_leaf_allocator_failure_payload: load(&counters.btree_leaf_allocator_failure_payload),
+        btree_leaf_allocator_failure_page_full: load(
+            &counters.btree_leaf_allocator_failure_page_full,
+        ),
+        btree_leaf_allocator_build_ns: load(&counters.btree_leaf_allocator_build_ns),
+        btree_leaf_allocator_build_count: load(&counters.btree_leaf_allocator_build_count),
+        btree_leaf_allocator_build_free_regions: load(
+            &counters.btree_leaf_allocator_build_free_regions,
+        ),
+        btree_leaf_allocator_snapshot_reuse: load(&counters.btree_leaf_allocator_snapshot_reuse),
+        btree_leaf_allocator_snapshot_free_regions: load(
+            &counters.btree_leaf_allocator_snapshot_free_regions,
+        ),
     })
 }
 
@@ -262,6 +345,74 @@ pub fn record_btree_leaf_memcopy_bytes(bytes: u64) {
         counters
             .btree_leaf_memcopy_bytes
             .fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+/// Records that the leaf allocator performed a compaction and moved `bytes` bytes.
+pub fn record_leaf_allocator_compaction(bytes: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_allocator_compactions
+            .fetch_add(1, Ordering::Relaxed);
+        if bytes > 0 {
+            counters
+                .btree_leaf_allocator_bytes_moved
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Records that the leaf allocator could not satisfy a request without rebuilding.
+#[derive(Clone, Copy, Debug)]
+pub enum LeafAllocatorFailureKind {
+    SlotOverflow,
+    PayloadExhausted,
+    PageFull,
+}
+
+pub fn record_leaf_allocator_failure(kind: LeafAllocatorFailureKind) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_allocator_failures
+            .fetch_add(1, Ordering::Relaxed);
+        match kind {
+            LeafAllocatorFailureKind::SlotOverflow => counters
+                .btree_leaf_allocator_failure_slot_overflow
+                .fetch_add(1, Ordering::Relaxed),
+            LeafAllocatorFailureKind::PayloadExhausted => counters
+                .btree_leaf_allocator_failure_payload
+                .fetch_add(1, Ordering::Relaxed),
+            LeafAllocatorFailureKind::PageFull => counters
+                .btree_leaf_allocator_failure_page_full
+                .fetch_add(1, Ordering::Relaxed),
+        };
+    }
+}
+
+/// Records how long it took to build a brand-new allocator plus the observed free regions.
+pub fn record_leaf_allocator_build(duration_ns: u64, free_regions: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_allocator_build_ns
+            .fetch_add(duration_ns, Ordering::Relaxed);
+        counters
+            .btree_leaf_allocator_build_count
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .btree_leaf_allocator_build_free_regions
+            .fetch_add(free_regions, Ordering::Relaxed);
+    }
+}
+
+/// Records that we reused a cached allocator snapshot along with the free regions it carried.
+pub fn record_leaf_allocator_snapshot_reuse(free_regions: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_allocator_snapshot_reuse
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .btree_leaf_allocator_snapshot_free_regions
+            .fetch_add(free_regions, Ordering::Relaxed);
     }
 }
 

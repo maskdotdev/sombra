@@ -296,12 +296,28 @@ impl BenchResult {
             let allocator_compactions = profile.btree_leaf_allocator_compactions;
             let allocator_bytes_moved = profile.btree_leaf_allocator_bytes_moved;
             let allocator_failures = profile.btree_leaf_allocator_failures;
+            let allocator_failure_slot = profile.btree_leaf_allocator_failure_slot_overflow;
+            let allocator_failure_payload = profile.btree_leaf_allocator_failure_payload;
+            let allocator_failure_page = profile.btree_leaf_allocator_failure_page_full;
             let allocator_avg_bytes = avg_per_unit(
                 profile.btree_leaf_allocator_bytes_moved,
                 profile.btree_leaf_allocator_compactions,
             );
+            let allocator_build_avg_us = avg_us(
+                profile.btree_leaf_allocator_build_ns,
+                profile.btree_leaf_allocator_build_count,
+            );
+            let allocator_build_free_regions = avg_per_unit(
+                profile.btree_leaf_allocator_build_free_regions,
+                profile.btree_leaf_allocator_build_count,
+            );
+            let allocator_snapshot_reuse = profile.btree_leaf_allocator_snapshot_reuse;
+            let allocator_snapshot_free_regions = avg_per_unit(
+                profile.btree_leaf_allocator_snapshot_free_regions,
+                profile.btree_leaf_allocator_snapshot_reuse,
+            );
             println!(
-                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} allocator_bytes_moved={} allocator_avg_bytes={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
+                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} (slot={} payload={} full={}) allocator_bytes_moved={} allocator_avg_bytes={:.1} allocator_builds={} allocator_build_avg_us={:.3} allocator_build_free_regions={:.1} allocator_cache_reuse={} allocator_cache_free_regions={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
                 profile.pager_wal_frames,
                 profile.pager_wal_bytes,
                 profile.pager_fsync_count,
@@ -312,8 +328,16 @@ impl BenchResult {
                 profile.btree_leaf_rebalance_rebuilds,
                 allocator_compactions,
                 allocator_failures,
+                allocator_failure_slot,
+                allocator_failure_payload,
+                allocator_failure_page,
                 allocator_bytes_moved,
                 allocator_avg_bytes,
+                profile.btree_leaf_allocator_build_count,
+                allocator_build_avg_us,
+                allocator_build_free_regions,
+                allocator_snapshot_reuse,
+                allocator_snapshot_free_regions,
                 commit_avg_ms,
                 search_avg_us,
                 insert_avg_us,
