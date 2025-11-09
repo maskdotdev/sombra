@@ -215,6 +215,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         value: Vec<u8>,
     ) -> Result<LeafInsert> {
         let _scope = profile_scope(StorageProfileKind::BTreeLeafInsert);
+        let mut fallback_snapshot = None;
         if self.options.in_place_leaf_edits {
             match self.try_insert_leaf_in_place(
                 tx,
@@ -227,25 +228,32 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     self.stats.inc_leaf_in_place_edits();
                     return Ok(LeafInsert::Done { new_first_key });
                 }
-                InPlaceInsertResult::NotApplied => {}
+                InPlaceInsertResult::NotApplied { snapshot } => {
+                    fallback_snapshot = snapshot;
+                }
             }
         }
 
         let data = page.data();
-        let slot_view = SlotView::new(&header, data)?;
-        let payload = slot_view.payload();
+        let payload_len = page::payload(data)?.len();
         let (low_fence, high_fence) = header.fence_slices(data)?;
         let low_fence_vec = low_fence.to_vec();
         let high_fence_vec = high_fence.to_vec();
 
-        let mut entries = Vec::with_capacity(slot_view.len());
-        for idx in 0..slot_view.len() {
-            let rec_slice = slot_view.slice(idx)?;
-            record_btree_leaf_key_decodes(1);
-            let record = page::decode_leaf_record(rec_slice)?;
-            record_btree_leaf_memcopy_bytes(record.key.len() as u64);
-            entries.push((record.key.to_vec(), record.value.to_vec()));
-        }
+        let mut entries = if let Some(snapshot) = fallback_snapshot {
+            snapshot.decode_entries(data)?
+        } else {
+            let slot_view = SlotView::new(&header, data)?;
+            let mut rows = Vec::with_capacity(slot_view.len());
+            for idx in 0..slot_view.len() {
+                let rec_slice = slot_view.slice(idx)?;
+                record_btree_leaf_key_decodes(1);
+                let record = page::decode_leaf_record(rec_slice)?;
+                record_btree_leaf_memcopy_bytes(record.key.len() as u64);
+                rows.push((record.key.to_vec(), record.value.to_vec()));
+            }
+            rows
+        };
 
         match entries.binary_search_by(|(existing, _)| {
             record_btree_leaf_key_cmps(1);
@@ -259,7 +267,6 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
         }
 
-        let payload_len = payload.len();
         let high_slice_existing = high_fence_vec.as_slice();
         let new_low_slice = entries[0].0.as_slice();
         if self.slice_fits(
@@ -409,7 +416,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         value: &[u8],
     ) -> Result<InPlaceInsertResult> {
         if header.kind != page::BTreePageKind::Leaf {
-            return Ok(InPlaceInsertResult::NotApplied);
+            return Ok(InPlaceInsertResult::NotApplied { snapshot: None });
         }
         let low_fence_bytes = {
             let fences = page.data();
@@ -467,8 +474,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
             Err(err) if allocator_capacity_error(&err) => {
                 let snapshot = allocator.into_snapshot();
-                self.leaf_allocator_cache(tx).insert(page.id, snapshot);
-                Ok(InPlaceInsertResult::NotApplied)
+                self.leaf_allocator_cache(tx)
+                    .insert(page.id, snapshot.clone());
+                Ok(InPlaceInsertResult::NotApplied {
+                    snapshot: Some(snapshot),
+                })
             }
             Err(err) => {
                 let snapshot = allocator.into_snapshot();

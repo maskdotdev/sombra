@@ -126,7 +126,9 @@ enum InPlaceInsertResult {
     Applied {
         new_first_key: Option<Vec<u8>>,
     },
-    NotApplied,
+    NotApplied {
+        snapshot: Option<LeafAllocatorSnapshot>,
+    },
 }
 
 enum BorrowResult {

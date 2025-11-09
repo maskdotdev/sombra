@@ -577,6 +577,32 @@ pub(super) struct LeafAllocatorSnapshot {
     payload_len: usize,
 }
 
+impl LeafAllocatorSnapshot {
+    pub(super) fn decode_entries(
+        &self,
+        page_bytes: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let payload = page::payload(page_bytes)?;
+        let mut entries = Vec::with_capacity(self.slot_meta.len());
+        for meta in &self.slot_meta {
+            let start = meta.offset as usize;
+            let end = start
+                .checked_add(meta.len as usize)
+                .ok_or_else(|| SombraError::Invalid("leaf allocator snapshot extent overflow"))?;
+            if end > payload.len() {
+                return Err(SombraError::Invalid(
+                    "leaf allocator snapshot record beyond payload",
+                ));
+            }
+            let record = page::decode_leaf_record(&payload[start..end])?;
+            record_btree_leaf_key_decodes(1);
+            record_btree_leaf_memcopy_bytes(record.key.len() as u64);
+            entries.push((record.key.to_vec(), record.value.to_vec()));
+        }
+        Ok(entries)
+    }
+}
+
 #[allow(dead_code)]
 impl FreeRegion {
     fn len(&self) -> usize {
