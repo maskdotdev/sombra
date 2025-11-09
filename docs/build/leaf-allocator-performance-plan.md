@@ -76,9 +76,9 @@ Code review points to three dominant costs:
    allocator with half ranges instead of rebuilding via `build_leaf_layout`.
    This eliminates the copy-heavy `LeafSplitBuilder` path and lets us compact
    only when necessary.
-2. **Delete `build_leaf_layout` / `apply_leaf_layout` call sites.** Once inserts,
-   deletes, borrow/merge, and splits all go through the allocator we can drop
-   the rebuild helpers and their `Vec<(Vec<u8>, Vec<u8>)>` snapshots.
+2. **(In progress)** Deletes + borrow/merge now reuse the allocator cache, but
+   splits still fall back to `build_leaf_layout`. Port the split logic and then
+   delete the rebuild helpers entirely.
 3. **Flip `BTreeOptions::in_place_leaf_edits` to default `true`.** With the old
    path removed there is no configuration switch; we can migrate existing trees
    once the allocator is stable.

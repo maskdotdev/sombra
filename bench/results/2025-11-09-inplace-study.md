@@ -34,6 +34,10 @@ TIME 13.82 ms  OPS/SEC 723748  µS/OP 1.4
 metrics: ... allocator_compactions=1 allocator_failures=53 allocator_bytes_moved=18 allocator_avg_bytes=18.0 insert_avg_us=0.607 slot_extent_avg_us=0.109
 ```
 
+Running the same workload after the borrow/merge cache changes still sits in the same
+ballpark (15.05 ms / 665 k ops/s, `insert_avg_us=0.626`), confirming that those paths
+don’t affect inserts-only behaviour but also didn’t regress the fast path.
+
 ## Raw Output
 
 ```
