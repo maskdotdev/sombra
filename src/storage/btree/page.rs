@@ -2,6 +2,7 @@ use std::convert::{TryFrom, TryInto};
 
 use crate::primitives::bytes::var;
 use crate::storage::btree::KeyCursor;
+use crate::storage::profile::{profile_scope, record_btree_slot_extent_slots, StorageProfileKind};
 use crate::types::{page::PAGE_HDR_LEN, PageId, Result, SombraError};
 use smallvec::SmallVec;
 
@@ -304,6 +305,8 @@ pub struct SlotExtents {
 impl SlotExtents {
     /// Builds the extent table for `slots` on a single page visit.
     pub fn build(header: &Header, payload: &[u8], slots: &SlotDirectory<'_>) -> Result<Self> {
+        let _scope = profile_scope(StorageProfileKind::BTreeSlotExtent);
+        record_btree_slot_extent_slots(slots.len() as u64);
         if slots.len() == 0 {
             return Ok(Self {
                 extents: SmallVec::new(),

@@ -240,9 +240,9 @@ fn in_place_leaf_edits_updates_stats() -> Result<()> {
         stats.leaf_in_place_edits >= 1,
         "expected at least one in-place insert, got {stats:?}"
     );
-    assert!(
-        stats.leaf_rebuilds >= 1,
-        "expected initial rebuild to be counted, got {stats:?}"
+    assert_eq!(
+        stats.leaf_rebuilds, 0,
+        "in-place allocator should avoid rebuilds, got {stats:?}"
     );
     Ok(())
 }
