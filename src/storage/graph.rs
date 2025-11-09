@@ -115,11 +115,10 @@ impl Graph {
         let inline_prop_blob = inline_blob_u32 as usize;
         let inline_prop_value = inline_value_u32 as usize;
 
-        let btree_inplace = opts.btree_inplace;
-        let nodes = open_u64_vec_tree(&store, meta.storage_nodes_root, btree_inplace)?;
-        let edges = open_u64_vec_tree(&store, meta.storage_edges_root, btree_inplace)?;
-        let adj_fwd = open_unit_tree(&store, meta.storage_adj_fwd_root, btree_inplace)?;
-        let adj_rev = open_unit_tree(&store, meta.storage_adj_rev_root, btree_inplace)?;
+        let nodes = open_u64_vec_tree(&store, meta.storage_nodes_root)?;
+        let edges = open_u64_vec_tree(&store, meta.storage_edges_root)?;
+        let adj_fwd = open_unit_tree(&store, meta.storage_adj_fwd_root)?;
+        let adj_rev = open_unit_tree(&store, meta.storage_adj_rev_root)?;
         let index_roots = IndexRoots {
             catalog: meta.storage_index_catalog_root,
             label: meta.storage_label_index_root,
@@ -127,7 +126,7 @@ impl Graph {
             prop_btree: meta.storage_prop_btree_root,
         };
         let (indexes, index_roots_actual) =
-            IndexStore::open(Arc::clone(&store), index_roots, btree_inplace)?;
+            IndexStore::open(Arc::clone(&store), index_roots)?;
 
         #[cfg(feature = "degree-cache")]
         let mut degree_cache_enabled = opts.degree_cache
@@ -138,7 +137,7 @@ impl Graph {
 
         #[cfg(feature = "degree-cache")]
         let degree_tree = if degree_cache_enabled || meta.storage_degree_root.0 != 0 {
-            let tree = open_degree_tree(&store, meta.storage_degree_root, btree_inplace)?;
+            let tree = open_degree_tree(&store, meta.storage_degree_root)?;
             Some(tree)
         } else {
             None
@@ -1556,37 +1555,22 @@ impl<'a> GraphWriter<'a> {
     }
 }
 
-fn open_u64_vec_tree(
-    store: &Arc<dyn PageStore>,
-    root: PageId,
-    inplace: bool,
-) -> Result<BTree<u64, Vec<u8>>> {
+fn open_u64_vec_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<u64, Vec<u8>>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
-    opts.in_place_leaf_edits = inplace;
     BTree::open_or_create(store, opts)
 }
 
-fn open_unit_tree(
-    store: &Arc<dyn PageStore>,
-    root: PageId,
-    inplace: bool,
-) -> Result<BTree<Vec<u8>, UnitValue>> {
+fn open_unit_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Vec<u8>, UnitValue>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
-    opts.in_place_leaf_edits = inplace;
     BTree::open_or_create(store, opts)
 }
 
 #[cfg(feature = "degree-cache")]
-fn open_degree_tree(
-    store: &Arc<dyn PageStore>,
-    root: PageId,
-    inplace: bool,
-) -> Result<BTree<Vec<u8>, u64>> {
+fn open_degree_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Vec<u8>, u64>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
-    opts.in_place_leaf_edits = inplace;
     BTree::open_or_create(store, opts)
 }
 

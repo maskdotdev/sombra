@@ -218,6 +218,50 @@ fn put_many_inserts_sorted_keys() -> Result<()> {
 }
 
 #[test]
+fn vec_key_put_many_round_trip() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_vec_key_put_many.db");
+    let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let tree = BTree::<Vec<u8>, u64>::open_or_create(&store, BTreeOptions::default())?;
+
+    let make_key = |src: u64, ty: u32, dst: u64, edge: u64| {
+        let mut buf = Vec::with_capacity(8 + 4 + 8 + 8);
+        buf.extend_from_slice(&src.to_be_bytes());
+        buf.extend_from_slice(&ty.to_be_bytes());
+        buf.extend_from_slice(&dst.to_be_bytes());
+        buf.extend_from_slice(&edge.to_be_bytes());
+        buf
+    };
+    let keys = vec![
+        make_key(75, 14, 130, 16),
+        make_key(12, 2, 42, 99),
+        make_key(1, 0, 1, 1),
+    ];
+
+    {
+        let mut refs: Vec<&Vec<u8>> = keys.iter().collect();
+        refs.sort_unstable();
+        let mut write = pager.begin_write()?;
+        let value = 0u64;
+        let iter = refs.into_iter().map(|key| PutItem { key, value: &value });
+        tree.put_many(&mut write, iter)?;
+        pager.commit(write)?;
+    }
+
+    pager.checkpoint(CheckpointMode::Force)?;
+    let read = pager.begin_read()?;
+    for key in &keys {
+        assert!(
+            tree.get(&read, key)?.is_some(),
+            "missing key {:?}",
+            key
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn in_place_leaf_edits_updates_stats() -> Result<()> {
     let dir = tempdir().map_err(SombraError::Io)?;
     let path = dir.path().join("btree_in_place_stats.db");

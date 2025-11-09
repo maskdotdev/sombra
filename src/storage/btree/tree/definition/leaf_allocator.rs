@@ -233,6 +233,100 @@ impl<'page> LeafAllocator<'page> {
         Ok(())
     }
 
+    pub fn rebuild_from_records<'a, I>(
+        &mut self,
+        low: &[u8],
+        high: &[u8],
+        records: I,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        self.reset(low, high)?;
+        for (idx, record) in records.into_iter().enumerate() {
+            self.insert_slot(idx, record)?;
+        }
+        Ok(())
+    }
+
+    pub fn split_into(
+        &mut self,
+        right: &mut LeafAllocator<'page>,
+        original_low_fence: &[u8],
+        original_high_fence: &[u8],
+        split_idx: usize,
+        pending_insert: &LeafPendingInsert,
+    ) -> Result<LeafSplitOutcome> {
+        let existing_slots = self.slot_meta.len();
+        let slots = build_record_slots(existing_slots, pending_insert)?;
+        let total_slots = slots.len();
+        if total_slots < 2 {
+            return Err(SombraError::Invalid(
+                "cannot split leaf with fewer than 2 entries",
+            ));
+        }
+        if split_idx == 0 || split_idx >= total_slots {
+            return Err(SombraError::Invalid("leaf split index out of range"));
+        }
+
+        let payload_copy = {
+            let payload = page::payload(&*self.page_bytes)?;
+            payload.to_vec()
+        };
+        if payload_copy.len() != self.payload_len {
+            return Err(SombraError::Invalid(
+                "leaf payload snapshot length mismatch",
+            ));
+        }
+        let payload_slice = payload_copy.as_slice();
+        let pending_bytes = pending_insert.record.as_slice();
+        if pending_bytes.is_empty() {
+            return Err(SombraError::Invalid("pending leaf record empty"));
+        }
+
+        let mut slices = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            match slot {
+                RecordSlot::Existing(idx) => {
+                    let meta = self
+                        .slot_meta
+                        .get(*idx)
+                        .ok_or_else(|| SombraError::Invalid("missing slot metadata"))?;
+                    let start = meta.offset as usize;
+                    let end = start
+                        .checked_add(meta.len as usize)
+                        .ok_or_else(|| SombraError::Invalid("leaf record extent overflow"))?;
+                    if end > payload_slice.len() {
+                        return Err(SombraError::Invalid("leaf record beyond payload"));
+                    }
+                    slices.push(RecordSlice::Existing { start, end });
+                }
+                RecordSlot::Pending => slices.push(RecordSlice::Pending),
+            }
+        }
+        let (left_slices, right_slices) = slices.split_at(split_idx);
+        let left_first = left_slices
+            .first()
+            .ok_or_else(|| SombraError::Invalid("left split missing entries"))?;
+        let right_first = right_slices
+            .first()
+            .ok_or_else(|| SombraError::Invalid("right split missing entries"))?;
+        let left_min = decode_split_key(left_first, payload_slice, pending_bytes)?;
+        let right_min = decode_split_key(right_first, payload_slice, pending_bytes)?;
+
+        let left_low_fence = if pending_insert.requires_low_fence_update {
+            left_min.as_slice()
+        } else {
+            original_low_fence
+        };
+        let left_iter = SliceIter::new(left_slices, payload_slice, pending_bytes);
+        self.rebuild_from_records(left_low_fence, right_min.as_slice(), left_iter)?;
+        let right_iter = SliceIter::new(right_slices, payload_slice, pending_bytes);
+        right.rebuild_from_records(right_min.as_slice(), original_high_fence, right_iter)?;
+
+        Ok(LeafSplitOutcome { left_min, right_min })
+    }
+
     /// Renders the current header value (for testing/debugging).
     pub fn header(&self) -> &page::Header {
         &self.header
@@ -245,14 +339,7 @@ impl<'page> LeafAllocator<'page> {
             .slot_meta
             .get(slot_idx)
             .ok_or(SombraError::Invalid("slot index out of bounds"))?;
-        let start = meta.offset as usize;
-        let end = start
-            .checked_add(meta.len as usize)
-            .ok_or_else(|| SombraError::Invalid("record extent overflow"))?;
-        if end > payload.len() {
-            return Err(SombraError::Invalid("record extent beyond payload"));
-        }
-        Ok(&payload[start..end])
+        meta.slice(payload)
     }
 
     /// Decodes and returns the leaf record stored at `slot_idx`.
@@ -559,6 +646,110 @@ impl SlotMeta {
     fn end(&self) -> u16 {
         self.offset.saturating_add(self.len)
     }
+
+    fn slice<'a>(&self, payload: &'a [u8]) -> Result<&'a [u8]> {
+        let start = self.offset as usize;
+        let end = start
+            .checked_add(self.len as usize)
+            .ok_or_else(|| SombraError::Invalid("record extent overflow"))?;
+        if end > payload.len() {
+            return Err(SombraError::Invalid("record extent beyond payload"));
+        }
+        Ok(&payload[start..end])
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+enum RecordSlot {
+    Existing(usize),
+    Pending,
+}
+
+fn build_record_slots(
+    slot_count: usize,
+    pending_insert: &LeafPendingInsert,
+) -> Result<Vec<RecordSlot>> {
+    if pending_insert.insert_idx > slot_count {
+        return Err(SombraError::Invalid(
+            "pending insert slot index out of range",
+        ));
+    }
+    if pending_insert.replaces_existing && pending_insert.insert_idx >= slot_count {
+        return Err(SombraError::Invalid(
+            "pending insert replace index out of range",
+        ));
+    }
+    let total_slots = if pending_insert.replaces_existing {
+        slot_count
+    } else {
+        slot_count
+            .checked_add(1)
+            .ok_or_else(|| SombraError::Invalid("leaf slot count overflow"))?
+    };
+    let mut slots = Vec::with_capacity(total_slots);
+    for idx in 0..=slot_count {
+        if idx == pending_insert.insert_idx {
+            slots.push(RecordSlot::Pending);
+        }
+        if idx < slot_count {
+            if pending_insert.replaces_existing && idx == pending_insert.insert_idx {
+                continue;
+            }
+            slots.push(RecordSlot::Existing(idx));
+        }
+    }
+    debug_assert_eq!(slots.len(), total_slots);
+    Ok(slots)
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+enum RecordSlice {
+    Existing { start: usize, end: usize },
+    Pending,
+}
+
+struct SliceIter<'a> {
+    payload: &'a [u8],
+    pending: &'a [u8],
+    slices: &'a [RecordSlice],
+    pos: usize,
+}
+
+impl<'a> SliceIter<'a> {
+    fn new(slices: &'a [RecordSlice], payload: &'a [u8], pending: &'a [u8]) -> Self {
+        Self {
+            payload,
+            pending,
+            slices,
+            pos: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for SliceIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let slice = self.slices.get(self.pos)?;
+        self.pos += 1;
+        match slice {
+            RecordSlice::Existing { start, end } => Some(&self.payload[*start..*end]),
+            RecordSlice::Pending => Some(self.pending),
+        }
+    }
+}
+
+fn decode_split_key(slice: &RecordSlice, payload: &[u8], pending: &[u8]) -> Result<Vec<u8>> {
+    let record_bytes = match slice {
+        RecordSlice::Existing { start, end } => &payload[*start..*end],
+        RecordSlice::Pending => pending,
+    };
+    record_btree_leaf_key_decodes(1);
+    let record = page::decode_leaf_record(record_bytes)?;
+    record_btree_leaf_memcopy_bytes(record.key.len() as u64);
+    Ok(record.key.to_vec())
 }
 
 #[allow(dead_code)]
@@ -584,22 +775,85 @@ impl LeafAllocatorSnapshot {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let payload = page::payload(page_bytes)?;
         let mut entries = Vec::with_capacity(self.slot_meta.len());
-        for meta in &self.slot_meta {
-            let start = meta.offset as usize;
-            let end = start
-                .checked_add(meta.len as usize)
-                .ok_or_else(|| SombraError::Invalid("leaf allocator snapshot extent overflow"))?;
-            if end > payload.len() {
-                return Err(SombraError::Invalid(
-                    "leaf allocator snapshot record beyond payload",
-                ));
-            }
-            let record = page::decode_leaf_record(&payload[start..end])?;
-            record_btree_leaf_key_decodes(1);
-            record_btree_leaf_memcopy_bytes(record.key.len() as u64);
+        for record in self.record_iter(payload)? {
+            let record = record?;
             entries.push((record.key.to_vec(), record.value.to_vec()));
         }
         Ok(entries)
+    }
+
+    pub(super) fn record_iter<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> Result<LeafSnapshotIter<'a>> {
+        if payload.len() != self.payload_len {
+            return Err(SombraError::Invalid(
+                "leaf allocator snapshot payload mismatch",
+            ));
+        }
+        Ok(LeafSnapshotIter {
+            payload,
+            slot_meta: &self.slot_meta,
+            idx: 0,
+        })
+    }
+
+    pub(super) fn arena_start(&self) -> usize {
+        self.arena_start
+    }
+
+    pub(super) fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    pub(super) fn record_slice<'a>(&'a self, payload: &'a [u8], idx: usize) -> Result<&'a [u8]> {
+        let meta = self
+            .slot_meta
+            .get(idx)
+            .ok_or_else(|| SombraError::Invalid("snapshot slot index out of bounds"))?;
+        meta.slice(payload)
+    }
+
+    pub(super) fn record_count(&self) -> usize {
+        self.slot_meta.len()
+    }
+
+    pub(super) fn encoded_len(&self, idx: usize) -> Result<usize> {
+        let meta = self
+            .slot_meta
+            .get(idx)
+            .ok_or_else(|| SombraError::Invalid("snapshot slot index out of bounds"))?;
+        Ok(meta.len as usize)
+    }
+}
+
+pub(super) struct LeafSnapshotIter<'a> {
+    payload: &'a [u8],
+    slot_meta: &'a [SlotMeta],
+    idx: usize,
+}
+
+impl<'a> Iterator for LeafSnapshotIter<'a> {
+    type Item = Result<page::LeafRecordRef<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let meta = match self.slot_meta.get(self.idx) {
+            Some(meta) => meta,
+            None => return None,
+        };
+        self.idx += 1;
+        let slice = match meta.slice(self.payload) {
+            Ok(slice) => slice,
+            Err(err) => return Some(Err(err)),
+        };
+        record_btree_leaf_key_decodes(1);
+        match page::decode_leaf_record(slice) {
+            Ok(record) => {
+                record_btree_leaf_memcopy_bytes(record.key.len() as u64);
+                Some(Ok(record))
+            }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 

@@ -30,8 +30,6 @@ pub struct BTreeOptions {
     pub checksum_verify_on_read: bool,
     /// Optional root page ID for an existing tree
     pub root_page: Option<PageId>,
-    /// Whether to attempt in-place leaf edits (insert/delete) before rebuilding
-    pub in_place_leaf_edits: bool,
 }
 
 impl Default for BTreeOptions {
@@ -41,7 +39,6 @@ impl Default for BTreeOptions {
             internal_min_fill: 40,
             checksum_verify_on_read: true,
             root_page: None,
-            in_place_leaf_edits: false,
         }
     }
 }
@@ -122,13 +119,28 @@ enum LeafInsert {
     },
 }
 
+#[allow(dead_code)]
 enum InPlaceInsertResult {
     Applied {
         new_first_key: Option<Vec<u8>>,
     },
     NotApplied {
         snapshot: Option<LeafAllocatorSnapshot>,
+        pending_insert: Option<LeafPendingInsert>,
     },
+}
+
+#[derive(Clone)]
+pub(super) struct LeafPendingInsert {
+    insert_idx: usize,
+    replaces_existing: bool,
+    requires_low_fence_update: bool,
+    record: Vec<u8>,
+}
+
+pub(super) struct LeafSplitOutcome {
+    left_min: Vec<u8>,
+    right_min: Vec<u8>,
 }
 
 enum BorrowResult {

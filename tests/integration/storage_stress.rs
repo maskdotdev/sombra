@@ -23,7 +23,7 @@ fn randomized_graph_stress_and_recovery() -> Result<()> {
 
     let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let graph = Graph::open(GraphOptions::new(store).btree_inplace(true))?;
+    let graph = Graph::open(GraphOptions::new(store))?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(SEED);
     let mut nodes = Vec::with_capacity(NODE_COUNT);
