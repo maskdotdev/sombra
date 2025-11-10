@@ -2,13 +2,14 @@
 
 use crate::query::{
     ast::{
-        EdgeClause, EdgeDirection, Literal, MatchClause, Projection, PropPredicate, QueryAst, Var,
+        BoolExpr, Comparison, EdgeClause, EdgeDirection, MatchClause, Projection, QueryAst, Var,
     },
     executor::{Executor, QueryResult},
     planner::{PlanExplain, Planner, PlannerOutput},
+    Value,
 };
 use crate::types::Result;
-use std::ops::Bound;
+use std::{mem, ops::Bound};
 
 /// Fluent builder matching the Stage 8 ergonomics.
 #[derive(Default)]
@@ -83,63 +84,19 @@ impl QueryBuilder {
         self
     }
 
-    /// Adds a property predicate.
-    pub fn where_prop<V, P, L1, L2>(
-        mut self,
-        var: V,
-        prop: P,
-        op: PropOp,
-        value: L1,
-        value2: Option<L2>,
-    ) -> Self
+    /// Adds predicates for a specific variable using the supplied builder.
+    pub fn where_var<S, F>(mut self, var: S, build: F) -> Self
     where
-        V: Into<String>,
-        P: Into<String>,
-        L1: Into<Literal>,
-        L2: Into<Literal>,
+        S: Into<String>,
+        F: FnOnce(&mut PredicateBuilder),
     {
         let var = Var(var.into());
-        let prop = prop.into();
-        let value = value.into();
-        let value2 = value2.map(|v| v.into());
-        let predicate = match op {
-            PropOp::Eq => PropPredicate::Eq { var, prop, value },
-            PropOp::Between => {
-                let (lower, upper) =
-                    value2.map_or_else(|| panic!("between requires two values"), |v2| (value, v2));
-                PropPredicate::Range {
-                    var,
-                    prop,
-                    lower: Bound::Included(lower),
-                    upper: Bound::Included(upper),
-                }
-            }
-            PropOp::Gt => PropPredicate::Range {
-                var,
-                prop,
-                lower: Bound::Excluded(value),
-                upper: Bound::Unbounded,
-            },
-            PropOp::Ge => PropPredicate::Range {
-                var,
-                prop,
-                lower: Bound::Included(value),
-                upper: Bound::Unbounded,
-            },
-            PropOp::Lt => PropPredicate::Range {
-                var,
-                prop,
-                lower: Bound::Unbounded,
-                upper: Bound::Excluded(value),
-            },
-            PropOp::Le => PropPredicate::Range {
-                var,
-                prop,
-                lower: Bound::Unbounded,
-                upper: Bound::Included(value),
-            },
-        };
-        self.ast.predicates.push(predicate);
+        let mut builder = PredicateBuilder::new(var);
+        build(&mut builder);
+        let expr = builder
+            .finish()
+            .expect("where_var requires at least one predicate");
+        self.append_bool_expr(expr);
         self
     }
 
@@ -198,6 +155,19 @@ impl QueryBuilder {
         let idx = self.next_var_idx;
         self.next_var_idx += 1;
         Var(auto_var_name(idx))
+    }
+
+    fn append_bool_expr(&mut self, expr: BoolExpr) {
+        self.ast.predicate = Some(match self.ast.predicate.take() {
+            Some(existing) => match existing {
+                BoolExpr::And(mut args) => {
+                    args.push(expr);
+                    BoolExpr::And(args)
+                }
+                other => BoolExpr::And(vec![other, expr]),
+            },
+            None => expr,
+        });
     }
 }
 
@@ -277,35 +247,252 @@ impl From<Option<&str>> for EdgeSpec {
     }
 }
 
-/// Property comparison operators supported by the builder.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PropOp {
-    /// Equal
-    Eq,
-    /// Less than
-    Lt,
-    /// Less than or equal
-    Le,
-    /// Greater than
-    Gt,
-    /// Greater than or equal
-    Ge,
-    /// Between two values (inclusive)
-    Between,
+#[derive(Clone, Copy, Debug)]
+enum PredicateMode {
+    And,
+    Or,
 }
 
-impl PropOp {
-    /// Parses a property operator from a string representation.
-    pub fn from_str(op: &str) -> Option<Self> {
-        match op {
-            "=" => Some(Self::Eq),
-            "<" => Some(Self::Lt),
-            "<=" => Some(Self::Le),
-            ">" => Some(Self::Gt),
-            ">=" => Some(Self::Ge),
-            "between" => Some(Self::Between),
-            _ => None,
+/// Builder used to construct predicates bound to a single variable.
+pub struct PredicateBuilder {
+    var: Var,
+    mode: PredicateMode,
+    exprs: Vec<BoolExpr>,
+}
+
+impl PredicateBuilder {
+    fn new(var: Var) -> Self {
+        Self::with_mode(var, PredicateMode::And)
+    }
+
+    fn with_mode(var: Var, mode: PredicateMode) -> Self {
+        Self {
+            var,
+            mode,
+            exprs: Vec::new(),
         }
+    }
+
+    fn push_cmp(&mut self, cmp: Comparison) -> &mut Self {
+        self.exprs.push(BoolExpr::Cmp(cmp));
+        self
+    }
+
+    fn push_expr(&mut self, expr: BoolExpr) -> &mut Self {
+        self.exprs.push(expr);
+        self
+    }
+
+    fn finish(self) -> Option<BoolExpr> {
+        match self.exprs.len() {
+            0 => None,
+            1 => Some(self.exprs.into_iter().next().unwrap()),
+            _ => Some(match self.mode {
+                PredicateMode::And => BoolExpr::And(self.exprs),
+                PredicateMode::Or => BoolExpr::Or(self.exprs),
+            }),
+        }
+    }
+
+    fn build_group_expr<F>(var: Var, mode: PredicateMode, build: F) -> BoolExpr
+    where
+        F: FnOnce(&mut PredicateBuilder),
+    {
+        let mut nested = PredicateBuilder::with_mode(var, mode);
+        build(&mut nested);
+        nested
+            .finish()
+            .expect("predicate group must emit at least one predicate")
+    }
+
+    /// Adds an equality predicate comparing the property to a literal.
+    pub fn eq<P, V>(&mut self, prop: P, value: V) -> &mut Self
+    where
+        P: Into<String>,
+        V: Into<Value>,
+    {
+        self.push_cmp(Comparison::Eq {
+            var: self.var.clone(),
+            prop: prop.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Adds an inequality predicate comparing the property to a literal.
+    pub fn ne<P, V>(&mut self, prop: P, value: V) -> &mut Self
+    where
+        P: Into<String>,
+        V: Into<Value>,
+    {
+        self.push_cmp(Comparison::Ne {
+            var: self.var.clone(),
+            prop: prop.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Adds a strict less-than predicate.
+    pub fn lt<P, V>(&mut self, prop: P, value: V) -> &mut Self
+    where
+        P: Into<String>,
+        V: Into<Value>,
+    {
+        self.push_cmp(Comparison::Lt {
+            var: self.var.clone(),
+            prop: prop.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Adds a less-than-or-equal predicate.
+    pub fn le<P, V>(&mut self, prop: P, value: V) -> &mut Self
+    where
+        P: Into<String>,
+        V: Into<Value>,
+    {
+        self.push_cmp(Comparison::Le {
+            var: self.var.clone(),
+            prop: prop.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Adds a strict greater-than predicate.
+    pub fn gt<P, V>(&mut self, prop: P, value: V) -> &mut Self
+    where
+        P: Into<String>,
+        V: Into<Value>,
+    {
+        self.push_cmp(Comparison::Gt {
+            var: self.var.clone(),
+            prop: prop.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Adds a greater-than-or-equal predicate.
+    pub fn ge<P, V>(&mut self, prop: P, value: V) -> &mut Self
+    where
+        P: Into<String>,
+        V: Into<Value>,
+    {
+        self.push_cmp(Comparison::Ge {
+            var: self.var.clone(),
+            prop: prop.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Adds an inclusive between predicate with both bounds included.
+    pub fn between<P, L, H>(&mut self, prop: P, low: L, high: H) -> &mut Self
+    where
+        P: Into<String>,
+        L: Into<Value>,
+        H: Into<Value>,
+    {
+        self.between_bounds(
+            prop,
+            Bound::Included(low.into()),
+            Bound::Included(high.into()),
+        )
+    }
+
+    /// Adds a between predicate with explicit bound inclusivity.
+    pub fn between_bounds<P>(&mut self, prop: P, low: Bound<Value>, high: Bound<Value>) -> &mut Self
+    where
+        P: Into<String>,
+    {
+        self.push_cmp(Comparison::Between {
+            var: self.var.clone(),
+            prop: prop.into(),
+            low,
+            high,
+        })
+    }
+
+    /// Adds an `IN` predicate matching a finite homogeneous literal set.
+    pub fn in_list<P, I, V>(&mut self, prop: P, values: I) -> &mut Self
+    where
+        P: Into<String>,
+        I: IntoIterator<Item = V>,
+        V: Into<Value>,
+    {
+        let collected: Vec<Value> = values.into_iter().map(Into::into).collect();
+        if collected.is_empty() {
+            panic!("in_list requires at least one value");
+        }
+        let first_tag = mem::discriminant(&collected[0]);
+        if !collected
+            .iter()
+            .all(|value| mem::discriminant(value) == first_tag)
+        {
+            panic!("in_list requires all values to share the same type");
+        }
+        self.push_cmp(Comparison::In {
+            var: self.var.clone(),
+            prop: prop.into(),
+            values: collected,
+        })
+    }
+
+    /// Asserts that the property key is present on the entity.
+    pub fn exists<P>(&mut self, prop: P) -> &mut Self
+    where
+        P: Into<String>,
+    {
+        self.push_cmp(Comparison::Exists {
+            var: self.var.clone(),
+            prop: prop.into(),
+        })
+    }
+
+    /// Tests whether the property is null or missing.
+    pub fn is_null<P>(&mut self, prop: P) -> &mut Self
+    where
+        P: Into<String>,
+    {
+        self.push_cmp(Comparison::IsNull {
+            var: self.var.clone(),
+            prop: prop.into(),
+        })
+    }
+
+    /// Tests whether the property exists and is not null.
+    pub fn is_not_null<P>(&mut self, prop: P) -> &mut Self
+    where
+        P: Into<String>,
+    {
+        self.push_cmp(Comparison::IsNotNull {
+            var: self.var.clone(),
+            prop: prop.into(),
+        })
+    }
+
+    /// Nests a group of predicates combined with logical AND.
+    pub fn and_group<F>(&mut self, build: F) -> &mut Self
+    where
+        F: FnOnce(&mut PredicateBuilder),
+    {
+        let expr = PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::And, build);
+        self.push_expr(expr)
+    }
+
+    /// Nests a group of predicates combined with logical OR.
+    pub fn or_group<F>(&mut self, build: F) -> &mut Self
+    where
+        F: FnOnce(&mut PredicateBuilder),
+    {
+        let expr = PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::Or, build);
+        self.push_expr(expr)
+    }
+
+    /// Nests a group of predicates and negates the result.
+    pub fn not_group<F>(&mut self, build: F) -> &mut Self
+    where
+        F: FnOnce(&mut PredicateBuilder),
+    {
+        let expr = PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::And, build);
+        self.push_expr(BoolExpr::Not(Box::new(expr)))
     }
 }
 
@@ -390,8 +577,10 @@ mod tests {
     fn builder_parses_property_predicates() {
         let ast = QueryBuilder::new()
             .r#match("User")
-            .where_prop("a", "age", PropOp::Ge, Literal::Int(21), None::<Literal>)
+            .where_var("a", |pred| {
+                pred.ge("age", Value::Int(21));
+            })
             .build();
-        assert_eq!(ast.predicates.len(), 1);
+        assert!(ast.predicate.is_some());
     }
 }
