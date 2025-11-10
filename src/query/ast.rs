@@ -4,6 +4,7 @@
 //! bindings exposed in Stage 8. They are later lowered into logical plan
 //! operators before any physical planning decisions are made.
 
+use crate::query::value::Value;
 use std::ops::Bound;
 
 /// Identifier assigned to a binding (node or edge) within the query.
@@ -49,79 +50,117 @@ pub struct EdgeClause {
     pub direction: EdgeDirection,
 }
 
-/// Supported property predicate kinds.
+/// Boolean predicate tree for typed comparisons.
 #[derive(Clone, Debug)]
-pub enum PropPredicate {
-    /// Equality predicate for exact property value matching.
+pub enum BoolExpr {
+    /// Comparison leaf node.
+    Cmp(Comparison),
+    /// Conjunction of child expressions.
+    And(Vec<BoolExpr>),
+    /// Disjunction of child expressions.
+    Or(Vec<BoolExpr>),
+    /// Negation of a child expression.
+    Not(Box<BoolExpr>),
+}
+
+/// Comparison operators that can appear as leaves within the predicate tree.
+#[derive(Clone, Debug)]
+pub enum Comparison {
+    /// Equality comparison.
     Eq {
-        /// Variable to test the property on.
+        /// Variable binding referenced by the predicate.
         var: Var,
-        /// Property name to check.
+        /// Property name on the variable.
         prop: String,
-        /// Expected value for the property.
-        value: Literal,
+        /// Literal value to compare against.
+        value: Value,
     },
-    /// Range predicate for property values within bounds.
-    Range {
-        /// Variable to test the property on.
+    /// Inequality comparison.
+    Ne {
+        /// Variable binding referenced by the predicate.
         var: Var,
-        /// Property name to check.
+        /// Property name on the variable.
         prop: String,
-        /// Lower bound for the range (inclusive or exclusive).
-        lower: Bound<Literal>,
-        /// Upper bound for the range (inclusive or exclusive).
-        upper: Bound<Literal>,
+        /// Literal value to compare against.
+        value: Value,
     },
-    /// Placeholder for future custom predicate expressions.
-    Custom {
-        /// Custom expression string.
-        expr: String,
+    /// Less-than comparison.
+    Lt {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+        /// Literal value to compare against.
+        value: Value,
     },
-}
-
-/// Literal values surfaced by the bindings layer.
-#[derive(Clone, Debug)]
-pub enum Literal {
-    /// Null value.
-    Null,
-    /// Boolean value.
-    Bool(bool),
-    /// Signed 64-bit integer value.
-    Int(i64),
-    /// 64-bit floating point value.
-    Float(f64),
-    /// String value.
-    String(String),
-}
-
-impl From<&str> for Literal {
-    fn from(value: &str) -> Self {
-        Self::String(value.to_owned())
-    }
-}
-
-impl From<String> for Literal {
-    fn from(value: String) -> Self {
-        Self::String(value)
-    }
-}
-
-impl From<bool> for Literal {
-    fn from(value: bool) -> Self {
-        Self::Bool(value)
-    }
-}
-
-impl From<i64> for Literal {
-    fn from(value: i64) -> Self {
-        Self::Int(value)
-    }
-}
-
-impl From<f64> for Literal {
-    fn from(value: f64) -> Self {
-        Self::Float(value)
-    }
+    /// Less-than-or-equal comparison.
+    Le {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+        /// Literal value to compare against.
+        value: Value,
+    },
+    /// Greater-than comparison.
+    Gt {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+        /// Literal value to compare against.
+        value: Value,
+    },
+    /// Greater-than-or-equal comparison.
+    Ge {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+        /// Literal value to compare against.
+        value: Value,
+    },
+    /// Between comparison with optional bound inclusivity.
+    Between {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+        /// Lower bound for the predicate.
+        low: Bound<Value>,
+        /// Upper bound for the predicate.
+        high: Bound<Value>,
+    },
+    /// Inclusion comparison against a finite literal set.
+    In {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+        /// Literal values to test membership against.
+        values: Vec<Value>,
+    },
+    /// Checks if a property key exists (value may still be null).
+    Exists {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+    },
+    /// Property is null or missing.
+    IsNull {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+    },
+    /// Property is present and not null.
+    IsNotNull {
+        /// Variable binding referenced by the predicate.
+        var: Var,
+        /// Property name on the variable.
+        prop: String,
+    },
 }
 
 /// Projection item included in the final result.
@@ -134,12 +173,14 @@ pub enum Projection {
         /// Optional alias for the projected variable.
         alias: Option<String>,
     },
-    /// Projection of a computed expression.
-    Expr {
-        /// Expression string to evaluate.
-        expr: String,
-        /// Alias for the expression result.
-        alias: String,
+    /// Projection of a property from a bound variable.
+    Prop {
+        /// Variable exposing the property.
+        var: Var,
+        /// Property name to project.
+        prop: String,
+        /// Optional alias for the projected column.
+        alias: Option<String>,
     },
 }
 
@@ -150,8 +191,8 @@ pub struct QueryAst {
     pub matches: Vec<MatchClause>,
     /// Edge traversal clauses connecting variables.
     pub edges: Vec<EdgeClause>,
-    /// Property predicates for filtering results.
-    pub predicates: Vec<PropPredicate>,
+    /// Canonical boolean predicate tree.
+    pub predicate: Option<BoolExpr>,
     /// Whether to deduplicate results.
     pub distinct: bool,
     /// Projection items defining the output columns.

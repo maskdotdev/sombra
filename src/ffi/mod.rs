@@ -9,12 +9,13 @@
 use crate::primitives::pager::{PageStore, Pager, PagerOptions, Synchronous, WriteGuard};
 use crate::query::{
     ast::{
-        EdgeClause, EdgeDirection, Literal, MatchClause, Projection, PropPredicate, QueryAst, Var,
+        BoolExpr, Comparison, EdgeClause, EdgeDirection, MatchClause, Projection, QueryAst, Var,
     },
     executor::{Executor, QueryResult, ResultStream, Row, Value as ExecValue},
-    metadata::CatalogMetadata,
+    metadata::{CatalogMetadata, MetadataProvider},
     planner::{ExplainNode, PlanExplain, Planner, PlannerConfig, PlannerOutput},
     profile::profile_snapshot as query_profile_snapshot,
+    Value as QueryValue,
 };
 use crate::storage::catalog::{Dict, DictOptions};
 use crate::storage::{
@@ -23,12 +24,14 @@ use crate::storage::{
     TypeTag,
 };
 use crate::types::{EdgeId, LabelId, NodeId, PropId, SombraError, TypeId};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cmp::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs, mem,
     ops::Bound,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -134,16 +137,16 @@ fn record_profile_timer(kind: ProfileKind, start: Option<Instant>) {
     let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     match kind {
         ProfileKind::Plan => {
-            counters.plan_ns.fetch_add(nanos, Ordering::Relaxed);
-            counters.plan_count.fetch_add(1, Ordering::Relaxed);
+            counters.plan_ns.fetch_add(nanos, AtomicOrdering::Relaxed);
+            counters.plan_count.fetch_add(1, AtomicOrdering::Relaxed);
         }
         ProfileKind::Execute => {
-            counters.exec_ns.fetch_add(nanos, Ordering::Relaxed);
-            counters.exec_count.fetch_add(1, Ordering::Relaxed);
+            counters.exec_ns.fetch_add(nanos, AtomicOrdering::Relaxed);
+            counters.exec_count.fetch_add(1, AtomicOrdering::Relaxed);
         }
         ProfileKind::Serialize => {
-            counters.serde_ns.fetch_add(nanos, Ordering::Relaxed);
-            counters.serde_count.fetch_add(1, Ordering::Relaxed);
+            counters.serde_ns.fetch_add(nanos, AtomicOrdering::Relaxed);
+            counters.serde_count.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 }
@@ -156,9 +159,9 @@ pub fn profile_snapshot(reset: bool) -> Option<ProfileSnapshot> {
     let counters = profile_counters()?;
     let load = |counter: &AtomicU64| {
         if reset {
-            counter.swap(0, Ordering::Relaxed)
+            counter.swap(0, AtomicOrdering::Relaxed)
         } else {
-            counter.load(Ordering::Relaxed)
+            counter.load(AtomicOrdering::Relaxed)
         }
     };
     let query = query_profile_snapshot(reset);
@@ -290,6 +293,7 @@ pub struct Database {
     pager: Arc<Pager>,
     graph: Arc<Graph>,
     dict: Arc<Dict>,
+    metadata: Arc<dyn MetadataProvider>,
     planner: Planner,
     executor: Executor,
 }
@@ -318,28 +322,30 @@ impl Database {
         };
 
         let store: Arc<dyn PageStore> = pager.clone();
-        let mut graph_opts = GraphOptions::new(Arc::clone(&store)).btree_inplace(true);
+        let mut graph_opts = GraphOptions::new(Arc::clone(&store));
         graph_opts = graph_opts.distinct_neighbors_default(opts.distinct_neighbors_default);
         let graph = Arc::new(Graph::open(graph_opts)?);
 
         let dict = Arc::new(Dict::open(Arc::clone(&store), DictOptions::default())?);
         let catalog_root = graph.index_catalog_root();
-        let metadata = Arc::new(CatalogMetadata::from_dict(
+        let metadata: Arc<dyn MetadataProvider> = Arc::new(CatalogMetadata::from_parts(
             Arc::clone(&dict),
             Arc::clone(&store),
             catalog_root,
+            Arc::clone(&graph),
         )?);
-        let planner = Planner::new(PlannerConfig::default(), Arc::clone(&metadata) as _);
+        let planner = Planner::new(PlannerConfig::default(), Arc::clone(&metadata));
         let executor = Executor::new(
             Arc::clone(&graph),
             Arc::clone(&pager),
-            Arc::clone(&metadata) as _,
+            Arc::clone(&metadata),
         );
 
         Ok(Self {
             pager,
             graph,
             dict,
+            metadata,
             planner,
             executor,
         })
@@ -349,6 +355,7 @@ impl Database {
     ///
     /// Deserializes the JSON query specification and executes it against the database.
     pub fn execute_json(&self, spec: &Value) -> Result<Vec<Value>> {
+        enforce_payload_size(spec)?;
         let spec: QuerySpec = serde_json::from_value(spec.clone())
             .map_err(|err| FfiError::Message(format!("invalid query spec: {err}")))?;
         self.execute(spec)
@@ -358,6 +365,7 @@ impl Database {
     ///
     /// Returns the query execution plan for inspection and optimization.
     pub fn explain_json(&self, spec: &Value) -> Result<Value> {
+        enforce_payload_size(spec)?;
         let spec: QuerySpec = serde_json::from_value(spec.clone())
             .map_err(|err| FfiError::Message(format!("invalid query spec: {err}")))?;
         self.explain(spec)
@@ -367,6 +375,7 @@ impl Database {
     ///
     /// Returns an iterator-like [`QueryStream`] for processing large result sets.
     pub fn stream_json(&self, spec: &Value) -> Result<QueryStream> {
+        enforce_payload_size(spec)?;
         let spec: QuerySpec = serde_json::from_value(spec.clone())
             .map_err(|err| FfiError::Message(format!("invalid query spec: {err}")))?;
         self.stream(spec)
@@ -749,6 +758,7 @@ impl Database {
 
     fn plan(&self, spec: QuerySpec) -> Result<PlannerOutput> {
         let ast = spec.into_ast()?;
+        validate_catalog_refs(&ast, self.metadata.as_ref())?;
         self.planner.plan(&ast).map_err(FfiError::from)
     }
 }
@@ -826,31 +836,68 @@ fn parse_optional_u64(value: &Value, field: &str) -> Result<Option<u64>> {
     Ok(Some(parse_u64(value, field)?))
 }
 
+fn enforce_payload_size(spec: &Value) -> Result<()> {
+    let serialized = serde_json::to_vec(spec)
+        .map_err(|err| FfiError::Message(format!("failed to measure payload size: {err}")))?;
+    if serialized.len() > MAX_PAYLOAD_BYTES {
+        Err(FfiError::Message(format!(
+            "payload exceeds {} bytes",
+            MAX_PAYLOAD_BYTES
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 /// JSON-deserializable query specification for FFI clients.
 ///
 /// Defines match clauses, edges, predicates, and projections for graph queries.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuerySpec {
+    /// Schema version for the query payload.
+    #[serde(rename = "$schemaVersion", default = "default_schema_version")]
+    pub schema_version: u32,
+    /// Optional client-supplied request identifier.
+    #[serde(default)]
+    pub request_id: Option<String>,
     /// MATCH clauses for node patterns.
     #[serde(default)]
     pub matches: Vec<MatchSpec>,
     /// Edge traversal specifications.
     #[serde(default)]
     pub edges: Vec<EdgeSpec>,
-    /// Property predicates for filtering.
+    /// Canonical boolean predicate tree.
     #[serde(default)]
-    pub predicates: Vec<PredicateSpec>,
-    /// Whether to return distinct results only.
-    #[serde(default)]
-    pub distinct: bool,
+    pub predicate: Option<PredicateSpec>,
     /// Column projections for result output.
     #[serde(default)]
     pub projections: Vec<ProjectionSpec>,
+    /// Whether to return distinct results only.
+    #[serde(default)]
+    pub distinct: bool,
+}
+
+const MAX_MATCHES: usize = 1_000;
+const MAX_IN_VALUES: usize = 10_000;
+const MAX_PREDICATE_NODES: usize = 10_000;
+const MAX_PREDICATE_DEPTH: usize = 256;
+const MAX_BYTES_LITERAL: usize = 1 << 20;
+const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
+fn default_schema_version() -> u32 {
+    1
 }
 
 impl QuerySpec {
     fn into_ast(self) -> Result<QueryAst> {
+        if self.schema_version != 1 {
+            return Err(FfiError::Message(format!(
+                "unsupported schema version {}",
+                self.schema_version
+            )));
+        }
+
         if self.matches.is_empty() {
             return Err(FfiError::Message(
                 "query requires at least one match".into(),
@@ -867,25 +914,272 @@ impl QuerySpec {
             .into_iter()
             .map(EdgeSpec::into_clause)
             .collect::<Result<Vec<_>>>()?;
-        let predicates = self
-            .predicates
-            .into_iter()
-            .map(PredicateSpec::into_predicate)
-            .collect::<Result<Vec<_>>>()?;
+        let predicate = self
+            .predicate
+            .map(|spec| spec.into_expr())
+            .transpose()?
+            .and_then(normalized_predicate);
         let projections = self
             .projections
             .into_iter()
             .map(ProjectionSpec::into_projection)
             .collect::<Result<Vec<_>>>()?;
 
+        validate_query_components(&matches, &edges, &projections, predicate.as_ref())?;
+
         Ok(QueryAst {
             matches,
             edges,
-            predicates,
+            predicate,
             distinct: self.distinct,
             projections,
         })
     }
+}
+
+fn validate_query_components(
+    matches: &[MatchClause],
+    edges: &[EdgeClause],
+    projections: &[Projection],
+    predicate_tree: Option<&BoolExpr>,
+) -> Result<()> {
+    if matches.len() > MAX_MATCHES {
+        return Err(FfiError::Message(format!(
+            "query may contain at most {} match clauses",
+            MAX_MATCHES
+        )));
+    }
+    let declared = collect_declared_vars(matches)?;
+    validate_edges(edges, &declared)?;
+    validate_projections(projections, &declared)?;
+    if let Some(expr) = predicate_tree {
+        validate_bool_expr(expr, &declared)?;
+    }
+    Ok(())
+}
+
+fn validate_catalog_refs(ast: &QueryAst, metadata: &dyn MetadataProvider) -> Result<()> {
+    let mut prop_cache: HashMap<String, PropId> = HashMap::new();
+
+    for clause in &ast.matches {
+        if let Some(label) = &clause.label {
+            metadata
+                .resolve_label(label)
+                .map_err(|_| FfiError::Message(format!("unknown label '{label}'")))?;
+        }
+    }
+
+    for edge in &ast.edges {
+        if let Some(edge_type) = &edge.edge_type {
+            metadata
+                .resolve_edge_type(edge_type)
+                .map_err(|_| FfiError::Message(format!("unknown edge type '{edge_type}'")))?;
+        }
+    }
+
+    for projection in &ast.projections {
+        if let Projection::Prop { prop, .. } = projection {
+            ensure_property_known(prop, metadata, &mut prop_cache)?;
+        }
+    }
+
+    if let Some(expr) = &ast.predicate {
+        visit_bool_expr_props(expr, &mut |prop| {
+            ensure_property_known(prop, metadata, &mut prop_cache)
+        })?;
+    }
+
+    Ok(())
+}
+
+fn collect_declared_vars(matches: &[MatchClause]) -> Result<HashSet<String>> {
+    let mut declared = HashSet::new();
+    for clause in matches {
+        let name = clause.var.0.clone();
+        if !declared.insert(name.clone()) {
+            return Err(FfiError::Message(format!(
+                "duplicate match variable '{name}'"
+            )));
+        }
+    }
+    Ok(declared)
+}
+
+fn ensure_declared(var: &Var, declared: &HashSet<String>, ctx: &str) -> Result<()> {
+    if declared.contains(&var.0) {
+        Ok(())
+    } else {
+        Err(FfiError::Message(format!(
+            "{} references undeclared variable '{}'",
+            ctx, var.0
+        )))
+    }
+}
+
+fn validate_edges(edges: &[EdgeClause], declared: &HashSet<String>) -> Result<()> {
+    for edge in edges {
+        ensure_declared(&edge.from, declared, "edge source")?;
+        ensure_declared(&edge.to, declared, "edge destination")?;
+    }
+    Ok(())
+}
+
+fn validate_projections(projections: &[Projection], declared: &HashSet<String>) -> Result<()> {
+    for projection in projections {
+        match projection {
+            Projection::Var { var, .. } | Projection::Prop { var, .. } => {
+                ensure_declared(var, declared, "projection")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_bool_expr(expr: &BoolExpr, declared: &HashSet<String>) -> Result<()> {
+    let stats = bool_expr_stats(expr, declared)?;
+    if stats.nodes > MAX_PREDICATE_NODES {
+        return Err(FfiError::Message(format!(
+            "predicate tree exceeds {} nodes",
+            MAX_PREDICATE_NODES
+        )));
+    }
+    if stats.depth > MAX_PREDICATE_DEPTH {
+        return Err(FfiError::Message(format!(
+            "predicate tree depth exceeds {} levels",
+            MAX_PREDICATE_DEPTH
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_property_known(
+    prop: &str,
+    metadata: &dyn MetadataProvider,
+    cache: &mut HashMap<String, PropId>,
+) -> Result<()> {
+    if cache.contains_key(prop) {
+        return Ok(());
+    }
+    metadata
+        .resolve_property(prop)
+        .map(|id| {
+            cache.insert(prop.to_owned(), id);
+        })
+        .map_err(|_| FfiError::Message(format!("unknown property '{prop}'")))?;
+    Ok(())
+}
+
+fn visit_bool_expr_props<F>(expr: &BoolExpr, visitor: &mut F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    match expr {
+        BoolExpr::Cmp(cmp) => visit_comparison_props(cmp, visitor),
+        BoolExpr::And(children) | BoolExpr::Or(children) => {
+            for child in children {
+                visit_bool_expr_props(child, visitor)?;
+            }
+            Ok(())
+        }
+        BoolExpr::Not(child) => visit_bool_expr_props(child, visitor),
+    }
+}
+
+fn visit_comparison_props<F>(cmp: &Comparison, visitor: &mut F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    let prop = match cmp {
+        Comparison::Eq { prop, .. }
+        | Comparison::Ne { prop, .. }
+        | Comparison::Lt { prop, .. }
+        | Comparison::Le { prop, .. }
+        | Comparison::Gt { prop, .. }
+        | Comparison::Ge { prop, .. }
+        | Comparison::Between { prop, .. }
+        | Comparison::In { prop, .. }
+        | Comparison::Exists { prop, .. }
+        | Comparison::IsNull { prop, .. }
+        | Comparison::IsNotNull { prop, .. } => prop,
+    };
+    visitor(prop)
+}
+
+struct BoolExprStats {
+    nodes: usize,
+    depth: usize,
+}
+
+fn bool_expr_stats(expr: &BoolExpr, declared: &HashSet<String>) -> Result<BoolExprStats> {
+    match expr {
+        BoolExpr::Cmp(cmp) => {
+            validate_comparison(cmp, declared)?;
+            Ok(BoolExprStats { nodes: 1, depth: 1 })
+        }
+        BoolExpr::And(children) | BoolExpr::Or(children) => {
+            let mut nodes = 1;
+            let mut max_depth = 0;
+            for child in children {
+                let stats = bool_expr_stats(child, declared)?;
+                nodes += stats.nodes;
+                max_depth = max_depth.max(stats.depth);
+            }
+            Ok(BoolExprStats {
+                nodes,
+                depth: max_depth + 1,
+            })
+        }
+        BoolExpr::Not(child) => {
+            let stats = bool_expr_stats(child, declared)?;
+            Ok(BoolExprStats {
+                nodes: stats.nodes + 1,
+                depth: stats.depth + 1,
+            })
+        }
+    }
+}
+
+fn validate_comparison(cmp: &Comparison, declared: &HashSet<String>) -> Result<()> {
+    match cmp {
+        Comparison::Eq { var, value, .. } | Comparison::Ne { var, value, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_scalar_value(value)?;
+        }
+        Comparison::Lt { var, value, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_scalar_value(value)?;
+            ensure_orderable(value, "lt()")?;
+        }
+        Comparison::Le { var, value, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_scalar_value(value)?;
+            ensure_orderable(value, "le()")?;
+        }
+        Comparison::Gt { var, value, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_scalar_value(value)?;
+            ensure_orderable(value, "gt()")?;
+        }
+        Comparison::Ge { var, value, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_scalar_value(value)?;
+            ensure_orderable(value, "ge()")?;
+        }
+        Comparison::Between { var, low, high, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_range_bounds(low, high, "between()")?;
+        }
+        Comparison::In { var, values, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+            validate_in_values(values)?;
+        }
+        Comparison::Exists { var, .. }
+        | Comparison::IsNull { var, .. }
+        | Comparison::IsNotNull { var, .. } => {
+            ensure_declared(var, declared, "predicate")?;
+        }
+    }
+    Ok(())
 }
 
 /// Specification for a MATCH clause in a query.
@@ -971,115 +1265,484 @@ impl From<DirectionSpec> for EdgeDirection {
     }
 }
 
-/// Property predicate for filtering query results.
+/// Boolean predicate specification emitted by bindings.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "op", rename_all = "lowercase")]
 pub enum PredicateSpec {
-    /// Equality predicate for exact property value matching.
+    /// Logical conjunction.
+    #[serde(rename = "and")]
+    And {
+        /// Child expressions.
+        args: Vec<PredicateSpec>,
+    },
+    /// Logical disjunction.
+    #[serde(rename = "or")]
+    Or {
+        /// Child expressions.
+        args: Vec<PredicateSpec>,
+    },
+    /// Logical negation.
+    #[serde(rename = "not")]
+    Not {
+        /// Child expressions (must contain exactly one entry).
+        args: Vec<PredicateSpec>,
+    },
+    /// Equality comparison.
+    #[serde(rename = "eq")]
     Eq {
-        /// Variable name to test.
+        /// Variable binding referenced by the predicate.
         var: String,
-        /// Property name to check.
+        /// Property name being compared.
         prop: String,
-        /// Expected value.
-        value: LiteralSpec,
+        /// Literal value to compare against.
+        value: QueryValue,
     },
-    /// Range predicate for property values within bounds.
-    Range {
-        /// Variable name to test.
+    /// Inequality comparison.
+    #[serde(rename = "ne")]
+    Ne {
+        /// Variable binding referenced by the predicate.
         var: String,
-        /// Property name to check.
+        /// Property name being compared.
         prop: String,
-        /// Lower bound (inclusive or exclusive).
-        lower: BoundSpec,
-        /// Upper bound (inclusive or exclusive).
-        upper: BoundSpec,
+        /// Literal value to compare against.
+        value: QueryValue,
     },
-    /// Custom predicate expression.
-    Custom {
-        /// Custom filter expression.
-        expr: String,
+    /// Less-than comparison.
+    #[serde(rename = "lt")]
+    Lt {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being compared.
+        prop: String,
+        /// Literal value to compare against.
+        value: QueryValue,
     },
+    /// Less-than-or-equal comparison.
+    #[serde(rename = "le")]
+    Le {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being compared.
+        prop: String,
+        /// Literal value to compare against.
+        value: QueryValue,
+    },
+    /// Greater-than comparison.
+    #[serde(rename = "gt")]
+    Gt {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being compared.
+        prop: String,
+        /// Literal value to compare against.
+        value: QueryValue,
+    },
+    /// Greater-than-or-equal comparison.
+    #[serde(rename = "ge")]
+    Ge {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being compared.
+        prop: String,
+        /// Literal value to compare against.
+        value: QueryValue,
+    },
+    /// Between comparison with optional bound inclusivity.
+    #[serde(rename = "between")]
+    Between {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being compared.
+        prop: String,
+        /// Lower bound literal.
+        low: QueryValue,
+        /// Upper bound literal.
+        high: QueryValue,
+        #[serde(default)]
+        /// Inclusive flags for the lower/upper bounds.
+        inclusive: Option<[bool; 2]>,
+    },
+    /// Membership comparison.
+    #[serde(rename = "in")]
+    In {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being compared.
+        prop: String,
+        /// Literal set to test membership against.
+        values: Vec<QueryValue>,
+    },
+    /// Property existence test.
+    #[serde(rename = "exists")]
+    Exists {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being inspected.
+        prop: String,
+    },
+    /// Property is null or missing.
+    #[serde(rename = "isnull")]
+    #[serde(alias = "isNull")]
+    IsNull {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being inspected.
+        prop: String,
+    },
+    /// Property is non-null.
+    #[serde(rename = "isnotnull")]
+    #[serde(alias = "isNotNull")]
+    IsNotNull {
+        /// Variable binding referenced by the predicate.
+        var: String,
+        /// Property name being inspected.
+        prop: String,
+    },
+}
+
+fn validate_scalar_value(value: &QueryValue) -> Result<()> {
+    match value {
+        QueryValue::Float(v) if !v.is_finite() => {
+            Err(FfiError::Message("float literal must be finite".into()))
+        }
+        QueryValue::Bytes(bytes) if bytes.len() > MAX_BYTES_LITERAL => Err(FfiError::Message(
+            format!("binary literal exceeds {} bytes", MAX_BYTES_LITERAL),
+        )),
+        QueryValue::DateTime(ts) if *ts < i64::MIN as i128 || *ts > i64::MAX as i128 => Err(
+            FfiError::Message("datetime literal must fit within 64-bit range".into()),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_orderable(value: &QueryValue, ctx: &str) -> Result<()> {
+    match value {
+        QueryValue::Int(_)
+        | QueryValue::Float(_)
+        | QueryValue::String(_)
+        | QueryValue::DateTime(_) => Ok(()),
+        QueryValue::Bytes(_) => Err(FfiError::Message(format!(
+            "bytes literals are only supported with eq()/ne(), not {ctx}"
+        ))),
+        QueryValue::Null => Err(FfiError::Message(format!(
+            "{ctx} does not accept null literals"
+        ))),
+        QueryValue::Bool(_) => Err(FfiError::Message(format!(
+            "{ctx} requires a numeric, datetime, or string literal"
+        ))),
+    }
+}
+
+fn validate_in_values(values: &[QueryValue]) -> Result<()> {
+    if values.is_empty() {
+        return Err(FfiError::Message("in() requires at least one value".into()));
+    }
+    if values.len() > MAX_IN_VALUES {
+        return Err(FfiError::Message(format!(
+            "in() may not exceed {} values",
+            MAX_IN_VALUES
+        )));
+    }
+    let mut tag = None;
+    let mut total_bytes = 0usize;
+    for value in values {
+        validate_scalar_value(value)?;
+        if let QueryValue::Bytes(bytes) = value {
+            total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                FfiError::Message(format!(
+                    "total bytes in in() literals exceeds {} bytes",
+                    MAX_BYTES_LITERAL
+                ))
+            })?;
+            if total_bytes > MAX_BYTES_LITERAL {
+                return Err(FfiError::Message(format!(
+                    "total bytes in in() literals exceeds {} bytes",
+                    MAX_BYTES_LITERAL
+                )));
+            }
+        }
+        if matches!(value, QueryValue::Null) {
+            continue;
+        }
+        let disc = mem::discriminant(value);
+        if let Some(existing) = tag {
+            if existing != disc {
+                return Err(FfiError::Message(
+                    "in() requires all values to share the same type".into(),
+                ));
+            }
+        } else {
+            tag = Some(disc);
+        }
+    }
+    Ok(())
+}
+
+fn validate_between_literals(low: &QueryValue, high: &QueryValue) -> Result<()> {
+    validate_scalar_value(low)?;
+    validate_scalar_value(high)?;
+    ensure_orderable(low, "between()")?;
+    ensure_orderable(high, "between()")?;
+    ensure_bounds_order(low, high)?;
+    Ok(())
+}
+
+fn ensure_bounds_order(low: &QueryValue, high: &QueryValue) -> Result<()> {
+    if mem::discriminant(low) != mem::discriminant(high) {
+        return Err(FfiError::Message(
+            "between() bounds must share the same literal type".into(),
+        ));
+    }
+    let ordering = match (low, high) {
+        (QueryValue::Int(a), QueryValue::Int(b)) => a.cmp(b),
+        (QueryValue::Float(a), QueryValue::Float(b)) => a
+            .partial_cmp(b)
+            .ok_or_else(|| FfiError::Message("between() bounds are not comparable".into()))?,
+        (QueryValue::String(a), QueryValue::String(b)) => a.cmp(b),
+        (QueryValue::DateTime(a), QueryValue::DateTime(b)) => a.cmp(b),
+        _ => Ordering::Equal,
+    };
+    if ordering == Ordering::Greater {
+        return Err(FfiError::Message(
+            "between() lower bound must be <= upper bound".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn bound_value(bound: &Bound<QueryValue>) -> Option<&QueryValue> {
+    match bound {
+        Bound::Included(value) | Bound::Excluded(value) => Some(value),
+        Bound::Unbounded => None,
+    }
+}
+
+fn validate_range_bounds(
+    lower: &Bound<QueryValue>,
+    upper: &Bound<QueryValue>,
+    ctx: &str,
+) -> Result<()> {
+    if let Some(value) = bound_value(lower) {
+        validate_scalar_value(value)?;
+        ensure_orderable(value, ctx)?;
+    }
+    if let Some(value) = bound_value(upper) {
+        validate_scalar_value(value)?;
+        ensure_orderable(value, ctx)?;
+    }
+    if let (Some(low), Some(high)) = (bound_value(lower), bound_value(upper)) {
+        ensure_bounds_order(low, high)?;
+    }
+    Ok(())
 }
 
 impl PredicateSpec {
-    fn into_predicate(self) -> Result<PropPredicate> {
+    fn into_expr(self) -> Result<BoolExpr> {
         match self {
-            PredicateSpec::Eq { var, prop, value } => Ok(PropPredicate::Eq {
-                var: Var(var),
-                prop,
-                value: value.into_literal(),
-            }),
-            PredicateSpec::Range {
+            PredicateSpec::And { args } => Ok(BoolExpr::And(into_expr_vec(args)?)),
+            PredicateSpec::Or { args } => Ok(BoolExpr::Or(into_expr_vec(args)?)),
+            PredicateSpec::Not { args } => {
+                if args.len() != 1 {
+                    return Err(FfiError::Message(
+                        "not() requires exactly one argument".into(),
+                    ));
+                }
+                let inner = args.into_iter().next().unwrap().into_expr()?;
+                Ok(BoolExpr::Not(Box::new(inner)))
+            }
+            PredicateSpec::Eq { var, prop, value } => {
+                validate_scalar_value(&value)?;
+                Ok(BoolExpr::Cmp(Comparison::Eq {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    value,
+                }))
+            }
+            PredicateSpec::Ne { var, prop, value } => {
+                validate_scalar_value(&value)?;
+                Ok(BoolExpr::Cmp(Comparison::Ne {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    value,
+                }))
+            }
+            PredicateSpec::Lt { var, prop, value } => {
+                validate_scalar_value(&value)?;
+                ensure_orderable(&value, "lt()")?;
+                Ok(BoolExpr::Cmp(Comparison::Lt {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    value,
+                }))
+            }
+            PredicateSpec::Le { var, prop, value } => {
+                validate_scalar_value(&value)?;
+                ensure_orderable(&value, "le()")?;
+                Ok(BoolExpr::Cmp(Comparison::Le {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    value,
+                }))
+            }
+            PredicateSpec::Gt { var, prop, value } => {
+                validate_scalar_value(&value)?;
+                ensure_orderable(&value, "gt()")?;
+                Ok(BoolExpr::Cmp(Comparison::Gt {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    value,
+                }))
+            }
+            PredicateSpec::Ge { var, prop, value } => {
+                validate_scalar_value(&value)?;
+                ensure_orderable(&value, "ge()")?;
+                Ok(BoolExpr::Cmp(Comparison::Ge {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    value,
+                }))
+            }
+            PredicateSpec::Between {
                 var,
                 prop,
-                lower,
-                upper,
-            } => Ok(PropPredicate::Range {
-                var: Var(var),
-                prop,
-                lower: lower.into_bound()?,
-                upper: upper.into_bound()?,
-            }),
-            PredicateSpec::Custom { expr } => Ok(PropPredicate::Custom { expr }),
+                low,
+                high,
+                inclusive,
+            } => {
+                validate_between_literals(&low, &high)?;
+                let (low_bound, high_bound) = between_bounds(low, high, inclusive);
+                Ok(BoolExpr::Cmp(Comparison::Between {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    low: low_bound,
+                    high: high_bound,
+                }))
+            }
+            PredicateSpec::In { var, prop, values } => {
+                validate_in_values(&values)?;
+                Ok(BoolExpr::Cmp(Comparison::In {
+                    var: into_var(var)?,
+                    prop: into_prop(prop)?,
+                    values,
+                }))
+            }
+            PredicateSpec::Exists { var, prop } => Ok(BoolExpr::Cmp(Comparison::Exists {
+                var: into_var(var)?,
+                prop: into_prop(prop)?,
+            })),
+            PredicateSpec::IsNull { var, prop } => Ok(BoolExpr::Cmp(Comparison::IsNull {
+                var: into_var(var)?,
+                prop: into_prop(prop)?,
+            })),
+            PredicateSpec::IsNotNull { var, prop } => Ok(BoolExpr::Cmp(Comparison::IsNotNull {
+                var: into_var(var)?,
+                prop: into_prop(prop)?,
+            })),
         }
     }
 }
 
-/// Range bound specification for range predicates.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum BoundSpec {
-    /// No bound (infinity).
-    Unbounded,
-    /// Inclusive bound with a value.
-    Included {
-        /// Bound value.
-        value: LiteralSpec,
-    },
-    /// Exclusive bound with a value.
-    Excluded {
-        /// Bound value.
-        value: LiteralSpec,
-    },
+fn into_expr_vec(args: Vec<PredicateSpec>) -> Result<Vec<BoolExpr>> {
+    args.into_iter().map(|arg| arg.into_expr()).collect()
 }
 
-impl BoundSpec {
-    fn into_bound(self) -> Result<Bound<Literal>> {
-        match self {
-            BoundSpec::Unbounded => Ok(Bound::Unbounded),
-            BoundSpec::Included { value } => Ok(Bound::Included(value.into_literal())),
-            BoundSpec::Excluded { value } => Ok(Bound::Excluded(value.into_literal())),
+fn into_var(name: String) -> Result<Var> {
+    if name.trim().is_empty() {
+        Err(FfiError::Message("variable name cannot be empty".into()))
+    } else {
+        Ok(Var(name))
+    }
+}
+
+fn into_prop(name: String) -> Result<String> {
+    if name.trim().is_empty() {
+        Err(FfiError::Message("property name cannot be empty".into()))
+    } else {
+        Ok(name)
+    }
+}
+
+enum SimplifiedBoolExpr {
+    True,
+    False,
+    Expr(BoolExpr),
+}
+
+fn normalized_predicate(expr: BoolExpr) -> Option<BoolExpr> {
+    match simplify_bool_expr(expr) {
+        SimplifiedBoolExpr::True => None,
+        SimplifiedBoolExpr::False => Some(BoolExpr::Or(Vec::new())),
+        SimplifiedBoolExpr::Expr(expr) => Some(expr),
+    }
+}
+
+fn simplify_bool_expr(expr: BoolExpr) -> SimplifiedBoolExpr {
+    match expr {
+        BoolExpr::Cmp(_) => SimplifiedBoolExpr::Expr(expr),
+        BoolExpr::Not(child) => match simplify_bool_expr(*child) {
+            SimplifiedBoolExpr::True => SimplifiedBoolExpr::False,
+            SimplifiedBoolExpr::False => SimplifiedBoolExpr::True,
+            SimplifiedBoolExpr::Expr(expr) => match expr {
+                BoolExpr::Not(inner) => simplify_bool_expr(*inner),
+                other => SimplifiedBoolExpr::Expr(BoolExpr::Not(Box::new(other))),
+            },
+        },
+        BoolExpr::And(children) => {
+            let mut flattened = Vec::new();
+            for child in children {
+                match simplify_bool_expr(child) {
+                    SimplifiedBoolExpr::True => {}
+                    SimplifiedBoolExpr::False => return SimplifiedBoolExpr::False,
+                    SimplifiedBoolExpr::Expr(expr) => match expr {
+                        BoolExpr::And(grand_children) => flattened.extend(grand_children),
+                        other => flattened.push(other),
+                    },
+                }
+            }
+            match flattened.len() {
+                0 => SimplifiedBoolExpr::True,
+                1 => SimplifiedBoolExpr::Expr(flattened.into_iter().next().unwrap()),
+                _ => SimplifiedBoolExpr::Expr(BoolExpr::And(flattened)),
+            }
+        }
+        BoolExpr::Or(children) => {
+            let mut flattened = Vec::new();
+            for child in children {
+                match simplify_bool_expr(child) {
+                    SimplifiedBoolExpr::False => {}
+                    SimplifiedBoolExpr::True => return SimplifiedBoolExpr::True,
+                    SimplifiedBoolExpr::Expr(expr) => match expr {
+                        BoolExpr::Or(grand_children) => flattened.extend(grand_children),
+                        other => flattened.push(other),
+                    },
+                }
+            }
+            match flattened.len() {
+                0 => SimplifiedBoolExpr::False,
+                1 => SimplifiedBoolExpr::Expr(flattened.into_iter().next().unwrap()),
+                _ => SimplifiedBoolExpr::Expr(BoolExpr::Or(flattened)),
+            }
         }
     }
 }
 
-/// Literal value specification for predicates and properties.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "lowercase")]
-pub enum LiteralSpec {
-    /// Null value.
-    Null,
-    /// Boolean value.
-    Bool(bool),
-    /// Integer value.
-    Int(i64),
-    /// Floating-point value.
-    Float(f64),
-    /// String value.
-    String(String),
-}
-
-impl LiteralSpec {
-    fn into_literal(self) -> Literal {
-        match self {
-            LiteralSpec::Null => Literal::Null,
-            LiteralSpec::Bool(v) => Literal::Bool(v),
-            LiteralSpec::Int(v) => Literal::Int(v),
-            LiteralSpec::Float(v) => Literal::Float(v),
-            LiteralSpec::String(v) => Literal::String(v),
-        }
-    }
+fn between_bounds(
+    low: QueryValue,
+    high: QueryValue,
+    inclusive: Option<[bool; 2]>,
+) -> (Bound<QueryValue>, Bound<QueryValue>) {
+    let flags = inclusive.unwrap_or([true, true]);
+    let low_bound = if flags[0] {
+        Bound::Included(low)
+    } else {
+        Bound::Excluded(low)
+    };
+    let high_bound = if flags[1] {
+        Bound::Included(high)
+    } else {
+        Bound::Excluded(high)
+    };
+    (low_bound, high_bound)
 }
 
 /// Result column projection specification.
@@ -1094,30 +1757,48 @@ pub enum ProjectionSpec {
         #[serde(default)]
         alias: Option<String>,
     },
-    /// Project a custom expression with required alias.
-    Expr {
-        /// Expression to evaluate.
-        expr: String,
-        /// Column alias for the result.
-        alias: String,
+    /// Project a property from a bound variable.
+    Prop {
+        /// Variable name exposing the property.
+        var: String,
+        /// Property name to project.
+        prop: String,
+        /// Optional column alias.
+        #[serde(default)]
+        alias: Option<String>,
     },
 }
 
 impl ProjectionSpec {
     fn into_projection(self) -> Result<Projection> {
         match self {
-            ProjectionSpec::Var { var, alias } => Ok(Projection::Var {
-                var: Var(var),
-                alias,
-            }),
-            ProjectionSpec::Expr { expr, alias } => {
-                if alias.is_empty() {
-                    Err(FfiError::Message(
-                        "projection expressions require an alias".into(),
-                    ))
-                } else {
-                    Ok(Projection::Expr { expr, alias })
+            ProjectionSpec::Var { var, alias } => {
+                if var.trim().is_empty() {
+                    return Err(FfiError::Message(
+                        "projection variable cannot be empty".into(),
+                    ));
                 }
+                Ok(Projection::Var {
+                    var: Var(var),
+                    alias,
+                })
+            }
+            ProjectionSpec::Prop { var, prop, alias } => {
+                if var.trim().is_empty() {
+                    return Err(FfiError::Message(
+                        "property projection variable cannot be empty".into(),
+                    ));
+                }
+                if prop.trim().is_empty() {
+                    return Err(FfiError::Message(
+                        "property projection name cannot be empty".into(),
+                    ));
+                }
+                Ok(Projection::Prop {
+                    var: Var(var),
+                    prop,
+                    alias,
+                })
             }
         }
     }
@@ -1298,6 +1979,16 @@ fn exec_value_to_json(value: &ExecValue) -> Result<Value> {
             .map(Value::Number)
             .ok_or_else(|| FfiError::Message("float value not representable in JSON".into()))?,
         ExecValue::String(v) => Value::String(v.clone()),
+        ExecValue::Bytes(bytes) => Value::String(BASE64.encode(bytes)),
+        ExecValue::Date(v) => Value::Number((*v).into()),
+        ExecValue::DateTime(v) => Value::Number((*v).into()),
+        ExecValue::Object(map) => {
+            let mut obj = Map::new();
+            for (key, value) in map {
+                obj.insert(key.clone(), exec_value_to_json(value)?);
+            }
+            Value::Object(obj)
+        }
         ExecValue::NodeId(node) => Value::Number(node.0.into()),
     })
 }
@@ -1751,6 +2442,7 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::Value as QueryValue;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -1777,6 +2469,114 @@ mod tests {
         assert_eq!(result.node_ids.len(), 2);
         assert_eq!(result.edge_ids.len(), 2);
         assert_eq!(result.aliases.get("$bob"), Some(&result.node_ids[1]));
+        Ok(())
+    }
+
+    #[test]
+    fn predicate_and_empty_normalizes_to_true() -> Result<()> {
+        let spec = QuerySpec {
+            schema_version: 1,
+            request_id: None,
+            matches: vec![MatchSpec {
+                var: "a".into(),
+                label: Some("User".into()),
+            }],
+            edges: Vec::new(),
+            predicate: Some(PredicateSpec::And { args: vec![] }),
+            projections: Vec::new(),
+            distinct: false,
+        };
+        let ast = spec.into_ast()?;
+        assert!(ast.predicate.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn predicate_or_empty_normalizes_to_false() -> Result<()> {
+        let spec = QuerySpec {
+            schema_version: 1,
+            request_id: None,
+            matches: vec![MatchSpec {
+                var: "a".into(),
+                label: Some("User".into()),
+            }],
+            edges: Vec::new(),
+            predicate: Some(PredicateSpec::Or { args: vec![] }),
+            projections: Vec::new(),
+            distinct: false,
+        };
+        let ast = spec.into_ast()?;
+        match ast.predicate {
+            Some(BoolExpr::Or(children)) => assert!(children.is_empty()),
+            other => panic!("unexpected predicate shape: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_predicate_spec_parses_into_ast() -> Result<()> {
+        let spec = json!({
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "edges": [],
+            "projections": [],
+            "distinct": false,
+            "predicate": {
+                "op": "eq",
+                "var": "a",
+                "prop": "name",
+                "value": { "t": "String", "v": "Ada" }
+            }
+        });
+        let spec: QuerySpec = serde_json::from_value(spec)?;
+        let ast = spec.into_ast()?;
+        assert!(matches!(ast.predicate, Some(BoolExpr::Cmp(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn execute_json_with_predicate_filters_rows() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("predicate_filter.db");
+        let db = Database::open(&path, DatabaseOptions::default())?;
+        db.seed_demo()?;
+        let spec = json!({
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "edges": [],
+            "projections": [
+                { "kind": "var", "var": "a", "alias": null }
+            ],
+            "predicate": {
+                "op": "eq",
+                "var": "a",
+                "prop": "name",
+                "value": { "t": "String", "v": "Ada" }
+            }
+        });
+        let rows = db.execute_json(&spec)?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn validate_in_values_rejects_excessive_bytes() {
+        let chunk = QueryValue::Bytes(vec![0u8; MAX_BYTES_LITERAL / 2 + 1]);
+        let err = super::validate_in_values(&[chunk.clone(), chunk]).unwrap_err();
+        match err {
+            FfiError::Message(msg) => {
+                assert!(msg.contains("total bytes in in() literals exceeds"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_in_values_allows_bytes_within_budget() -> Result<()> {
+        let chunk = QueryValue::Bytes(vec![0u8; MAX_BYTES_LITERAL / 2]);
+        super::validate_in_values(&[chunk.clone(), chunk])?;
         Ok(())
     }
 

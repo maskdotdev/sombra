@@ -15,6 +15,12 @@ pub mod ast;
 /// Provides a fluent API for building complex queries without writing raw AST.
 pub mod builder;
 
+/// Query normalization utilities (Phase 3).
+pub mod analyze;
+
+/// Canonical scalar value representation shared across the query stack.
+pub mod value;
+
 /// Query execution engine.
 ///
 /// Executes physical plans and streams result rows back to clients.
@@ -46,6 +52,7 @@ pub mod planner;
 pub mod profile;
 
 pub use builder::QueryBuilder;
+pub use value::Value;
 
 /// Execution plan output with explanation capabilities.
 pub use planner::{PlanExplain, PlannerOutput};
