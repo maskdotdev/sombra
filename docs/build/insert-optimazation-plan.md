@@ -259,7 +259,7 @@ impl BTree {
 
 ### B2) In-place deletes & merges
 
-**Status (May 2024):** `btree_inplace` now toggles `try_delete_leaf_in_place`, `borrow_from_{left,right}_in_place`, and the merge helpers in `src/storage/btree/tree/definition.rs`. `BTreeStats::leaf_merges()` increments whenever we collapse siblings, so the plumbing exists — the remaining work is to add the guardrails and telemetry we promised before turning the feature on by default.
+**Status (May 2024):** The old `btree_inplace` toggle has been removed; `try_delete_leaf_in_place`, `borrow_from_{left,right}_in_place`, and the merge helpers in `src/storage/btree/tree/definition.rs` now run unconditionally. `BTreeStats::leaf_merges()` increments whenever we collapse siblings, so the plumbing exists — the remaining work is to keep telemetry healthy as the always-on path matures.
 
 **Algorithm (delete):**
 
@@ -274,13 +274,13 @@ impl BTree {
 * Delete single key doesn’t rewrite entire page.
 * Borrow/merge correctness with varied neighbor sizes.
 * Extend `src/storage/btree/tests.rs` to fuzz delete-heavy workloads with `BTreeOptions { in_place_leaf_edits: true }` and assert at least one merge event by checking `BTree::stats().leaf_merges() > 0`.
-* Integration workload in `tests/integration/storage_stage7.rs` that alternates insert/delete cycles with `GraphOptions::btree_inplace(true)` and validates adjacency scans remain sorted.
+* Integration workload in `tests/integration/storage_stage7.rs` that alternates insert/delete cycles with default `GraphOptions` and validates adjacency scans remain sorted.
 
 **Follow-ups before default-on:**
 
 * Export `leaf_merges`, `leaf_rebalance_in_place`, and `leaf_rebalance_rebuilds` through `src/storage/metrics.rs` so CRUD + micro benches show how often we stay in-place.
 * Gate rollout behind an env/pragma toggle so we can bisect regressions without rebuilding.
-* Run nightly fuzzers with `RUSTFLAGS='-Zpanic_abort_tests' SOMBRA_FEATURES=btree_inplace` to ensure the in-place delete path keeps passing under abort-on-panic.
+* Run nightly fuzzers with `RUSTFLAGS='-Zpanic_abort_tests'` to ensure the in-place delete path keeps passing under abort-on-panic.
 
 ---
 
@@ -357,7 +357,7 @@ impl BTree {
 * **Trace probes:** mark `put_many` groups and commit phases.
 * **Feature flags:**
 
-  * `row_hash_header`, `prop_delta_path`, `btree_inplace`, `wal_coalesce`, `vstore_extents`, `adjacency_put_many`.
+  * `row_hash_header`, `prop_delta_path`, `wal_coalesce`, `vstore_extents`, `adjacency_put_many`.
 * **Fallbacks:** If any feature panics under `RUSTFLAGS='-Zpanic_abort_tests'`, auto-disable via env to keep server usable.
 
 ---
@@ -395,7 +395,7 @@ impl BTree {
 3. **Row-hash storage** (`row_hash_header`) with mixed-row compatibility tests.
 4. **Write-path materialization via write guard** (`VStore::read_with_write`).
 5. **BTree::put_many()`** + adjacency/property-index batching.
-6. **In-place leaf insert** (feature `btree_inplace`), retaining rebuild fallback.
+6. **In-place leaf insert** (always on), retaining rebuild fallback.
 7. **In-place delete/borrow/merge**.
 8. **WAL borrowed buffers + coalesced `pwritev`**; metrics & crash tests.
 9. **VStore contiguous extents + streaming writes**.
@@ -491,7 +491,7 @@ fn insert_in_place(leaf: &mut [u8], pos: usize, cell: &[u8]) -> Result<bool> {
 * [x] `VStore::read_with_write` / write-path materialization reuse
 * [x] `BTree::put_many` wired into adjacency/property indexes
 * [x] In-place insert (+ scratch buffer + fuzz/property tests)
-* [x] In-place delete/merge w/ borrow fallback _(still staged behind `btree_inplace`; telemetry + fuzzing before default-on)_
+* [x] In-place delete/merge w/ borrow fallback _(now always on; telemetry + fuzzing keep watch)_
 * [ ] WAL borrowed buffers + full-page CRC + coalescing metrics
 * [ ] VStore contiguous extents / streaming overflow writes
 * [x] Bulk `GraphWriter` with `trusted_endpoints` + validator enforcement

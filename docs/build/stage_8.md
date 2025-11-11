@@ -30,8 +30,8 @@ type Dir = 'out' | 'in' | 'both';
 export class QueryBuilder {
   match(labelOrVar: string | { var: string; label: string }): this;
   where(edgeType: string, right: string | { var: string; label: string }): this;
-  // Optional property predicates:
-  whereProp(varName: string, prop: string, op: '=' | '>' | '<' | '>=' | '<=' | 'between', value: any, value2?: any): this;
+  // Predicate overload: when the second argument is a callback, .where() switches to predicate mode.
+  where(varName: string, build: (pred: PredicateBuilder) => void): this;
 
   // Graph semantics
   direction(dir: Dir): this;        // default 'out'
@@ -46,6 +46,9 @@ export class QueryBuilder {
   execute(): Promise<Array<Record<string, any>>>;
   stream(): AsyncIterable<Record<string, any>>;
 }
+
+// Calling where(varName) without a callback returns a PredicateBuilder; invoke .done()
+// to hand control back to the QueryBuilder before chaining more clauses.
 ```
 
 **Sane defaults for the common case:**
@@ -53,7 +56,9 @@ export class QueryBuilder {
 * `.match('User')` creates variable `a:User`.
 * `.where('FOLLOWS', 'User')` creates variable `b:User` and edge pattern `(a)-[:FOLLOWS]->(b)`.
 * `.bidirectional()` compiles to **intersect** between FWD and REV neighbor sets (mutuality).
-* Repeating `.whereProp` predicates on the same variable builds a stack of posting streams that the planner will intersect via the Stage‑7 streaming helper, keeping results lazy.
+* Repeating `.where(var, …)` predicates on the same variable (or chaining `.predicate(var).eq(...).done()`) builds a stack of posting streams that the planner will intersect via the Stage‑7 streaming helper, keeping results lazy.
+* Property projections (`{ var, prop, as }`) keep results flat (one scalar column per projection) so analytics-style queries skip large entity payloads.
+* Literals accept timezone-aware ISO 8601 strings or language-native `Date`/`datetime` values and automatically convert them to UTC nanoseconds; naive datetimes are rejected.
 
 ### 0.2 Python parity
 
@@ -71,12 +76,16 @@ plan = q.explain()
 ```ts
 import { Database } from 'sombradb'
 
-const db = Database.open('/tmp/sombra.db').seedDemo()
+type Schema = {
+  User: { _id: string; name: string; country: string; bio?: string }
+}
+
+const db = Database.open<Schema>('/tmp/sombra.db').seedDemo()
 const rows = await db
   .query()
   .match('User')
-  .whereProp('a', 'name', '=', 'Ada')
-  .select(['a'])
+  .where('a', (pred) => pred.eq('name', 'Ada'))
+  .select([{ var: 'a', prop: 'name', as: 'label' }])
   .execute()
 ```
 
@@ -88,7 +97,7 @@ from sombra_py import Database
 db = Database.open("/tmp/sombra.db")
 db.seed_demo()
 
-rows = db.query().match("User").where_prop("a", "name", "=", "Ada").select(["a"]).execute()
+rows = db.query().match("User").where_var("a", lambda pred: pred.eq("name", "Ada")).select(["a"]).execute()
 ```
 
 `seedDemo`/`seed_demo` materialises a small sample graph (Ada, Grace, Alan) so the fluent API can be exercised without bootstrapping a full dataset.
@@ -253,9 +262,9 @@ const rows = await db
 const rows = await db
   .query()
   .match({ var: 'a', label: 'Person' })
-  .whereProp('a', 'name', '=', 'Ada')
+  .where('a', (pred) => pred.eq('name', 'Ada'))
   .where('KNOWS', { var: 'b', label: 'Person' })
-  .whereProp('b', 'name', '=', 'Grace')
+  .where('b', (pred) => pred.eq('name', 'Grace'))
   .select(['a','b'])
   .execute();
 ```
