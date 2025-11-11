@@ -185,8 +185,10 @@ pub enum Projection {
 }
 
 /// Top-level AST produced by the query builder.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct QueryAst {
+    /// Schema version emitted by bindings.
+    pub schema_version: u32,
     /// Optional client-specified identifier for correlating requests.
     pub request_id: Option<String>,
     /// Match clauses defining initial variable bindings.
@@ -199,4 +201,18 @@ pub struct QueryAst {
     pub distinct: bool,
     /// Projection items defining the output columns.
     pub projections: Vec<Projection>,
+}
+
+impl Default for QueryAst {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            request_id: None,
+            matches: Vec::new(),
+            edges: Vec::new(),
+            predicate: None,
+            distinct: false,
+            projections: Vec::new(),
+        }
+    }
 }

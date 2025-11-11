@@ -4,7 +4,7 @@
 //! types by name. The planner requires deterministic identifiers when selecting indexes
 //! or adjacency operators, so these helpers provide the translation layer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::primitives::pager::PageStore;
@@ -30,6 +30,14 @@ pub trait MetadataProvider {
     /// Returns the type hint for the given property, when known.
     fn property_type_hint(&self, _prop: PropId) -> Result<Option<TypeTag>> {
         Ok(None)
+    }
+    /// Returns whether a label exposes the requested property (best effort).
+    fn label_has_property(&self, _label: LabelId, _prop: PropId) -> Result<bool> {
+        Ok(true)
+    }
+    /// Returns the catalog epoch for plan hashing (0 when unknown).
+    fn catalog_epoch(&self) -> u64 {
+        0
     }
 }
 
@@ -118,6 +126,14 @@ impl MetadataProvider for CatalogMetadata {
             Ok(None)
         }
     }
+
+    fn label_has_property(&self, _label: LabelId, _prop: PropId) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn catalog_epoch(&self) -> u64 {
+        self.graph.catalog_epoch()
+    }
 }
 
 /// Simple in-memory metadata provider used for tests or prototyping.
@@ -127,6 +143,7 @@ pub struct InMemoryMetadata {
     prop_names: HashMap<PropId, String>,
     edge_types: HashMap<String, TypeId>,
     prop_indexes: HashMap<(LabelId, PropId), IndexDef>,
+    label_props: HashMap<LabelId, HashSet<PropId>>,
 }
 
 impl InMemoryMetadata {
@@ -138,6 +155,7 @@ impl InMemoryMetadata {
             prop_names: HashMap::new(),
             edge_types: HashMap::new(),
             prop_indexes: HashMap::new(),
+            label_props: HashMap::new(),
         }
     }
 
@@ -178,6 +196,16 @@ impl InMemoryMetadata {
     /// Registers a custom index definition for the given label and property.
     pub fn with_property_index_def(mut self, def: IndexDef) -> Self {
         self.prop_indexes.insert((def.label, def.prop), def);
+        self
+    }
+
+    /// Restricts the set of properties allowed on a label (empty set denies all).
+    pub fn with_label_props<I>(mut self, label: LabelId, props: I) -> Self
+    where
+        I: IntoIterator<Item = PropId>,
+    {
+        self.label_props
+            .insert(label, props.into_iter().collect::<HashSet<_>>());
         self
     }
 
@@ -229,5 +257,13 @@ impl MetadataProvider for InMemoryMetadata {
 
     fn property_stats(&self, _label: LabelId, _prop: PropId) -> Result<Option<PropStats>> {
         Ok(None)
+    }
+
+    fn label_has_property(&self, label: LabelId, prop: PropId) -> Result<bool> {
+        Ok(self
+            .label_props
+            .get(&label)
+            .map(|set| set.contains(&prop))
+            .unwrap_or(true))
     }
 }

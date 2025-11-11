@@ -74,6 +74,9 @@ pub enum AnalyzerError {
     /// Between bounds are inverted after normalization.
     #[error("between() lower bound must be <= upper bound")]
     InvalidBounds,
+    /// Property not defined for the label attached to the variable.
+    #[error("property '{prop}' not defined on label '{label}'")]
+    PropertyNotInLabel { label: String, prop: String },
 }
 
 impl AnalyzerError {
@@ -120,6 +123,7 @@ impl AnalyzerError {
             AnalyzerError::RangeTypeMismatch { .. } => "TypeMismatch",
             AnalyzerError::BytesRangeUnsupported { .. } => "TypeMismatch",
             AnalyzerError::InvalidBounds => "InvalidBounds",
+            AnalyzerError::PropertyNotInLabel { .. } => "UnknownProperty",
         }
     }
 }

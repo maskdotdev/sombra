@@ -870,7 +870,7 @@ pub struct QuerySpec {
     #[serde(rename = "$schemaVersion", default = "default_schema_version")]
     pub schema_version: u32,
     /// Optional client-supplied request identifier.
-    #[serde(default, rename = "request_id", alias = "requestId")]
+    #[serde(default, alias = "request_id")]
     pub request_id: Option<String>,
     /// MATCH clauses for node patterns.
     #[serde(default)]
@@ -933,6 +933,7 @@ impl QuerySpec {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(QueryAst {
+            schema_version: self.schema_version,
             request_id: self.request_id,
             matches,
             edges,

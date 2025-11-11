@@ -69,7 +69,7 @@ pub struct PropRef {
 }
 
 /// String collation identifier attached to predicates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Collation {
     /// Raw UTF-8 binary collation.
     Binary,
@@ -192,6 +192,8 @@ pub enum AnalyzedComparison {
 /// Fully analyzed query passed into the planner.
 #[derive(Clone, Debug)]
 pub struct AnalyzedQuery {
+    /// Schema version supplied in the payload.
+    pub schema_version: u32,
     /// Optional client-specified identifier.
     pub request_id: Option<String>,
     vars: Vec<VarBinding>,
@@ -227,6 +229,11 @@ impl AnalyzedQuery {
     /// Returns the optional request identifier, if present.
     pub fn request_id(&self) -> Option<&str> {
         self.request_id.as_deref()
+    }
+
+    /// Returns the schema version declared in the request.
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
     }
 }
 
@@ -545,6 +552,12 @@ fn type_rank(value: &Value) -> u8 {
     }
 }
 
+fn sort_values_by_collation(values: &mut [Value], collation: &Collation) {
+    match collation {
+        Collation::Binary => values.sort_by(compare_values),
+    }
+}
+
 fn validate_between_bounds(low: &Bound<Value>, high: &Bound<Value>) -> AnalyzeResult<()> {
     match (extract_bound_value(low), extract_bound_value(high)) {
         (Some(a), Some(b)) => {
@@ -584,6 +597,7 @@ impl<'m> Analyzer<'m> {
 
     fn run(mut self, ast: QueryAst) -> AnalyzeResult<AnalyzedQuery> {
         let request_id = ast.request_id.clone();
+        let schema_version = ast.schema_version;
         self.process_matches(&ast.matches)?;
         let edges = self.process_edges(&ast.edges)?;
         let predicate = match ast.predicate {
@@ -598,6 +612,7 @@ impl<'m> Analyzer<'m> {
             vars, var_index, ..
         } = self;
         Ok(AnalyzedQuery {
+            schema_version,
             request_id,
             vars,
             var_index,
@@ -732,49 +747,55 @@ impl<'m> Analyzer<'m> {
         match cmp {
             Comparison::Eq { var, prop, value } => {
                 self.validate_scalar(&value)?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Eq {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     value,
                 })
             }
             Comparison::Ne { var, prop, value } => {
                 self.validate_scalar(&value)?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Ne {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     value,
                 })
             }
             Comparison::Lt { var, prop, value } => {
                 self.validate_orderable(&value, "lt()")?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Lt {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     value,
                 })
             }
             Comparison::Le { var, prop, value } => {
                 self.validate_orderable(&value, "le()")?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Le {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     value,
                 })
             }
             Comparison::Gt { var, prop, value } => {
                 self.validate_orderable(&value, "gt()")?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Gt {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     value,
                 })
             }
             Comparison::Ge { var, prop, value } => {
                 self.validate_orderable(&value, "ge()")?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Ge {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     value,
                 })
             }
@@ -786,9 +807,10 @@ impl<'m> Analyzer<'m> {
             } => {
                 self.validate_bound(&low, "between()")?;
                 self.validate_bound(&high, "between()")?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
                 Ok(AnalyzedComparison::Between {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     low,
                     high,
                 })
@@ -800,24 +822,35 @@ impl<'m> Analyzer<'m> {
             } => {
                 self.validate_in_literals(&values)?;
                 canonicalize_in_values(&mut values)?;
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
+                sort_values_by_collation(&mut values, &prop_ref.collation);
                 Ok(AnalyzedComparison::In {
-                    var: self.require_var(&var, "predicate")?,
-                    prop: self.property(&prop)?,
+                    var: var_id,
+                    prop: prop_ref,
                     values,
                 })
             }
-            Comparison::Exists { var, prop } => Ok(AnalyzedComparison::Exists {
-                var: self.require_var(&var, "predicate")?,
-                prop: self.property(&prop)?,
-            }),
-            Comparison::IsNull { var, prop } => Ok(AnalyzedComparison::IsNull {
-                var: self.require_var(&var, "predicate")?,
-                prop: self.property(&prop)?,
-            }),
-            Comparison::IsNotNull { var, prop } => Ok(AnalyzedComparison::IsNotNull {
-                var: self.require_var(&var, "predicate")?,
-                prop: self.property(&prop)?,
-            }),
+            Comparison::Exists { var, prop } => {
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
+                Ok(AnalyzedComparison::Exists {
+                    var: var_id,
+                    prop: prop_ref,
+                })
+            }
+            Comparison::IsNull { var, prop } => {
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
+                Ok(AnalyzedComparison::IsNull {
+                    var: var_id,
+                    prop: prop_ref,
+                })
+            }
+            Comparison::IsNotNull { var, prop } => {
+                let (var_id, prop_ref) = self.resolve_var_prop(&var, &prop, "predicate")?;
+                Ok(AnalyzedComparison::IsNotNull {
+                    var: var_id,
+                    prop: prop_ref,
+                })
+            }
         }
     }
 
@@ -906,6 +939,44 @@ impl<'m> Analyzer<'m> {
         };
         self.prop_cache.insert(name.to_owned(), prop.clone());
         Ok(prop)
+    }
+
+    fn binding_for_id(&self, id: VarId) -> Option<&VarBinding> {
+        self.vars.iter().find(|binding| binding.id == id)
+    }
+
+    fn ensure_property_visible(&self, var_id: VarId, prop: &PropRef) -> AnalyzeResult<()> {
+        let binding = self
+            .binding_for_id(var_id)
+            .expect("variable registered before property usage");
+        let allowed = self
+            .metadata
+            .label_has_property(binding.label_id, prop.id)
+            .map_err(|_| AnalyzerError::UnknownProperty {
+                prop: prop.name.clone(),
+            })?;
+        if !allowed {
+            return Err(AnalyzerError::PropertyNotInLabel {
+                label: binding
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| binding.var.0.clone()),
+                prop: prop.name.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn resolve_var_prop(
+        &mut self,
+        var: &Var,
+        prop: &str,
+        context: &'static str,
+    ) -> AnalyzeResult<(VarId, PropRef)> {
+        let var_id = self.require_var(var, context)?;
+        let prop_ref = self.property(prop)?;
+        self.ensure_property_visible(var_id, &prop_ref)?;
+        Ok((var_id, prop_ref))
     }
 }
 
@@ -997,6 +1068,7 @@ mod tests {
             }),
         ]);
         let ast = QueryAst {
+            schema_version: 1,
             request_id: None,
             matches: vec![],
             edges: vec![],
@@ -1024,6 +1096,7 @@ mod tests {
             ],
         });
         let ast = QueryAst {
+            schema_version: 1,
             request_id: None,
             matches: vec![],
             edges: vec![],
@@ -1050,6 +1123,7 @@ mod tests {
             values: vec![Value::Null],
         });
         let ast = QueryAst {
+            schema_version: 1,
             request_id: None,
             matches: vec![],
             edges: vec![],
@@ -1070,6 +1144,7 @@ mod tests {
             high: Bound::Included(Value::Int(5)),
         });
         let ast = QueryAst {
+            schema_version: 1,
             request_id: None,
             matches: vec![],
             edges: vec![],
@@ -1158,6 +1233,26 @@ mod tests {
         }));
         let err = analyze(&ast, &metadata()).expect_err("analysis should fail");
         assert!(matches!(err, AnalyzerError::UnknownVariable { .. }));
+    }
+
+    #[test]
+    fn rejects_property_not_in_label() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(3))
+            .with_label_props(LabelId(1), Vec::<PropId>::new());
+        let mut ast = QueryAst::default();
+        ast.matches.push(MatchClause {
+            var: var("a"),
+            label: Some("User".into()),
+        });
+        ast.predicate = Some(BoolExpr::Cmp(Comparison::Eq {
+            var: var("a"),
+            prop: "name".into(),
+            value: Value::String("Ada".into()),
+        }));
+        let err = analyze(&ast, &metadata).expect_err("analysis should fail");
+        assert!(matches!(err, AnalyzerError::PropertyNotInLabel { .. }));
     }
 
     #[test]

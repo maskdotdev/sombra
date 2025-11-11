@@ -2157,4 +2157,9 @@ impl Graph {
         stats.distinct_count = distinct_keys.len() as u64;
         Ok(Some(stats))
     }
+
+    /// Returns the current catalog epoch used for DDL invalidation.
+    pub fn catalog_epoch(&self) -> u64 {
+        self.catalog_epoch.current().0
+    }
 }

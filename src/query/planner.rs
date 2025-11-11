@@ -2,8 +2,8 @@
 
 use crate::query::{
     analyze::{
-        self, AnalyzedComparison, AnalyzedExpr, AnalyzedProjection, AnalyzedQuery, PropRef,
-        VarBinding, VarId,
+        self, AnalyzedComparison, AnalyzedExpr, AnalyzedProjection, AnalyzedQuery, Collation,
+        PropRef, VarBinding, VarId,
     },
     ast::{EdgeDirection, QueryAst, Var},
     errors::AnalyzerErrorWithCode,
@@ -15,7 +15,7 @@ use crate::query::{
     },
     Value,
 };
-use crate::storage::index::IndexDef;
+use crate::storage::index::{IndexDef, TypeTag};
 use crate::storage::{PropStats, PropValueOwned};
 use crate::types::{LabelId, PropId, Result, SombraError};
 use std::cmp::Ordering;
@@ -104,7 +104,7 @@ impl Planner {
         let mut ctx = PlanContext::new(self.metadata.as_ref());
         let logical = self.build_logical_plan(analyzed, &mut ctx)?;
         let physical = self.lower_to_physical(&logical, &mut ctx)?;
-        let plan_hash = compute_plan_hash(&physical);
+        let plan_hash = compute_plan_hash(analyzed, &physical, self.metadata.catalog_epoch());
         let explain = PlanExplain {
             root: build_explain_tree(&physical.root),
             plan_hash,
@@ -289,16 +289,48 @@ impl Planner {
                 )
             };
 
-            current = PlanNode::with_inputs(
-                LogicalOp::Expand {
-                    from: expand_from.clone(),
-                    to: expand_to.clone(),
-                    direction,
-                    edge_type: edge.edge_type.clone(),
-                    distinct_nodes: false,
-                },
-                vec![current],
-            );
+            let base_input = current;
+            current = match direction {
+                EdgeDirection::Both => {
+                    let forward = PlanNode::with_inputs(
+                        LogicalOp::Expand {
+                            from: expand_from.clone(),
+                            to: expand_to.clone(),
+                            direction: EdgeDirection::Out,
+                            edge_type: edge.edge_type.clone(),
+                            distinct_nodes: false,
+                        },
+                        vec![base_input.clone()],
+                    );
+                    let reverse = PlanNode::with_inputs(
+                        LogicalOp::Expand {
+                            from: expand_from.clone(),
+                            to: expand_to.clone(),
+                            direction: EdgeDirection::In,
+                            edge_type: edge.edge_type.clone(),
+                            distinct_nodes: false,
+                        },
+                        vec![base_input],
+                    );
+                    PlanNode::with_inputs(
+                        LogicalOp::Union {
+                            vars: vec![expand_from.clone(), expand_to.clone()],
+                            dedup: false,
+                        },
+                        vec![forward, reverse],
+                    )
+                }
+                _ => PlanNode::with_inputs(
+                    LogicalOp::Expand {
+                        from: expand_from.clone(),
+                        to: expand_to.clone(),
+                        direction,
+                        edge_type: edge.edge_type.clone(),
+                        distinct_nodes: false,
+                    },
+                    vec![base_input],
+                ),
+            };
             current =
                 self.apply_var_predicates(analyzed, current, target_binding.id, &mut preds_by_var)?;
             bound_vars.insert(expand_to);
@@ -1351,7 +1383,16 @@ fn build_explain_tree(node: &PhysicalNode) -> ExplainNode {
     explain
 }
 
-fn compute_plan_hash(plan: &PhysicalPlan) -> u64 {
+fn compute_plan_hash(analyzed: &AnalyzedQuery, plan: &PhysicalPlan, catalog_epoch: u64) -> u64 {
+    let logical = hash_analyzed_query(analyzed, catalog_epoch);
+    let physical = hash_physical_plan(plan);
+    let mut hasher = Xxh64::new(0);
+    hasher.write_u64(logical);
+    hasher.write_u64(physical);
+    hasher.finish()
+}
+
+fn hash_physical_plan(plan: &PhysicalPlan) -> u64 {
     let mut hasher = Xxh64::new(0);
     hash_physical_node(&plan.root, &mut hasher);
     hasher.finish()
@@ -1366,6 +1407,248 @@ fn hash_physical_node(node: &PhysicalNode, hasher: &mut Xxh64) {
     hasher.write_u64(node.inputs.len() as u64);
     for child in &node.inputs {
         hash_physical_node(child, hasher);
+    }
+}
+
+fn hash_analyzed_query(analyzed: &AnalyzedQuery, catalog_epoch: u64) -> u64 {
+    let mut hasher = Xxh64::new(0);
+    hasher.write_u32(analyzed.schema_version());
+    hasher.write_u64(catalog_epoch);
+    hasher.write_u8(analyzed.distinct as u8);
+    hasher.write_u64(analyzed.vars().len() as u64);
+    for binding in analyzed.vars() {
+        hasher.write(binding.var.0.as_bytes());
+        if let Some(label) = &binding.label {
+            hasher.write(label.as_bytes());
+        }
+        hasher.write_u32(binding.label_id.0);
+    }
+    hasher.write_u64(analyzed.edges.len() as u64);
+    for edge in &analyzed.edges {
+        hasher.write_u32(edge.from.0);
+        hasher.write_u32(edge.to.0);
+        hasher.write_u8(match edge.direction {
+            EdgeDirection::Out => 0,
+            EdgeDirection::In => 1,
+            EdgeDirection::Both => 2,
+        });
+        if let Some(id) = edge.edge_type.id {
+            hasher.write_u32(id.0);
+        }
+        if let Some(name) = &edge.edge_type.name {
+            hasher.write(name.as_bytes());
+        }
+    }
+    if let Some(expr) = &analyzed.predicate {
+        hash_analyzed_expr(expr, &mut hasher);
+    } else {
+        hasher.write_u8(0xff);
+    }
+    hasher.write_u64(analyzed.projections.len() as u64);
+    for projection in &analyzed.projections {
+        hash_projection(projection, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_projection(projection: &AnalyzedProjection, hasher: &mut Xxh64) {
+    match projection {
+        AnalyzedProjection::Var { var, alias } => {
+            hasher.write_u8(0);
+            hasher.write_u32(var.0);
+            if let Some(alias) = alias {
+                hasher.write(alias.as_bytes());
+            }
+        }
+        AnalyzedProjection::Prop { var, prop, alias } => {
+            hasher.write_u8(1);
+            hasher.write_u32(var.0);
+            hasher.write(prop.name.as_bytes());
+            hasher.write_u32(prop.id.0);
+            hasher.write_u8(match prop.collation {
+                Collation::Binary => 0,
+            });
+            if let Some(alias) = alias {
+                hasher.write(alias.as_bytes());
+            }
+        }
+    }
+}
+
+fn hash_analyzed_expr(expr: &AnalyzedExpr, hasher: &mut Xxh64) {
+    match expr {
+        AnalyzedExpr::Cmp(cmp) => {
+            hasher.write_u8(0);
+            hash_analyzed_comparison(cmp, hasher);
+        }
+        AnalyzedExpr::And(children) => {
+            hasher.write_u8(1);
+            hasher.write_u64(children.len() as u64);
+            for child in children {
+                hash_analyzed_expr(child, hasher);
+            }
+        }
+        AnalyzedExpr::Or(children) => {
+            hasher.write_u8(2);
+            hasher.write_u64(children.len() as u64);
+            for child in children {
+                hash_analyzed_expr(child, hasher);
+            }
+        }
+        AnalyzedExpr::Not(child) => {
+            hasher.write_u8(3);
+            hash_analyzed_expr(child, hasher);
+        }
+    }
+}
+
+fn hash_analyzed_comparison(cmp: &AnalyzedComparison, hasher: &mut Xxh64) {
+    match cmp {
+        AnalyzedComparison::Eq { var, prop, value } => {
+            hasher.write_u8(0);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_value(value, hasher);
+        }
+        AnalyzedComparison::Ne { var, prop, value } => {
+            hasher.write_u8(1);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_value(value, hasher);
+        }
+        AnalyzedComparison::Lt { var, prop, value } => {
+            hasher.write_u8(2);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_value(value, hasher);
+        }
+        AnalyzedComparison::Le { var, prop, value } => {
+            hasher.write_u8(3);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_value(value, hasher);
+        }
+        AnalyzedComparison::Gt { var, prop, value } => {
+            hasher.write_u8(4);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_value(value, hasher);
+        }
+        AnalyzedComparison::Ge { var, prop, value } => {
+            hasher.write_u8(5);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_value(value, hasher);
+        }
+        AnalyzedComparison::Between {
+            var,
+            prop,
+            low,
+            high,
+        } => {
+            hasher.write_u8(6);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hash_bound_value(low, hasher);
+            hash_bound_value(high, hasher);
+        }
+        AnalyzedComparison::In { var, prop, values } => {
+            hasher.write_u8(7);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+            hasher.write_u64(values.len() as u64);
+            for value in values {
+                hash_value(value, hasher);
+            }
+        }
+        AnalyzedComparison::Exists { var, prop } => {
+            hasher.write_u8(8);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+        }
+        AnalyzedComparison::IsNull { var, prop } => {
+            hasher.write_u8(9);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+        }
+        AnalyzedComparison::IsNotNull { var, prop } => {
+            hasher.write_u8(10);
+            hasher.write_u32(var.0);
+            hash_prop(prop, hasher);
+        }
+    }
+}
+
+fn hash_prop(prop: &PropRef, hasher: &mut Xxh64) {
+    hasher.write(prop.name.as_bytes());
+    hasher.write_u32(prop.id.0);
+    hasher.write_u8(match prop.collation {
+        Collation::Binary => 0,
+    });
+    match prop.type_hint {
+        Some(tag) => {
+            hasher.write_u8(1);
+            hasher.write_u8(type_tag_to_byte(tag));
+        }
+        None => hasher.write_u8(0),
+    }
+}
+
+fn type_tag_to_byte(tag: TypeTag) -> u8 {
+    match tag {
+        TypeTag::Null => 0,
+        TypeTag::Bool => 1,
+        TypeTag::Int => 2,
+        TypeTag::Float => 3,
+        TypeTag::String => 4,
+        TypeTag::Bytes => 5,
+        TypeTag::Date => 6,
+        TypeTag::DateTime => 7,
+    }
+}
+
+fn hash_value(value: &Value, hasher: &mut Xxh64) {
+    match value {
+        Value::Null => hasher.write_u8(0),
+        Value::Bool(v) => {
+            hasher.write_u8(1);
+            hasher.write_u8(*v as u8);
+        }
+        Value::Int(v) => {
+            hasher.write_u8(2);
+            hasher.write_i64(*v);
+        }
+        Value::Float(v) => {
+            hasher.write_u8(3);
+            hasher.write_u64(v.to_bits());
+        }
+        Value::String(s) => {
+            hasher.write_u8(4);
+            hasher.write(s.as_bytes());
+        }
+        Value::Bytes(bytes) => {
+            hasher.write_u8(5);
+            hasher.write_u64(bytes.len() as u64);
+            hasher.write(bytes);
+        }
+        Value::DateTime(ts) => {
+            hasher.write_u8(6);
+            hasher.write(&ts.to_le_bytes());
+        }
+    }
+}
+
+fn hash_bound_value(bound: &Bound<Value>, hasher: &mut Xxh64) {
+    match bound {
+        Bound::Included(value) => {
+            hasher.write_u8(0);
+            hash_value(value, hasher);
+        }
+        Bound::Excluded(value) => {
+            hasher.write_u8(1);
+            hash_value(value, hasher);
+        }
+        Bound::Unbounded => hasher.write_u8(2),
     }
 }
 
