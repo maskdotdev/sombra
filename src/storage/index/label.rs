@@ -43,14 +43,9 @@ pub struct LabelIndex {
 }
 
 impl LabelIndex {
-    pub fn open(
-        store: &Arc<dyn PageStore>,
-        root: PageId,
-        in_place: bool,
-    ) -> Result<(Self, PageId)> {
+    pub fn open(store: &Arc<dyn PageStore>, root: PageId) -> Result<(Self, PageId)> {
         let mut opts = BTreeOptions::default();
         opts.root_page = (root.0 != 0).then_some(root);
-        opts.in_place_leaf_edits = in_place;
         let tree = BTree::open_or_create(store, opts)?;
         let root_page = tree.root_page();
         let index = Self {

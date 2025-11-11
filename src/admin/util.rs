@@ -49,7 +49,6 @@ pub fn open_graph(path: &Path, opts: &AdminOpenOptions) -> Result<GraphHandle> {
     let pager = open_pager(path, opts)?;
     let store: Arc<dyn PageStore> = pager.clone();
     let graph_opts = GraphOptions::new(Arc::clone(&store))
-        .btree_inplace(true)
         .distinct_neighbors_default(opts.distinct_neighbors_default);
     let graph = Arc::new(Graph::open(graph_opts)?);
     let dict = Arc::new(Dict::open(store, DictOptions::default())?);

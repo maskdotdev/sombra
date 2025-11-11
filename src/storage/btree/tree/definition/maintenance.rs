@@ -330,9 +330,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         parent_frame: &PathEntry,
         left_id: PageId,
     ) -> Result<BorrowResult> {
-        if self.options.in_place_leaf_edits
-            && self.borrow_from_left_in_place(tx, leaf_id, leaf_header, parent_frame, left_id)?
-        {
+        if self.borrow_from_left_in_place(tx, leaf_id, leaf_header, parent_frame, left_id)? {
             self.stats.inc_leaf_rebalance_in_place();
             record_btree_leaf_rebalance_in_place(1);
             return Ok(BorrowResult::Borrowed);
@@ -776,16 +774,14 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         parent_frame: &PathEntry,
         right_id: PageId,
     ) -> Result<bool> {
-        if self.options.in_place_leaf_edits
-            && self.borrow_from_right_in_place(
-                tx,
-                leaf_id,
-                leaf_header,
-                leaf_snapshot,
-                parent_frame,
-                right_id,
-            )?
-        {
+        if self.borrow_from_right_in_place(
+            tx,
+            leaf_id,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            right_id,
+        )? {
             self.stats.inc_leaf_rebalance_in_place();
             record_btree_leaf_rebalance_in_place(1);
             return Ok(true);
@@ -828,18 +824,16 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let left_snapshot = self.snapshot_leaf(&left_header, left_page.data())?;
         drop(left_page);
 
-        if self.options.in_place_leaf_edits
-            && self.merge_leaf_with_left_in_place(
-                tx,
-                leaf_id,
-                leaf_header,
-                leaf_snapshot,
-                parent_frame,
-                path,
-                left_id,
-                &left_snapshot,
-            )?
-        {
+        if self.merge_leaf_with_left_in_place(
+            tx,
+            leaf_id,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            path,
+            left_id,
+            &left_snapshot,
+        )? {
             self.stats.inc_leaf_merges();
             self.stats.inc_leaf_rebalance_in_place();
             record_btree_leaf_rebalance_in_place(1);
@@ -1086,19 +1080,17 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let right_snapshot = self.snapshot_leaf(&right_header, right_page.data())?;
         drop(right_page);
 
-        if self.options.in_place_leaf_edits
-            && self.merge_leaf_with_right_in_place(
-                tx,
-                leaf_id,
-                leaf_header,
-                leaf_snapshot,
-                parent_frame,
-                path,
-                right_id,
-                &right_header,
-                &right_snapshot,
-            )?
-        {
+        if self.merge_leaf_with_right_in_place(
+            tx,
+            leaf_id,
+            leaf_header,
+            leaf_snapshot,
+            parent_frame,
+            path,
+            right_id,
+            &right_header,
+            &right_snapshot,
+        )? {
             self.stats.inc_leaf_merges();
             self.stats.inc_leaf_rebalance_in_place();
             record_btree_leaf_rebalance_in_place(1);

@@ -69,10 +69,6 @@ struct Args {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
-    /// Enable in-place B-tree leaf edits for the Sombra workload.
-    #[arg(long, default_value_t = false)]
-    btree_inplace: bool,
-
     /// Sombra insert API to exercise (pointwise put vs. batched put_many).
     #[arg(long, value_enum, default_value_t = SombraInsertApi::Pointwise)]
     sombra_insert_api: SombraInsertApi,
@@ -146,7 +142,6 @@ struct BenchConfig {
     commit_every: usize,
     mode: BenchMode,
     tx_mode: TxMode,
-    btree_inplace: bool,
     insert_api: SombraInsertApi,
     put_many_group: usize,
     databases: DatabaseSelection,
@@ -174,7 +169,6 @@ impl From<Args> for BenchConfig {
             commit_every: value.commit_every,
             mode: value.mode,
             tx_mode: value.tx_mode,
-            btree_inplace: value.btree_inplace,
             insert_api: value.sombra_insert_api,
             put_many_group: value.put_many_group,
             databases: value.databases,
@@ -184,9 +178,7 @@ impl From<Args> for BenchConfig {
 
 impl BenchConfig {
     fn btree_options(&self) -> BTreeOptions {
-        let mut opts = BTreeOptions::default();
-        opts.in_place_leaf_edits = self.btree_inplace;
-        opts
+        BTreeOptions::default()
     }
 
     fn uses_put_many(&self) -> bool {

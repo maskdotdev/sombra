@@ -1,11 +1,11 @@
-use std::cmp::Ordering as CmpOrdering;
+use std::cmp::{Ordering as CmpOrdering, Ordering};
 #[cfg(feature = "degree-cache")]
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::convert::TryFrom;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use lru::LruCache;
@@ -92,6 +92,23 @@ pub struct Graph {
     row_hash_header: bool,
 }
 
+/// Basic statistics for a (label, property) pair.
+#[derive(Clone, Debug, Default)]
+pub struct PropStats {
+    /// Total number of rows (nodes with the label).
+    pub row_count: u64,
+    /// Number of rows with a non-null value for the property.
+    pub non_null_count: u64,
+    /// Number of rows where the property is missing or null.
+    pub null_count: u64,
+    /// Number of distinct non-null property values.
+    pub distinct_count: u64,
+    /// Minimum observed non-null property value.
+    pub min: Option<PropValueOwned>,
+    /// Maximum observed non-null property value.
+    pub max: Option<PropValueOwned>,
+}
+
 impl Graph {
     /// Opens a graph storage instance with the specified configuration options.
     pub fn open(opts: GraphOptions) -> Result<Self> {
@@ -125,8 +142,7 @@ impl Graph {
             prop_chunk: meta.storage_prop_chunk_root,
             prop_btree: meta.storage_prop_btree_root,
         };
-        let (indexes, index_roots_actual) =
-            IndexStore::open(Arc::clone(&store), index_roots)?;
+        let (indexes, index_roots_actual) = IndexStore::open(Arc::clone(&store), index_roots)?;
 
         #[cfg(feature = "degree-cache")]
         let mut degree_cache_enabled = opts.degree_cache
@@ -314,7 +330,7 @@ impl Graph {
                     return Err(err);
                 }
             };
-        let id_raw = self.next_node_id.fetch_add(1, Ordering::SeqCst);
+        let id_raw = self.next_node_id.fetch_add(1, AtomicOrdering::SeqCst);
         let node_id = NodeId(id_raw);
         let next_id = node_id.0.saturating_add(1);
         tx.update_meta(|meta| {
@@ -507,8 +523,8 @@ impl Graph {
     /// Returns aggregate cache statistics for label→index lookups.
     pub fn index_cache_stats(&self) -> GraphIndexCacheStats {
         GraphIndexCacheStats {
-            hits: self.idx_cache_hits.load(Ordering::Relaxed),
-            misses: self.idx_cache_misses.load(Ordering::Relaxed),
+            hits: self.idx_cache_hits.load(AtomicOrdering::Relaxed),
+            misses: self.idx_cache_misses.load(AtomicOrdering::Relaxed),
         }
     }
 
@@ -743,7 +759,7 @@ impl Graph {
                 return Err(err);
             }
         };
-        let id_raw = self.next_edge_id.fetch_add(1, Ordering::SeqCst);
+        let id_raw = self.next_edge_id.fetch_add(1, AtomicOrdering::SeqCst);
         let edge_id = EdgeId(id_raw);
         let next_id = edge_id.0.saturating_add(1);
         tx.update_meta(|meta| {
@@ -1647,6 +1663,102 @@ fn encode_bytes_key(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+fn prop_stats_key(value: &PropValueOwned) -> Vec<u8> {
+    use PropValueOwned::*;
+    let mut out = Vec::new();
+    match value {
+        Null => out.push(0),
+        Bool(v) => {
+            out.push(1);
+            out.push(u8::from(*v));
+        }
+        Int(v) => {
+            out.push(2);
+            out.extend_from_slice(&encode_i64_key(*v));
+        }
+        Float(v) => {
+            out.push(3);
+            out.extend_from_slice(&encode_f64_key(*v).unwrap_or_else(|_| vec![0; 8]));
+        }
+        Str(v) => {
+            out.push(4);
+            out.extend(
+                encode_bytes_key(v.as_bytes())
+                    .unwrap_or_else(|_| v.as_bytes().to_vec())
+                    .into_iter(),
+            );
+        }
+        Bytes(v) => {
+            out.push(5);
+            out.extend(
+                encode_bytes_key(v)
+                    .unwrap_or_else(|_| v.clone())
+                    .into_iter(),
+            );
+        }
+        Date(v) => {
+            out.push(6);
+            out.extend_from_slice(&encode_i64_key(*v));
+        }
+        DateTime(v) => {
+            out.push(7);
+            out.extend_from_slice(&encode_i64_key(*v));
+        }
+    }
+    out
+}
+
+fn update_min_max(
+    slot: &mut Option<PropValueOwned>,
+    candidate: &PropValueOwned,
+    desired: Ordering,
+) -> Result<()> {
+    match slot {
+        Some(current) => {
+            if compare_prop_values(candidate, current)? == desired {
+                *slot = Some(candidate.clone());
+            }
+        }
+        None => {
+            *slot = Some(candidate.clone());
+        }
+    }
+    Ok(())
+}
+
+fn compare_prop_values(a: &PropValueOwned, b: &PropValueOwned) -> Result<Ordering> {
+    use PropValueOwned::*;
+    Ok(match (a, b) {
+        (Null, Null) => Ordering::Equal,
+        (Null, _) => Ordering::Less,
+        (_, Null) => Ordering::Greater,
+        (Bool(a), Bool(b)) => a.cmp(b),
+        (Int(a), Int(b)) => a.cmp(b),
+        (Float(a), Float(b)) => a
+            .partial_cmp(b)
+            .ok_or(SombraError::Invalid("float comparison invalid"))?,
+        (Str(a), Str(b)) => a.cmp(b),
+        (Bytes(a), Bytes(b)) => a.cmp(b),
+        (Date(a), Date(b)) => a.cmp(b),
+        (DateTime(a), DateTime(b)) => a.cmp(b),
+        (va, vb) => value_rank(va).cmp(&value_rank(vb)),
+    })
+}
+
+fn value_rank(value: &PropValueOwned) -> u8 {
+    use PropValueOwned::*;
+    match value {
+        Null => 0,
+        Bool(_) => 1,
+        Int(_) => 2,
+        Float(_) => 3,
+        Str(_) => 4,
+        Bytes(_) => 5,
+        Date(_) => 6,
+        DateTime(_) => 7,
+    }
+}
+
 fn prop_value_to_owned(value: PropValue<'_>) -> PropValueOwned {
     match value {
         PropValue::Null => PropValueOwned::Null,
@@ -1906,18 +2018,20 @@ impl Graph {
 
     fn store_txn_state(&self, tx: &mut WriteGuard<'_>, mut state: GraphTxnState) {
         let stats = state.index_cache.take_stats();
-        self.idx_cache_hits.fetch_add(stats.hits, Ordering::Relaxed);
+        self.idx_cache_hits
+            .fetch_add(stats.hits, AtomicOrdering::Relaxed);
         self.idx_cache_misses
-            .fetch_add(stats.misses, Ordering::Relaxed);
+            .fetch_add(stats.misses, AtomicOrdering::Relaxed);
         tx.store_extension(state);
     }
 
     fn invalidate_txn_cache(&self, tx: &mut WriteGuard<'_>) {
         if let Some(mut state) = tx.take_extension::<GraphTxnState>() {
             let stats = state.index_cache.take_stats();
-            self.idx_cache_hits.fetch_add(stats.hits, Ordering::Relaxed);
+            self.idx_cache_hits
+                .fetch_add(stats.hits, AtomicOrdering::Relaxed);
             self.idx_cache_misses
-                .fetch_add(stats.misses, Ordering::Relaxed);
+                .fetch_add(stats.misses, AtomicOrdering::Relaxed);
         }
     }
 
@@ -2007,5 +2121,40 @@ impl Graph {
             }
         }
         Ok(())
+    }
+    /// Computes light-weight property statistics for a label/property pair.
+    pub fn property_stats(&self, label: LabelId, prop: PropId) -> Result<Option<PropStats>> {
+        let read = self.store.begin_read()?;
+        let Some(mut scan) = self.indexes.label_scan(&read, label)? else {
+            return Ok(None);
+        };
+
+        let mut stats = PropStats::default();
+        let mut distinct_keys: HashSet<Vec<u8>> = HashSet::new();
+
+        while let Some(node_id) = scan.next()? {
+            stats.row_count += 1;
+            let Some(node) = self.get_node(&read, node_id)? else {
+                continue;
+            };
+            let value = node
+                .props
+                .iter()
+                .find_map(|(prop_id, value)| (*prop_id == prop).then(|| value.clone()));
+            match value {
+                Some(PropValueOwned::Null) | None => {
+                    stats.null_count += 1;
+                }
+                Some(value) => {
+                    stats.non_null_count += 1;
+                    distinct_keys.insert(prop_stats_key(&value));
+                    update_min_max(&mut stats.min, &value, Ordering::Less)?;
+                    update_min_max(&mut stats.max, &value, Ordering::Greater)?;
+                }
+            }
+        }
+
+        stats.distinct_count = distinct_keys.len() as u64;
+        Ok(Some(stats))
     }
 }

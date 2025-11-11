@@ -35,15 +35,11 @@ pub struct IndexStore {
 
 impl IndexStore {
     /// Opens an existing index store with the given root pages.
-    pub fn open(
-        store: Arc<dyn PageStore>,
-        roots: IndexRoots,
-        btree_inplace: bool,
-    ) -> Result<(Self, IndexRoots)> {
-        let (catalog, catalog_root) = IndexCatalog::open(&store, roots.catalog, btree_inplace)?;
-        let (label_index, label_root) = LabelIndex::open(&store, roots.label, btree_inplace)?;
-        let (chunked, _chunk_root) = ChunkedIndex::open(&store, roots.prop_chunk, btree_inplace)?;
-        let (btree, _btree_root) = BTreePostings::open(&store, roots.prop_btree, btree_inplace)?;
+    pub fn open(store: Arc<dyn PageStore>, roots: IndexRoots) -> Result<(Self, IndexRoots)> {
+        let (catalog, catalog_root) = IndexCatalog::open(&store, roots.catalog)?;
+        let (label_index, label_root) = LabelIndex::open(&store, roots.label)?;
+        let (chunked, _chunk_root) = ChunkedIndex::open(&store, roots.prop_chunk)?;
+        let (btree, _btree_root) = BTreePostings::open(&store, roots.prop_btree)?;
         let index_store = Self {
             store: Arc::clone(&store),
             catalog,

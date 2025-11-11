@@ -82,8 +82,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let mut right_page = tx.page_mut(new_page_id)?;
         self.init_leaf_page(new_page_id, &mut right_page)?;
         let right_header = page::Header::parse(right_page.data())?;
-        let mut right_allocator =
-            LeafAllocator::new(right_page.data_mut(), right_header.clone())?;
+        let mut right_allocator = LeafAllocator::new(right_page.data_mut(), right_header.clone())?;
         let outcome = left_allocator.split_into(
             &mut right_allocator,
             low_fence.as_slice(),
@@ -94,7 +93,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let left_snapshot = left_allocator.into_snapshot();
         self.leaf_allocator_cache(tx).insert(page_id, left_snapshot);
         let right_snapshot = right_allocator.into_snapshot();
-        self.leaf_allocator_cache(tx).insert(new_page_id, right_snapshot);
+        self.leaf_allocator_cache(tx)
+            .insert(new_page_id, right_snapshot);
         drop(right_page);
         drop(page);
         self.finalize_leaf_split(
@@ -159,20 +159,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 continue;
             }
             let right_slot = &slots[idx];
-            let right_key_len =
-                record_slot_key_len(snapshot, right_slot, payload, pending_record)?;
-            let left_fits = self.slice_fits_encoded(
-                payload_len,
-                left_low_len,
-                right_key_len,
-                left_slice,
-            )?;
-            let right_fits = self.slice_fits_encoded(
-                payload_len,
-                right_key_len,
-                high_fence.len(),
-                right_slice,
-            )?;
+            let right_key_len = record_slot_key_len(snapshot, right_slot, payload, pending_record)?;
+            let left_fits =
+                self.slice_fits_encoded(payload_len, left_low_len, right_key_len, left_slice)?;
+            let right_fits =
+                self.slice_fits_encoded(payload_len, right_key_len, high_fence.len(), right_slice)?;
             if left_fits && right_fits {
                 return Ok(idx);
             }
@@ -478,12 +469,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
         let high_slice_existing = high_fence_vec.as_slice();
         let new_low_slice = entries[0].0.as_slice();
-        if self.slice_fits(
-            payload_len,
-            new_low_slice,
-            high_slice_existing,
-            &entries,
-        )? {
+        if self.slice_fits(payload_len, new_low_slice, high_slice_existing, &entries)? {
             self.rebuild_leaf_payload(
                 tx,
                 &mut page,
@@ -494,10 +480,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             )?;
             let new_low = entries[0].0.clone();
             self.stats.inc_leaf_rebuilds();
-            let first_key_changed = K::compare_encoded(
-                new_low.as_slice(),
-                low_fence_vec.as_slice(),
-            ) != Ordering::Equal;
+            let first_key_changed =
+                K::compare_encoded(new_low.as_slice(), low_fence_vec.as_slice()) != Ordering::Equal;
             let new_first_key = first_key_changed.then_some(new_low);
             return Ok(LeafInsert::Done { new_first_key });
         }
@@ -521,8 +505,14 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
             let left_high = right_slice.first().map(|(k, _)| k.as_slice()).unwrap();
             let right_low = right_slice.first().map(|(k, _)| k.as_slice()).unwrap();
-            let left_fits = self.slice_fits(payload_len, low_fence_vec.as_slice(), left_high, left_slice)?;
-            let right_fits = self.slice_fits(payload_len, right_low, high_fence_vec.as_slice(), right_slice)?;
+            let left_fits =
+                self.slice_fits(payload_len, low_fence_vec.as_slice(), left_high, left_slice)?;
+            let right_fits = self.slice_fits(
+                payload_len,
+                right_low,
+                high_fence_vec.as_slice(),
+                right_slice,
+            )?;
             if left_fits && right_fits {
                 split_at = Some(idx);
                 break;
@@ -599,11 +589,99 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         key: &[u8],
         value: &[u8],
     ) -> Result<InPlaceInsertResult> {
-        let _ = (tx, page, header, key, value);
-        Ok(InPlaceInsertResult::NotApplied {
-            snapshot: None,
-            pending_insert: None,
-        })
+        if header.kind != page::BTreePageKind::Leaf {
+            return Ok(InPlaceInsertResult::NotApplied {
+                snapshot: None,
+                pending_insert: None,
+            });
+        }
+        let (low_fence_slice, _) = header.fence_slices(page.data())?;
+        let low_fence: Vec<u8> = low_fence_slice.to_vec();
+        let snapshot = self.leaf_allocator_cache(tx).take(page.id);
+        let mut allocator = if let Some(snapshot) = snapshot {
+            LeafAllocator::from_snapshot(page.data_mut(), header.clone(), snapshot)?
+        } else {
+            LeafAllocator::new(page.data_mut(), header.clone())?
+        };
+
+        let mut lo = 0usize;
+        let mut hi = allocator.slot_count();
+        let mut insert_idx = 0usize;
+        let mut replaces_existing = false;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            record_btree_leaf_key_decodes(1);
+            let record = allocator.leaf_record(mid)?;
+            record_btree_leaf_key_cmps(1);
+            match K::compare_encoded(record.key, key) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => {
+                    insert_idx = mid;
+                    replaces_existing = true;
+                    break;
+                }
+            }
+        }
+        if !replaces_existing {
+            insert_idx = lo;
+        }
+
+        let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
+        let mut record = Vec::with_capacity(record_len);
+        page::encode_leaf_record(key, value, &mut record)?;
+
+        let requires_low_fence_update = insert_idx == 0
+            && !replaces_existing
+            && (low_fence.is_empty()
+                || K::compare_encoded(key, low_fence.as_slice()) == Ordering::Less);
+
+        let insert_result = if replaces_existing {
+            allocator.replace_slot(insert_idx, &record)
+        } else {
+            allocator.insert_slot(insert_idx, &record)
+        };
+
+        match insert_result {
+            Ok(()) => {
+                if requires_low_fence_update {
+                    if let Err(err) = allocator.update_low_fence(key) {
+                        if allocator_capacity_error(&err) {
+                            allocator.delete_slot(insert_idx)?;
+                            let snapshot = allocator.into_snapshot();
+                            return Ok(InPlaceInsertResult::NotApplied {
+                                snapshot: Some(snapshot),
+                                pending_insert: Some(LeafPendingInsert {
+                                    insert_idx,
+                                    replaces_existing,
+                                    requires_low_fence_update,
+                                    record,
+                                }),
+                            });
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                }
+                let new_first_key = requires_low_fence_update.then(|| key.to_vec());
+                let snapshot = allocator.into_snapshot();
+                self.leaf_allocator_cache(tx).insert(page.id, snapshot);
+                Ok(InPlaceInsertResult::Applied { new_first_key })
+            }
+            Err(err) if allocator_capacity_error(&err) => {
+                let snapshot = allocator.into_snapshot();
+                Ok(InPlaceInsertResult::NotApplied {
+                    snapshot: Some(snapshot),
+                    pending_insert: Some(LeafPendingInsert {
+                        insert_idx,
+                        replaces_existing,
+                        requires_low_fence_update,
+                        record,
+                    }),
+                })
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn try_delete_leaf_in_place(

@@ -1,16 +1,12 @@
 use crate::storage::profile::{
     profile_timer, record_leaf_allocator_build, record_leaf_allocator_compaction,
-    record_leaf_allocator_failure, record_leaf_allocator_snapshot_reuse,
-    LeafAllocatorFailureKind,
+    record_leaf_allocator_failure, record_leaf_allocator_snapshot_reuse, LeafAllocatorFailureKind,
 };
 
-#[allow(dead_code)]
 const INLINE_FREE_REGIONS: usize = 32;
-#[allow(dead_code)]
 const INLINE_SLOT_EXTENTS: usize = 128;
 
 /// Incremental allocator for B-tree leaf payloads.
-#[allow(dead_code)]
 pub(super) struct LeafAllocator<'page> {
     page_bytes: &'page mut [u8],
     header: page::Header,
@@ -20,7 +16,6 @@ pub(super) struct LeafAllocator<'page> {
     free_regions: SmallVec<[FreeRegion; INLINE_FREE_REGIONS]>,
 }
 
-#[allow(dead_code)]
 impl<'page> LeafAllocator<'page> {
     /// Builds a new allocator for `page_bytes` using the parsed `header`.
     pub fn new(page_bytes: &'page mut [u8], header: page::Header) -> Result<Self> {
@@ -57,10 +52,14 @@ impl<'page> LeafAllocator<'page> {
     ) -> Result<Self> {
         let payload_len = page::payload(page_bytes)?.len();
         if payload_len != snapshot.payload_len {
-            return Err(SombraError::Invalid("leaf allocator snapshot payload mismatch"));
+            return Err(SombraError::Invalid(
+                "leaf allocator snapshot payload mismatch",
+            ));
         }
         if snapshot.slot_meta.len() != header.slot_count as usize {
-            return Err(SombraError::Invalid("leaf allocator snapshot slot mismatch"));
+            return Err(SombraError::Invalid(
+                "leaf allocator snapshot slot mismatch",
+            ));
         }
         let arena_start = snapshot.arena_start;
         let allocator = Self {
@@ -99,7 +98,9 @@ impl<'page> LeafAllocator<'page> {
                 len: len_u16,
             },
         );
-        self.persist_slot_directory()
+        self.persist_slot_directory()?;
+        self.debug_assert_ordered();
+        Ok(())
     }
 
     /// Overwrites the record stored at `slot_idx`.
@@ -129,7 +130,9 @@ impl<'page> LeafAllocator<'page> {
                 self.insert_free_region(freed_start_u16, freed_end_u16);
             }
             self.slot_meta[slot_idx].len = new_len_u16;
-            return self.persist_slot_directory();
+            self.persist_slot_directory()?;
+            self.debug_assert_ordered();
+            return Ok(());
         }
 
         // Remove the slot temporarily so we can reuse the insertion helpers.
@@ -156,7 +159,9 @@ impl<'page> LeafAllocator<'page> {
         self.zero_range(removed.offset, removed.len)?;
         self.insert_free_region(removed.offset, removed.end());
         self.try_shrink_free_start();
-        self.persist_slot_directory()
+        self.persist_slot_directory()?;
+        self.debug_assert_ordered();
+        Ok(())
     }
 
     /// Updates the low fence to match `new_low`.
@@ -172,10 +177,12 @@ impl<'page> LeafAllocator<'page> {
         self.header.low_fence_len = new_low.len();
         self.arena_start = new_arena_start;
         self.persist_slot_directory()?;
+        self.debug_assert_ordered();
         Ok(())
     }
 
     /// Updates the high fence to match `new_high`.
+    #[allow(dead_code)]
     pub fn update_high_fence(&mut self, new_high: &[u8]) -> Result<()> {
         let new_arena_start = page::PAYLOAD_HEADER_LEN + self.header.low_fence_len + new_high.len();
         let used_bytes = self.total_used_bytes();
@@ -233,12 +240,7 @@ impl<'page> LeafAllocator<'page> {
         Ok(())
     }
 
-    pub fn rebuild_from_records<'a, I>(
-        &mut self,
-        low: &[u8],
-        high: &[u8],
-        records: I,
-    ) -> Result<()>
+    pub fn rebuild_from_records<'a, I>(&mut self, low: &[u8], high: &[u8], records: I) -> Result<()>
     where
         I: IntoIterator<Item = &'a [u8]>,
     {
@@ -324,7 +326,10 @@ impl<'page> LeafAllocator<'page> {
         let right_iter = SliceIter::new(right_slices, payload_slice, pending_bytes);
         right.rebuild_from_records(right_min.as_slice(), original_high_fence, right_iter)?;
 
-        Ok(LeafSplitOutcome { left_min, right_min })
+        Ok(LeafSplitOutcome {
+            left_min,
+            right_min,
+        })
     }
 
     /// Renders the current header value (for testing/debugging).
@@ -471,26 +476,50 @@ impl<'page> LeafAllocator<'page> {
             self.free_regions.clear();
             return Ok(());
         }
+        let total_bytes = self
+            .slot_meta
+            .iter()
+            .map(|meta| meta.len as usize)
+            .sum::<usize>();
+        if total_bytes == 0 {
+            self.header.free_start = u16::try_from(new_start)
+                .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
+            self.free_regions.clear();
+            return Ok(());
+        }
+        let mut scratch = Vec::with_capacity(total_bytes);
+        {
+            let payload = page::payload(&*self.page_bytes)?;
+            for meta in &self.slot_meta {
+                let start = meta.offset as usize;
+                let end = start + meta.len as usize;
+                if end > payload.len() {
+                    return Err(SombraError::Invalid("record extent beyond payload"));
+                }
+                scratch.extend_from_slice(&payload[start..end]);
+            }
+        }
         let payload = page::payload_mut(self.page_bytes)?;
         let mut cursor = new_start;
-        let mut bytes_moved = 0u64;
+        let mut copied = 0usize;
         for meta in self.slot_meta.iter_mut() {
-            let start = meta.offset as usize;
-            let end = start + meta.len as usize;
-            if start != cursor {
-                payload.copy_within(start..end, cursor);
-                bytes_moved += (end - start) as u64;
-                meta.offset = u16::try_from(cursor)
-                    .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
+            let len = meta.len as usize;
+            let end = cursor
+                .checked_add(len)
+                .ok_or_else(|| SombraError::Invalid("record extent overflow"))?;
+            if end > payload.len() {
+                return Err(SombraError::Invalid("record extent beyond payload"));
             }
-            cursor += meta.len as usize;
+            payload[cursor..end].copy_from_slice(&scratch[copied..copied + len]);
+            meta.offset = u16::try_from(cursor)
+                .map_err(|_| SombraError::Invalid("leaf slot offset overflow"))?;
+            cursor = end;
+            copied += len;
         }
-        self.header.free_start = u16::try_from(cursor)
-            .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
+        self.header.free_start =
+            u16::try_from(cursor).map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
         self.free_regions.clear();
-        if bytes_moved > 0 {
-            record_leaf_allocator_compaction(bytes_moved);
-        }
+        record_leaf_allocator_compaction(total_bytes as u64);
         Ok(())
     }
 
@@ -588,9 +617,7 @@ impl<'page> LeafAllocator<'page> {
             return;
         }
         let mut insert_at = 0;
-        while insert_at < self.free_regions.len()
-            && self.free_regions[insert_at].start < start
-        {
+        while insert_at < self.free_regions.len() && self.free_regions[insert_at].start < start {
             insert_at += 1;
         }
         self.free_regions
@@ -632,16 +659,52 @@ impl<'page> LeafAllocator<'page> {
             }
         }
     }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_ordered(&self) {
+        if let Err(err) = self.validate_key_order() {
+            panic!("leaf allocator key order invariant violated: {err:?}");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn validate_key_order(&self) -> Result<()> {
+        if self.slot_meta.is_empty() {
+            return Ok(());
+        }
+        let payload = page::payload(&*self.page_bytes)?;
+        let mut prev: Option<Vec<u8>> = None;
+        for meta in &self.slot_meta {
+            let slice = meta.slice(payload)?;
+            let record = page::decode_leaf_record(slice)?;
+            if let Some(prev_key) = prev.as_ref() {
+                if prev_key.as_slice() >= record.key {
+                    return Err(SombraError::Corruption(
+                        "leaf allocator produced non-increasing keys",
+                    ));
+                }
+            }
+            prev = Some(record.key.to_vec());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn debug_assert_ordered(&self) {}
+
+    #[cfg(not(debug_assertions))]
+    #[allow(dead_code)]
+    fn validate_key_order(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 struct SlotMeta {
     offset: u16,
     len: u16,
 }
 
-#[allow(dead_code)]
 impl SlotMeta {
     fn end(&self) -> u16 {
         self.offset.saturating_add(self.len)
@@ -659,7 +722,6 @@ impl SlotMeta {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 enum RecordSlot {
     Existing(usize),
@@ -703,7 +765,6 @@ fn build_record_slots(
     Ok(slots)
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 enum RecordSlice {
     Existing { start: usize, end: usize },
@@ -752,14 +813,12 @@ fn decode_split_key(slice: &RecordSlice, payload: &[u8], pending: &[u8]) -> Resu
     Ok(record.key.to_vec())
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 struct FreeRegion {
     start: u16,
     end: u16,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(super) struct LeafAllocatorSnapshot {
     slot_meta: Vec<SlotMeta>,
@@ -769,10 +828,7 @@ pub(super) struct LeafAllocatorSnapshot {
 }
 
 impl LeafAllocatorSnapshot {
-    pub(super) fn decode_entries(
-        &self,
-        page_bytes: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub(super) fn decode_entries(&self, page_bytes: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let payload = page::payload(page_bytes)?;
         let mut entries = Vec::with_capacity(self.slot_meta.len());
         for record in self.record_iter(payload)? {
@@ -782,10 +838,7 @@ impl LeafAllocatorSnapshot {
         Ok(entries)
     }
 
-    pub(super) fn record_iter<'a>(
-        &'a self,
-        payload: &'a [u8],
-    ) -> Result<LeafSnapshotIter<'a>> {
+    pub(super) fn record_iter<'a>(&'a self, payload: &'a [u8]) -> Result<LeafSnapshotIter<'a>> {
         if payload.len() != self.payload_len {
             return Err(SombraError::Invalid(
                 "leaf allocator snapshot payload mismatch",
@@ -796,14 +849,6 @@ impl LeafAllocatorSnapshot {
             slot_meta: &self.slot_meta,
             idx: 0,
         })
-    }
-
-    pub(super) fn arena_start(&self) -> usize {
-        self.arena_start
-    }
-
-    pub(super) fn payload_len(&self) -> usize {
-        self.payload_len
     }
 
     pub(super) fn record_slice<'a>(&'a self, payload: &'a [u8], idx: usize) -> Result<&'a [u8]> {
@@ -857,7 +902,6 @@ impl<'a> Iterator for LeafSnapshotIter<'a> {
     }
 }
 
-#[allow(dead_code)]
 impl FreeRegion {
     fn len(&self) -> usize {
         (self.end as usize).saturating_sub(self.start as usize)
@@ -872,9 +916,7 @@ impl FreeRegion {
             return None;
         }
         let offset = self.start;
-        self.start = self
-            .start
-            .checked_add(len as u16)?;
+        self.start = self.start.checked_add(len as u16)?;
         Some(offset)
     }
 }
@@ -883,12 +925,12 @@ impl FreeRegion {
 mod tests {
     use super::*;
     use crate::storage::btree::page;
-    use crate::types::page::{PageHeader, PageKind, PAGE_HDR_LEN, DEFAULT_PAGE_SIZE};
+    use crate::types::page::{PageHeader, PageKind, DEFAULT_PAGE_SIZE, PAGE_HDR_LEN};
     use crate::types::{PageId, Result as TestResult, SombraError};
     use proptest::prelude::*;
 
-    #[allow(dead_code)]
     #[derive(Clone, Debug)]
+    #[allow(dead_code)]
     enum TestOp {
         Insert(Vec<u8>, Vec<u8>),
         Delete,
@@ -916,7 +958,12 @@ mod tests {
         let mut buf = blank_leaf(DEFAULT_PAGE_SIZE as usize)?;
         let mut entries = Vec::new();
         for i in 0..32u32 {
-            apply_insert(&mut buf, &mut entries, format!("k{i}").into_bytes(), vec![i as u8])?;
+            apply_insert(
+                &mut buf,
+                &mut entries,
+                format!("k{i}").into_bytes(),
+                vec![i as u8],
+            )?;
         }
         for _ in 0..16 {
             apply_delete(&mut buf, &mut entries)?;
@@ -996,13 +1043,10 @@ mod tests {
 
     fn blank_leaf(page_size: usize) -> TestResult<Vec<u8>> {
         let mut buf = vec![0u8; PAGE_HDR_LEN + page_size];
-        let header = PageHeader::new(PageId(1), PageKind::BTreeLeaf, page_size as u32, 0)?
-            .with_crc32(0);
+        let header =
+            PageHeader::new(PageId(1), PageKind::BTreeLeaf, page_size as u32, 0)?.with_crc32(0);
         header.encode(&mut buf[..PAGE_HDR_LEN])?;
-        page::write_initial_header(
-            &mut buf[PAGE_HDR_LEN..],
-            page::BTreePageKind::Leaf,
-        )?;
+        page::write_initial_header(&mut buf[PAGE_HDR_LEN..], page::BTreePageKind::Leaf)?;
         Ok(buf)
     }
 
@@ -1012,5 +1056,28 @@ mod tests {
             SombraError::Invalid("leaf page full")
                 | SombraError::Invalid("slot directory exceeds payload")
         )
+    }
+
+    #[test]
+    fn low_fence_update_preserves_existing_records() -> TestResult<()> {
+        let mut buf = blank_leaf(DEFAULT_PAGE_SIZE as usize)?;
+        let header = page::Header::parse(&buf)?;
+        let mut allocator = LeafAllocator::new(&mut buf, header)?;
+        let value = vec![1u8];
+        let key_a = vec![10, 20, 30, 40];
+        let key_b = vec![5, 15, 25, 35];
+        let mut record = Vec::new();
+        page::encode_leaf_record(&key_a, &value, &mut record)?;
+        allocator.insert_slot(0, &record)?;
+        allocator.update_low_fence(&key_a)?;
+        record.clear();
+        page::encode_leaf_record(&key_b, &value, &mut record)?;
+        allocator.insert_slot(0, &record)?;
+        allocator.update_low_fence(&key_b)?;
+        let first = allocator.leaf_record(0)?;
+        let second = allocator.leaf_record(1)?;
+        assert_eq!(first.key, key_b.as_slice());
+        assert_eq!(second.key, key_a.as_slice());
+        Ok(())
     }
 }

@@ -84,12 +84,18 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
             let rec_slice = extents.record_slice(payload, self.slot_index)?;
             record_btree_leaf_key_decodes(1);
             let record = page::decode_leaf_record(rec_slice)?;
+            if !self.lower_allows(record.key) {
+                self.slot_index += 1;
+                continue;
+            }
             if self.is_past_upper(record.key) {
                 self.finish();
                 return Ok(None);
             }
-            let value = V::decode_val(record.value)?;
-            let typed_key = K::decode_key(record.key)?;
+            let key_bytes = record.key;
+            let value_slice = record.value;
+            let value = V::decode_val(value_slice)?;
+            let typed_key = K::decode_key(key_bytes)?;
             self.slot_index += 1;
             return Ok(Some((typed_key, value)));
         }

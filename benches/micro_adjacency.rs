@@ -54,7 +54,7 @@ impl GraphHarness {
         pager_opts.synchronous = synchronous;
         let pager = Arc::new(Pager::create(&path, pager_opts).expect("pager"));
         let store: Arc<dyn PageStore> = pager.clone();
-        let graph = Graph::open(GraphOptions::new(store).btree_inplace(true)).expect("graph");
+        let graph = Graph::open(GraphOptions::new(store)).expect("graph");
         let mut harness = Self {
             _tmpdir: tmpdir,
             pager,

@@ -4,6 +4,8 @@ use super::{page, BTree, BTreeOptions, PutItem};
 use crate::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions, ReadGuard};
 use crate::types::{PageId, Result, SombraError};
 use proptest::prelude::*;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::sync::Arc;
@@ -46,6 +48,11 @@ fn append_u64_from_key(key_bytes: &[u8], dst: &mut Vec<u64>) -> Result<()> {
     arr.copy_from_slice(key_bytes);
     dst.push(u64::from_be_bytes(arr));
     Ok(())
+}
+
+fn random_vec_key(map: &BTreeMap<Vec<u8>, u64>, rng: &mut ChaCha8Rng) -> Vec<u8> {
+    let idx = rng.gen_range(0..map.len());
+    map.keys().nth(idx).expect("non-empty map").clone()
 }
 
 fn choose_child_for_key(header: &page::Header, data: &[u8], key: &[u8]) -> Result<PageId> {
@@ -252,12 +259,115 @@ fn vec_key_put_many_round_trip() -> Result<()> {
     pager.checkpoint(CheckpointMode::Force)?;
     let read = pager.begin_read()?;
     for key in &keys {
-        assert!(
-            tree.get(&read, key)?.is_some(),
-            "missing key {:?}",
-            key
-        );
+        assert!(tree.get(&read, key)?.is_some(), "missing key {:?}", key);
     }
+    Ok(())
+}
+
+#[test]
+fn vec_key_randomized_round_trip_matches_reference() -> Result<()> {
+    let dir = tempdir().map_err(SombraError::Io)?;
+    let path = dir.path().join("btree_vec_key_random_ops.db");
+    let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let tree = BTree::<Vec<u8>, u64>::open_or_create(&store, BTreeOptions::default())?;
+    let mut reference = BTreeMap::new();
+    let mut rng = ChaCha8Rng::seed_from_u64(0xDEADBEEF);
+    let mut next_edge = 0u64;
+
+    let make_key = |src: u64, ty: u32, dst: u64, edge: u64| {
+        let mut buf = Vec::with_capacity(28);
+        buf.extend_from_slice(&src.to_be_bytes());
+        buf.extend_from_slice(&ty.to_be_bytes());
+        buf.extend_from_slice(&dst.to_be_bytes());
+        buf.extend_from_slice(&edge.to_be_bytes());
+        buf
+    };
+
+    let mut history = Vec::new();
+    for step in 0..512 {
+        let op = rng.gen_range(0..3);
+        match op {
+            0 => {
+                let src = rng.gen_range(0..256);
+                let dst = rng.gen_range(0..256);
+                let ty = rng.gen_range(0..64);
+                let key = make_key(src, ty, dst, next_edge);
+                next_edge += 1;
+                let value = rng.gen::<u64>();
+                let inserted_edge = next_edge - 1;
+                history.push(format!(
+                    "insert #{step}: src={src} dst={dst} ty={ty} edge={inserted_edge} val={value}"
+                ));
+                let prev = reference.insert(key.clone(), value);
+                assert!(
+                    prev.is_none(),
+                    "duplicate key generated during randomized insert"
+                );
+                let mut write = pager.begin_write()?;
+                tree.put(&mut write, &key, &value)?;
+                pager.commit(write)?;
+                let read = pager.begin_read()?;
+                assert_eq!(tree.get(&read, &key)?, Some(value));
+            }
+            1 => {
+                if reference.is_empty() {
+                    continue;
+                }
+                let key = random_vec_key(&reference, &mut rng);
+                let value = rng.gen::<u64>();
+                reference.insert(key.clone(), value);
+                history.push(format!("update #{step}: key={key:?} val={value}"));
+                let mut write = pager.begin_write()?;
+                tree.put(&mut write, &key, &value)?;
+                pager.commit(write)?;
+                let read = pager.begin_read()?;
+                assert_eq!(tree.get(&read, &key)?, Some(value));
+            }
+            _ => {
+                if reference.is_empty() {
+                    continue;
+                }
+                let key = random_vec_key(&reference, &mut rng);
+                reference.remove(&key);
+                history.push(format!("delete #{step}: key={key:?}"));
+                let mut write = pager.begin_write()?;
+                let removed = tree.delete(&mut write, &key)?;
+                pager.commit(write)?;
+                if !removed {
+                    let read = pager.begin_read()?;
+                    let mut cursor = tree.range(
+                        &read,
+                        Bound::Unbounded::<Vec<u8>>,
+                        Bound::Unbounded::<Vec<u8>>,
+                    )?;
+                    let mut remaining_keys = Vec::new();
+                    while let Some((k, v)) = cursor.next()? {
+                        remaining_keys.push((k, v));
+                    }
+                    panic!(
+                        "expected delete to remove existing key at step {step}: {key:?}; history: {history:?}; tree={remaining_keys:?}"
+                    );
+                }
+                let read = pager.begin_read()?;
+                assert!(tree.get(&read, &key)?.is_none());
+            }
+        }
+    }
+
+    pager.checkpoint(CheckpointMode::Force)?;
+    let read = pager.begin_read()?;
+    let mut cursor = tree.range(
+        &read,
+        Bound::Unbounded::<Vec<u8>>,
+        Bound::Unbounded::<Vec<u8>>,
+    )?;
+    let mut remaining = reference.clone();
+    while let Some((key, value)) = cursor.next()? {
+        let expected = remaining.remove(&key);
+        assert_eq!(expected, Some(value), "unexpected key {:?}", key);
+    }
+    assert!(remaining.is_empty(), "missing keys: {}", remaining.len());
     Ok(())
 }
 
@@ -267,9 +377,7 @@ fn in_place_leaf_edits_updates_stats() -> Result<()> {
     let path = dir.path().join("btree_in_place_stats.db");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let mut tree_opts = BTreeOptions::default();
-    tree_opts.in_place_leaf_edits = true;
-    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+    let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())?;
 
     {
         let mut write = pager.begin_write()?;
@@ -297,9 +405,7 @@ fn in_place_leaf_delete_updates_stats() -> Result<()> {
     let path = dir.path().join("btree_in_place_delete.db");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let mut tree_opts = BTreeOptions::default();
-    tree_opts.in_place_leaf_edits = true;
-    let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
+    let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())?;
 
     let before_stats = {
         let mut write = pager.begin_write()?;
@@ -718,7 +824,6 @@ fn borrow_in_place_updates_stats() -> Result<()> {
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
     tree_opts.page_fill_target = 99;
-    tree_opts.in_place_leaf_edits = true;
     let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
 
     for key in 0u64..80 {
@@ -781,7 +886,6 @@ fn merge_in_place_updates_stats() -> Result<()> {
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
     tree_opts.page_fill_target = 100;
-    tree_opts.in_place_leaf_edits = true;
     let tree = BTree::<u64, u64>::open_or_create(&store, tree_opts)?;
 
     for key in 0u64..64 {

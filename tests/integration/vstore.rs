@@ -1,4 +1,5 @@
 #![allow(clippy::all)]
+#![allow(missing_docs)]
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::collections::{HashMap, HashSet};

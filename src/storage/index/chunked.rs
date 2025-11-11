@@ -18,20 +18,14 @@ pub struct ChunkedIndex {
     store: Arc<dyn PageStore>,
     root: Cell<PageId>,
     tree: RefCell<Option<BTree<Vec<u8>, Vec<u8>>>>,
-    btree_inplace: bool,
 }
 
 impl ChunkedIndex {
-    pub fn open(
-        store: &Arc<dyn PageStore>,
-        root: PageId,
-        in_place: bool,
-    ) -> Result<(Self, PageId)> {
+    pub fn open(store: &Arc<dyn PageStore>, root: PageId) -> Result<(Self, PageId)> {
         let index = Self {
             store: Arc::clone(store),
             root: Cell::new(root),
             tree: RefCell::new(None),
-            btree_inplace: in_place,
         };
         Ok((index, root))
     }
@@ -231,7 +225,6 @@ impl ChunkedIndex {
         }
         let mut opts = BTreeOptions::default();
         opts.root_page = Some(self.root.get());
-        opts.in_place_leaf_edits = self.btree_inplace;
         let tree = BTree::open_or_create(&self.store, opts)?;
         self.tree.replace(Some(tree));
         Ok(())
@@ -243,7 +236,6 @@ impl ChunkedIndex {
         }
         let mut opts = BTreeOptions::default();
         opts.root_page = Some(self.root.get());
-        opts.in_place_leaf_edits = self.btree_inplace;
         let tree = BTree::open_or_create(&self.store, opts)?;
         self.tree.replace(Some(tree));
         Ok(())

@@ -225,126 +225,50 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             let mut local_rebalance = false;
             let removed_first = position == 0;
             let mut applied_in_place = false;
-            if self.options.in_place_leaf_edits {
-                let can_update_fence =
-                    !removed_first || !first_key_changed || header.low_fence_len == new_low.len();
-                if can_update_fence {
-                    let mut page = tx.page_mut(leaf_id)?;
-                    if let Some(result) = self.try_delete_leaf_in_place(
-                        tx,
-                        &mut page,
-                        &header,
-                        key_buf.as_slice(),
-                        removed_first && first_key_changed,
-                        removed_first.then_some(new_low.as_slice()),
-                    )? {
-                        applied_in_place = true;
-                        self.stats.inc_leaf_in_place_edits();
-                        if first_key_changed {
-                            parent_update_key = Some(new_low.clone());
-                        }
-                        let fill =
-                            Self::fill_percent(payload_len, result.free_start, result.free_end);
-                        local_rebalance = has_parent && fill < self.options.page_fill_target;
-                        if local_rebalance {
-                            rebalance_snapshot = Some(LeafSnapshot {
-                                entries: entries.clone(),
-                                low_fence: new_low.clone(),
-                                high_fence: high_fence.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-
-            if !applied_in_place {
-                if self.options.in_place_leaf_edits {
-                    if !has_parent {
-                        return Err(SombraError::Invalid(
-                            "leaf layout after delete exceeds capacity",
-                        ));
-                    }
-                    rebalance_snapshot = Some(LeafSnapshot {
-                        entries: entries.clone(),
-                        low_fence: new_low.clone(),
-                        high_fence: high_fence.clone(),
-                    });
-                    local_rebalance = true;
+            let can_update_fence =
+                !removed_first || !first_key_changed || header.low_fence_len == new_low.len();
+            if can_update_fence {
+                let mut page = tx.page_mut(leaf_id)?;
+                if let Some(result) = self.try_delete_leaf_in_place(
+                    tx,
+                    &mut page,
+                    &header,
+                    key_buf.as_slice(),
+                    removed_first && first_key_changed,
+                    removed_first.then_some(new_low.as_slice()),
+                )? {
+                    applied_in_place = true;
+                    self.stats.inc_leaf_in_place_edits();
                     if first_key_changed {
-                        parent_update_key = Some(new_low);
+                        parent_update_key = Some(new_low.clone());
                     }
-                } else {
-                    let high_slice = high_fence.as_slice();
-                    if self.slice_fits(
-                        payload_len,
-                        new_low.as_slice(),
-                        high_slice,
-                        &entries,
-                    )? {
-                        let fill = {
-                            let mut page = tx.page_mut(leaf_id)?;
-                            self.rebuild_leaf_payload(
-                                tx,
-                                &mut page,
-                                &header,
-                                new_low.as_slice(),
-                                high_slice,
-                                &entries,
-                            )?;
-                            let refreshed = page::Header::parse(page.data())?;
-                            Self::fill_percent(
-                                payload_len,
-                                refreshed.free_start,
-                                refreshed.free_end,
-                            )
-                        };
-                        self.stats.inc_leaf_rebuilds();
-                        local_rebalance =
-                            has_parent && fill < self.options.page_fill_target;
-                    } else if self.slice_fits(
-                        payload_len,
-                        low_fence.as_slice(),
-                        high_slice,
-                        &entries,
-                    )? {
-                        let fill = {
-                            let mut page = tx.page_mut(leaf_id)?;
-                            self.rebuild_leaf_payload(
-                                tx,
-                                &mut page,
-                                &header,
-                                low_fence.as_slice(),
-                                high_slice,
-                                &entries,
-                            )?;
-                            let refreshed = page::Header::parse(page.data())?;
-                            Self::fill_percent(
-                                payload_len,
-                                refreshed.free_start,
-                                refreshed.free_end,
-                            )
-                        };
-                        self.stats.inc_leaf_rebuilds();
-                        first_key_changed = false;
-                        local_rebalance =
-                            has_parent && fill < self.options.page_fill_target;
-                    } else {
-                        if !has_parent {
-                            return Err(SombraError::Invalid(
-                                "leaf layout after delete exceeds capacity",
-                            ));
-                        }
+                    let fill =
+                        Self::fill_percent(payload_len, result.free_start, result.free_end);
+                    local_rebalance = has_parent && fill < self.options.page_fill_target;
+                    if local_rebalance {
                         rebalance_snapshot = Some(LeafSnapshot {
                             entries: entries.clone(),
                             low_fence: new_low.clone(),
                             high_fence: high_fence.clone(),
                         });
-                        local_rebalance = true;
                     }
+                }
+            }
 
-                    if first_key_changed {
-                        parent_update_key = Some(new_low);
-                    }
+            if !applied_in_place {
+                if !has_parent {
+                    return Err(SombraError::Invalid(
+                        "leaf layout after delete exceeds capacity",
+                    ));
+                }
+                rebalance_snapshot = Some(LeafSnapshot {
+                    entries: entries.clone(),
+                    low_fence: new_low.clone(),
+                    high_fence: high_fence.clone(),
+                });
+                local_rebalance = true;
+                if first_key_changed {
+                    parent_update_key = Some(new_low);
                 }
             }
             local_rebalance

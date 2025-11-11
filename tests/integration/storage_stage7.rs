@@ -1,8 +1,10 @@
+#![allow(missing_docs)]
+
 use std::ops::Bound;
 use std::sync::Arc;
 
-use sombra::storage::index::{collect_all, intersect_k, intersect_sorted, PostingStream};
 use sombra::primitives::pager::{PageStore, Pager, PagerOptions};
+use sombra::storage::index::{collect_all, intersect_k, intersect_sorted, PostingStream};
 use sombra::storage::{
     BulkEdgeValidator, CreateEdgeOptions, DeleteNodeOpts, EdgeSpec, Graph, GraphOptions,
     GraphWriter, IndexDef, IndexKind, LabelScan, NodeSpec, PropEntry, PropPatch, PropPatchOp,
@@ -14,7 +16,7 @@ use tempfile::tempdir;
 fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Graph)> {
     let pager = Arc::new(Pager::create(path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let graph = Graph::open(GraphOptions::new(store).btree_inplace(true))?;
+    let graph = Graph::open(GraphOptions::new(store))?;
     Ok((pager, graph))
 }
 
@@ -884,10 +886,7 @@ fn graph_writer_node_cache_tracks_hits() -> Result<()> {
 struct NoopValidator;
 
 impl BulkEdgeValidator for NoopValidator {
-    fn validate_batch(
-        &self,
-        _: &[(sombra::types::NodeId, sombra::types::NodeId)],
-    ) -> Result<()> {
+    fn validate_batch(&self, _: &[(sombra::types::NodeId, sombra::types::NodeId)]) -> Result<()> {
         Ok(())
     }
 }

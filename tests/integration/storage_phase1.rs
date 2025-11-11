@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use sombra::{
@@ -17,7 +19,7 @@ fn graph_open_initializes_metadata_defaults() -> Result<()> {
 
     let store_arc = Arc::new(Pager::create(&db_path, PagerOptions::default())?);
     let store_trait: Arc<dyn PageStore> = store_arc.clone();
-    let graph = Graph::open(GraphOptions::new(store_trait.clone()).btree_inplace(true))?;
+    let graph = Graph::open(GraphOptions::new(store_trait.clone()))?;
     drop(graph);
 
     let meta = store_arc.meta()?;
@@ -84,8 +86,7 @@ fn graph_open_respects_custom_inline_thresholds() -> Result<()> {
         GraphOptions::new(store.clone())
             .inline_prop_blob(custom_blob)
             .inline_prop_value(custom_value)
-            .degree_cache(cfg!(feature = "degree-cache"))
-            .btree_inplace(true),
+            .degree_cache(cfg!(feature = "degree-cache")),
     )?;
     drop(graph);
 

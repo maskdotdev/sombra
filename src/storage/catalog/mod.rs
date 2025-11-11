@@ -391,6 +391,12 @@ impl Dict {
         }
     }
 
+    /// Resolves a string identifier using a fresh read guard.
+    pub fn resolve_str(&self, id: StrId) -> Result<String> {
+        let read = self.store.begin_read()?;
+        self.resolve(&read, id)
+    }
+
     fn reserve_str_id(&self, tx: &mut WriteGuard<'_>) -> Result<StrId> {
         let mut allocated: Option<u32> = None;
         tx.update_meta(|meta| {

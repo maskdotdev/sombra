@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use sombra::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions};
@@ -10,7 +12,7 @@ use tempfile::tempdir;
 fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Graph)> {
     let pager = Arc::new(Pager::create(path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
-    let graph = Graph::open(GraphOptions::new(store).btree_inplace(true))?;
+    let graph = Graph::open(GraphOptions::new(store))?;
     Ok((pager, graph))
 }
 

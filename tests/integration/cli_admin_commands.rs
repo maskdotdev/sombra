@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,8 +26,7 @@ fn seed_demo(path: &Path) -> sombra::types::Result<()> {
     let graph = Graph::open(
         GraphOptions::new(store.clone())
             .inline_prop_blob(256)
-            .inline_prop_value(64)
-            .btree_inplace(true),
+            .inline_prop_value(64),
     )?;
 
     let mut write = pager.begin_write()?;
@@ -60,7 +61,7 @@ fn seed_demo(path: &Path) -> sombra::types::Result<()> {
 #[test]
 fn stats_emits_json() {
     let (_dir, db_path) = setup_db("stats");
-    let output = cargo_bin_cmd!("sombra")
+    let output = cargo_bin_cmd!("cli")
         .args(["--format", "json", "stats"])
         .arg(&db_path)
         .assert()
@@ -75,7 +76,7 @@ fn stats_emits_json() {
 #[test]
 fn checkpoint_completes() {
     let (_dir, db_path) = setup_db("checkpoint");
-    cargo_bin_cmd!("sombra")
+    cargo_bin_cmd!("cli")
         .args(["checkpoint"])
         .arg(&db_path)
         .assert()
@@ -85,7 +86,7 @@ fn checkpoint_completes() {
 #[test]
 fn verify_full_succeeds() {
     let (_dir, db_path) = setup_db("verify");
-    let output = cargo_bin_cmd!("sombra")
+    let output = cargo_bin_cmd!("cli")
         .args(["--format", "json", "verify", "--level", "full"])
         .arg(&db_path)
         .assert()
@@ -101,7 +102,7 @@ fn verify_full_succeeds() {
 fn vacuum_writes_destination_file() {
     let (dir, db_path) = setup_db("vacuum");
     let dst = dir.path().join("vacuumed.sombra");
-    cargo_bin_cmd!("sombra")
+    cargo_bin_cmd!("cli")
         .arg("vacuum")
         .arg(&db_path)
         .arg("--into")
@@ -118,7 +119,7 @@ fn vacuum_writes_destination_file() {
 fn vacuum_analyze_reports_summary() {
     let (dir, db_path) = setup_db("vacuum-analyze");
     let dst = dir.path().join("vacuumed_analyze.sombra");
-    let output = cargo_bin_cmd!("sombra")
+    let output = cargo_bin_cmd!("cli")
         .args(["--format", "json", "vacuum"])
         .arg(&db_path)
         .arg("--into")
@@ -149,7 +150,7 @@ fn import_and_export_round_trip() {
     fs::write(&nodes_csv, "id,name\n1,Ada\n2,Bob\n").unwrap();
     fs::write(&edges_csv, "src,dst\n1,2\n").unwrap();
 
-    cargo_bin_cmd!("sombra")
+    cargo_bin_cmd!("cli")
         .args([
             "import",
             db_path.to_str().unwrap(),
@@ -174,7 +175,7 @@ fn import_and_export_round_trip() {
         .assert()
         .success();
 
-    cargo_bin_cmd!("sombra")
+    cargo_bin_cmd!("cli")
         .args([
             "export",
             db_path.to_str().unwrap(),
