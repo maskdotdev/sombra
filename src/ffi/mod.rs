@@ -870,7 +870,7 @@ pub struct QuerySpec {
     #[serde(rename = "$schemaVersion", default = "default_schema_version")]
     pub schema_version: u32,
     /// Optional client-supplied request identifier.
-    #[serde(default)]
+    #[serde(default, rename = "request_id", alias = "requestId")]
     pub request_id: Option<String>,
     /// MATCH clauses for node patterns.
     #[serde(default)]
@@ -2341,7 +2341,11 @@ mod tests {
                 "value": { "t": "String", "v": "Ada" }
             }
         });
-        let rows = db.execute_json(&spec)?;
+        let response = db.execute_json(&spec)?;
+        let rows = response
+            .get("rows")
+            .and_then(Value::as_array)
+            .expect("rows array");
         assert_eq!(rows.len(), 1);
         Ok(())
     }
