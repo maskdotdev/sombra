@@ -1,7 +1,9 @@
 //! Physical operator tree selected by the rule-based planner.
 
-use crate::query::ast::{Literal, Var};
+use crate::query::ast::Var;
+use crate::query::Value;
 use crate::types::{LabelId, PropId, TypeId};
+use std::convert::TryInto;
 use std::ops::Bound;
 
 /// Physical plan produced by the planner.
@@ -60,6 +62,8 @@ pub enum PhysicalOp {
         prop: PropId,
         /// The predicate to apply.
         pred: PropPredicate,
+        /// Estimated predicate selectivity.
+        selectivity: f64,
         /// Variable name to bind matched nodes.
         as_var: Var,
     },
@@ -80,6 +84,8 @@ pub enum PhysicalOp {
     Filter {
         /// The predicate to apply for filtering.
         pred: PropPredicate,
+        /// Estimated predicate selectivity.
+        selectivity: f64,
     },
     /// Intersects multiple node ID streams.
     Intersect {
@@ -99,6 +105,11 @@ pub enum PhysicalOp {
     Project {
         /// Fields to include in the projection.
         fields: Vec<ProjectField>,
+    },
+    /// Filters rows using a boolean predicate tree.
+    BoolFilter {
+        /// Predicate to evaluate.
+        expr: PhysicalBoolExpr,
     },
 }
 
@@ -136,10 +147,118 @@ pub enum PropPredicate {
         /// Upper bound of the range (inclusive or exclusive).
         upper: Bound<LiteralValue>,
     },
-    /// Custom predicate expression (for future extension).
-    Custom {
-        /// String representation of the custom expression.
-        expr: String,
+}
+
+/// Boolean predicate tree resolved to physical identifiers.
+#[derive(Clone, Debug)]
+pub enum PhysicalBoolExpr {
+    /// Comparison leaf.
+    Cmp(PhysicalComparison),
+    /// Logical AND.
+    And(Vec<PhysicalBoolExpr>),
+    /// Logical OR.
+    Or(Vec<PhysicalBoolExpr>),
+    /// Logical NOT.
+    Not(Box<PhysicalBoolExpr>),
+}
+
+/// Comparison operator referencing resolved property identifiers.
+#[derive(Clone, Debug)]
+pub enum PhysicalComparison {
+    /// Equality predicate on a resolved property id.
+    Eq {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal value to compare against.
+        value: LiteralValue,
+    },
+    /// Inequality predicate on a resolved property id.
+    Ne {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal value to compare against.
+        value: LiteralValue,
+    },
+    /// Less-than predicate on a resolved property id.
+    Lt {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal value to compare against.
+        value: LiteralValue,
+    },
+    /// Less-than-or-equal predicate on a resolved property id.
+    Le {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal value to compare against.
+        value: LiteralValue,
+    },
+    /// Greater-than predicate on a resolved property id.
+    Gt {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal value to compare against.
+        value: LiteralValue,
+    },
+    /// Greater-than-or-equal predicate on a resolved property id.
+    Ge {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal value to compare against.
+        value: LiteralValue,
+    },
+    /// Between predicate with explicit bounds.
+    Between {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Lower bound literal (inclusive/exclusive).
+        low: Bound<LiteralValue>,
+        /// Upper bound literal (inclusive/exclusive).
+        high: Bound<LiteralValue>,
+    },
+    /// Inclusion predicate with a literal set.
+    In {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Literal set to test membership against.
+        values: Vec<LiteralValue>,
+    },
+    /// Checks whether the property key exists on the node.
+    Exists {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+    },
+    /// Checks whether the property value is null or missing.
+    IsNull {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+    },
+    /// Checks whether the property is present and not null.
+    IsNotNull {
+        /// Variable whose property is inspected.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
     },
 }
 
@@ -153,12 +272,16 @@ pub enum ProjectField {
         /// Optional alias for the output field.
         alias: Option<String>,
     },
-    /// Projects a computed expression.
-    Expr {
-        /// String representation of the expression.
-        expr: String,
-        /// Alias for the computed field.
-        alias: String,
+    /// Projects a property from a bound variable.
+    Prop {
+        /// Variable exposing the property.
+        var: Var,
+        /// Resolved property identifier.
+        prop: PropId,
+        /// Property name preserved for explain output / default aliasing.
+        prop_name: String,
+        /// Optional alias for the output field.
+        alias: Option<String>,
     },
 }
 
@@ -175,16 +298,27 @@ pub enum LiteralValue {
     Float(f64),
     /// String value.
     String(String),
+    /// Binary value stored inline (base64 encoded over the wire).
+    Bytes(Vec<u8>),
+    /// DateTime literal represented as nanoseconds since Unix epoch.
+    DateTime(i64),
 }
 
-impl From<&Literal> for LiteralValue {
-    fn from(value: &Literal) -> Self {
+impl From<&Value> for LiteralValue {
+    fn from(value: &Value) -> Self {
         match value {
-            Literal::Null => LiteralValue::Null,
-            Literal::Bool(v) => LiteralValue::Bool(*v),
-            Literal::Int(v) => LiteralValue::Int(*v),
-            Literal::Float(v) => LiteralValue::Float(*v),
-            Literal::String(v) => LiteralValue::String(v.clone()),
+            Value::Null => LiteralValue::Null,
+            Value::Bool(v) => LiteralValue::Bool(*v),
+            Value::Int(v) => LiteralValue::Int(*v),
+            Value::Float(v) => LiteralValue::Float(*v),
+            Value::String(v) => LiteralValue::String(v.clone()),
+            Value::Bytes(bytes) => LiteralValue::Bytes(bytes.clone()),
+            Value::DateTime(v) => {
+                let nanos: i64 = (*v)
+                    .try_into()
+                    .expect("datetime literal exceeds i64 range after validation");
+                LiteralValue::DateTime(nanos)
+            }
         }
     }
 }

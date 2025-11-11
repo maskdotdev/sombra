@@ -1,7 +1,11 @@
 //! Logical query plan structures built from the AST before physical
 //! optimisation.
 
-use crate::query::ast::{EdgeDirection, Projection, PropPredicate, Var};
+use crate::query::{
+    ast::{BoolExpr, EdgeDirection, Projection, Var},
+    value::Value,
+};
+use std::ops::Bound;
 
 /// Logical operator tree for a query.
 #[derive(Clone, Debug)]
@@ -59,6 +63,8 @@ pub enum LogicalOp {
         prop: String,
         /// Predicate to apply on the property.
         predicate: PropPredicate,
+        /// Estimated predicate selectivity.
+        selectivity: f64,
         /// Variable name to bind matched nodes.
         as_var: Var,
     },
@@ -79,6 +85,8 @@ pub enum LogicalOp {
     Filter {
         /// The predicate to apply for filtering.
         predicate: PropPredicate,
+        /// Estimated predicate selectivity.
+        selectivity: f64,
     },
     /// Intersects multiple node ID streams.
     Intersect {
@@ -99,4 +107,33 @@ pub enum LogicalOp {
     },
     /// Removes duplicate rows from the result stream.
     Distinct,
+    /// Filters rows using a boolean predicate tree.
+    BoolFilter {
+        /// Predicate to evaluate.
+        expr: BoolExpr,
+    },
+}
+/// Simple property predicate used for pushdown planning decisions.
+#[derive(Clone, Debug)]
+pub enum PropPredicate {
+    /// Equality predicate for exact property value matching.
+    Eq {
+        /// Variable to test the property on.
+        var: Var,
+        /// Property name to check.
+        prop: String,
+        /// Expected value for the property.
+        value: Value,
+    },
+    /// Range predicate for property values within bounds.
+    Range {
+        /// Variable to test the property on.
+        var: Var,
+        /// Property name to check.
+        prop: String,
+        /// Lower bound for the range (inclusive or exclusive).
+        lower: Bound<Value>,
+        /// Upper bound for the range (inclusive or exclusive).
+        upper: Bound<Value>,
+    },
 }

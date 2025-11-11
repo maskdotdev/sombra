@@ -14,8 +14,8 @@ use crate::types::{LabelId, NodeId, PropId, Result, SombraError, TypeId};
 use crate::query::ast::Var;
 use crate::query::metadata::MetadataProvider;
 use crate::query::physical::{
-    LiteralValue, PhysicalNode, PhysicalOp, PhysicalPlan, ProjectField,
-    PropPredicate as PhysicalPredicate,
+    LiteralValue, PhysicalBoolExpr, PhysicalComparison, PhysicalNode, PhysicalOp, PhysicalPlan,
+    ProjectField, PropPredicate as PhysicalPredicate,
 };
 use crate::query::profile::{
     profile_timer as query_profile_timer, record_profile_timer as record_query_profile_timer,
@@ -45,11 +45,20 @@ pub enum Value {
     Float(f64),
     /// String value
     String(String),
+    /// Binary value (base64-encoded when serialized).
+    Bytes(Vec<u8>),
+    /// Date value represented as days since Unix epoch.
+    Date(i64),
+    /// DateTime value represented as milliseconds since Unix epoch.
+    DateTime(i64),
     /// Node identifier
     NodeId(NodeId),
+    /// Nested object value (used for var projections).
+    Object(BTreeMap<String, Value>),
 }
 
 type NodeCache = Arc<Mutex<HashMap<NodeId, NodeData>>>;
+type PropNameCache = Arc<Mutex<HashMap<PropId, String>>>;
 
 trait BindingStream {
     fn try_next(&mut self) -> Result<Option<BindingRow>>;
@@ -95,14 +104,28 @@ impl BindingRow {
 #[derive(Clone)]
 enum RowMapper {
     All,
-    Project(Vec<ProjectField>),
+    Project {
+        fields: Vec<ProjectField>,
+        graph: Arc<Graph>,
+        context: Arc<ReadContext>,
+        cache: NodeCache,
+        metadata: Arc<dyn MetadataProvider>,
+        prop_names: PropNameCache,
+    },
 }
 
 impl RowMapper {
     fn map(&self, binding: &BindingRow) -> Result<Row> {
         match self {
             RowMapper::All => project_all(binding),
-            RowMapper::Project(fields) => apply_projection(binding, fields),
+            RowMapper::Project {
+                fields,
+                graph,
+                context,
+                cache,
+                metadata,
+                prop_names,
+            } => apply_projection(binding, fields, graph, context, cache, metadata, prop_names),
         }
     }
 }
@@ -168,20 +191,31 @@ impl Executor {
         let context = Arc::new(ReadContext::new(self.pager.begin_read()?));
         record_query_profile_timer(QueryProfileKind::ReadGuard, guard_timer);
         let cache: NodeCache = Arc::new(Mutex::new(HashMap::new()));
-
-        let (mapper, root) = match &plan.root.op {
+        let mut project_fields = None;
+        let root = match &plan.root.op {
             PhysicalOp::Project { fields } => {
                 if plan.root.inputs.len() != 1 {
                     return Err(SombraError::Invalid("project expects single input"));
                 }
-                (RowMapper::Project(fields.clone()), &plan.root.inputs[0])
+                project_fields = Some(fields.clone());
+                &plan.root.inputs[0]
             }
-            _ => (RowMapper::All, &plan.root),
+            _ => &plan.root,
         };
-
         let build_timer = query_profile_timer();
-        let bindings = self.build_stream(root, Arc::clone(&context), cache)?;
+        let bindings = self.build_stream(root, Arc::clone(&context), Arc::clone(&cache))?;
         record_query_profile_timer(QueryProfileKind::StreamBuild, build_timer);
+        let mapper = match project_fields {
+            Some(fields) => RowMapper::Project {
+                fields,
+                graph: Arc::clone(&self.graph),
+                context: Arc::clone(&context),
+                cache,
+                metadata: Arc::clone(&self.metadata),
+                prop_names: Arc::new(Mutex::new(HashMap::new())),
+            },
+            None => RowMapper::All,
+        };
         Ok(ResultStream::new(bindings, mapper, context))
     }
 
@@ -207,6 +241,7 @@ impl Executor {
                 prop,
                 pred,
                 as_var,
+                ..
             } => self.build_prop_index_stream(*label, *prop, pred, &as_var.0, Arc::clone(&context)),
             PhysicalOp::Expand {
                 from,
@@ -231,26 +266,33 @@ impl Executor {
                     *distinct_nodes,
                 )))
             }
-            PhysicalOp::Filter { pred } => {
+            PhysicalOp::Filter { pred, .. } => {
                 if node.inputs.len() != 1 {
                     return Err(SombraError::Invalid("filter expects single input child"));
                 }
                 let input =
                     self.build_stream(&node.inputs[0], Arc::clone(&context), cache.clone())?;
-                let filter = match pred {
-                    PhysicalPredicate::Eq { .. } | PhysicalPredicate::Range { .. } => {
-                        FilterEval::Physical(pred.clone())
-                    }
-                    PhysicalPredicate::Custom { expr } => {
-                        FilterEval::Custom(self.parse_custom_predicate(expr)?)
-                    }
-                };
+                let filter = FilterEval::Physical(pred.clone());
                 Ok(Box::new(FilterStream::new(
                     input,
                     self.graph.clone(),
                     Arc::clone(&context),
                     cache,
                     filter,
+                )))
+            }
+            PhysicalOp::BoolFilter { expr } => {
+                if node.inputs.len() != 1 {
+                    return Err(SombraError::Invalid("filter expects single input child"));
+                }
+                let input =
+                    self.build_stream(&node.inputs[0], Arc::clone(&context), cache.clone())?;
+                Ok(Box::new(FilterStream::new(
+                    input,
+                    self.graph.clone(),
+                    Arc::clone(&context),
+                    cache,
+                    FilterEval::Bool(expr.clone()),
                 )))
             }
             PhysicalOp::Intersect { vars } => {
@@ -339,20 +381,13 @@ impl Executor {
                     stream,
                 )?))
             }
-            PhysicalPredicate::Custom { .. } => Err(SombraError::Invalid(
-                "custom property predicate not supported by index scan",
-            )),
         }
-    }
-
-    fn parse_custom_predicate(&self, expr: &str) -> Result<ParsedCustomPredicate> {
-        parse_custom_predicate(self.metadata.as_ref(), expr)
     }
 }
 
 enum FilterEval {
     Physical(PhysicalPredicate),
-    Custom(ParsedCustomPredicate),
+    Bool(PhysicalBoolExpr),
 }
 
 struct PostingBindingStream {
@@ -565,35 +600,280 @@ impl FilterStream {
             let Some(row) = self.input.try_next()? else {
                 return Ok(None);
             };
-            let node_id = match &self.eval {
-                FilterEval::Physical(PhysicalPredicate::Eq { var, .. })
-                | FilterEval::Physical(PhysicalPredicate::Range { var, .. }) => row
-                    .get(&var.0)
-                    .ok_or(SombraError::Invalid("filter variable missing from binding"))?,
-                FilterEval::Physical(PhysicalPredicate::Custom { .. }) => {
-                    return Err(SombraError::Invalid(
-                        "custom predicate stored in physical filter",
-                    ))
-                }
-                FilterEval::Custom(parsed) => row.get(&parsed.var).ok_or(SombraError::Invalid(
-                    "custom predicate variable missing from binding",
-                ))?,
-            };
-            let node_data = fetch_node_data(&self.graph, &self.context, &self.cache, node_id)?;
             let matches = match &self.eval {
                 FilterEval::Physical(pred) => match pred {
-                    PhysicalPredicate::Eq { .. } | PhysicalPredicate::Range { .. } => {
+                    PhysicalPredicate::Eq { var, .. } | PhysicalPredicate::Range { var, .. } => {
+                        let node_id = row
+                            .get(&var.0)
+                            .ok_or(SombraError::Invalid("filter variable missing from binding"))?;
+                        let node_data =
+                            fetch_node_data(&self.graph, &self.context, &self.cache, node_id)?;
                         evaluate_predicate(pred, &node_data)?
                     }
-                    PhysicalPredicate::Custom { .. } => unreachable!(),
                 },
-                FilterEval::Custom(parsed) => evaluate_custom_predicate(parsed, &node_data)?,
+                FilterEval::Bool(expr) => {
+                    let mut resolver = ExecutorBoolResolver::new(
+                        &row,
+                        self.graph.clone(),
+                        Arc::clone(&self.context),
+                        self.cache.clone(),
+                    );
+                    evaluate_bool_expr(expr, &mut resolver)?
+                }
             };
             if matches {
                 return Ok(Some(row));
             }
         }
     }
+}
+
+trait BoolNodeResolver {
+    fn resolve(&mut self, var: &Var) -> Result<NodeData>;
+}
+
+struct ExecutorBoolResolver<'a> {
+    row: &'a BindingRow,
+    graph: Arc<Graph>,
+    context: Arc<ReadContext>,
+    cache: NodeCache,
+    loaded: HashMap<String, NodeData>,
+}
+
+impl<'a> ExecutorBoolResolver<'a> {
+    fn new(
+        row: &'a BindingRow,
+        graph: Arc<Graph>,
+        context: Arc<ReadContext>,
+        cache: NodeCache,
+    ) -> Self {
+        Self {
+            row,
+            graph,
+            context,
+            cache,
+            loaded: HashMap::new(),
+        }
+    }
+}
+
+impl BoolNodeResolver for ExecutorBoolResolver<'_> {
+    fn resolve(&mut self, var: &Var) -> Result<NodeData> {
+        if let Some(existing) = self.loaded.get(&var.0) {
+            return Ok(existing.clone());
+        }
+        let node_id = self.row.get(&var.0).ok_or(SombraError::Invalid(
+            "predicate variable missing from binding",
+        ))?;
+        let data = fetch_node_data(&self.graph, &self.context, &self.cache, node_id)?;
+        self.loaded.insert(var.0.clone(), data.clone());
+        Ok(data)
+    }
+}
+
+fn evaluate_bool_expr<R: BoolNodeResolver>(
+    expr: &PhysicalBoolExpr,
+    resolver: &mut R,
+) -> Result<bool> {
+    match expr {
+        PhysicalBoolExpr::Cmp(cmp) => evaluate_comparison(cmp, resolver),
+        PhysicalBoolExpr::And(children) => {
+            for child in children {
+                if !evaluate_bool_expr(child, resolver)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        PhysicalBoolExpr::Or(children) => {
+            for child in children {
+                if evaluate_bool_expr(child, resolver)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        PhysicalBoolExpr::Not(child) => Ok(!evaluate_bool_expr(child, resolver)?),
+    }
+}
+
+fn evaluate_comparison<R: BoolNodeResolver>(
+    cmp: &PhysicalComparison,
+    resolver: &mut R,
+) -> Result<bool> {
+    match cmp {
+        PhysicalComparison::Eq { var, prop, value } => {
+            let node = resolver.resolve(var)?;
+            eval_eq(&node, *prop, value)
+        }
+        PhysicalComparison::Ne { var, prop, value } => {
+            let node = resolver.resolve(var)?;
+            eval_ne(&node, *prop, value)
+        }
+        PhysicalComparison::Lt { var, prop, value } => {
+            let node = resolver.resolve(var)?;
+            compare_with(&node, *prop, value, |ord| ord.is_lt())
+        }
+        PhysicalComparison::Le { var, prop, value } => {
+            let node = resolver.resolve(var)?;
+            compare_with(&node, *prop, value, |ord| ord.is_le())
+        }
+        PhysicalComparison::Gt { var, prop, value } => {
+            let node = resolver.resolve(var)?;
+            compare_with(&node, *prop, value, |ord| ord.is_gt())
+        }
+        PhysicalComparison::Ge { var, prop, value } => {
+            let node = resolver.resolve(var)?;
+            compare_with(&node, *prop, value, |ord| ord.is_ge())
+        }
+        PhysicalComparison::Between {
+            var,
+            prop,
+            low,
+            high,
+        } => {
+            let node = resolver.resolve(var)?;
+            eval_between(&node, *prop, low, high)
+        }
+        PhysicalComparison::In { var, prop, values } => {
+            let node = resolver.resolve(var)?;
+            eval_in(&node, *prop, values)
+        }
+        PhysicalComparison::Exists { var, prop } => {
+            let node = resolver.resolve(var)?;
+            Ok(find_prop(&node, *prop).is_some())
+        }
+        PhysicalComparison::IsNull { var, prop } => {
+            let node = resolver.resolve(var)?;
+            Ok(find_prop(&node, *prop)
+                .map(|value| matches!(value, PropValueOwned::Null))
+                .unwrap_or(true))
+        }
+        PhysicalComparison::IsNotNull { var, prop } => {
+            let node = resolver.resolve(var)?;
+            Ok(find_prop(&node, *prop)
+                .map(|value| !matches!(value, PropValueOwned::Null))
+                .unwrap_or(false))
+        }
+    }
+}
+
+fn eval_eq(node: &NodeData, prop: PropId, literal: &LiteralValue) -> Result<bool> {
+    if matches!(literal, LiteralValue::Null) {
+        return Ok(find_prop(node, prop)
+            .map(|value| matches!(value, PropValueOwned::Null))
+            .unwrap_or(true));
+    }
+    let Some(value) = find_prop(node, prop) else {
+        return Ok(false);
+    };
+    if matches!(value, PropValueOwned::Null) {
+        return Ok(false);
+    }
+    Ok(compare_values(value, literal)?.is_eq())
+}
+
+fn eval_ne(node: &NodeData, prop: PropId, literal: &LiteralValue) -> Result<bool> {
+    if matches!(literal, LiteralValue::Null) {
+        return Ok(find_prop(node, prop)
+            .map(|value| !matches!(value, PropValueOwned::Null))
+            .unwrap_or(false));
+    }
+    let Some(value) = find_prop(node, prop) else {
+        return Ok(false);
+    };
+    if matches!(value, PropValueOwned::Null) {
+        return Ok(false);
+    }
+    Ok(!compare_values(value, literal)?.is_eq())
+}
+
+fn compare_with<F>(
+    node: &NodeData,
+    prop: PropId,
+    literal: &LiteralValue,
+    predicate: F,
+) -> Result<bool>
+where
+    F: Fn(CompareOrdering) -> bool,
+{
+    if matches!(literal, LiteralValue::Null) {
+        return Ok(false);
+    }
+    let Some(value) = find_prop(node, prop) else {
+        return Ok(false);
+    };
+    if matches!(value, PropValueOwned::Null) {
+        return Ok(false);
+    }
+    let ord = compare_values(value, literal)?;
+    Ok(predicate(ord))
+}
+
+fn eval_between(
+    node: &NodeData,
+    prop: PropId,
+    low: &Bound<LiteralValue>,
+    high: &Bound<LiteralValue>,
+) -> Result<bool> {
+    let Some(value) = find_prop(node, prop) else {
+        return Ok(false);
+    };
+    if matches!(value, PropValueOwned::Null) {
+        return Ok(false);
+    }
+    let meets_low = match low {
+        Bound::Unbounded => true,
+        Bound::Included(lit) => {
+            if matches!(lit, LiteralValue::Null) {
+                return Ok(false);
+            }
+            compare_values(value, lit)?.is_ge()
+        }
+        Bound::Excluded(lit) => {
+            if matches!(lit, LiteralValue::Null) {
+                return Ok(false);
+            }
+            compare_values(value, lit)?.is_gt()
+        }
+    };
+    if !meets_low {
+        return Ok(false);
+    }
+    let meets_high = match high {
+        Bound::Unbounded => true,
+        Bound::Included(lit) => {
+            if matches!(lit, LiteralValue::Null) {
+                return Ok(false);
+            }
+            compare_values(value, lit)?.is_le()
+        }
+        Bound::Excluded(lit) => {
+            if matches!(lit, LiteralValue::Null) {
+                return Ok(false);
+            }
+            compare_values(value, lit)?.is_lt()
+        }
+    };
+    Ok(meets_high)
+}
+
+fn eval_in(node: &NodeData, prop: PropId, values: &[LiteralValue]) -> Result<bool> {
+    let Some(actual) = find_prop(node, prop) else {
+        return Ok(false);
+    };
+    if matches!(actual, PropValueOwned::Null) {
+        return Ok(false);
+    }
+    for literal in values {
+        if matches!(literal, LiteralValue::Null) {
+            continue;
+        }
+        if compare_values(actual, literal)?.is_eq() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 struct HashJoinStream {
@@ -730,108 +1010,15 @@ fn fetch_node_data(
     Ok(data)
 }
 
-fn parse_custom_predicate(
-    metadata: &dyn MetadataProvider,
-    expr: &str,
-) -> Result<ParsedCustomPredicate> {
-    let tokens = tokenize_expression(expr);
-    if tokens.len() < 2 {
-        return Err(SombraError::Invalid(
-            "custom predicate requires an operator",
-        ));
-    }
-
-    let (var, prop_name) = split_var_prop(&tokens[0])?;
-    let prop = metadata.resolve_property(&prop_name)?;
-
-    if tokens[1].eq_ignore_ascii_case("IS") {
-        if tokens.len() == 3 && tokens[2].eq_ignore_ascii_case("NULL") {
-            return Ok(ParsedCustomPredicate {
-                var,
-                prop,
-                op: CustomOp::IsNull,
-                literal: None,
-            });
-        }
-        if tokens.len() == 4
-            && tokens[2].eq_ignore_ascii_case("NOT")
-            && tokens[3].eq_ignore_ascii_case("NULL")
-        {
-            return Ok(ParsedCustomPredicate {
-                var,
-                prop,
-                op: CustomOp::IsNotNull,
-                literal: None,
-            });
-        }
-        return Err(SombraError::Invalid(
-            "custom predicate expected NULL after IS",
-        ));
-    }
-
-    if tokens.len() < 3 {
-        return Err(SombraError::Invalid(
-            "custom predicate missing comparison literal",
-        ));
-    }
-
-    let op = match tokens[1].as_str() {
-        "=" | "==" => CustomOp::Eq,
-        "!=" | "<>" => CustomOp::Ne,
-        ">" => CustomOp::Gt,
-        ">=" => CustomOp::Ge,
-        "<" => CustomOp::Lt,
-        "<=" => CustomOp::Le,
-        _ => {
-            return Err(SombraError::Invalid(
-                "unsupported custom predicate operator",
-            ))
-        }
-    };
-
-    let literal_raw = tokens[2..].join(" ");
-    let literal = parse_literal_value(&literal_raw)?;
-    Ok(ParsedCustomPredicate {
-        var,
-        prop,
-        op,
-        literal: Some(literal),
-    })
-}
-
-fn evaluate_custom_predicate(parsed: &ParsedCustomPredicate, node: &NodeData) -> Result<bool> {
-    let prop_value = find_prop(node, parsed.prop);
-    match parsed.op {
-        CustomOp::IsNull => Ok(prop_value
-            .map(|value| matches!(value, PropValueOwned::Null))
-            .unwrap_or(true)),
-        CustomOp::IsNotNull => Ok(prop_value
-            .map(|value| !matches!(value, PropValueOwned::Null))
-            .unwrap_or(false)),
-        CustomOp::Eq | CustomOp::Ne | CustomOp::Lt | CustomOp::Le | CustomOp::Gt | CustomOp::Ge => {
-            let Some(actual) = prop_value else {
-                return Ok(false);
-            };
-            let literal = parsed
-                .literal
-                .as_ref()
-                .ok_or_else(|| SombraError::Invalid("custom predicate missing literal"))?;
-            let ord = compare_values(actual, literal)?;
-            let matches = match parsed.op {
-                CustomOp::Eq => ord.is_eq(),
-                CustomOp::Ne => !ord.is_eq(),
-                CustomOp::Lt => ord.is_lt(),
-                CustomOp::Le => ord.is_le(),
-                CustomOp::Gt => ord.is_gt(),
-                CustomOp::Ge => ord.is_ge(),
-                CustomOp::IsNull | CustomOp::IsNotNull => unreachable!(),
-            };
-            Ok(matches)
-        }
-    }
-}
-
-fn apply_projection(binding: &BindingRow, fields: &[ProjectField]) -> Result<Row> {
+fn apply_projection(
+    binding: &BindingRow,
+    fields: &[ProjectField],
+    graph: &Arc<Graph>,
+    context: &Arc<ReadContext>,
+    cache: &NodeCache,
+    metadata: &Arc<dyn MetadataProvider>,
+    prop_names: &PropNameCache,
+) -> Result<Row> {
     let mut row = Row::new();
     for field in fields {
         match field {
@@ -839,17 +1026,50 @@ fn apply_projection(binding: &BindingRow, fields: &[ProjectField]) -> Result<Row
                 let Some(node) = binding.get(&var.0) else {
                     return Err(SombraError::Invalid("projection variable missing"));
                 };
+                let data = fetch_node_data(graph, context, cache, node)?;
+                let mut props = BTreeMap::new();
+                for (prop_id, prop_value) in &data.props {
+                    let name = resolve_prop_name(metadata, prop_names, *prop_id)?;
+                    props.insert(name, prop_value_to_exec_value(prop_value));
+                }
                 let key = alias.clone().unwrap_or_else(|| var.0.clone());
-                row.insert(key, Value::NodeId(node));
+                let mut node_obj = BTreeMap::new();
+                node_obj.insert("_id".into(), Value::NodeId(node));
+                node_obj.insert("props".into(), Value::Object(props));
+                row.insert(key, Value::Object(node_obj));
             }
-            ProjectField::Expr { .. } => {
-                return Err(SombraError::Invalid(
-                    "expression projection not implemented",
-                ));
+            ProjectField::Prop {
+                var,
+                prop,
+                prop_name,
+                alias,
+            } => {
+                let node_id = binding
+                    .get(&var.0)
+                    .ok_or(SombraError::Invalid("projection variable missing"))?;
+                let data = fetch_node_data(graph, context, cache, node_id)?;
+                let value = find_prop(&data, *prop)
+                    .map(prop_value_to_exec_value)
+                    .unwrap_or(Value::Null);
+                let key = alias.clone().unwrap_or_else(|| prop_name.clone());
+                row.insert(key, value);
             }
         }
     }
     Ok(row)
+}
+
+fn resolve_prop_name(
+    metadata: &Arc<dyn MetadataProvider>,
+    cache: &PropNameCache,
+    prop: PropId,
+) -> Result<String> {
+    if let Some(name) = cache.lock().unwrap().get(&prop).cloned() {
+        return Ok(name);
+    }
+    let name = metadata.property_name(prop)?;
+    cache.lock().unwrap().insert(prop, name.clone());
+    Ok(name)
 }
 
 fn project_all(binding: &BindingRow) -> Result<Row> {
@@ -878,9 +1098,17 @@ fn merge_rows(left: &BindingRow, right: &BindingRow) -> Option<BindingRow> {
 fn evaluate_predicate(predicate: &PhysicalPredicate, node: &NodeData) -> Result<bool> {
     match predicate {
         PhysicalPredicate::Eq { prop, value, .. } => {
+            if matches!(value, LiteralValue::Null) {
+                return Ok(find_prop(node, *prop)
+                    .map(|actual| matches!(actual, PropValueOwned::Null))
+                    .unwrap_or(true));
+            }
             let Some(actual) = find_prop(node, *prop) else {
                 return Ok(false);
             };
+            if matches!(actual, PropValueOwned::Null) {
+                return Ok(false);
+            }
             Ok(compare_values(actual, value)?.is_eq())
         }
         PhysicalPredicate::Range {
@@ -889,20 +1117,40 @@ fn evaluate_predicate(predicate: &PhysicalPredicate, node: &NodeData) -> Result<
             let Some(actual) = find_prop(node, *prop) else {
                 return Ok(false);
             };
+            if matches!(actual, PropValueOwned::Null) {
+                return Ok(false);
+            }
             let lower_cmp = match lower {
                 Bound::Unbounded => true,
-                Bound::Included(lit) => compare_values(actual, lit)?.is_ge(),
-                Bound::Excluded(lit) => compare_values(actual, lit)?.is_gt(),
+                Bound::Included(lit) => {
+                    if matches!(lit, LiteralValue::Null) {
+                        return Ok(false);
+                    }
+                    compare_values(actual, lit)?.is_ge()
+                }
+                Bound::Excluded(lit) => {
+                    if matches!(lit, LiteralValue::Null) {
+                        return Ok(false);
+                    }
+                    compare_values(actual, lit)?.is_gt()
+                }
             };
             let upper_cmp = match upper {
                 Bound::Unbounded => true,
-                Bound::Included(lit) => compare_values(actual, lit)?.is_le(),
-                Bound::Excluded(lit) => compare_values(actual, lit)?.is_lt(),
+                Bound::Included(lit) => {
+                    if matches!(lit, LiteralValue::Null) {
+                        return Ok(false);
+                    }
+                    compare_values(actual, lit)?.is_le()
+                }
+                Bound::Excluded(lit) => {
+                    if matches!(lit, LiteralValue::Null) {
+                        return Ok(false);
+                    }
+                    compare_values(actual, lit)?.is_lt()
+                }
             };
             Ok(lower_cmp && upper_cmp)
-        }
-        PhysicalPredicate::Custom { .. } => {
-            Err(SombraError::Invalid("custom predicates not supported yet"))
         }
     }
 }
@@ -911,6 +1159,19 @@ fn find_prop<'a>(node: &'a NodeData, prop: PropId) -> Option<&'a PropValueOwned>
     node.props
         .iter()
         .find_map(|(id, value)| if *id == prop { Some(value) } else { None })
+}
+
+fn prop_value_to_exec_value(value: &PropValueOwned) -> Value {
+    match value {
+        PropValueOwned::Null => Value::Null,
+        PropValueOwned::Bool(v) => Value::Bool(*v),
+        PropValueOwned::Int(v) => Value::Int(*v),
+        PropValueOwned::Float(v) => Value::Float(*v),
+        PropValueOwned::Str(v) => Value::String(v.clone()),
+        PropValueOwned::Bytes(v) => Value::Bytes(v.clone()),
+        PropValueOwned::Date(v) => Value::Date(*v),
+        PropValueOwned::DateTime(v) => Value::DateTime(*v),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -940,6 +1201,22 @@ impl CompareOrdering {
 
 fn compare_values(value: &PropValueOwned, literal: &LiteralValue) -> Result<CompareOrdering> {
     use CompareOrdering::*;
+    if let LiteralValue::Bytes(expected) = literal {
+        match value {
+            PropValueOwned::Bytes(actual) => {
+                return Ok(match actual.cmp(expected) {
+                    std::cmp::Ordering::Less => Less,
+                    std::cmp::Ordering::Equal => Equal,
+                    std::cmp::Ordering::Greater => Greater,
+                })
+            }
+            _ => {
+                return Err(SombraError::Invalid(
+                    "binary property comparison unsupported for this property",
+                ))
+            }
+        }
+    }
     let left = comparable_from_prop(value)?;
     let right = comparable_from_literal(literal);
     match (left, right) {
@@ -975,6 +1252,8 @@ fn literal_to_prop_value(value: &LiteralValue) -> Result<PropValueOwned> {
         LiteralValue::Int(v) => Ok(PropValueOwned::Int(*v)),
         LiteralValue::Float(v) => Ok(PropValueOwned::Float(*v)),
         LiteralValue::String(v) => Ok(PropValueOwned::Str(v.clone())),
+        LiteralValue::Bytes(v) => Ok(PropValueOwned::Bytes(v.clone())),
+        LiteralValue::DateTime(v) => Ok(PropValueOwned::DateTime(*v)),
     }
 }
 
@@ -1015,6 +1294,8 @@ fn comparable_from_literal(literal: &LiteralValue) -> ComparableValue {
         LiteralValue::Int(v) => ComparableValue::Number(*v as f64),
         LiteralValue::Float(v) => ComparableValue::Number(*v),
         LiteralValue::String(v) => ComparableValue::String(v.clone()),
+        LiteralValue::DateTime(v) => ComparableValue::Number(*v as f64),
+        LiteralValue::Bytes(_) => unreachable!("binary literal handled earlier"),
     }
 }
 
@@ -1028,162 +1309,6 @@ fn bound_ref<'a>(
         (Bound::Excluded(_), Some(value)) => Bound::Excluded(value),
         _ => Bound::Unbounded,
     }
-}
-
-#[derive(Clone, Debug)]
-struct ParsedCustomPredicate {
-    var: String,
-    prop: PropId,
-    op: CustomOp,
-    literal: Option<LiteralValue>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum CustomOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    IsNull,
-    IsNotNull,
-}
-
-fn tokenize_expression(expr: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    let mut chars = expr.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if let Some(q) = quote {
-            buf.push(ch);
-            if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    buf.push(next);
-                }
-                continue;
-            }
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' => {
-                if !buf.is_empty() {
-                    tokens.push(std::mem::take(&mut buf));
-                }
-                quote = Some(ch);
-                buf.push(ch);
-            }
-            c if c.is_whitespace() => {
-                if !buf.is_empty() {
-                    tokens.push(std::mem::take(&mut buf));
-                }
-            }
-            '=' | '!' | '<' | '>' => {
-                if !buf.is_empty() {
-                    tokens.push(std::mem::take(&mut buf));
-                }
-                let mut op = String::new();
-                op.push(ch);
-                if let Some(next) = chars.peek() {
-                    if (*next == '=')
-                        || (ch == '<' && *next == '>')
-                        || (ch == '>' && *next == '=')
-                        || (ch == '!' && *next == '=')
-                    {
-                        op.push(*next);
-                        chars.next();
-                    }
-                }
-                tokens.push(op);
-            }
-            _ => buf.push(ch),
-        }
-    }
-
-    if !buf.is_empty() {
-        tokens.push(buf);
-    }
-
-    tokens
-}
-
-fn split_var_prop(token: &str) -> Result<(String, String)> {
-    let trimmed = token.trim();
-    let Some((var, prop)) = trimmed.split_once('.') else {
-        return Err(SombraError::Invalid(
-            "custom predicate must reference a var.prop pair",
-        ));
-    };
-    if var.is_empty() || prop.is_empty() {
-        return Err(SombraError::Invalid(
-            "custom predicate requires non-empty var and property",
-        ));
-    }
-    Ok((var.to_owned(), prop.to_owned()))
-}
-
-fn parse_literal_value(raw: &str) -> Result<LiteralValue> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(SombraError::Invalid(
-            "custom predicate literal cannot be empty",
-        ));
-    }
-
-    if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        || (trimmed.starts_with('"') && trimmed.ends_with('"'))
-    {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let unescaped = unescape_quoted(inner)?;
-        return Ok(LiteralValue::String(unescaped));
-    }
-
-    match trimmed.to_ascii_lowercase().as_str() {
-        "null" => Ok(LiteralValue::Null),
-        "true" => Ok(LiteralValue::Bool(true)),
-        "false" => Ok(LiteralValue::Bool(false)),
-        _ => {
-            if let Ok(int) = trimmed.parse::<i64>() {
-                return Ok(LiteralValue::Int(int));
-            }
-            if let Ok(float) = trimmed.parse::<f64>() {
-                return Ok(LiteralValue::Float(float));
-            }
-            Err(SombraError::Invalid(
-                "unable to parse custom predicate literal",
-            ))
-        }
-    }
-}
-
-fn unescape_quoted(input: &str) -> Result<String> {
-    let mut result = String::new();
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            let Some(next) = chars.next() else {
-                return Err(SombraError::Invalid("incomplete escape in literal"));
-            };
-            match next {
-                '\\' => result.push('\\'),
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                '\'' => result.push('\''),
-                '"' => result.push('"'),
-                other => result.push(other),
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -1201,6 +1326,7 @@ mod tests {
     use crate::query::planner::{Planner, PlannerConfig};
     use crate::storage::{GraphOptions, NodeSpec, PropEntry, PropValue};
     use crate::types::{LabelId, PropId, TypeId};
+    use std::collections::HashMap;
     use std::ops::Bound;
     use std::sync::Arc;
     use tempfile::{tempdir, TempDir};
@@ -1210,7 +1336,7 @@ mod tests {
         let path = dir.path().join("executor.db");
         let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
         let store: Arc<dyn crate::primitives::pager::PageStore> = pager.clone();
-        let graph = Arc::new(Graph::open(GraphOptions::new(store).btree_inplace(true))?);
+        let graph = Arc::new(Graph::open(GraphOptions::new(store))?);
         Ok((dir, pager, graph))
     }
 
@@ -1253,6 +1379,20 @@ mod tests {
         Ok(())
     }
 
+    fn node_id_from(value: &Value) -> NodeId {
+        match value {
+            Value::NodeId(id) => *id,
+            Value::Object(obj) => {
+                if let Some(Value::NodeId(id)) = obj.get("_id") {
+                    *id
+                } else {
+                    panic!("object missing _id field");
+                }
+            }
+            _ => panic!("unexpected value type"),
+        }
+    }
+
     #[test]
     fn executor_scans_label() -> Result<()> {
         let (_tmpdir, pager, graph) = setup_graph()?;
@@ -1269,9 +1409,10 @@ mod tests {
         assert_eq!(result.rows.len(), 2);
         for row in result.rows {
             let value = row.get("a").expect("projected value");
-            match value {
-                Value::NodeId(id) => assert!(id.0 > 0),
-                _ => panic!("unexpected value type"),
+            let id = node_id_from(value);
+            assert!(id.0 > 0);
+            if let Value::Object(obj) = value {
+                assert!(obj.get("props").is_some());
             }
         }
         Ok(())
@@ -1301,6 +1442,7 @@ mod tests {
                     lower: Bound::Included(LiteralValue::Int(30)),
                     upper: Bound::Unbounded,
                 },
+                selectivity: 0.3,
             },
             vec![right_scan],
         );
@@ -1334,91 +1476,9 @@ mod tests {
         let rows = executor.execute(&plan)?.rows;
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
-        let Value::NodeId(a_id) = row.get("a").expect("binding for a") else {
-            panic!("expected node id for a");
-        };
-        let Value::NodeId(b_id) = row.get("b").expect("binding for b") else {
-            panic!("expected node id for b");
-        };
+        let a_id = node_id_from(row.get("a").expect("binding for a"));
+        let b_id = node_id_from(row.get("b").expect("binding for b"));
         assert_eq!(a_id, b_id);
-        Ok(())
-    }
-
-    #[test]
-    fn executor_custom_predicate_filters() -> Result<()> {
-        let (_tmpdir, pager, graph) = setup_graph()?;
-        let metadata = setup_metadata();
-        seed_users(&pager, &graph, &[Some(18), Some(42)])?;
-
-        let scan = PhysicalNode::new(PhysicalOp::LabelScan {
-            label: LabelId(1),
-            as_var: Var("a".into()),
-        });
-
-        let filter = PhysicalNode::with_inputs(
-            PhysicalOp::Filter {
-                pred: PhysicalPredicate::Custom {
-                    expr: "a.age >= 21".into(),
-                },
-            },
-            vec![scan],
-        );
-
-        let project = PhysicalNode::with_inputs(
-            PhysicalOp::Project {
-                fields: vec![ProjectField::Var {
-                    var: Var("a".into()),
-                    alias: None,
-                }],
-            },
-            vec![filter],
-        );
-
-        let plan = PhysicalPlan::new(project);
-        let executor = Executor::new(graph, pager, metadata);
-        let rows = executor.execute(&plan)?.rows;
-        assert_eq!(rows.len(), 1);
-        let Value::NodeId(node_id) = rows[0].get("a").expect("binding for a") else {
-            panic!("expected node id");
-        };
-        assert!(node_id.0 > 0);
-        Ok(())
-    }
-
-    #[test]
-    fn executor_custom_predicate_supports_is_null() -> Result<()> {
-        let (_tmpdir, pager, graph) = setup_graph()?;
-        let metadata = setup_metadata();
-        seed_users(&pager, &graph, &[None, Some(10)])?;
-
-        let scan = PhysicalNode::new(PhysicalOp::LabelScan {
-            label: LabelId(1),
-            as_var: Var("a".into()),
-        });
-
-        let filter = PhysicalNode::with_inputs(
-            PhysicalOp::Filter {
-                pred: PhysicalPredicate::Custom {
-                    expr: "a.age IS NULL".into(),
-                },
-            },
-            vec![scan],
-        );
-
-        let project = PhysicalNode::with_inputs(
-            PhysicalOp::Project {
-                fields: vec![ProjectField::Var {
-                    var: Var("a".into()),
-                    alias: None,
-                }],
-            },
-            vec![filter],
-        );
-
-        let plan = PhysicalPlan::new(project);
-        let executor = Executor::new(graph, pager, metadata);
-        let rows = executor.execute(&plan)?.rows;
-        assert_eq!(rows.len(), 1);
         Ok(())
     }
 
@@ -1436,5 +1496,241 @@ mod tests {
         let rows: Vec<Row> = stream.collect::<Result<_>>()?;
         assert_eq!(rows.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn executor_projects_property_values() -> Result<()> {
+        let (_tmpdir, pager, graph) = setup_graph()?;
+        let metadata = setup_metadata();
+        seed_users(&pager, &graph, &[Some(42)])?;
+
+        let scan = PhysicalNode::new(PhysicalOp::LabelScan {
+            label: LabelId(1),
+            as_var: Var("a".into()),
+        });
+        let project = PhysicalNode::with_inputs(
+            PhysicalOp::Project {
+                fields: vec![ProjectField::Prop {
+                    var: Var("a".into()),
+                    prop: PropId(1),
+                    prop_name: "age".into(),
+                    alias: None,
+                }],
+            },
+            vec![scan],
+        );
+        let plan = PhysicalPlan::new(project);
+        let executor = Executor::new(graph, pager, metadata);
+        let rows = executor.execute(&plan)?.rows;
+        assert_eq!(rows.len(), 1);
+        let value = rows[0].get("age").expect("projected column");
+        assert!(matches!(value, Value::Int(42)));
+        Ok(())
+    }
+
+    fn bool_node(props: Vec<(PropId, PropValueOwned)>) -> NodeData {
+        NodeData {
+            labels: Vec::<LabelId>::new(),
+            props,
+        }
+    }
+
+    struct TestResolver {
+        nodes: HashMap<String, NodeData>,
+    }
+
+    impl TestResolver {
+        fn new(entries: Vec<(&str, NodeData)>) -> Self {
+            let mut nodes = HashMap::new();
+            for (var, node) in entries {
+                nodes.insert(var.to_owned(), node);
+            }
+            Self { nodes }
+        }
+    }
+
+    impl BoolNodeResolver for TestResolver {
+        fn resolve(&mut self, var: &Var) -> Result<NodeData> {
+            self.nodes
+                .get(&var.0)
+                .cloned()
+                .ok_or_else(|| SombraError::Invalid("missing test binding".into()))
+        }
+    }
+
+    fn eval_cmp_with_props(cmp: PhysicalComparison, props: Vec<(PropId, PropValueOwned)>) -> bool {
+        let expr = PhysicalBoolExpr::Cmp(cmp);
+        let mut resolver = TestResolver::new(vec![("a", bool_node(props))]);
+        evaluate_bool_expr(&expr, &mut resolver).unwrap()
+    }
+
+    #[test]
+    fn bool_expr_or_evaluates() {
+        let expr = PhysicalBoolExpr::Or(vec![
+            PhysicalBoolExpr::Cmp(PhysicalComparison::Eq {
+                var: Var("a".into()),
+                prop: PropId(1),
+                value: LiteralValue::String("Ada".into()),
+            }),
+            PhysicalBoolExpr::Cmp(PhysicalComparison::Eq {
+                var: Var("a".into()),
+                prop: PropId(1),
+                value: LiteralValue::String("Bob".into()),
+            }),
+        ]);
+        let mut resolver = TestResolver::new(vec![(
+            "a",
+            bool_node(vec![(PropId(1), PropValueOwned::Str("Bob".into()))]),
+        )]);
+        assert!(evaluate_bool_expr(&expr, &mut resolver).unwrap());
+    }
+
+    #[test]
+    fn bool_expr_not_handles_in_with_nulls() {
+        let expr = PhysicalBoolExpr::Not(Box::new(PhysicalBoolExpr::Cmp(PhysicalComparison::In {
+            var: Var("a".into()),
+            prop: PropId(2),
+            values: vec![
+                LiteralValue::Int(1),
+                LiteralValue::Null,
+                LiteralValue::Int(5),
+            ],
+        })));
+        let mut resolver = TestResolver::new(vec![(
+            "a",
+            bool_node(vec![(PropId(2), PropValueOwned::Int(10))]),
+        )]);
+        assert!(evaluate_bool_expr(&expr, &mut resolver).unwrap());
+    }
+
+    #[test]
+    fn bool_expr_eq_null_matches_missing_property() {
+        let expr = PhysicalBoolExpr::Cmp(PhysicalComparison::Eq {
+            var: Var("a".into()),
+            prop: PropId(3),
+            value: LiteralValue::Null,
+        });
+        let mut resolver = TestResolver::new(vec![(
+            "a",
+            bool_node(vec![(PropId(4), PropValueOwned::Int(1))]),
+        )]);
+        assert!(evaluate_bool_expr(&expr, &mut resolver).unwrap());
+    }
+
+    #[test]
+    fn bool_expr_exists_treats_null_as_present() {
+        let cmp = PhysicalComparison::Exists {
+            var: Var("a".into()),
+            prop: PropId(10),
+        };
+        assert!(eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(10), PropValueOwned::Null)]
+        ));
+        assert!(!eval_cmp_with_props(cmp, vec![]));
+    }
+
+    #[test]
+    fn bool_expr_is_null_handles_missing_and_null_values() {
+        let cmp = PhysicalComparison::IsNull {
+            var: Var("a".into()),
+            prop: PropId(11),
+        };
+        assert!(eval_cmp_with_props(cmp.clone(), vec![]));
+        assert!(eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(11), PropValueOwned::Null)]
+        ));
+        assert!(!eval_cmp_with_props(
+            cmp,
+            vec![(PropId(11), PropValueOwned::Int(5))]
+        ));
+    }
+
+    #[test]
+    fn bool_expr_is_not_null_requires_value() {
+        let cmp = PhysicalComparison::IsNotNull {
+            var: Var("a".into()),
+            prop: PropId(12),
+        };
+        assert!(eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(12), PropValueOwned::Int(5))]
+        ));
+        assert!(!eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(12), PropValueOwned::Null)]
+        ));
+        assert!(!eval_cmp_with_props(cmp, vec![]));
+    }
+
+    #[test]
+    fn bool_expr_eq_null_rejects_present_non_null_values() {
+        let cmp = PhysicalComparison::Eq {
+            var: Var("a".into()),
+            prop: PropId(13),
+            value: LiteralValue::Null,
+        };
+        assert!(!eval_cmp_with_props(
+            cmp,
+            vec![(PropId(13), PropValueOwned::Int(7))]
+        ));
+    }
+
+    #[test]
+    fn bool_expr_ne_null_only_matches_present_values() {
+        let cmp = PhysicalComparison::Ne {
+            var: Var("a".into()),
+            prop: PropId(14),
+            value: LiteralValue::Null,
+        };
+        assert!(eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(14), PropValueOwned::Int(1))]
+        ));
+        assert!(!eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(14), PropValueOwned::Null)]
+        ));
+        assert!(!eval_cmp_with_props(cmp, vec![]));
+    }
+
+    #[test]
+    fn bool_expr_lt_with_null_literal_is_false() {
+        let cmp = PhysicalComparison::Lt {
+            var: Var("a".into()),
+            prop: PropId(15),
+            value: LiteralValue::Null,
+        };
+        assert!(!eval_cmp_with_props(
+            cmp,
+            vec![(PropId(15), PropValueOwned::Int(10))]
+        ));
+    }
+
+    #[test]
+    fn bool_expr_between_rejects_null_bounds_and_values() {
+        let cmp = PhysicalComparison::Between {
+            var: Var("a".into()),
+            prop: PropId(16),
+            low: Bound::Included(LiteralValue::Null),
+            high: Bound::Excluded(LiteralValue::Int(5)),
+        };
+        assert!(!eval_cmp_with_props(
+            cmp.clone(),
+            vec![(PropId(16), PropValueOwned::Int(1))]
+        ));
+
+        let cmp_value_null = PhysicalComparison::Between {
+            var: Var("a".into()),
+            prop: PropId(16),
+            low: Bound::Unbounded,
+            high: Bound::Excluded(LiteralValue::Int(5)),
+        };
+        assert!(!eval_cmp_with_props(
+            cmp_value_null,
+            vec![(PropId(16), PropValueOwned::Null)]
+        ));
+        assert!(!eval_cmp_with_props(cmp, vec![]));
     }
 }

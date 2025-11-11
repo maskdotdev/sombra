@@ -1,17 +1,22 @@
 //! Rule-based planner scaffolding.
 
 use crate::query::{
-    ast::{EdgeDirection, MatchClause, Projection, PropPredicate as AstPredicate, QueryAst, Var},
-    logical::{LogicalOp, LogicalPlan, PlanNode},
+    analyze,
+    ast::{BoolExpr, Comparison, EdgeDirection, MatchClause, Projection, QueryAst, Var},
+    logical::{LogicalOp, LogicalPlan, PlanNode, PropPredicate as AstPredicate},
     metadata::MetadataProvider,
     physical::{
-        Dir, LiteralValue, PhysicalNode, PhysicalOp, PhysicalPlan, ProjectField,
-        PropPredicate as PhysicalPredicate,
+        Dir, LiteralValue, PhysicalBoolExpr, PhysicalComparison, PhysicalNode, PhysicalOp,
+        PhysicalPlan, ProjectField, PropPredicate as PhysicalPredicate,
     },
+    Value,
 };
 use crate::storage::index::IndexDef;
+use crate::storage::{PropStats, PropValueOwned};
 use crate::types::{LabelId, PropId, Result, SombraError, TypeId};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::convert::TryFrom;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -77,8 +82,9 @@ impl Planner {
 
     /// Converts an AST into a physical plan.
     pub fn plan(&self, ast: &QueryAst) -> Result<PlannerOutput> {
+        let normalized = analyze::normalize(ast)?;
         let mut ctx = PlanContext::new(self.metadata.as_ref());
-        let logical = self.build_logical_plan(ast, &mut ctx)?;
+        let logical = self.build_logical_plan(&normalized, &mut ctx)?;
         let physical = self.lower_to_physical(&logical, &mut ctx)?;
         let explain = PlanExplain {
             root: build_explain_tree(&physical.root),
@@ -102,26 +108,28 @@ impl Planner {
             ));
         }
 
-        let mut preds_by_var: HashMap<Var, Vec<AstPredicate>> = HashMap::new();
-        let mut custom_preds = Vec::new();
-        for pred in &ast.predicates {
-            match pred {
-                AstPredicate::Eq { var, .. } | AstPredicate::Range { var, .. } => {
-                    preds_by_var
-                        .entry(var.clone())
-                        .or_default()
-                        .push(pred.clone());
-                }
-                AstPredicate::Custom { .. } => custom_preds.push(pred.clone()),
+        let mut preds_by_var: HashMap<Var, Vec<VarPredicate>> = HashMap::new();
+        let mut residual_predicate = ast.predicate.clone();
+        if let Some(expr) = ast.predicate.as_ref() {
+            let mut pushdowns = Vec::new();
+            residual_predicate = extract_pushdown_predicates(expr, &mut pushdowns);
+            for pred in pushdowns {
+                let key = predicate_var(&pred);
+                let selectivity = predicate_selectivity(&pred, ctx)?;
+                preds_by_var.entry(key).or_default().push(VarPredicate {
+                    predicate: pred,
+                    selectivity,
+                });
             }
         }
 
         let labels_by_var = self.resolve_label_ids(&ast.matches, ctx)?;
         let anchor_idx = self.select_anchor(&ast.matches, &labels_by_var, &preds_by_var, ctx)?;
         let anchor_match = &ast.matches[anchor_idx];
-        let anchor_label = *labels_by_var
+        let anchor_label = labels_by_var
             .get(&anchor_match.var)
-            .expect("missing label id for anchor");
+            .expect("missing label id for anchor")
+            .id;
         let indexed_preds =
             self.take_indexed_predicates(anchor_label, &anchor_match.var, &mut preds_by_var, ctx)?;
         let mut current = match indexed_preds.len() {
@@ -130,22 +138,32 @@ impl Planner {
                 as_var: anchor_match.var.clone(),
             }),
             1 => {
-                let (predicate, prop) = indexed_preds.into_iter().next().unwrap();
+                let (var_pred, prop) = indexed_preds.into_iter().next().unwrap();
+                let VarPredicate {
+                    predicate,
+                    selectivity,
+                } = var_pred;
                 PlanNode::new(LogicalOp::PropIndexScan {
                     label: anchor_match.label.clone(),
                     prop,
                     predicate,
+                    selectivity,
                     as_var: anchor_match.var.clone(),
                 })
             }
             _ => {
                 let children = indexed_preds
                     .into_iter()
-                    .map(|(predicate, prop)| {
+                    .map(|(var_pred, prop)| {
+                        let VarPredicate {
+                            predicate,
+                            selectivity,
+                        } = var_pred;
                         PlanNode::new(LogicalOp::PropIndexScan {
                             label: anchor_match.label.clone(),
                             prop,
                             predicate,
+                            selectivity,
                             as_var: anchor_match.var.clone(),
                         })
                     })
@@ -207,8 +225,9 @@ impl Planner {
             bound_vars.insert(expand_to);
         }
 
-        for pred in custom_preds {
-            current = PlanNode::with_inputs(LogicalOp::Filter { predicate: pred }, vec![current]);
+        if let Some(expr) = &residual_predicate {
+            current =
+                PlanNode::with_inputs(LogicalOp::BoolFilter { expr: expr.clone() }, vec![current]);
         }
 
         if ast.distinct {
@@ -231,11 +250,26 @@ impl Planner {
         &self,
         mut node: PlanNode,
         var: &Var,
-        preds_by_var: &mut HashMap<Var, Vec<AstPredicate>>,
+        preds_by_var: &mut HashMap<Var, Vec<VarPredicate>>,
     ) -> PlanNode {
-        if let Some(preds) = preds_by_var.remove(var) {
-            for pred in preds {
-                node = PlanNode::with_inputs(LogicalOp::Filter { predicate: pred }, vec![node]);
+        if let Some(mut preds) = preds_by_var.remove(var) {
+            preds.sort_by(|a, b| {
+                a.selectivity
+                    .partial_cmp(&b.selectivity)
+                    .unwrap_or(Ordering::Equal)
+            });
+            for predicate in preds {
+                let VarPredicate {
+                    predicate,
+                    selectivity,
+                } = predicate;
+                node = PlanNode::with_inputs(
+                    LogicalOp::Filter {
+                        predicate,
+                        selectivity,
+                    },
+                    vec![node],
+                );
             }
         }
         node
@@ -245,11 +279,21 @@ impl Planner {
         &self,
         matches: &[MatchClause],
         ctx: &mut PlanContext<'_>,
-    ) -> Result<HashMap<Var, LabelId>> {
+    ) -> Result<HashMap<Var, VarLabel>> {
         let mut map = HashMap::new();
         for m in matches {
+            let label_name = m
+                .label
+                .as_ref()
+                .ok_or(SombraError::Invalid("match clause requires a label"))?
+                .clone();
             let id = ctx.label(&m.label)?;
-            map.insert(m.var.clone(), id);
+            let info = VarLabel {
+                id,
+                name: label_name,
+            };
+            ctx.record_var_label(&m.var, info.clone());
+            map.insert(m.var.clone(), info);
         }
         Ok(map)
     }
@@ -257,8 +301,8 @@ impl Planner {
     fn select_anchor(
         &self,
         matches: &[MatchClause],
-        labels_by_var: &HashMap<Var, LabelId>,
-        preds_by_var: &HashMap<Var, Vec<AstPredicate>>,
+        labels_by_var: &HashMap<Var, VarLabel>,
+        preds_by_var: &HashMap<Var, Vec<VarPredicate>>,
         ctx: &mut PlanContext<'_>,
     ) -> Result<usize> {
         let mut best_idx = 0;
@@ -266,9 +310,8 @@ impl Planner {
         for (idx, m) in matches.iter().enumerate() {
             let label = labels_by_var
                 .get(&m.var)
-                .copied()
                 .expect("label id missing for match variable");
-            let score = self.anchor_score(&m.var, label, preds_by_var, ctx)?;
+            let score = self.anchor_score(&m.var, label.id, preds_by_var, ctx)?;
             if score > best_score {
                 best_score = score;
                 best_idx = idx;
@@ -281,7 +324,7 @@ impl Planner {
         &self,
         var: &Var,
         label: LabelId,
-        preds_by_var: &HashMap<Var, Vec<AstPredicate>>,
+        preds_by_var: &HashMap<Var, Vec<VarPredicate>>,
         ctx: &mut PlanContext<'_>,
     ) -> Result<AnchorScore> {
         let Some(preds) = preds_by_var.get(var) else {
@@ -289,10 +332,9 @@ impl Planner {
         };
         let mut best = AnchorScore::Label;
         for pred in preds {
-            let (prop_name, score_candidate) = match pred {
+            let (prop_name, score_candidate) = match &pred.predicate {
                 AstPredicate::Eq { prop, .. } => (prop.as_str(), AnchorScore::Eq),
                 AstPredicate::Range { prop, .. } => (prop.as_str(), AnchorScore::Range),
-                AstPredicate::Custom { .. } => continue,
             };
             let prop_id = ctx.property(prop_name)?;
             if ctx.property_index(label, prop_id)?.is_some() {
@@ -309,25 +351,21 @@ impl Planner {
         &self,
         label_id: LabelId,
         var: &Var,
-        preds_by_var: &mut HashMap<Var, Vec<AstPredicate>>,
+        preds_by_var: &mut HashMap<Var, Vec<VarPredicate>>,
         ctx: &mut PlanContext<'_>,
-    ) -> Result<Vec<(AstPredicate, String)>> {
-        let Some(preds) = preds_by_var.get_mut(var) else {
+    ) -> Result<Vec<(VarPredicate, String)>> {
+        let Some(mut preds) = preds_by_var.remove(var) else {
             return Ok(Vec::new());
         };
 
-        let mut indexed_eq = Vec::new();
-        let mut indexed_range = Vec::new();
-        let mut remaining = Vec::new();
+        let mut indexed_eq: Vec<(VarPredicate, String)> = Vec::new();
+        let mut indexed_range: Vec<(VarPredicate, String)> = Vec::new();
+        let mut remaining: Vec<VarPredicate> = Vec::new();
 
         for predicate in preds.drain(..) {
-            let (prop_name, class) = match &predicate {
+            let (prop_name, class) = match &predicate.predicate {
                 AstPredicate::Eq { prop, .. } => (prop.as_str(), AnchorScore::Eq),
                 AstPredicate::Range { prop, .. } => (prop.as_str(), AnchorScore::Range),
-                AstPredicate::Custom { .. } => {
-                    remaining.push(predicate);
-                    continue;
-                }
             };
 
             let prop_id = ctx.property(prop_name)?;
@@ -343,11 +381,17 @@ impl Planner {
             }
         }
 
-        if remaining.is_empty() {
-            preds_by_var.remove(var);
-        } else {
-            *preds = remaining;
+        if !remaining.is_empty() {
+            preds_by_var.insert(var.clone(), remaining);
         }
+
+        let by_selectivity = |a: &(VarPredicate, String), b: &(VarPredicate, String)| {
+            a.0.selectivity
+                .partial_cmp(&b.0.selectivity)
+                .unwrap_or(Ordering::Equal)
+        };
+        indexed_eq.sort_by(by_selectivity);
+        indexed_range.sort_by(by_selectivity);
 
         let mut indexed = indexed_eq;
         indexed.extend(indexed_range);
@@ -378,6 +422,7 @@ impl Planner {
             LogicalOp::PropIndexScan {
                 label,
                 predicate,
+                selectivity,
                 as_var,
                 ..
             } => {
@@ -389,6 +434,7 @@ impl Planner {
                     label: ctx.label(label)?,
                     prop,
                     pred,
+                    selectivity: *selectivity,
                     as_var: as_var.clone(),
                 }
             }
@@ -405,18 +451,32 @@ impl Planner {
                 ty: ctx.edge_type(edge_type)?,
                 distinct_nodes: *distinct_nodes,
             },
-            LogicalOp::Filter { predicate } => PhysicalOp::Filter {
+            LogicalOp::Filter {
+                predicate,
+                selectivity,
+            } => PhysicalOp::Filter {
                 pred: self.convert_prop_predicate(predicate, ctx)?,
+                selectivity: *selectivity,
             },
             LogicalOp::Intersect { vars } => PhysicalOp::Intersect { vars: vars.clone() },
             LogicalOp::HashJoin { left, right } => PhysicalOp::HashJoin {
                 left: left.clone(),
                 right: right.clone(),
             },
-            LogicalOp::Project { fields } => PhysicalOp::Project {
-                fields: fields.iter().cloned().map(convert_projection).collect(),
-            },
+            LogicalOp::Project { fields } => {
+                let projections = fields
+                    .iter()
+                    .cloned()
+                    .map(|proj| convert_projection(proj, ctx))
+                    .collect::<Result<Vec<_>>>()?;
+                PhysicalOp::Project {
+                    fields: projections,
+                }
+            }
             LogicalOp::Distinct => PhysicalOp::Distinct,
+            LogicalOp::BoolFilter { expr } => PhysicalOp::BoolFilter {
+                expr: self.convert_bool_expr(expr, ctx)?,
+            },
         };
 
         Ok(PhysicalNode::with_inputs(op, inputs))
@@ -444,8 +504,112 @@ impl Planner {
                 lower: convert_bound(lower),
                 upper: convert_bound(upper),
             }),
-            AstPredicate::Custom { expr } => Ok(PhysicalPredicate::Custom { expr: expr.clone() }),
         }
+    }
+
+    fn convert_bool_expr(
+        &self,
+        expr: &BoolExpr,
+        ctx: &mut PlanContext<'_>,
+    ) -> Result<PhysicalBoolExpr> {
+        match expr {
+            BoolExpr::Cmp(cmp) => Ok(PhysicalBoolExpr::Cmp(self.convert_comparison(cmp, ctx)?)),
+            BoolExpr::And(children) => {
+                let mut converted = Vec::with_capacity(children.len());
+                for child in children {
+                    converted.push(self.convert_bool_expr(child, ctx)?);
+                }
+                converted.sort_by(|a, b| {
+                    let sa = bool_expr_selectivity(a);
+                    let sb = bool_expr_selectivity(b);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                Ok(PhysicalBoolExpr::And(converted))
+            }
+            BoolExpr::Or(children) => {
+                let mut converted = Vec::with_capacity(children.len());
+                for child in children {
+                    converted.push(self.convert_bool_expr(child, ctx)?);
+                }
+                converted.sort_by(|a, b| {
+                    let sa = bool_expr_selectivity(a);
+                    let sb = bool_expr_selectivity(b);
+                    sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                Ok(PhysicalBoolExpr::Or(converted))
+            }
+            BoolExpr::Not(child) => {
+                let inner = self.convert_bool_expr(child, ctx)?;
+                Ok(PhysicalBoolExpr::Not(Box::new(inner)))
+            }
+        }
+    }
+
+    fn convert_comparison(
+        &self,
+        cmp: &Comparison,
+        ctx: &mut PlanContext<'_>,
+    ) -> Result<PhysicalComparison> {
+        Ok(match cmp {
+            Comparison::Eq { var, prop, value } => PhysicalComparison::Eq {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                value: LiteralValue::from(value),
+            },
+            Comparison::Ne { var, prop, value } => PhysicalComparison::Ne {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                value: LiteralValue::from(value),
+            },
+            Comparison::Lt { var, prop, value } => PhysicalComparison::Lt {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                value: LiteralValue::from(value),
+            },
+            Comparison::Le { var, prop, value } => PhysicalComparison::Le {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                value: LiteralValue::from(value),
+            },
+            Comparison::Gt { var, prop, value } => PhysicalComparison::Gt {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                value: LiteralValue::from(value),
+            },
+            Comparison::Ge { var, prop, value } => PhysicalComparison::Ge {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                value: LiteralValue::from(value),
+            },
+            Comparison::Between {
+                var,
+                prop,
+                low,
+                high,
+            } => PhysicalComparison::Between {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                low: convert_bound(low),
+                high: convert_bound(high),
+            },
+            Comparison::In { var, prop, values } => PhysicalComparison::In {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+                values: values.iter().map(LiteralValue::from).collect(),
+            },
+            Comparison::Exists { var, prop } => PhysicalComparison::Exists {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+            },
+            Comparison::IsNull { var, prop } => PhysicalComparison::IsNull {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+            },
+            Comparison::IsNotNull { var, prop } => PhysicalComparison::IsNotNull {
+                var: var.clone(),
+                prop: ctx.property(prop)?,
+            },
+        })
     }
 }
 
@@ -465,18 +629,229 @@ fn invert_direction(direction: EdgeDirection) -> EdgeDirection {
     }
 }
 
-fn convert_bound(bound: &Bound<crate::query::ast::Literal>) -> Bound<LiteralValue> {
+fn convert_bound(bound: &Bound<Value>) -> Bound<LiteralValue> {
     match bound {
+        Bound::Unbounded => Bound::Unbounded,
         Bound::Included(lit) => Bound::Included(LiteralValue::from(lit)),
         Bound::Excluded(lit) => Bound::Excluded(LiteralValue::from(lit)),
-        Bound::Unbounded => Bound::Unbounded,
     }
 }
 
-fn convert_projection(proj: Projection) -> ProjectField {
+fn convert_projection(proj: Projection, ctx: &mut PlanContext<'_>) -> Result<ProjectField> {
     match proj {
-        Projection::Var { var, alias } => ProjectField::Var { var, alias },
-        Projection::Expr { expr, alias } => ProjectField::Expr { expr, alias },
+        Projection::Var { var, alias } => Ok(ProjectField::Var { var, alias }),
+        Projection::Prop { var, prop, alias } => {
+            let prop_id = ctx.property(&prop)?;
+            Ok(ProjectField::Prop {
+                var,
+                prop: prop_id,
+                prop_name: prop,
+                alias,
+            })
+        }
+    }
+}
+
+fn extract_pushdown_predicates(expr: &BoolExpr, out: &mut Vec<AstPredicate>) -> Option<BoolExpr> {
+    match expr {
+        BoolExpr::Cmp(cmp) => {
+            if let Some(pred) = predicate_from_comparison(cmp) {
+                out.push(pred);
+                None
+            } else {
+                Some(expr.clone())
+            }
+        }
+        BoolExpr::And(children) => {
+            let mut residual = Vec::new();
+            for child in children {
+                match child {
+                    BoolExpr::Or(_) | BoolExpr::Not(_) => residual.push(child.clone()),
+                    _ => {
+                        if let Some(rest) = extract_pushdown_predicates(child, out) {
+                            residual.push(rest);
+                        }
+                    }
+                }
+            }
+            match residual.len() {
+                0 => None,
+                1 => Some(residual.remove(0)),
+                _ => Some(BoolExpr::And(residual)),
+            }
+        }
+        BoolExpr::Or(_) | BoolExpr::Not(_) => Some(expr.clone()),
+    }
+}
+
+fn predicate_from_comparison(cmp: &Comparison) -> Option<AstPredicate> {
+    match cmp {
+        Comparison::Eq { var, prop, value } => Some(AstPredicate::Eq {
+            var: var.clone(),
+            prop: prop.clone(),
+            value: value.clone(),
+        }),
+        Comparison::Lt { var, prop, value } => Some(range_predicate(
+            var,
+            prop,
+            &Bound::Unbounded,
+            &Bound::Excluded(value.clone()),
+        )),
+        Comparison::Le { var, prop, value } => Some(range_predicate(
+            var,
+            prop,
+            &Bound::Unbounded,
+            &Bound::Included(value.clone()),
+        )),
+        Comparison::Gt { var, prop, value } => Some(range_predicate(
+            var,
+            prop,
+            &Bound::Excluded(value.clone()),
+            &Bound::Unbounded,
+        )),
+        Comparison::Ge { var, prop, value } => Some(range_predicate(
+            var,
+            prop,
+            &Bound::Included(value.clone()),
+            &Bound::Unbounded,
+        )),
+        Comparison::Between {
+            var,
+            prop,
+            low,
+            high,
+        } => Some(range_predicate(var, prop, low, high)),
+        _ => None,
+    }
+}
+
+fn range_predicate(
+    var: &Var,
+    prop: &str,
+    lower: &Bound<Value>,
+    upper: &Bound<Value>,
+) -> AstPredicate {
+    AstPredicate::Range {
+        var: var.clone(),
+        prop: prop.to_string(),
+        lower: lower.clone(),
+        upper: upper.clone(),
+    }
+}
+
+fn predicate_var(pred: &AstPredicate) -> Var {
+    match pred {
+        AstPredicate::Eq { var, .. } | AstPredicate::Range { var, .. } => var.clone(),
+    }
+}
+
+const DEFAULT_EQ_SELECTIVITY: f64 = 0.05;
+const DEFAULT_RANGE_SELECTIVITY: f64 = 0.3;
+const MIN_SELECTIVITY: f64 = 1e-6;
+
+fn predicate_selectivity(pred: &AstPredicate, ctx: &mut PlanContext<'_>) -> Result<f64> {
+    let selectivity = match pred {
+        AstPredicate::Eq { var, prop, .. } => {
+            if let Some(stats) = ctx.property_stats_for(var, prop)? {
+                eq_selectivity(stats.as_ref())
+            } else {
+                DEFAULT_EQ_SELECTIVITY
+            }
+        }
+        AstPredicate::Range {
+            var,
+            prop,
+            lower,
+            upper,
+        } => {
+            if let Some(stats) = ctx.property_stats_for(var, prop)? {
+                range_selectivity(stats.as_ref(), lower, upper)
+            } else {
+                DEFAULT_RANGE_SELECTIVITY
+            }
+        }
+    };
+    Ok(selectivity.clamp(MIN_SELECTIVITY, 1.0))
+}
+
+fn eq_selectivity(stats: &PropStats) -> f64 {
+    if stats.row_count == 0 {
+        return DEFAULT_EQ_SELECTIVITY;
+    }
+    let domain = stats.distinct_count.max(1) as f64;
+    let non_null = stats.non_null_count.max(1) as f64;
+    let base = non_null / stats.row_count as f64;
+    (base / domain).max(MIN_SELECTIVITY)
+}
+
+fn range_selectivity(stats: &PropStats, lower: &Bound<Value>, upper: &Bound<Value>) -> f64 {
+    if stats.row_count == 0 {
+        return DEFAULT_RANGE_SELECTIVITY;
+    }
+    let density =
+        (stats.non_null_count.max(1) as f64 / stats.row_count as f64).max(MIN_SELECTIVITY);
+    if let Some(span) = numeric_range_fraction(stats, lower, upper) {
+        return (density * span).clamp(MIN_SELECTIVITY, 1.0);
+    }
+    (density * DEFAULT_RANGE_SELECTIVITY)
+        .max(DEFAULT_RANGE_SELECTIVITY)
+        .clamp(MIN_SELECTIVITY, 1.0)
+}
+
+fn numeric_range_fraction(
+    stats: &PropStats,
+    lower: &Bound<Value>,
+    upper: &Bound<Value>,
+) -> Option<f64> {
+    let min = prop_value_to_f64(stats.min.as_ref()?)?;
+    let max = prop_value_to_f64(stats.max.as_ref()?)?;
+    if min >= max {
+        return Some(1.0);
+    }
+    let domain = max - min;
+    if domain <= f64::EPSILON {
+        return Some(1.0);
+    }
+    let lower_ratio = bound_numeric(lower)
+        .map(|v| ((v - min) / domain).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    let upper_ratio = bound_numeric(upper)
+        .map(|v| ((v - min) / domain).clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    if upper_ratio <= lower_ratio {
+        return Some(MIN_SELECTIVITY);
+    }
+    Some((upper_ratio - lower_ratio).clamp(MIN_SELECTIVITY, 1.0))
+}
+
+fn bound_numeric(bound: &Bound<Value>) -> Option<f64> {
+    match bound {
+        Bound::Included(value) | Bound::Excluded(value) => {
+            value_to_prop_value(value).and_then(|pv| prop_value_to_f64(&pv))
+        }
+        Bound::Unbounded => None,
+    }
+}
+
+fn prop_value_to_f64(value: &PropValueOwned) -> Option<f64> {
+    match value {
+        PropValueOwned::Int(v) => Some(*v as f64),
+        PropValueOwned::Float(v) => Some(*v),
+        PropValueOwned::Date(v) => Some(*v as f64),
+        PropValueOwned::DateTime(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+fn value_to_prop_value(value: &Value) -> Option<PropValueOwned> {
+    match value {
+        Value::Null => Some(PropValueOwned::Null),
+        Value::Bool(v) => Some(PropValueOwned::Bool(*v)),
+        Value::Int(v) => Some(PropValueOwned::Int(*v)),
+        Value::Float(v) => Some(PropValueOwned::Float(*v)),
+        Value::String(v) => Some(PropValueOwned::Str(v.clone())),
+        Value::Bytes(v) => Some(PropValueOwned::Bytes(v.clone())),
+        Value::DateTime(v) => i64::try_from(*v).ok().map(PropValueOwned::DateTime),
     }
 }
 
@@ -485,6 +860,8 @@ struct PlanContext<'a> {
     labels: HashMap<String, LabelId>,
     props: HashMap<String, PropId>,
     edge_types: HashMap<String, TypeId>,
+    var_labels: HashMap<String, VarLabel>,
+    prop_stats: HashMap<(LabelId, PropId), Arc<PropStats>>,
 }
 
 impl<'a> PlanContext<'a> {
@@ -494,6 +871,8 @@ impl<'a> PlanContext<'a> {
             labels: HashMap::new(),
             props: HashMap::new(),
             edge_types: HashMap::new(),
+            var_labels: HashMap::new(),
+            prop_stats: HashMap::new(),
         }
     }
 
@@ -539,6 +918,41 @@ impl<'a> PlanContext<'a> {
         self.labels.insert(name.to_owned(), id);
         Ok(id)
     }
+
+    fn record_var_label(&mut self, var: &Var, info: VarLabel) {
+        self.var_labels.insert(var.0.clone(), info);
+    }
+
+    fn var_label_info(&self, var: &Var) -> Option<&VarLabel> {
+        self.var_labels.get(&var.0)
+    }
+
+    fn property_stats_for(&mut self, var: &Var, prop: &str) -> Result<Option<Arc<PropStats>>> {
+        let label_id = match self.var_label_info(var) {
+            Some(info) => info.id,
+            None => return Ok(None),
+        };
+        let prop_id = self.property(prop)?;
+        self.property_stats_by_id(label_id, prop_id)
+    }
+
+    fn property_stats_by_id(
+        &mut self,
+        label: LabelId,
+        prop: PropId,
+    ) -> Result<Option<Arc<PropStats>>> {
+        if let Some(stats) = self.prop_stats.get(&(label, prop)) {
+            return Ok(Some(stats.clone()));
+        }
+        let stats = self.metadata.property_stats(label, prop)?;
+        if let Some(stats) = stats {
+            let arc = Arc::new(stats);
+            self.prop_stats.insert((label, prop), arc.clone());
+            Ok(Some(arc))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -546,6 +960,18 @@ enum AnchorScore {
     Label,
     Range,
     Eq,
+}
+
+#[derive(Clone)]
+struct VarLabel {
+    id: LabelId,
+    name: String,
+}
+
+#[derive(Clone)]
+struct VarPredicate {
+    predicate: AstPredicate,
+    selectivity: f64,
 }
 
 fn build_explain_tree(node: &PhysicalNode) -> ExplainNode {
@@ -565,6 +991,7 @@ fn op_name(op: &PhysicalOp) -> &'static str {
         PhysicalOp::PropIndexScan { .. } => "PropIndexScan",
         PhysicalOp::Expand { .. } => "Expand",
         PhysicalOp::Filter { .. } => "Filter",
+        PhysicalOp::BoolFilter { .. } => "BoolFilter",
         PhysicalOp::Intersect { .. } => "Intersect",
         PhysicalOp::HashJoin { .. } => "HashJoin",
         PhysicalOp::Distinct => "Distinct",
@@ -583,12 +1010,17 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
             prop,
             pred,
             as_var,
-        } => vec![
-            ("label".into(), label.0.to_string()),
-            ("prop".into(), prop.0.to_string()),
-            ("as".into(), as_var.0.clone()),
-            ("predicate".into(), describe_predicate(pred)),
-        ],
+            selectivity,
+        } => {
+            let mut props = vec![
+                ("label".into(), label.0.to_string()),
+                ("prop".into(), prop.0.to_string()),
+                ("as".into(), as_var.0.clone()),
+                ("predicate".into(), describe_predicate(pred)),
+            ];
+            props.push(("selectivity".into(), fmt_selectivity(*selectivity)));
+            props
+        }
         PhysicalOp::Expand {
             from,
             to,
@@ -605,7 +1037,19 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
             ),
             ("distinct".into(), distinct_nodes.to_string()),
         ],
-        PhysicalOp::Filter { pred } => vec![("predicate".into(), describe_predicate(pred))],
+        PhysicalOp::Filter { pred, selectivity } => {
+            vec![
+                ("predicate".into(), describe_predicate(pred)),
+                ("selectivity".into(), fmt_selectivity(*selectivity)),
+            ]
+        }
+        PhysicalOp::BoolFilter { expr } => vec![
+            ("expr".into(), describe_bool_expr(expr)),
+            (
+                "selectivity".into(),
+                fmt_selectivity(bool_expr_selectivity(expr)),
+            ),
+        ],
         PhysicalOp::Intersect { vars } => vec![(
             "vars".into(),
             vars.iter()
@@ -646,7 +1090,79 @@ fn describe_predicate(pred: &PhysicalPredicate) -> String {
             bound_to_string(lower),
             bound_to_string(upper)
         ),
-        PhysicalPredicate::Custom { expr } => expr.clone(),
+    }
+}
+
+fn describe_bool_expr(expr: &PhysicalBoolExpr) -> String {
+    match expr {
+        PhysicalBoolExpr::Cmp(cmp) => describe_comparison(cmp),
+        PhysicalBoolExpr::And(children) => format!(
+            "AND({})",
+            children
+                .iter()
+                .map(describe_bool_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PhysicalBoolExpr::Or(children) => format!(
+            "OR({})",
+            children
+                .iter()
+                .map(describe_bool_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PhysicalBoolExpr::Not(child) => format!("NOT({})", describe_bool_expr(child)),
+    }
+}
+
+fn describe_comparison(cmp: &PhysicalComparison) -> String {
+    match cmp {
+        PhysicalComparison::Eq { var, prop, value } => {
+            format!("{}.{} = {}", var.0, prop.0, literal_to_string(value))
+        }
+        PhysicalComparison::Ne { var, prop, value } => {
+            format!("{}.{} != {}", var.0, prop.0, literal_to_string(value))
+        }
+        PhysicalComparison::Lt { var, prop, value } => {
+            format!("{}.{} < {}", var.0, prop.0, literal_to_string(value))
+        }
+        PhysicalComparison::Le { var, prop, value } => {
+            format!("{}.{} <= {}", var.0, prop.0, literal_to_string(value))
+        }
+        PhysicalComparison::Gt { var, prop, value } => {
+            format!("{}.{} > {}", var.0, prop.0, literal_to_string(value))
+        }
+        PhysicalComparison::Ge { var, prop, value } => {
+            format!("{}.{} >= {}", var.0, prop.0, literal_to_string(value))
+        }
+        PhysicalComparison::Between {
+            var,
+            prop,
+            low,
+            high,
+        } => format!(
+            "{}.{} in {}..{}",
+            var.0,
+            prop.0,
+            bound_to_string(low),
+            bound_to_string(high)
+        ),
+        PhysicalComparison::In { var, prop, values } => format!(
+            "{}.{} IN [{}]",
+            var.0,
+            prop.0,
+            values
+                .iter()
+                .map(literal_to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PhysicalComparison::Exists { var, prop } => format!("EXISTS({}.{})", var.0, prop.0),
+        PhysicalComparison::IsNull { var, prop } => format!("{}.{} IS NULL", var.0, prop.0),
+        PhysicalComparison::IsNotNull { var, prop } => {
+            format!("{}.{} IS NOT NULL", var.0, prop.0)
+        }
     }
 }
 
@@ -657,6 +1173,8 @@ fn literal_to_string(value: &LiteralValue) -> String {
         LiteralValue::Int(v) => v.to_string(),
         LiteralValue::Float(v) => v.to_string(),
         LiteralValue::String(v) => format!("{:?}", v),
+        LiteralValue::Bytes(bytes) => format!("bytes(len={})", bytes.len()),
+        LiteralValue::DateTime(ts) => format!("datetime({ts})"),
     }
 }
 
@@ -674,7 +1192,15 @@ fn describe_field(field: &ProjectField) -> String {
             Some(alias) => format!("{} as {}", var.0, alias),
             None => var.0.clone(),
         },
-        ProjectField::Expr { expr, alias } => format!("{expr} as {alias}"),
+        ProjectField::Prop {
+            var,
+            prop_name,
+            alias,
+            ..
+        } => match alias {
+            Some(alias) => format!("{}.{} as {}", var.0, prop_name, alias),
+            None => format!("{}.{}", var.0, prop_name),
+        },
     }
 }
 
@@ -682,15 +1208,52 @@ fn prop_from_predicate(pred: &PhysicalPredicate) -> Option<PropId> {
     match pred {
         PhysicalPredicate::Eq { prop, .. } => Some(*prop),
         PhysicalPredicate::Range { prop, .. } => Some(*prop),
-        PhysicalPredicate::Custom { .. } => None,
     }
+}
+
+fn bool_expr_selectivity(expr: &PhysicalBoolExpr) -> f64 {
+    match expr {
+        PhysicalBoolExpr::Cmp(cmp) => comparison_selectivity(cmp),
+        PhysicalBoolExpr::And(children) => {
+            let mut sel = 1.0;
+            for child in children {
+                sel *= bool_expr_selectivity(child);
+            }
+            sel.clamp(0.0, 1.0)
+        }
+        PhysicalBoolExpr::Or(children) => {
+            let mut remaining = 1.0;
+            for child in children {
+                remaining *= 1.0 - bool_expr_selectivity(child);
+            }
+            (1.0 - remaining).clamp(0.0, 1.0)
+        }
+        PhysicalBoolExpr::Not(child) => (1.0 - bool_expr_selectivity(child)).clamp(0.0, 1.0),
+    }
+}
+
+fn comparison_selectivity(cmp: &PhysicalComparison) -> f64 {
+    match cmp {
+        PhysicalComparison::Eq { .. } => 0.05,
+        PhysicalComparison::Ne { .. } => 0.95,
+        PhysicalComparison::Lt { .. } | PhysicalComparison::Le { .. } => 0.3,
+        PhysicalComparison::Gt { .. } | PhysicalComparison::Ge { .. } => 0.3,
+        PhysicalComparison::Between { .. } => 0.2,
+        PhysicalComparison::In { values, .. } => (values.len() as f64 * 0.05).clamp(0.05, 1.0),
+        PhysicalComparison::Exists { .. } => 0.5,
+        PhysicalComparison::IsNull { .. } => 0.1,
+        PhysicalComparison::IsNotNull { .. } => 0.9,
+    }
+}
+
+fn fmt_selectivity(value: f64) -> String {
+    format!("{:.4}", value.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::ast::Literal;
-    use crate::query::builder::{PropOp, QueryBuilder};
+    use crate::query::builder::QueryBuilder;
     use crate::query::metadata::InMemoryMetadata;
     use crate::types::{LabelId, PropId, TypeId};
 
@@ -737,13 +1300,15 @@ mod tests {
         let planner = planner_with_metadata();
         let ast = QueryBuilder::new()
             .r#match("Person")
-            .where_prop("a", "age", PropOp::Ge, 21_i64, None::<Literal>)
+            .where_var("a", |pred| {
+                pred.ge("age", 21_i64);
+            })
             .select(["a"])
             .build();
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
-            PhysicalOp::Filter { pred } => match pred {
+            PhysicalOp::Filter { pred, .. } => match pred {
                 PhysicalPredicate::Range { var, prop, .. } => {
                     assert_eq!(var.0, "a");
                     assert_eq!(prop.0, 3);
@@ -759,7 +1324,9 @@ mod tests {
         let planner = planner_with_indexed_metadata();
         let ast = QueryBuilder::new()
             .r#match("User")
-            .where_prop("a", "name", PropOp::Eq, "Ada", None::<Literal>)
+            .where_var("a", |pred| {
+                pred.eq("name", "Ada");
+            })
             .select(["a"])
             .build();
         let output = planner.plan(&ast).expect("plan succeeds");
@@ -784,8 +1351,12 @@ mod tests {
         let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
         let ast = QueryBuilder::new()
             .r#match("User")
-            .where_prop("a", "name", PropOp::Eq, "Ada", None::<Literal>)
-            .where_prop("a", "status", PropOp::Eq, "active", None::<Literal>)
+            .where_var("a", |pred| {
+                pred.eq("name", "Ada");
+            })
+            .where_var("a", |pred| {
+                pred.eq("status", "active");
+            })
             .select(["a"])
             .build();
         let output = planner.plan(&ast).expect("plan succeeds");
@@ -817,7 +1388,9 @@ mod tests {
         let ast = QueryBuilder::new()
             .r#match(("a", "User"))
             .where_edge("FOLLOWS", ("b", "User"))
-            .where_prop("b", "name", PropOp::Eq, "Ada", None::<Literal>)
+            .where_var("b", |pred| {
+                pred.eq("name", "Ada");
+            })
             .select(["a", "b"])
             .build();
         let output = planner.plan(&ast).expect("plan succeeds");
