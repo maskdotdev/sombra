@@ -24,7 +24,7 @@ def test_execute_query_returns_rows() -> None:
         .select(["a"])
         .execute()
     )
-    rows = result["rows"]
+    rows = result.rows()
     assert len(rows) == 1
     record = rows[0]["a"]
     assert isinstance(record, dict)
@@ -139,7 +139,7 @@ def test_property_projections_return_scalars() -> None:
         .select([{"var": "a", "prop": "name", "as": "alias"}])
         .execute()
     )
-    rows = result["rows"]
+    rows = result.rows()
     assert len(rows) > 0
     assert isinstance(rows[0]["alias"], str)
 

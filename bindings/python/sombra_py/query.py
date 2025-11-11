@@ -9,6 +9,40 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, 
 
 from . import _native
 
+
+class QueryResult(dict):
+    """Envelope returned by execute()/explain() with convenience helpers."""
+
+    def rows(self) -> List[Dict[str, Any]]:
+        rows = self.get("rows") or []
+        if not isinstance(rows, list):
+            raise TypeError("result rows must be a list")
+        return rows
+
+    def request_id(self) -> Optional[str]:
+        rid = self.get("request_id")
+        if rid is not None and not isinstance(rid, str):
+            raise TypeError("request_id must be a string when present")
+        return rid
+
+    def features(self) -> List[Any]:
+        feats = self.get("features") or []
+        if not isinstance(feats, list):
+            raise TypeError("features must be a list")
+        return feats
+
+    def plan(self) -> Optional[Dict[str, Any]]:
+        plan = self.get("plan")
+        if plan is not None and not isinstance(plan, dict):
+            raise TypeError("plan must be an object when present")
+        return plan
+
+    def plan_hash(self) -> Optional[str]:
+        value = self.get("plan_hash")
+        if value is not None and not isinstance(value, str):
+            raise TypeError("plan_hash must be a string when present")
+        return value
+
 LiteralInput = Optional[Union[str, int, float, bool, datetime]]
 ProjectionField = Union[
     str,
@@ -705,11 +739,13 @@ class QueryBuilder:
         self._projections = projections
         return self
 
-    def explain(self) -> Dict[str, Any]:
-        return self._db._explain(self._build())
+    def explain(self) -> QueryResult:
+        payload = self._db._explain(self._build())
+        return QueryResult(payload)
 
-    def execute(self) -> Dict[str, Any]:
-        return self._db._execute(self._build())
+    def execute(self) -> QueryResult:
+        payload = self._db._execute(self._build())
+        return QueryResult(payload)
 
     def stream(self) -> AsyncIterator[Any]:
         handle = self._db._stream(self._build())
@@ -773,3 +809,17 @@ def _datetime_to_ns(value: datetime) -> int:
     total_seconds = delta.days * 86_400 + delta.seconds
     nanos = total_seconds * _NANOS_PER_SECOND + delta.microseconds * 1_000
     return nanos
+class QueryResult(dict):
+    """Envelope returned by execute/explain with helper accessors."""
+
+    def rows(self) -> List[Dict[str, Any]]:
+        rows = self.get("rows") or []
+        if not isinstance(rows, list):
+            raise TypeError("expected 'rows' to be a list")
+        return rows
+
+    def request_id(self) -> Optional[str]:
+        rid = self.get("request_id")
+        if rid is not None and not isinstance(rid, str):
+            raise TypeError("request_id must be a string when present")
+        return rid

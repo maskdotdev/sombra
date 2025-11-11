@@ -29,7 +29,7 @@ def main() -> None:
         .select(["a"])
         .execute()
     )
-    print("Query rows:", result["rows"])
+    print("Query rows:", result.rows())
 
     db.delete_node(user_id, cascade=True)
     print("Deleted user:", user_id)

@@ -110,8 +110,10 @@ result = (
     .execute()
 )
 
-rows = result["rows"]
+rows = result.rows()
 print(rows[0]["a"]["_id"], rows[0]["b"]["props"]["name"])
+
+Python’s `execute()` returns a lightweight `QueryResult` helper; call `result.rows()` for the row list and `result.request_id()` if you need the correlation id.
 ```
 
 ### 1.2 Scalars & predicate AST

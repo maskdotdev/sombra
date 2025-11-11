@@ -28,7 +28,7 @@ def main() -> None:
         .execute()
     )
 
-    for row in result["rows"]:
+    for row in result.rows():
         src = row["a"]
         dst = row["b"]
         print(
