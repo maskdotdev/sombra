@@ -82,6 +82,7 @@ tracing = "0.1"
 rustc-hash = "1.1"
 siphasher = "0.3"
 ahash = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"

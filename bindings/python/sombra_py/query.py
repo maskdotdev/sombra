@@ -585,7 +585,7 @@ class Database:
         self.mutate({"ops": [{"op": "deleteEdge", "id": int(edge_id)}]})
         return self
 
-    def _execute(self, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _execute(self, spec: Dict[str, Any]) -> Dict[str, Any]:
         return _native.database_execute(self._handle, spec)
 
     def _explain(self, spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -708,7 +708,7 @@ class QueryBuilder:
     def explain(self) -> Dict[str, Any]:
         return self._db._explain(self._build())
 
-    def execute(self) -> List[Dict[str, Any]]:
+    def execute(self) -> Dict[str, Any]:
         return self._db._execute(self._build())
 
     def stream(self) -> AsyncIterator[Any]:

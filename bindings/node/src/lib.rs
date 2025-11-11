@@ -86,7 +86,7 @@ pub fn openDatabase(path: String, options: Option<ConnectOptions>) -> NapiResult
 
 #[allow(non_snake_case)]
 #[napi]
-pub fn databaseExecute(handle: &DatabaseHandle, spec: Value) -> NapiResult<Vec<Value>> {
+pub fn databaseExecute(handle: &DatabaseHandle, spec: Value) -> NapiResult<Value> {
   handle.inner.execute_json(&spec).map_err(to_napi_err)
 }
 

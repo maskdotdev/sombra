@@ -22,7 +22,7 @@ export interface ConnectOptions {
 
 export declare function databaseCreate(handle: DatabaseHandle, spec: any): NapiResult<any>
 
-export declare function databaseExecute(handle: DatabaseHandle, spec: any): NapiResult<Array<any>>
+export declare function databaseExecute(handle: DatabaseHandle, spec: any): NapiResult<any>
 
 export declare function databaseExplain(handle: DatabaseHandle, spec: any): NapiResult<any>
 

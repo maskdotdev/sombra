@@ -5,7 +5,7 @@ async function main() {
   const db = Database.open(dbPath)
   db.seedDemo()
 
-  const rows = await db
+  const result = await db
     .query()
     .match({ var: 'a', label: 'User' })
     .where('FOLLOWS', { var: 'b', label: 'User' })
@@ -15,7 +15,7 @@ async function main() {
     .distinct()
     .execute()
 
-  for (const row of rows) {
+  for (const row of result.rows) {
     const source = row.source
     const target = row.target
     if (source && target) {

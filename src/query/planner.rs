@@ -21,8 +21,10 @@ use crate::types::{LabelId, PropId, Result, SombraError};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::hash::Hasher;
 use std::ops::Bound;
 use std::sync::Arc;
+use xxhash_rust::xxh64::Xxh64;
 
 /// Planner inputs that influence rule selection.
 #[derive(Clone, Debug, Default)]
@@ -34,10 +36,14 @@ pub struct PlannerConfig {
 /// Planner output containing the chosen physical plan and explain tree.
 #[derive(Clone, Debug)]
 pub struct PlannerOutput {
+    /// Optional request identifier propagated from the AST.
+    pub request_id: Option<String>,
     /// The generated physical query plan
     pub plan: PhysicalPlan,
     /// Human-readable explain tree
     pub explain: PlanExplain,
+    /// Deterministic plan hash for explain/caching.
+    pub plan_hash: u64,
 }
 
 /// Human-readable explain tree.
@@ -45,6 +51,8 @@ pub struct PlannerOutput {
 pub struct PlanExplain {
     /// Root node of the explain tree
     pub root: ExplainNode,
+    /// Deterministic hash for the plan.
+    pub plan_hash: u64,
 }
 
 /// Explain node representing an operator with optional metadata.
@@ -96,12 +104,16 @@ impl Planner {
         let mut ctx = PlanContext::new(self.metadata.as_ref());
         let logical = self.build_logical_plan(analyzed, &mut ctx)?;
         let physical = self.lower_to_physical(&logical, &mut ctx)?;
+        let plan_hash = compute_plan_hash(&physical);
         let explain = PlanExplain {
             root: build_explain_tree(&physical.root),
+            plan_hash,
         };
         Ok(PlannerOutput {
+            request_id: analyzed.request_id.clone(),
             plan: physical,
             explain,
+            plan_hash,
         })
     }
 
@@ -1337,6 +1349,24 @@ fn build_explain_tree(node: &PhysicalNode) -> ExplainNode {
         .map(|child| build_explain_tree(child))
         .collect();
     explain
+}
+
+fn compute_plan_hash(plan: &PhysicalPlan) -> u64 {
+    let mut hasher = Xxh64::new(0);
+    hash_physical_node(&plan.root, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_physical_node(node: &PhysicalNode, hasher: &mut Xxh64) {
+    hasher.write(op_name(&node.op).as_bytes());
+    for (key, value) in op_props(&node.op) {
+        hasher.write(key.as_bytes());
+        hasher.write(value.as_bytes());
+    }
+    hasher.write_u64(node.inputs.len() as u64);
+    for child in &node.inputs {
+        hash_physical_node(child, hasher);
+    }
 }
 
 fn op_name(op: &PhysicalOp) -> &'static str {

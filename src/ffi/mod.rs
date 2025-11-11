@@ -359,7 +359,7 @@ impl Database {
     /// Executes a JSON-serialized query specification and returns all results.
     ///
     /// Deserializes the JSON query specification and executes it against the database.
-    pub fn execute_json(&self, spec: &Value) -> Result<Vec<Value>> {
+    pub fn execute_json(&self, spec: &Value) -> Result<Value> {
         enforce_payload_size(spec)?;
         let spec: QuerySpec = serde_json::from_value(spec.clone())
             .map_err(|err| FfiError::Message(format!("invalid query spec: {err}")))?;
@@ -421,7 +421,7 @@ impl Database {
     }
 
     /// Executes a query specification and returns all results.
-    pub fn execute(&self, spec: QuerySpec) -> Result<Vec<Value>> {
+    pub fn execute(&self, spec: QuerySpec) -> Result<Value> {
         let plan_timer = profile_timer();
         let plan = self.plan(spec)?;
         record_profile_timer(ProfileKind::Plan, plan_timer);
@@ -429,15 +429,19 @@ impl Database {
         let result = self.executor.execute(&plan.plan)?;
         record_profile_timer(ProfileKind::Execute, exec_timer);
         let serde_timer = profile_timer();
-        let rows = rows_to_values(&result);
+        let rows = rows_to_values(&result)?;
         record_profile_timer(ProfileKind::Serialize, serde_timer);
-        rows
+        Ok(execution_payload(plan.request_id.clone(), rows))
     }
 
     /// Returns the query execution plan for a specification.
     pub fn explain(&self, spec: QuerySpec) -> Result<Value> {
         let plan = self.plan(spec)?;
-        Ok(explain_to_value(&plan.explain))
+        Ok(explain_payload(
+            plan.request_id.clone(),
+            plan.plan_hash,
+            &plan.explain,
+        ))
     }
 
     /// Creates a streaming query result.
@@ -1721,6 +1725,16 @@ fn rows_to_values(result: &QueryResult) -> Result<Vec<Value>> {
         .collect::<Result<Vec<_>>>()
 }
 
+fn execution_payload(request_id: Option<String>, rows: Vec<Value>) -> Value {
+    let mut map = Map::new();
+    if let Some(id) = request_id {
+        map.insert("request_id".into(), Value::String(id));
+    }
+    map.insert("features".into(), Value::Array(Vec::new()));
+    map.insert("rows".into(), Value::Array(rows));
+    Value::Object(map)
+}
+
 fn row_to_value(row: &Row) -> Result<Value> {
     let mut map = Map::new();
     for (key, value) in row {
@@ -1790,8 +1804,16 @@ fn prop_value_ref(value: &PropValueOwned) -> PropValue<'_> {
     }
 }
 
-fn explain_to_value(explain: &PlanExplain) -> Value {
+fn explain_payload(request_id: Option<String>, plan_hash: u64, explain: &PlanExplain) -> Value {
     let mut root = Map::new();
+    if let Some(id) = request_id {
+        root.insert("request_id".into(), Value::String(id));
+    }
+    root.insert("features".into(), Value::Array(Vec::new()));
+    root.insert(
+        "plan_hash".into(),
+        Value::String(format_plan_hash(plan_hash)),
+    );
     root.insert("plan".into(), explain_node_to_value(&explain.root));
     Value::Object(root)
 }
@@ -1813,6 +1835,10 @@ fn explain_node_to_value(node: &ExplainNode) -> Value {
         .collect::<Vec<_>>();
     map.insert("inputs".into(), Value::Array(inputs));
     Value::Object(map)
+}
+
+fn format_plan_hash(hash: u64) -> String {
+    format!("0x{hash:016x}")
 }
 
 /// Result of a batch creation operation with node IDs, edge IDs, and aliases.
@@ -2477,6 +2503,7 @@ mod tests {
         db.seed_demo()?;
         let spec = json!({
             "$schemaVersion": 1,
+            "request_id": "req-42",
             "matches": [
                 { "var": "a", "label": "User" }
             ],
@@ -2503,6 +2530,10 @@ mod tests {
             }
         });
         let explain = db.explain_json(&spec)?;
+        assert_eq!(
+            explain.get("request_id").and_then(Value::as_str),
+            Some("req-42")
+        );
         let plan = explain
             .get("plan")
             .and_then(Value::as_object)
@@ -2513,9 +2544,7 @@ mod tests {
             .and_then(Value::as_array)
             .expect("project inputs");
         assert_eq!(inputs.len(), 1);
-        let union = inputs[0]
-            .as_object()
-            .expect("union node object");
+        let union = inputs[0].as_object().expect("union node object");
         assert_eq!(union.get("op").and_then(Value::as_str), Some("Union"));
         let dedup = union
             .get("props")
@@ -2523,6 +2552,50 @@ mod tests {
             .and_then(|props| props.get("dedup"))
             .and_then(Value::as_str);
         assert_eq!(dedup, Some("true"));
+        let features = explain
+            .get("features")
+            .and_then(Value::as_array)
+            .expect("features array");
+        assert!(features.is_empty());
+        let plan_hash = explain
+            .get("plan_hash")
+            .and_then(Value::as_str)
+            .expect("plan hash");
+        assert!(plan_hash.starts_with("0x"));
+        Ok(())
+    }
+
+    #[test]
+    fn execute_json_includes_metadata() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("execute_with_meta.db");
+        let db = Database::open(&path, DatabaseOptions::default())?;
+        db.seed_demo()?;
+        let spec = json!({
+            "$schemaVersion": 1,
+            "request_id": "req-777",
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "projections": [
+                { "kind": "var", "var": "a" }
+            ]
+        });
+        let response = db.execute_json(&spec)?;
+        assert_eq!(
+            response.get("request_id").and_then(Value::as_str),
+            Some("req-777")
+        );
+        let features = response
+            .get("features")
+            .and_then(Value::as_array)
+            .expect("features array");
+        assert!(features.is_empty());
+        let rows = response
+            .get("rows")
+            .and_then(Value::as_array)
+            .expect("rows array");
+        assert!(!rows.is_empty());
         Ok(())
     }
 }

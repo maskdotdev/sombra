@@ -132,12 +132,10 @@ fn database_execute(
     py: Python<'_>,
     handle: &DatabaseHandle,
     spec: &Bound<'_, PyAny>,
-) -> PyResult<Vec<PyObject>> {
+) -> PyResult<PyObject> {
     let value = any_to_value(spec)?;
-    let rows = handle.inner.execute_json(&value).map_err(to_py_err)?;
-    rows.into_iter()
-        .map(|row| value_to_py(py, row))
-        .collect::<PyResult<Vec<_>>>()
+    let response = handle.inner.execute_json(&value).map_err(to_py_err)?;
+    value_to_py(py, response)
 }
 
 #[pyfunction]

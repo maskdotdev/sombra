@@ -18,7 +18,7 @@ async function typedExamples() {
   const db = Database.open<Schema>(':memory:')
 
   const nodes = await db.query().match('User').select(['a']).execute()
-  const entity = nodes[0]?.a
+  const entity = nodes.rows[0]?.a
   const entityRecord = entity as Record<string, unknown> | undefined
   console.log(entityRecord)
 
@@ -27,7 +27,7 @@ async function typedExamples() {
     .match({ var: 'u', label: 'User' })
     .select([{ var: 'u', prop: 'name', as: 'userName' }])
     .execute()
-  const label = scalars[0]?.userName
+  const label = scalars.rows[0]?.userName
   if (typeof label === 'string') {
     label.toUpperCase()
   }

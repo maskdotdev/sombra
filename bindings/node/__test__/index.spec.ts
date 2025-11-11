@@ -12,15 +12,16 @@ function tempPath(): string {
 
 test('executing fluent query returns seeded rows', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
-  const rows = await db
+  const result = await db
     .query()
     .match('User')
     .where('a', (pred) => pred.eq('name', 'Ada'))
     .select(['a'])
     .execute()
 
-  t.is(rows.length, 1)
-  const entity = rows[0].a as { _id: number; props: Record<string, unknown> }
+  t.true(Array.isArray(result.rows))
+  t.is(result.rows.length, 1)
+  const entity = result.rows[0].a as { _id: number; props: Record<string, unknown> }
   t.truthy(entity)
   t.true(typeof entity._id === 'number')
   t.true(typeof entity.props === 'object')
@@ -139,14 +140,14 @@ test('pragma toggles autocheckpoint window', (t) => {
 
 test('property projections return scalar columns', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
-  const rows = await db
+  const result = await db
     .query()
     .match({ var: 'a', label: 'User' })
     .select([{ var: 'a', prop: 'name', as: 'label' }])
     .execute()
 
-  t.true(rows.length > 0)
-  t.true(typeof rows[0].label === 'string')
+  t.true(result.rows.length > 0)
+  t.true(typeof result.rows[0].label === 'string')
 })
 
 test('DateTime literals support Date objects and ISO strings', (t) => {
