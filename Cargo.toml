@@ -22,6 +22,42 @@ path = "src/bin/fast_bench.rs"
 name = "compare-bench"
 path = "src/bin/compare_bench.rs"
 
+[[test]]
+name = "catalog_dict"
+path = "tests/integration/catalog_dict.rs"
+
+[[test]]
+name = "cli_admin_commands"
+path = "tests/integration/cli_admin_commands.rs"
+
+[[test]]
+name = "pager_stage3_end_to_end"
+path = "tests/integration/pager_stage3_end_to_end.rs"
+
+[[test]]
+name = "storage_phase1"
+path = "tests/integration/storage_phase1.rs"
+
+[[test]]
+name = "storage_phase2"
+path = "tests/integration/storage_phase2.rs"
+
+[[test]]
+name = "storage_phase3"
+path = "tests/integration/storage_phase3.rs"
+
+[[test]]
+name = "storage_stage7"
+path = "tests/integration/storage_stage7.rs"
+
+[[test]]
+name = "storage_stress"
+path = "tests/integration/storage_stress.rs"
+
+[[test]]
+name = "vstore"
+path = "tests/integration/vstore.rs"
+
 [features]
 default = []
 degree-cache = []
@@ -35,6 +71,7 @@ crc32fast = "1.4"
 csv = "1.3"
 hex = "0.4"
 lru = "0.12"
+base64 = "0.21"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 rand = "0.8"
 smallvec = "1.11"
@@ -44,6 +81,7 @@ thiserror = "1"
 tracing = "0.1"
 rustc-hash = "1.1"
 siphasher = "0.3"
+ahash = "0.8"
 
 [dev-dependencies]
 assert_cmd = "2.0"
