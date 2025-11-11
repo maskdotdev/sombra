@@ -17,13 +17,14 @@ def test_execute_query_returns_rows() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    rows = (
+    result = (
         db.query()
         .match("User")
         .where_var("a", lambda pred: pred.eq("name", "Ada"))
         .select(["a"])
         .execute()
     )
+    rows = result["rows"]
     assert len(rows) == 1
     record = rows[0]["a"]
     assert isinstance(record, dict)
@@ -132,12 +133,13 @@ def test_property_projections_return_scalars() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    rows = (
+    result = (
         db.query()
         .match({"var": "a", "label": "User"})
         .select([{"var": "a", "prop": "name", "as": "alias"}])
         .execute()
     )
+    rows = result["rows"]
     assert len(rows) > 0
     assert isinstance(rows[0]["alias"], str)
 

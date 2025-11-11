@@ -22,14 +22,14 @@ def main() -> None:
 
     db.update_node(user_id, set_props={"bio": "Updated from Python"})
 
-    rows = (
+    result = (
         db.query()
         .match("User")
         .where_var("a", lambda pred: pred.eq("name", "Example User"))
         .select(["a"])
         .execute()
     )
-    print("Query rows:", rows)
+    print("Query rows:", result["rows"])
 
     db.delete_node(user_id, cascade=True)
     print("Deleted user:", user_id)

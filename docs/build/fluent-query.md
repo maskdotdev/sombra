@@ -73,6 +73,7 @@ Key points:
 - For OR predicates mixing typed and wildcard edge clauses, the planner emits typed expansions where type is known and falls back to wildcard adjacency only for the branches that require it.
 - `predicate` is optional; omit for “match everything”.
 - Optional `request_id` strings let callers correlate/abort work later (documented but cancellation API is future work).
+- Execute/explain responses always wrap data inside an envelope: `{ "request_id": "...?", "features": [], "rows": [...] }` for `execute` and `{ "request_id": "...?", "features": [], "plan_hash": "0x...", "plan": { ... } }` for `explain`.
 - `projections.kind` is either `"var"` (return the entire bound entity) or `"prop"` (single property). Multiple `"prop"` projections are returned in request order.
 - Property projections produce scalar columns and coerce their literals according to the property type. They are ideal for selective queries that only need a couple of values instead of whole nodes.
 - Language bindings expose typed `Database<Schema>` surfaces so label/property mismatches are caught at compile time even though the on-the-wire representation stays the same.
@@ -83,7 +84,7 @@ Key points:
 **Node (TypeScript)**
 
 ```ts
-const rows = await db
+const result = await db
   .query()
   .match({ var: 'a', label: 'User' })
   .where('FOLLOWS', { var: 'b', label: 'User' })
@@ -92,13 +93,14 @@ const rows = await db
   .select([{ var: 'a', as: 'source' }, { var: 'b', as: 'target' }])
   .execute();
 
-console.log(rows[0].source._id, rows[0].target.props.name);
+const rows = result.rows;
+console.log(rows[0]?.source._id, rows[0]?.target.props.name);
 ```
 
 **Python**
 
 ```python
-rows = (
+result = (
     db.query()
     .match({"var": "a", "label": "User"})
     .where("FOLLOWS", {"var": "b", "label": "User"})
@@ -108,6 +110,7 @@ rows = (
     .execute()
 )
 
+rows = result["rows"]
 print(rows[0]["a"]["_id"], rows[0]["b"]["props"]["name"])
 ```
 

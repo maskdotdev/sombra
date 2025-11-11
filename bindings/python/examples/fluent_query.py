@@ -17,7 +17,7 @@ def main() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    rows = (
+    result = (
         db.query()
         .match({"var": "a", "label": "User"})
         .where("FOLLOWS", {"var": "b", "label": "User"})
@@ -28,7 +28,7 @@ def main() -> None:
         .execute()
     )
 
-    for row in rows:
+    for row in result["rows"]:
         src = row["a"]
         dst = row["b"]
         print(
