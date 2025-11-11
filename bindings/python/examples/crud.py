@@ -25,7 +25,7 @@ def main() -> None:
     rows = (
         db.query()
         .match("User")
-        .where_prop("a", "name", "=", "Example User")
+        .where_var("a", lambda pred: pred.eq("name", "Example User"))
         .select(["a"])
         .execute()
     )

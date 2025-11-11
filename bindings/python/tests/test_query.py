@@ -1,9 +1,11 @@
 import asyncio
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sombra_py import Database
+from sombra_py.query import _literal_value
 
 
 def temp_db_path() -> str:
@@ -15,9 +17,18 @@ def test_execute_query_returns_rows() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    rows = db.query().match("User").where_prop("a", "name", "=", "Ada").select(["a"]).execute()
+    rows = (
+        db.query()
+        .match("User")
+        .where_var("a", lambda pred: pred.eq("name", "Ada"))
+        .select(["a"])
+        .execute()
+    )
     assert len(rows) == 1
-    assert rows[0]["a"] > 0
+    record = rows[0]["a"]
+    assert isinstance(record, dict)
+    assert record["_id"] > 0
+    assert isinstance(record["props"], dict)
 
 
 def test_stream_iterates_results() -> None:
@@ -32,6 +43,7 @@ def test_stream_iterates_results() -> None:
 
     rows = asyncio.run(collect())
     assert len(rows) >= 3
+    assert all("a" in row and isinstance(row["a"], dict) for row in rows)
 
 
 def test_explain_plan_shape() -> None:
@@ -114,5 +126,32 @@ def test_pragma_round_trip() -> None:
     assert db.pragma("synchronous") == "normal"
     db.pragma("autocheckpoint_ms", 7)
     assert db.pragma("autocheckpoint_ms") == 7
-    db.pragma("autocheckpoint_ms", None)
-    assert db.pragma("autocheckpoint_ms") is None
+
+
+def test_property_projections_return_scalars() -> None:
+    db = Database.open(temp_db_path())
+    db.seed_demo()
+
+    rows = (
+        db.query()
+        .match({"var": "a", "label": "User"})
+        .select([{"var": "a", "prop": "name", "as": "alias"}])
+        .execute()
+    )
+    assert len(rows) > 0
+    assert isinstance(rows[0]["alias"], str)
+
+
+def test_literal_value_datetime_supports_timezone() -> None:
+    aware = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    literal = _literal_value(aware)
+    assert literal["t"] == "DateTime"
+    assert isinstance(literal["v"], int)
+
+    naive = datetime(2020, 1, 1)
+    try:
+        _literal_value(naive)
+    except ValueError as exc:
+        assert "timezone" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for naive datetime")

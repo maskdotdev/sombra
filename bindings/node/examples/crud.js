@@ -21,7 +21,7 @@ function main() {
   const rows = db
     .query()
     .match('User')
-    .whereProp('a', 'name', '=', 'Example User')
+    .where('a', (pred) => pred.eq('name', 'Example User'))
     .select(['a'])
     .execute()
   console.log('Query results:', rows)

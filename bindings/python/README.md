@@ -15,10 +15,12 @@ db.seed_demo()
 rows = (
     db.query()
     .match("User")
-    .where_prop("a", "name", "=", "Ada")
-    .select(["a"])
+    .where_var("a", lambda pred: pred.eq("name", "Ada"))
+    .select([{"var": "a", "prop": "name", "as": "alias"}])
     .execute()
 )
+doc = rows[0]["a"]
+print(doc["_id"], doc["props"]["name"])
 
 user_id = db.create_node("User", {"name": "New User"})
 db.update_node(user_id, set_props={"bio": "updated"})
@@ -39,6 +41,8 @@ against a throwaway database:
 ```bash
 python benchmarks/crud.py
 ```
+
+Predicate builders accept timezone-aware `datetime` objects directly and reject naive datetimes so callers do not need to juggle epochs. Property projections (`{"var": "a", "prop": "name", "as": "alias"}`) return scalar columns when you only need a subset of properties.
 
 ## Development
 

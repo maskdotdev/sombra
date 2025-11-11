@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import math
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import _native
 
-LiteralInput = Optional[Union[str, int, float, bool]]
+LiteralInput = Optional[Union[str, int, float, bool, datetime]]
 ProjectionField = Union[
     str,
     Dict[str, Optional[str]],
@@ -35,34 +37,45 @@ def _normalize_target(
     raise ValueError("target must be a string or dict with keys 'var' and optional 'label'")
 
 
-def _literal_spec(value: LiteralInput) -> Dict[str, Any]:
+_I64_MIN = -(1 << 63)
+_I64_MAX = (1 << 63) - 1
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MIN_DATETIME = datetime(1900, 1, 1, tzinfo=timezone.utc)
+_MAX_DATETIME = datetime(2100, 1, 1, tzinfo=timezone.utc)
+_NANOS_PER_SECOND = 1_000_000_000
+
+
+def _literal_value(value: LiteralInput) -> Dict[str, Any]:
     if value is None:
-        return {"type": "null"}
+        return {"t": "Null"}
     if isinstance(value, bool):
-        return {"type": "bool", "value": value}
-    if isinstance(value, str):
-        return {"type": "string", "value": value}
+        return {"t": "Bool", "v": value}
+    if isinstance(value, datetime):
+        return {"t": "DateTime", "v": _datetime_to_ns(value)}
     if isinstance(value, int):
-        return {"type": "int", "value": value}
+        if value < _I64_MIN or value > _I64_MAX:
+            raise ValueError("integer literal must fit within signed 64-bit range")
+        return {"t": "Int", "v": value}
     if isinstance(value, float):
-        if not (value == value and value not in (float("inf"), float("-inf"))):
+        if math.isnan(value) or math.isinf(value):
             raise ValueError("float literal must be finite")
-        if value.is_integer():
-            return {"type": "int", "value": int(value)}
-        return {"type": "float", "value": value}
+        return {"t": "Float", "v": value}
+    if isinstance(value, str):
+        return {"t": "String", "v": value}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        buf = bytes(value)
+        return {"t": "Bytes", "v": list(buf)}
     raise ValueError(f"unsupported literal type: {type(value)!r}")
-
-
-def _included_bound(value: LiteralInput) -> Dict[str, Any]:
-    return {"kind": "included", "value": _literal_spec(value)}
-
-
-def _excluded_bound(value: LiteralInput) -> Dict[str, Any]:
-    return {"kind": "excluded", "value": _literal_spec(value)}
 
 
 def _clone(obj: Dict[str, Any]) -> Dict[str, Any]:
     return copy.deepcopy(obj)
+
+
+def _normalize_prop_name(prop: str) -> str:
+    if not isinstance(prop, str) or not prop.strip():
+        raise ValueError("property name must be a non-empty string")
+    return prop
 
 
 def _normalize_labels(labels: Union[str, Sequence[str]]) -> List[str]:
@@ -173,6 +186,168 @@ class _QueryStream:
         if value is None:
             raise StopAsyncIteration
         return value
+
+
+class _PredicateBuilder:
+    def __init__(self, parent: Optional["QueryBuilder"], var: str, mode: str = "and") -> None:
+        if not isinstance(var, str) or not var:
+            raise ValueError("where_var() requires a non-empty variable name")
+        self._parent = parent
+        self._var = var
+        self._mode = mode
+        self._exprs: List[Dict[str, Any]] = []
+        self._sealed = False
+
+    def _ensure_active(self) -> None:
+        if self._sealed:
+            raise RuntimeError("predicate builder already finalized")
+
+    def _push(self, expr: Dict[str, Any]) -> "_PredicateBuilder":
+        self._ensure_active()
+        self._exprs.append(expr)
+        return self
+
+    def _finalize_expr(self) -> Dict[str, Any]:
+        self._ensure_active()
+        if not self._exprs:
+            raise ValueError("predicate builder must emit at least one predicate")
+        self._sealed = True
+        if len(self._exprs) == 1:
+            return self._exprs[0]
+        return {"op": self._mode, "args": list(self._exprs)}
+
+    def done(self) -> "QueryBuilder":
+        if self._parent is None:
+            raise RuntimeError("cannot finalize nested predicate group directly")
+        expr = self._finalize_expr()
+        self._parent._append_predicate(expr)
+        return self._parent
+
+    def _comparison(self, op: str, prop: str, extra: Dict[str, Any]) -> "_PredicateBuilder":
+        spec = {"op": op, "var": self._var, "prop": _normalize_prop_name(prop)}
+        spec.update(extra)
+        return self._push(spec)
+
+    def eq(self, prop: str, value: LiteralInput) -> "_PredicateBuilder":
+        return self._comparison("eq", prop, {"value": _literal_value(value)})
+
+    def ne(self, prop: str, value: LiteralInput) -> "_PredicateBuilder":
+        return self._comparison("ne", prop, {"value": _literal_value(value)})
+
+    def lt(self, prop: str, value: LiteralInput) -> "_PredicateBuilder":
+        literal = _literal_value(value)
+        if literal["t"] == "Null":
+            raise ValueError("lt() does not accept null literals")
+        return self._comparison("lt", prop, {"value": literal})
+
+    def le(self, prop: str, value: LiteralInput) -> "_PredicateBuilder":
+        literal = _literal_value(value)
+        if literal["t"] == "Null":
+            raise ValueError("le() does not accept null literals")
+        return self._comparison("le", prop, {"value": literal})
+
+    def gt(self, prop: str, value: LiteralInput) -> "_PredicateBuilder":
+        literal = _literal_value(value)
+        if literal["t"] == "Null":
+            raise ValueError("gt() does not accept null literals")
+        return self._comparison("gt", prop, {"value": literal})
+
+    def ge(self, prop: str, value: LiteralInput) -> "_PredicateBuilder":
+        literal = _literal_value(value)
+        if literal["t"] == "Null":
+            raise ValueError("ge() does not accept null literals")
+        return self._comparison("ge", prop, {"value": literal})
+
+    def between(
+        self,
+        prop: str,
+        low: LiteralInput,
+        high: LiteralInput,
+        inclusive: Optional[Sequence[bool]] = None,
+    ) -> "_PredicateBuilder":
+        low_literal = _literal_value(low)
+        high_literal = _literal_value(high)
+        if low_literal["t"] == "Null" or high_literal["t"] == "Null":
+            raise ValueError("between() does not accept null bounds")
+        flags = [True, True]
+        if inclusive is not None:
+            if (
+                not isinstance(inclusive, Sequence)
+                or len(inclusive) != 2
+                or not all(isinstance(flag, bool) for flag in inclusive)
+            ):
+                raise ValueError("inclusive must be a two-element sequence of booleans")
+            flags = [bool(inclusive[0]), bool(inclusive[1])]
+        return self._push(
+            {
+                "op": "between",
+                "var": self._var,
+                "prop": _normalize_prop_name(prop),
+                "low": low_literal,
+                "high": high_literal,
+                "inclusive": flags,
+            }
+        )
+
+    def in_(self, prop: str, values: Sequence[LiteralInput]) -> "_PredicateBuilder":
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+            raise TypeError("in_() requires a sequence of literal values")
+        items = list(values)
+        if not items:
+            raise ValueError("in_() requires at least one literal")
+        tagged: List[Dict[str, Any]] = []
+        for value in items:
+            if isinstance(value, (list, tuple, set, dict)):
+                raise TypeError("in_() does not accept nested collections")
+            tagged.append(_literal_value(value))
+        exemplar = next((entry for entry in tagged if entry["t"] != "Null"), None)
+        if exemplar is not None:
+            for entry in tagged:
+                if entry["t"] != "Null" and entry["t"] != exemplar["t"]:
+                    raise ValueError("in_() requires all literals to share the same type")
+        return self._push(
+            {
+                "op": "in",
+                "var": self._var,
+                "prop": _normalize_prop_name(prop),
+                "values": tagged,
+            }
+        )
+
+    def exists(self, prop: str) -> "_PredicateBuilder":
+        return self._push({"op": "exists", "var": self._var, "prop": _normalize_prop_name(prop)})
+
+    def is_null(self, prop: str) -> "_PredicateBuilder":
+        return self._push({"op": "isNull", "var": self._var, "prop": _normalize_prop_name(prop)})
+
+    def is_not_null(self, prop: str) -> "_PredicateBuilder":
+        return self._push(
+            {"op": "isNotNull", "var": self._var, "prop": _normalize_prop_name(prop)}
+        )
+
+    def and_(self, callback: Callable[["_PredicateBuilder"], None]) -> "_PredicateBuilder":
+        return self._group("and", callback)
+
+    def or_(self, callback: Callable[["_PredicateBuilder"], None]) -> "_PredicateBuilder":
+        return self._group("or", callback)
+
+    def not_(self, callback: Callable[["_PredicateBuilder"], None]) -> "_PredicateBuilder":
+        if not callable(callback):
+            raise TypeError("not_() requires a callback")
+        nested = _PredicateBuilder(None, self._var, "and")
+        callback(nested)
+        expr = nested._finalize_expr()
+        return self._push({"op": "not", "args": [expr]})
+
+    def _group(
+        self, mode: str, callback: Callable[["_PredicateBuilder"], None]
+    ) -> "_PredicateBuilder":
+        if not callable(callback):
+            raise TypeError(f"{mode}_() requires a callback")
+        nested = _PredicateBuilder(None, self._var, mode)
+        callback(nested)
+        expr = nested._finalize_expr()
+        return self._push(expr)
 
 
 class _CreateHandle:
@@ -432,7 +607,7 @@ class QueryBuilder:
         self._db = db
         self._matches: List[Dict[str, Optional[str]]] = []
         self._edges: List[Dict[str, Any]] = []
-        self._predicates: List[Dict[str, Any]] = []
+        self._predicate: Optional[Dict[str, Any]] = None
         self._projections: List[Dict[str, Any]] = []
         self._distinct = False
         self._last_var: Optional[str] = None
@@ -467,6 +642,22 @@ class QueryBuilder:
         self._pending_direction = "out"
         return self
 
+    def where_var(
+        self,
+        var_name: str,
+        build: Optional[Callable[["_PredicateBuilder"], None]] = None,
+    ) -> Union["_PredicateBuilder", "QueryBuilder"]:
+        if not isinstance(var_name, str) or not var_name:
+            raise ValueError("where_var() requires a non-empty variable name")
+        self._assert_match(var_name)
+        builder = _PredicateBuilder(self, var_name)
+        if build is not None:
+            if not callable(build):
+                raise TypeError("where_var() callback must be callable")
+            build(builder)
+            return builder.done()
+        return builder
+
     def direction(self, direction: str) -> "QueryBuilder":
         if direction not in ("out", "in", "both"):
             raise ValueError(f"invalid direction: {direction}")
@@ -475,75 +666,6 @@ class QueryBuilder:
 
     def bidirectional(self) -> "QueryBuilder":
         return self.direction("both")
-
-    def where_prop(
-        self,
-        var_name: str,
-        prop: str,
-        op: str,
-        value: LiteralInput,
-        value2: LiteralInput = None,
-    ) -> "QueryBuilder":
-        op_lower = op.lower()
-        if op_lower in ("=", "eq"):
-            self._predicates.append(
-                {"kind": "eq", "var": var_name, "prop": prop, "value": _literal_spec(value)}
-            )
-        elif op_lower == "between":
-            if value2 is None:
-                raise ValueError("between operator requires two values")
-            self._predicates.append(
-                {
-                    "kind": "range",
-                    "var": var_name,
-                    "prop": prop,
-                    "lower": _included_bound(value),
-                    "upper": _included_bound(value2),
-                }
-            )
-        elif op_lower in (">", "gt"):
-            self._predicates.append(
-                {
-                    "kind": "range",
-                    "var": var_name,
-                    "prop": prop,
-                    "lower": _excluded_bound(value),
-                    "upper": {"kind": "unbounded"},
-                }
-            )
-        elif op_lower in (">=", "ge"):
-            self._predicates.append(
-                {
-                    "kind": "range",
-                    "var": var_name,
-                    "prop": prop,
-                    "lower": _included_bound(value),
-                    "upper": {"kind": "unbounded"},
-                }
-            )
-        elif op_lower in ("<", "lt"):
-            self._predicates.append(
-                {
-                    "kind": "range",
-                    "var": var_name,
-                    "prop": prop,
-                    "lower": {"kind": "unbounded"},
-                    "upper": _excluded_bound(value),
-                }
-            )
-        elif op_lower in ("<=", "le"):
-            self._predicates.append(
-                {
-                    "kind": "range",
-                    "var": var_name,
-                    "prop": prop,
-                    "lower": {"kind": "unbounded"},
-                    "upper": _included_bound(value),
-                }
-            )
-        else:
-            raise ValueError(f"unsupported property operator: {op}")
-        return self
 
     def distinct(self, _on: Optional[str] = None) -> "QueryBuilder":
         self._distinct = True
@@ -561,6 +683,17 @@ class QueryBuilder:
                     if not isinstance(expr, str) or not isinstance(alias, str):
                         raise ValueError("projection expression requires string expr and alias")
                     projections.append({"kind": "expr", "expr": expr, "alias": alias})
+                elif "prop" in field:
+                    var_name = field.get("var")
+                    prop = field["prop"]
+                    alias = field.get("as")
+                    if not isinstance(var_name, str) or not var_name:
+                        raise ValueError("property projection requires a variable name")
+                    if not isinstance(prop, str) or not prop:
+                        raise ValueError("property projection requires a property name")
+                    if alias is not None and not isinstance(alias, str):
+                        raise ValueError("property projection alias must be a string when provided")
+                    projections.append({"kind": "prop", "var": var_name, "prop": prop, "alias": alias})
                 elif "var" in field:
                     var_name = field["var"]
                     alias = field.get("as")
@@ -590,13 +723,27 @@ class QueryBuilder:
                 return
         self._matches.append({"var": var_name, "label": label})
 
+    def _assert_match(self, var_name: str) -> None:
+        if not any(match["var"] == var_name for match in self._matches):
+            raise ValueError(f"unknown variable '{var_name}' - call match() first")
+
+    def _append_predicate(self, expr: Dict[str, Any]) -> None:
+        if self._predicate is None:
+            self._predicate = expr
+            return
+        if self._predicate.get("op") == "and":
+            self._predicate["args"].append(expr)
+        else:
+            self._predicate = {"op": "and", "args": [self._predicate, expr]}
+
     def _next_auto_var(self) -> str:
         name = _auto_var_name(self._next_var_idx)
         self._next_var_idx += 1
         return name
 
     def _build(self) -> Dict[str, Any]:
-        return {
+        spec: Dict[str, Any] = {
+            "$schemaVersion": 1,
             "matches": [
                 {"var": clause["var"], "label": clause.get("label")}
                 for clause in self._matches
@@ -610,7 +757,19 @@ class QueryBuilder:
                 }
                 for edge in self._edges
             ],
-            "predicates": [_clone(pred) for pred in self._predicates],
             "distinct": self._distinct,
             "projections": [_clone(proj) for proj in self._projections],
         }
+        if self._predicate is not None:
+            spec["predicate"] = _clone(self._predicate)
+        return spec
+def _datetime_to_ns(value: datetime) -> int:
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError("datetime literal must include timezone info")
+    normalized = value.astimezone(timezone.utc)
+    if normalized < _MIN_DATETIME or normalized > _MAX_DATETIME:
+        raise ValueError("datetime literal must be between 1900-01-01 and 2100-01-01 UTC")
+    delta = normalized - _EPOCH
+    total_seconds = delta.days * 86_400 + delta.seconds
+    nanos = total_seconds * _NANOS_PER_SECOND + delta.microseconds * 1_000
+    return nanos

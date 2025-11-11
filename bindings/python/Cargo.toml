@@ -1,8 +1,8 @@
 [package]
 name = "sombra-py-native"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
 publish = false
 
 [lib]

@@ -15,12 +15,15 @@ test('executing fluent query returns seeded rows', async (t) => {
   const rows = await db
     .query()
     .match('User')
-    .whereProp('a', 'name', '=', 'Ada')
+    .where('a', (pred) => pred.eq('name', 'Ada'))
     .select(['a'])
     .execute()
 
   t.is(rows.length, 1)
-  t.truthy(rows[0].a)
+  const entity = rows[0].a as { _id: number; props: Record<string, unknown> }
+  t.truthy(entity)
+  t.true(typeof entity._id === 'number')
+  t.true(typeof entity.props === 'object')
 })
 
 test('streaming query iterates over results', async (t) => {
@@ -29,7 +32,8 @@ test('streaming query iterates over results', async (t) => {
 
   const encountered: Array<number> = []
   for await (const row of stream) {
-    encountered.push(row.a as number)
+    const entity = row.a as { _id: number }
+    encountered.push(entity._id)
   }
 
   t.true(encountered.length >= 3)
@@ -131,4 +135,37 @@ test('pragma toggles autocheckpoint window', (t) => {
   t.is(db.pragma('autocheckpoint_ms'), 5)
   db.pragma('autocheckpoint_ms', null)
   t.is(db.pragma('autocheckpoint_ms'), null)
+})
+
+test('property projections return scalar columns', async (t) => {
+  const db = Database.open(tempPath()).seedDemo()
+  const rows = await db
+    .query()
+    .match({ var: 'a', label: 'User' })
+    .select([{ var: 'a', prop: 'name', as: 'label' }])
+    .execute()
+
+  t.true(rows.length > 0)
+  t.true(typeof rows[0].label === 'string')
+})
+
+test('DateTime literals support Date objects and ISO strings', (t) => {
+  const db = Database.open(tempPath())
+  const dateSpec = db
+    .query()
+    .match('User')
+    .where('a', (pred) => pred.eq('created_at', new Date('2020-01-01T00:00:00Z')))
+    ._build()
+  t.is(dateSpec.predicate?.value?.t ?? dateSpec.predicate?.args?.[0]?.value?.t, 'DateTime')
+
+  const isoSpec = db
+    .query()
+    .match('User')
+    .where('a', (pred) => pred.eq('created_at', '2020-01-01T00:00:00Z'))
+    ._build()
+  t.is(isoSpec.predicate?.value?.t ?? isoSpec.predicate?.args?.[0]?.value?.t, 'DateTime')
+
+  t.throws(() =>
+    db.query().match('User').where('a', (pred) => pred.eq('created_at', '2020-01-01T00:00:00')),
+  )
 })
