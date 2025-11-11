@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import math
 from datetime import datetime, timezone
@@ -31,11 +32,15 @@ class QueryResult(dict):
             raise TypeError("features must be a list")
         return feats
 
-    def plan(self) -> Optional[Dict[str, Any]]:
+    def plan(self) -> List[Dict[str, Any]]:
         plan = self.get("plan")
-        if plan is not None and not isinstance(plan, dict):
-            raise TypeError("plan must be an object when present")
-        return plan
+        if plan is None:
+            return []
+        if isinstance(plan, list):
+            return plan
+        if isinstance(plan, dict):
+            return [plan]
+        raise TypeError("plan must be a list of plan nodes when present")
 
     def plan_hash(self) -> Optional[str]:
         value = self.get("plan_hash")
@@ -43,7 +48,7 @@ class QueryResult(dict):
             raise TypeError("plan_hash must be a string when present")
         return value
 
-LiteralInput = Optional[Union[str, int, float, bool, datetime]]
+LiteralInput = Optional[Union[str, int, float, bool, datetime, bytes, bytearray, memoryview]]
 ProjectionField = Union[
     str,
     Dict[str, Optional[str]],
@@ -52,11 +57,7 @@ ProjectionField = Union[
 
 
 def _auto_var_name(idx: int) -> str:
-    alphabet = "abcdefghijklmnopqrstuvwxyz"
-    letter = alphabet[idx % len(alphabet)]
-    if idx < len(alphabet):
-        return letter
-    return f"{letter}{idx // len(alphabet)}"
+    return f"n{idx}"
 
 
 def _normalize_target(
@@ -71,12 +72,39 @@ def _normalize_target(
     raise ValueError("target must be a string or dict with keys 'var' and optional 'label'")
 
 
+def _normalize_runtime_schema(
+    schema: Optional[Mapping[str, Mapping[str, Any]]]
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    if schema is None:
+        return None
+    if not isinstance(schema, Mapping):
+        raise TypeError("schema must be a mapping of label -> property metadata")
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for label, props in schema.items():
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("schema labels must be non-empty strings")
+        if not isinstance(props, Mapping):
+            raise TypeError(f"schema entry for label '{label}' must be a mapping of properties")
+        normalized_props: Dict[str, Any] = {}
+        for prop_name in props.keys():
+            if not isinstance(prop_name, str) or not prop_name.strip():
+                raise ValueError(f"schema for label '{label}' contains an invalid property name")
+            normalized_props[prop_name] = props[prop_name]
+        normalized[label] = normalized_props
+    return normalized
+
+
 _I64_MIN = -(1 << 63)
 _I64_MAX = (1 << 63) - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MIN_DATETIME = datetime(1900, 1, 1, tzinfo=timezone.utc)
 _MAX_DATETIME = datetime(2100, 1, 1, tzinfo=timezone.utc)
 _NANOS_PER_SECOND = 1_000_000_000
+
+
+def _encode_bytes_literal(value: Union[bytes, bytearray, memoryview]) -> str:
+    buf = bytes(value)
+    return base64.b64encode(buf).decode("ascii")
 
 
 def _literal_value(value: LiteralInput) -> Dict[str, Any]:
@@ -97,13 +125,28 @@ def _literal_value(value: LiteralInput) -> Dict[str, Any]:
     if isinstance(value, str):
         return {"t": "String", "v": value}
     if isinstance(value, (bytes, bytearray, memoryview)):
-        buf = bytes(value)
-        return {"t": "Bytes", "v": list(buf)}
+        return {"t": "Bytes", "v": _encode_bytes_literal(value)}
     raise ValueError(f"unsupported literal type: {type(value)!r}")
 
 
 def _clone(obj: Dict[str, Any]) -> Dict[str, Any]:
     return copy.deepcopy(obj)
+
+
+def _normalize_envelope(payload: Dict[str, Any], *, expect_plan: bool = False) -> Dict[str, Any]:
+    if "request_id" not in payload:
+        payload["request_id"] = None
+    if expect_plan:
+        plan = payload.get("plan")
+        if plan is None:
+            payload["plan"] = []
+        elif isinstance(plan, list):
+            pass
+        elif isinstance(plan, dict):
+            payload["plan"] = [plan]
+        else:
+            raise TypeError("plan must be an object or list when present")
+    return payload
 
 
 def _normalize_prop_name(prop: str) -> str:
@@ -223,12 +266,19 @@ class _QueryStream:
 
 
 class _PredicateBuilder:
-    def __init__(self, parent: Optional["QueryBuilder"], var: str, mode: str = "and") -> None:
+    def __init__(
+        self,
+        parent: Optional["QueryBuilder"],
+        var: str,
+        mode: str = "and",
+        validator: Optional[Callable[[str], str]] = None,
+    ) -> None:
         if not isinstance(var, str) or not var:
             raise ValueError("where_var() requires a non-empty variable name")
         self._parent = parent
         self._var = var
         self._mode = mode
+        self._validator = validator
         self._exprs: List[Dict[str, Any]] = []
         self._sealed = False
 
@@ -257,8 +307,13 @@ class _PredicateBuilder:
         self._parent._append_predicate(expr)
         return self._parent
 
+    def _normalize_prop(self, prop: str) -> str:
+        if self._validator is not None:
+            return self._validator(prop)
+        return _normalize_prop_name(prop)
+
     def _comparison(self, op: str, prop: str, extra: Dict[str, Any]) -> "_PredicateBuilder":
-        spec = {"op": op, "var": self._var, "prop": _normalize_prop_name(prop)}
+        spec = {"op": op, "var": self._var, "prop": self._normalize_prop(prop)}
         spec.update(extra)
         return self._push(spec)
 
@@ -316,7 +371,7 @@ class _PredicateBuilder:
             {
                 "op": "between",
                 "var": self._var,
-                "prop": _normalize_prop_name(prop),
+                "prop": self._normalize_prop(prop),
                 "low": low_literal,
                 "high": high_literal,
                 "inclusive": flags,
@@ -343,20 +398,20 @@ class _PredicateBuilder:
             {
                 "op": "in",
                 "var": self._var,
-                "prop": _normalize_prop_name(prop),
+                "prop": self._normalize_prop(prop),
                 "values": tagged,
             }
         )
 
     def exists(self, prop: str) -> "_PredicateBuilder":
-        return self._push({"op": "exists", "var": self._var, "prop": _normalize_prop_name(prop)})
+        return self._push({"op": "exists", "var": self._var, "prop": self._normalize_prop(prop)})
 
     def is_null(self, prop: str) -> "_PredicateBuilder":
-        return self._push({"op": "isNull", "var": self._var, "prop": _normalize_prop_name(prop)})
+        return self._push({"op": "isNull", "var": self._var, "prop": self._normalize_prop(prop)})
 
     def is_not_null(self, prop: str) -> "_PredicateBuilder":
         return self._push(
-            {"op": "isNotNull", "var": self._var, "prop": _normalize_prop_name(prop)}
+            {"op": "isNotNull", "var": self._var, "prop": self._normalize_prop(prop)}
         )
 
     def and_(self, callback: Callable[["_PredicateBuilder"], None]) -> "_PredicateBuilder":
@@ -368,7 +423,7 @@ class _PredicateBuilder:
     def not_(self, callback: Callable[["_PredicateBuilder"], None]) -> "_PredicateBuilder":
         if not callable(callback):
             raise TypeError("not_() requires a callback")
-        nested = _PredicateBuilder(None, self._var, "and")
+        nested = _PredicateBuilder(None, self._var, "and", self._validator)
         callback(nested)
         expr = nested._finalize_expr()
         return self._push({"op": "not", "args": [expr]})
@@ -378,7 +433,7 @@ class _PredicateBuilder:
     ) -> "_PredicateBuilder":
         if not callable(callback):
             raise TypeError(f"{mode}_() requires a callback")
-        nested = _PredicateBuilder(None, self._var, mode)
+        nested = _PredicateBuilder(None, self._var, mode, self._validator)
         callback(nested)
         expr = nested._finalize_expr()
         return self._push(expr)
@@ -518,11 +573,16 @@ class Database:
 
     def __init__(self, handle: _native.DatabaseHandle):
         self._handle = handle
+        self._schema: Optional[Dict[str, Dict[str, Any]]] = None
 
     @classmethod
     def open(cls, path: str, **options: Any) -> "Database":
+        schema = options.pop("schema", None)
         handle = _native.open_database(path, options or None)
-        return cls(handle)
+        db = cls(handle)
+        if schema is not None:
+            db.with_schema(schema)
+        return db
 
     def query(self) -> "QueryBuilder":
         return QueryBuilder(self)
@@ -556,6 +616,15 @@ class Database:
         if value is _PRAGMA_SENTINEL:
             return _native.database_pragma_get(self._handle, name)
         return _native.database_pragma_set(self._handle, name, value)
+
+    def cancel_request(self, request_id: str) -> bool:
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise ValueError("cancel_request requires a non-empty request id string")
+        return _native.database_cancel_request(self._handle, request_id)
+
+    def with_schema(self, schema: Optional[Mapping[str, Mapping[str, Any]]]) -> "Database":
+        self._schema = _normalize_runtime_schema(schema)
+        return self
 
     def create_node(
         self,
@@ -620,10 +689,12 @@ class Database:
         return self
 
     def _execute(self, spec: Dict[str, Any]) -> Dict[str, Any]:
-        return _native.database_execute(self._handle, spec)
+        payload = _native.database_execute(self._handle, spec)
+        return _normalize_envelope(payload)
 
     def _explain(self, spec: Dict[str, Any]) -> Dict[str, Any]:
-        return _native.database_explain(self._handle, spec)
+        payload = _native.database_explain(self._handle, spec)
+        return _normalize_envelope(payload, expect_plan=True)
 
     def _stream(self, spec: Dict[str, Any]) -> _native.StreamHandle:
         return _native.database_stream(self._handle, spec)
@@ -639,6 +710,7 @@ class QueryBuilder:
 
     def __init__(self, db: Database):
         self._db = db
+        self._schema = getattr(db, "_schema", None)
         self._matches: List[Dict[str, Optional[str]]] = []
         self._edges: List[Dict[str, Any]] = []
         self._predicate: Optional[Dict[str, Any]] = None
@@ -647,6 +719,7 @@ class QueryBuilder:
         self._last_var: Optional[str] = None
         self._next_var_idx = 0
         self._pending_direction = "out"
+        self._request_id: Optional[str] = None
 
     def match(self, target: Union[str, Dict[str, Optional[str]]]) -> "QueryBuilder":
         fallback = self._next_auto_var()
@@ -684,7 +757,8 @@ class QueryBuilder:
         if not isinstance(var_name, str) or not var_name:
             raise ValueError("where_var() requires a non-empty variable name")
         self._assert_match(var_name)
-        builder = _PredicateBuilder(self, var_name)
+        validator = self._make_prop_validator(var_name)
+        builder = _PredicateBuilder(self, var_name, validator=validator)
         if build is not None:
             if not callable(build):
                 raise TypeError("where_var() callback must be callable")
@@ -705,19 +779,26 @@ class QueryBuilder:
         self._distinct = True
         return self
 
+    def request_id(self, value: Optional[str]) -> "QueryBuilder":
+        if value is None:
+            self._request_id = None
+            return self
+        if not isinstance(value, str):
+            raise ValueError("request_id must be provided as a string")
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("request_id must be a non-empty string")
+        self._request_id = trimmed
+        return self
+
     def select(self, fields: Sequence[ProjectionField]) -> "QueryBuilder":
         projections: List[Dict[str, Any]] = []
         for field in fields:
             if isinstance(field, str):
+                self._assert_match(field)
                 projections.append({"kind": "var", "var": field, "alias": None})
             elif isinstance(field, dict):
-                if "expr" in field:
-                    expr = field["expr"]
-                    alias = field.get("as")
-                    if not isinstance(expr, str) or not isinstance(alias, str):
-                        raise ValueError("projection expression requires string expr and alias")
-                    projections.append({"kind": "expr", "expr": expr, "alias": alias})
-                elif "prop" in field:
+                if "prop" in field:
                     var_name = field.get("var")
                     prop = field["prop"]
                     alias = field.get("as")
@@ -727,20 +808,29 @@ class QueryBuilder:
                         raise ValueError("property projection requires a property name")
                     if alias is not None and not isinstance(alias, str):
                         raise ValueError("property projection alias must be a string when provided")
-                    projections.append({"kind": "prop", "var": var_name, "prop": prop, "alias": alias})
+                    self._assert_match(var_name)
+                    validator = self._make_prop_validator(var_name)
+                    normalized_prop = validator(prop)
+                    projections.append({"kind": "prop", "var": var_name, "prop": normalized_prop, "alias": alias})
                 elif "var" in field:
                     var_name = field["var"]
                     alias = field.get("as")
+                    self._assert_match(var_name)
                     projections.append({"kind": "var", "var": var_name, "alias": alias})
+                elif "expr" in field:
+                    raise ValueError("expression projections are not supported; use property projections instead")
                 else:
-                    raise ValueError("projection dict must contain 'expr' or 'var'")
+                    raise ValueError("projection dict must contain 'prop' or 'var'")
             else:
                 raise ValueError("unsupported projection field")
         self._projections = projections
         return self
 
-    def explain(self) -> QueryResult:
-        payload = self._db._explain(self._build())
+    def explain(self, *, redact_literals: bool = False) -> QueryResult:
+        spec = self._build()
+        if redact_literals:
+            spec["redact_literals"] = True
+        payload = self._db._explain(spec)
         return QueryResult(payload)
 
     def execute(self) -> QueryResult:
@@ -778,6 +868,11 @@ class QueryBuilder:
         return name
 
     def _build(self) -> Dict[str, Any]:
+        projections = (
+            self._projections
+            if self._projections
+            else [{"kind": "var", "var": clause["var"], "alias": None} for clause in self._matches]
+        )
         spec: Dict[str, Any] = {
             "$schemaVersion": 1,
             "matches": [
@@ -794,11 +889,41 @@ class QueryBuilder:
                 for edge in self._edges
             ],
             "distinct": self._distinct,
-            "projections": [_clone(proj) for proj in self._projections],
+            "projections": [_clone(proj) for proj in projections],
         }
         if self._predicate is not None:
             spec["predicate"] = _clone(self._predicate)
+        if self._request_id is not None:
+            spec["request_id"] = self._request_id
         return spec
+
+    def _label_for_var(self, var_name: str) -> Optional[str]:
+        for clause in self._matches:
+            if clause["var"] == var_name:
+                label = clause.get("label")
+                if isinstance(label, str) and label:
+                    return label
+                return None
+        return None
+
+    def _make_prop_validator(self, var_name: str) -> Callable[[str], str]:
+        schema = self._schema
+        if not schema:
+            return _normalize_prop_name
+        label = self._label_for_var(var_name)
+        if not label:
+            return _normalize_prop_name
+        label_schema = schema.get(label)
+        if not isinstance(label_schema, Mapping):
+            return _normalize_prop_name
+
+        def validator(prop: str) -> str:
+            normalized = _normalize_prop_name(prop)
+            if normalized not in label_schema:
+                raise ValueError(f"Unknown property '{normalized}' on label '{label}'")
+            return normalized
+
+        return validator
 def _datetime_to_ns(value: datetime) -> int:
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         raise ValueError("datetime literal must include timezone info")

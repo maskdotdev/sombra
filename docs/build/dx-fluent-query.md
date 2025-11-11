@@ -83,7 +83,16 @@ struct QuerySpec {
 ## 2.1 Public surfaces
 
 ```ts
-declare function Database<S>(cfg?: unknown): {
+type RuntimeSchema<S extends Record<string, Record<string, unknown>>> = {
+  [L in keyof S & string]: Record<keyof S[L] & string, { type: string }>;
+};
+
+interface DatabaseConfig<S extends Record<string, Record<string, unknown>>> {
+  schema: RuntimeSchema<S>;            // supplied by the host app for runtime validation
+  [extra: string]: unknown;            // pool handles, auth, etc.
+}
+
+declare function Database<S extends Record<string, Record<string, unknown>>>(cfg: DatabaseConfig<S>): {
   query(): {
     nodes<L extends keyof S & string>(label: L): NodeScope<S, L>;
     // (edges/patterns in Phase 3)
@@ -91,9 +100,9 @@ declare function Database<S>(cfg?: unknown): {
 };
 
 interface NodeScope<S, L extends keyof S & string> {
-  where(expr: Expr | ((ctx: NodeScope<S, L>) => Expr)): this; // callback form optional
-  andWhere(expr: Expr): this;
-  orWhere(expr: Expr): this;
+  where(expr: ScopedExpr<S, L> | ((ctx: NodeScope<S, L>) => ScopedExpr<S, L>)): this; // callback form optional
+  andWhere(expr: ScopedExpr<S, L>): this;   // sugar for .where(and(current, expr))
+  orWhere(expr: ScopedExpr<S, L>): this;    // ORs against the scope-local predicate
 
   select(...keys: Array<keyof S[L] & string>): this;
   distinct(): this;
@@ -107,6 +116,7 @@ interface NodeScope<S, L extends keyof S & string> {
 ```
 
 > Note: `NodeScope` **does not** expose `eq/and/...` methods. Those come from **imported helpers** for a clean call-site.
+> `.where()` and `.andWhere()` always AND the new predicate with the scope-local root; `.orWhere()` ORs the entire accumulated predicate with the new clause. Reach for the explicit `and()`/`or()` helpers when you need finer grouping.
 
 ## 2.2 Type-safe, importable operators
 
@@ -149,15 +159,10 @@ type KeyOf<S, L extends keyof S> = keyof S[L] & string;
 type KeyType<S, L extends keyof S, K extends KeyOf<S,L>> = S[L][K];
 
 // Narrow Expr so keys must be valid for L, and values must match S[L][K]:
-type ScopedExpr<S, L extends keyof S> = Expr & {
+export type ScopedExpr<S, L extends keyof S> = Expr & {
   // branded type used only at compile time to enforce key/value compatibility
   __scope?: { label: L }
 };
-
-// Overload: .where(ScopedExpr<...>) enforces that eq('id', 42) is valid for Person.
-interface NodeScope<S, L extends keyof S & string> {
-  where(expr: ScopedExpr<S, L> | ((ctx: NodeScope<S, L>) => ScopedExpr<S, L>)): this;
-}
 ```
 
 **Implementation detail:** during `.where()`, recursively walk `_node`:
@@ -169,7 +174,7 @@ interface NodeScope<S, L extends keyof S & string> {
 ## 2.3 Selection typing
 
 * `.select('id', 'name')` → TS infers `Array<Pick<S[L], 'id'|'name'>>`.
-* If no `.select()`, return `Array<S[L]>` or `Array<Partial<S[L]>>` (choose one and document).
+* If no `.select()`, return `Array<S[L]>` (full rows); document this default so callers know they get every column unless they narrow it.
 
 ## 2.4 Runtime checks (for JS callers)
 
@@ -208,6 +213,7 @@ await db.query()
 * `.match({ p:'Person', m:'Movie' })` binds variables.
 * `.on('p', fn)` hands a **Person-scoped** `NodeScope<Schema,'Person'>` to `fn`.
 * The same **imported operators** (`eq`, `and`, …) work; keys are validated against the active label.
+* Var allocation: `.nodes()` auto-generates deterministic names (`n0`, `n1`, …) per call, while `.match()`/`.on()` honor the user-supplied keys so cross-entity filters stay stable.
 
 (You can introduce edges later in the same style: `.edges('LIKES')` → edge-scoped select/filters.)
 
@@ -324,13 +330,14 @@ export const isNotNull = <K extends string>(k: K) => not(isNull(k));
 
 ```ts
 // Database<S> (Node scope; stamping + validation)
-function Database<S extends Record<string, Record<string, unknown>>>(cfg?: unknown) {
-  const schema = /* your schema metadata for runtime checks */;
+function Database<S extends Record<string, Record<string, unknown>>>(cfg: DatabaseConfig<S>) {
+  const schema = cfg.schema; // supplied via DatabaseConfig
   return {
     query() {
       const matches: Array<{ var: string; label: string }> = [];
       let root: any | undefined;
       let select: Array<{ var: string; prop: string }> = [];
+      let nextVarId = 0;
 
       const stamp = (label: keyof S & string, varName: string, node: any): any => {
         // Recursively add {var:varName} to leaves, validate props against schema[label]
@@ -348,7 +355,7 @@ function Database<S extends Record<string, Record<string, unknown>>>(cfg?: unkno
 
       return {
         nodes<L extends keyof S & string>(label: L) {
-          const varName = 'n'; // internal
+          const varName = `n${nextVarId++}`; // deterministic per scope
           matches.push({ var: varName, label });
           return {
             where(exprOrFn: any) {
@@ -388,5 +395,12 @@ function Database<S extends Record<string, Record<string, unknown>>>(cfg?: unkno
 ```
 
 ---
+
+## Implementation Notes
+
+* `DatabaseConfig<S>` always requires a runtime `schema` map generated by the host app; TS types decorate DX, but every runtime check reads from that metadata.
+* `.select()` returning `Array<Pick<...>>` is opt-in—when omitted, `execute()` resolves to `Array<S[L]>`, so callers should select explicitly when they need slimmer payloads.
+* `.nodes()` scopes get deterministic auto-generated var names (`n0`, `n1`, …), whereas `.match()` honors the caller-provided keys to keep cross-entity joins and projections aligned.
+* Clause helpers chain predictably: `.where()` and `.andWhere()` AND new predicates with the existing scope root, and `.orWhere()` (or `or(...)`) is how you widen that predicate.
 
 This keeps the call-site **minimal and readable**, preserves **strong typing** from your schema, cleanly separates **operators** (imported helpers) from **scopes** (nodes/patterns), and maps 1:1 to a robust boolean predicate tree on the backend.

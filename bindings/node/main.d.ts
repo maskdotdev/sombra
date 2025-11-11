@@ -8,6 +8,7 @@ export interface ConnectOptions {
   commitMaxFrames?: number
   commitMaxCommits?: number
   autocheckpointMs?: number | null
+  schema?: NodeSchema
 }
 
 export type Direction = 'out' | 'in' | 'both'
@@ -44,11 +45,6 @@ type BasePropProjectionField = {
   as?: string | null
 }
 
-type ExprProjectionField = {
-  expr: string
-  as: string
-}
-
 export interface PredicateBetweenOptions {
   inclusive?: [boolean, boolean]
 }
@@ -77,12 +73,16 @@ type TypedPropProjectionField<
 export type ProjectionField<
   S extends NodeSchema = DefaultSchema,
   B extends BindingMap<S> = BindingMap<S>,
-> = BaseVarProjectionField | BasePropProjectionField | ExprProjectionField | TypedPropProjectionField<S, B>
+> = BaseVarProjectionField | BasePropProjectionField | TypedPropProjectionField<S, B>
 
 type ContainsNonPropField<Fields extends ReadonlyArray<ProjectionField>> =
   Exclude<Fields[number], BasePropProjectionField> extends never ? false : true
 
 type QueryRow<HasVar extends boolean> = Record<string, HasVar extends true ? unknown : ScalarValue>
+
+export interface ExplainOptions {
+  redactLiterals?: boolean
+}
 
 export interface MutationSummary {
   createdNodes?: number[]
@@ -189,13 +189,34 @@ export class QueryBuilder<
   where(varName: string, build: (builder: PredicateBuilder<S, TargetLabel<S>, QueryBuilder<S, B, HasVar>>) => void): QueryBuilder<S, B, HasVar>
   where<V extends string, L extends TargetLabel<S>>(edgeType: string | null, target: { var: V; label: L }): QueryBuilder<S, UpdateBindings<S, B, V, L>, HasVar>
   where(edgeType: string | null, target: TargetSpec<S>): QueryBuilder<S, B, HasVar>
+  andWhere<V extends KnownBindings<B>>(varName: V): PredicateBuilder<S, BindingLabel<S, B, V>, QueryBuilder<S, B, HasVar>>
+  andWhere<V extends KnownBindings<B>>(
+    varName: V,
+    build: (builder: PredicateBuilder<S, BindingLabel<S, B, V>, QueryBuilder<S, B, HasVar>>) => void,
+  ): QueryBuilder<S, B, HasVar>
+  andWhere(varName: string): PredicateBuilder<S, TargetLabel<S>, QueryBuilder<S, B, HasVar>>
+  andWhere(
+    varName: string,
+    build: (builder: PredicateBuilder<S, TargetLabel<S>, QueryBuilder<S, B, HasVar>>) => void,
+  ): QueryBuilder<S, B, HasVar>
+  orWhere<V extends KnownBindings<B>>(varName: V): PredicateBuilder<S, BindingLabel<S, B, V>, QueryBuilder<S, B, HasVar>>
+  orWhere<V extends KnownBindings<B>>(
+    varName: V,
+    build: (builder: PredicateBuilder<S, BindingLabel<S, B, V>, QueryBuilder<S, B, HasVar>>) => void,
+  ): QueryBuilder<S, B, HasVar>
+  orWhere(varName: string): PredicateBuilder<S, TargetLabel<S>, QueryBuilder<S, B, HasVar>>
+  orWhere(
+    varName: string,
+    build: (builder: PredicateBuilder<S, TargetLabel<S>, QueryBuilder<S, B, HasVar>>) => void,
+  ): QueryBuilder<S, B, HasVar>
   direction(dir: Direction): QueryBuilder<S, B, HasVar>
   bidirectional(): QueryBuilder<S, B, HasVar>
   distinct(on?: 'nodes' | 'edges'): QueryBuilder<S, B, HasVar>
+  requestId(id?: string | null): QueryBuilder<S, B, HasVar>
   select<Fields extends ReadonlyArray<ProjectionField<S, B>>>(
     fields: Fields,
   ): QueryBuilder<S, B, ContainsNonPropField<Fields> extends true ? true : false>
-  explain(): Promise<any>
+  explain(options?: ExplainOptions): Promise<any>
   execute(): Promise<Array<QueryRow<HasVar>>>
   stream(): QueryStream<QueryRow<HasVar>>
 }
@@ -203,6 +224,7 @@ export class QueryBuilder<
 export class Database<S extends NodeSchema = DefaultSchema> {
   static open<T extends NodeSchema = DefaultSchema>(path: string, options?: ConnectOptions | null): Database<T>
   query(): QueryBuilder<S, {}, true>
+  withSchema(schema: S | null): this
   create(): CreateBuilder
   intern(name: string): number
   seedDemo(): Database
@@ -213,6 +235,7 @@ export class Database<S extends NodeSchema = DefaultSchema> {
     result: T
   }>
   pragma(name: string, value?: any): any
+  cancelRequest(requestId: string): boolean
   createNode(labels: NodeLabels, props?: PropsInput): number | null
   updateNode(id: number, options?: { set?: PropsInput; unset?: string[] }): this
   deleteNode(id: number, cascade?: boolean): this

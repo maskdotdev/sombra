@@ -148,7 +148,7 @@ impl QueryBuilder {
     /// Executes the query using the supplied planner and executor.
     pub fn execute(self, planner: &Planner, executor: &Executor) -> Result<QueryResult> {
         let output = self.plan(planner)?;
-        executor.execute(&output.plan)
+        executor.execute(&output.plan, None)
     }
 
     fn next_auto_var(&mut self) -> Var {

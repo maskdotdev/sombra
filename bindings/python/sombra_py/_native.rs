@@ -189,6 +189,11 @@ fn database_seed_demo(handle: &DatabaseHandle) -> PyResult<()> {
 }
 
 #[pyfunction]
+fn database_cancel_request(handle: &DatabaseHandle, request_id: &str) -> PyResult<bool> {
+    Ok(handle.inner.cancel_request(request_id))
+}
+
+#[pyfunction]
 fn database_pragma_get(py: Python<'_>, handle: &DatabaseHandle, name: &str) -> PyResult<PyObject> {
     let result = handle.inner.pragma(name, None).map_err(to_py_err)?;
     value_to_py(py, result)
@@ -237,6 +242,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(database_intern, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_pragma_get, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_pragma_set, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_cancel_request, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(stream_next, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_seed_demo, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(version, m)?)?;

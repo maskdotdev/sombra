@@ -27,7 +27,7 @@ Speed up point/range lookups by teaching the Stage 8 planner to choose `PropIn
 
 ## Phase 3 — Tests & validation
 
-- [ ] **Planner unit tests**: add cases where `match("User").where_var("a", |pred| pred.eq("name","foo"))` yields a physical `PropIndexScan`, plus range predicates and “no index available” fallbacks.
+- [ ] **Planner unit tests**: add cases where `match("User").where_var("n0", |pred| pred.eq("name","foo"))` yields a physical `PropIndexScan`, plus range predicates and “no index available” fallbacks.
 - [ ] **Integration/bench smoke**: run or add a microbenchmark proving indexed reads only touch the expected nodes.
 - [ ] **Explain output**: assert the explain tree now shows `PropIndexScan` for indexed queries.
 

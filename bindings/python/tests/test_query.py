@@ -20,13 +20,13 @@ def test_execute_query_returns_rows() -> None:
     result = (
         db.query()
         .match("User")
-        .where_var("a", lambda pred: pred.eq("name", "Ada"))
-        .select(["a"])
+        .where_var("n0", lambda pred: pred.eq("name", "Ada"))
+        .select(["n0"])
         .execute()
     )
     rows = result.rows()
     assert len(rows) == 1
-    record = rows[0]["a"]
+    record = rows[0]["n0"]
     assert isinstance(record, dict)
     assert record["_id"] > 0
     assert isinstance(record["props"], dict)
@@ -38,21 +38,36 @@ def test_stream_iterates_results() -> None:
 
     async def collect():
         results = []
-        async for row in db.query().match("User").select(["a"]).stream():
+        async for row in db.query().match("User").select(["n0"]).stream():
             results.append(row)
         return results
 
     rows = asyncio.run(collect())
     assert len(rows) >= 3
-    assert all("a" in row and isinstance(row["a"], dict) for row in rows)
+    assert all("n0" in row and isinstance(row["n0"], dict) for row in rows)
 
 
 def test_explain_plan_shape() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    plan = db.query().match("User").where("FOLLOWS", "User").select(["a", "b"]).explain()
-    assert plan["plan"]["op"] == "Project"
+    plan = db.query().match("User").where("FOLLOWS", "User").select(["n0", "n1"]).explain()
+    assert isinstance(plan["plan"], list)
+    assert plan["plan"][0]["op"] == "Project"
+
+
+def test_request_id_round_trip() -> None:
+    db = Database.open(temp_db_path())
+    db.seed_demo()
+
+    plan = (
+        db.query()
+        .request_id("req-py")
+        .match("User")
+        .select(["n0"])
+        .explain()
+    )
+    assert plan["request_id"] == "req-py"
 
 
 def test_mutate_crud_helpers() -> None:
@@ -157,3 +172,24 @@ def test_literal_value_datetime_supports_timezone() -> None:
         assert "timezone" in str(exc)
     else:
         raise AssertionError("expected ValueError for naive datetime")
+
+
+def test_runtime_schema_validation_rejects_unknown_property() -> None:
+    db = Database.open(temp_db_path(), schema={"User": {"name": {"type": "string"}}})
+    db.seed_demo()
+
+    db.query().match("User").where_var("n0", lambda pred: pred.eq("name", "Ada"))
+
+    try:
+        db.query().match("User").where_var("n0", lambda pred: pred.eq("unknown_prop", "x"))
+    except ValueError as exc:
+        assert "Unknown property 'unknown_prop'" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for invalid predicate property")
+
+    try:
+        db.query().match("User").select([{"var": "n0", "prop": "bogus"}])
+    except ValueError as exc:
+        assert "Unknown property 'bogus'" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for invalid projection property")

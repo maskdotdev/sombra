@@ -74,6 +74,9 @@ pub enum SombraError {
     /// Requested item not found.
     #[error("not found")]
     NotFound,
+    /// Query was cancelled before completion.
+    #[error("query cancelled")]
+    Cancelled,
 }
 
 /// Result type for Sombra operations using [`SombraError`].

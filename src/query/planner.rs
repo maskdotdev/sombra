@@ -10,8 +10,8 @@ use crate::query::{
     logical::{LogicalOp, LogicalPlan, PlanNode, PropPredicate as AstPredicate},
     metadata::MetadataProvider,
     physical::{
-        Dir, LiteralValue, PhysicalBoolExpr, PhysicalComparison, PhysicalNode, PhysicalOp,
-        PhysicalPlan, ProjectField, PropPredicate as PhysicalPredicate,
+        Dir, InLookup, LiteralValue, PhysicalBoolExpr, PhysicalComparison, PhysicalNode,
+        PhysicalOp, PhysicalPlan, ProjectField, PropPredicate as PhysicalPredicate,
     },
     Value,
 };
@@ -61,7 +61,7 @@ pub struct ExplainNode {
     /// Operator name
     pub op: String,
     /// Additional properties describing the operator
-    pub props: Vec<(String, String)>,
+    pub props: Vec<ExplainProp>,
     /// Input operators
     pub inputs: Vec<ExplainNode>,
 }
@@ -73,6 +73,35 @@ impl ExplainNode {
             op: op.into(),
             props: Vec::new(),
             inputs: Vec::new(),
+        }
+    }
+}
+
+/// Single property associated with an [`ExplainNode`].
+#[derive(Clone, Debug)]
+pub struct ExplainProp {
+    /// Property key.
+    pub key: String,
+    /// Property value serialized for display.
+    pub value: String,
+    /// Whether this property contains literal data that may be redacted.
+    pub redactable: bool,
+}
+
+impl ExplainProp {
+    fn plain(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+            redactable: false,
+        }
+    }
+
+    fn literal(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+            redactable: true,
         }
     }
 }
@@ -792,12 +821,17 @@ impl Planner {
                 low: convert_bound(low),
                 high: convert_bound(high),
             },
-            AnalyzedComparison::In { var, prop, values } => PhysicalComparison::In {
-                var: ctx.var_for_id(*var),
-                prop: prop.id,
-                prop_name: prop.name.clone(),
-                values: values.iter().map(LiteralValue::from).collect(),
-            },
+            AnalyzedComparison::In { var, prop, values } => {
+                let literals: Vec<LiteralValue> = values.iter().map(LiteralValue::from).collect();
+                let lookup = InLookup::from_literals(&literals);
+                PhysicalComparison::In {
+                    var: ctx.var_for_id(*var),
+                    prop: prop.id,
+                    prop_name: prop.name.clone(),
+                    values: literals,
+                    lookup,
+                }
+            }
             AnalyzedComparison::Exists { var, prop } => PhysicalComparison::Exists {
                 var: ctx.var_for_id(*var),
                 prop: prop.id,
@@ -1400,9 +1434,9 @@ fn hash_physical_plan(plan: &PhysicalPlan) -> u64 {
 
 fn hash_physical_node(node: &PhysicalNode, hasher: &mut Xxh64) {
     hasher.write(op_name(&node.op).as_bytes());
-    for (key, value) in op_props(&node.op) {
-        hasher.write(key.as_bytes());
-        hasher.write(value.as_bytes());
+    for prop in op_props(&node.op) {
+        hasher.write(prop.key.as_bytes());
+        hasher.write(prop.value.as_bytes());
     }
     hasher.write_u64(node.inputs.len() as u64);
     for child in &node.inputs {
@@ -1667,7 +1701,7 @@ fn op_name(op: &PhysicalOp) -> &'static str {
     }
 }
 
-fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
+fn op_props(op: &PhysicalOp) -> Vec<ExplainProp> {
     match op {
         PhysicalOp::LabelScan {
             label,
@@ -1675,11 +1709,11 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
             as_var,
         } => {
             let mut props = vec![
-                ("label_id".into(), label.0.to_string()),
-                ("as".into(), as_var.0.clone()),
+                ExplainProp::plain("label_id", label.0.to_string()),
+                ExplainProp::plain("as", as_var.0.clone()),
             ];
             if let Some(name) = label_name {
-                props.insert(0, ("label".into(), name.clone()));
+                props.insert(0, ExplainProp::plain("label", name.clone()));
             }
             props
         }
@@ -1693,16 +1727,16 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
             selectivity,
         } => {
             let mut props = vec![
-                ("label_id".into(), label.0.to_string()),
-                ("prop_id".into(), prop.0.to_string()),
-                ("prop".into(), prop_name.clone()),
-                ("as".into(), as_var.0.clone()),
-                ("predicate".into(), describe_predicate(pred)),
+                ExplainProp::plain("label_id", label.0.to_string()),
+                ExplainProp::plain("prop_id", prop.0.to_string()),
+                ExplainProp::plain("prop", prop_name.clone()),
+                ExplainProp::plain("as", as_var.0.clone()),
+                ExplainProp::literal("predicate", describe_predicate(pred)),
             ];
             if let Some(name) = label_name {
-                props.insert(0, ("label".into(), name.clone()));
+                props.insert(0, ExplainProp::plain("label", name.clone()));
             }
-            props.push(("selectivity".into(), fmt_selectivity(*selectivity)));
+            props.push(ExplainProp::plain("selectivity", fmt_selectivity(*selectivity)));
             props
         }
         PhysicalOp::Expand {
@@ -1712,52 +1746,52 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
             ty,
             distinct_nodes,
         } => vec![
-            ("from".into(), from.0.clone()),
-            ("to".into(), to.0.clone()),
-            ("dir".into(), format!("{dir:?}")),
-            (
-                "type".into(),
+            ExplainProp::plain("from", from.0.clone()),
+            ExplainProp::plain("to", to.0.clone()),
+            ExplainProp::plain("dir", format!("{dir:?}")),
+            ExplainProp::plain(
+                "type",
                 ty.map(|t| t.0.to_string()).unwrap_or_else(|| "*".into()),
             ),
-            ("distinct".into(), distinct_nodes.to_string()),
+            ExplainProp::plain("distinct", distinct_nodes.to_string()),
         ],
         PhysicalOp::Filter { pred, selectivity } => {
             vec![
-                ("predicate".into(), describe_predicate(pred)),
-                ("selectivity".into(), fmt_selectivity(*selectivity)),
+                ExplainProp::literal("predicate", describe_predicate(pred)),
+                ExplainProp::plain("selectivity", fmt_selectivity(*selectivity)),
             ]
         }
         PhysicalOp::Union { vars, dedup } => vec![
-            (
-                "vars".into(),
+            ExplainProp::plain(
+                "vars",
                 vars.iter()
                     .map(|v| v.0.clone())
                     .collect::<Vec<_>>()
                     .join(", "),
             ),
-            ("dedup".into(), dedup.to_string()),
+            ExplainProp::plain("dedup", dedup.to_string()),
         ],
         PhysicalOp::BoolFilter { expr } => vec![
-            ("expr".into(), describe_bool_expr(expr)),
-            (
-                "selectivity".into(),
+            ExplainProp::literal("expr", describe_bool_expr(expr)),
+            ExplainProp::plain(
+                "selectivity",
                 fmt_selectivity(bool_expr_selectivity(expr)),
             ),
         ],
-        PhysicalOp::Intersect { vars } => vec![(
-            "vars".into(),
+        PhysicalOp::Intersect { vars } => vec![ExplainProp::plain(
+            "vars",
             vars.iter()
                 .map(|v| v.0.clone())
                 .collect::<Vec<_>>()
                 .join(", "),
         )],
         PhysicalOp::HashJoin { left, right } => vec![
-            ("left".into(), left.0.clone()),
-            ("right".into(), right.0.clone()),
+            ExplainProp::plain("left", left.0.clone()),
+            ExplainProp::plain("right", right.0.clone()),
         ],
         PhysicalOp::Distinct => Vec::new(),
-        PhysicalOp::Project { fields } => vec![(
-            "fields".into(),
+        PhysicalOp::Project { fields } => vec![ExplainProp::plain(
+            "fields",
             fields
                 .iter()
                 .map(describe_field)
@@ -1869,6 +1903,7 @@ fn describe_comparison(cmp: &PhysicalComparison) -> String {
             var,
             prop_name,
             values,
+            lookup: _,
             ..
         } => format!(
             "{}.{} IN [{}]",
@@ -2018,7 +2053,9 @@ fn comparison_selectivity(cmp: &PhysicalComparison) -> f64 {
         PhysicalComparison::Lt { .. } | PhysicalComparison::Le { .. } => 0.3,
         PhysicalComparison::Gt { .. } | PhysicalComparison::Ge { .. } => 0.3,
         PhysicalComparison::Between { .. } => 0.2,
-        PhysicalComparison::In { values, .. } => (values.len() as f64 * 0.05).clamp(0.05, 1.0),
+        PhysicalComparison::In { values, lookup: _, .. } => {
+            (values.len() as f64 * 0.05).clamp(0.05, 1.0)
+        }
         PhysicalComparison::Exists { .. } => 0.5,
         PhysicalComparison::IsNull { .. } => 0.1,
         PhysicalComparison::IsNotNull { .. } => 0.9,

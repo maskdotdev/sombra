@@ -6,7 +6,7 @@ End-state blueprint for the typed fluent query API spanning Rust, Node, and Pyth
 
 ## Phase 0 — Goals & Guardrails
 
-- **Typed predicates**: helpers such as `where('a').eq('name', 'Ada')` replace stringly operators. Bindings fail fast on invalid combinations.
+- **Typed predicates**: helpers such as `where('n0').eq('name', 'Ada')` replace stringly operators. Bindings fail fast on invalid combinations.
 - **Boolean structure**: predicates become trees (`and`/`or`/`not` + comparison leaves) so we can model arbitrary boolean logic and plan OR/AND branches.
 - **Single wire format**: one canonical JSON payload that bindings emit, FFI validates, and the planner consumes.
 - **Consistent semantics**: null handling, collation, and type coercions are defined once and enforced everywhere.
@@ -76,6 +76,9 @@ Key points:
 - Execute/explain responses always wrap data inside an envelope: `{ "request_id": "...?", "features": [], "rows": [...] }` for `execute` and `{ "request_id": "...?", "features": [], "plan_hash": "0x...", "plan": { ... } }` for `explain`.
 - `projections.kind` is either `"var"` (return the entire bound entity) or `"prop"` (single property). Multiple `"prop"` projections are returned in request order.
 - Property projections produce scalar columns and coerce their literals according to the property type. They are ideal for selective queries that only need a couple of values instead of whole nodes.
+- Bindings inject runtime schema metadata (`DatabaseConfig.schema`) when constructing `Database<Schema>` so runtime callers (plain JS/Python) still get high-quality validation errors even without TypeScript types.
+- If the builder never calls `.select(...)`, we implicitly behave as though every matched variable were projected as `{ kind: "var" }`, so `execute()` returns full rows by default. Callers must opt into property-only payloads explicitly.
+- Single-label sugar such as `.nodes('Person')` auto-generates deterministic variable names (`n0`, `n1`, …); multi-entity `.match({ p: 'Person' })` honors the caller-supplied keys so cross-entity filters stay stable.
 - Language bindings expose typed `Database<Schema>` surfaces so label/property mismatches are caught at compile time even though the on-the-wire representation stays the same.
 - Payloads include `$schemaVersion` for future evolvability. Unknown or missing versions throw `UnsupportedSchemaVersion`.
 
@@ -236,14 +239,44 @@ Validation rules enforced before planning:
 
 ### Node (`bindings/node/main.js` + `main.d.ts`)
 
+- `Database<Schema>(cfg: DatabaseConfig<Schema>)` now requires a runtime `schema` map describing every label/property pair so runtime callers get the same validation experience as TS users. The config object is also where pools/auth live.
 - `QueryBuilder.where(var: string): PredicateBuilder`.
 - Predicate builder methods: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `between(low, high, opts?)`, `in(values)`, `exists(prop)`, `isNull`, `isNotNull`, `custom()` (omitted in v1), plus `and(cb)`, `or(cb)`, `not(cb)`.
 - TypeScript definitions bake in literal types and raise compile-time errors for missing callbacks.
+- `.where()` and `.andWhere()` always AND the new predicate with the scope-local root; `.orWhere()` ORs the entire accumulated predicate with the new clause. Reach for the explicit `and()`/`or()` helpers when you need finer grouping.
 - Runtime validation throws `TypeError` for heterogeneous or empty `in()` values, invalid directions, etc.
 - `in(values)` rejects nested arrays/objects immediately with `TypeError` before deeper validation to protect planner assumptions.
 - Literal tagging: `Number.isSafeInteger` plus range check `|value| <= i64::MAX` → `Int`; other finite numbers → `Float`; `true/false` → `Bool`. Non-finite numbers throw immediately.
 - `DateTime` helpers accept JS `Date` or ISO 8601 strings and emit nanosecond integers so callers never hand-roll epochs.
-- Result typing: when projections are property-only, `execute()` returns `Promise<Array<Record<string, Value>>>`; when `kind:"var"` appears, the return type widens to `Array<Record<string, unknown>>` (documented in typings).
+- Result typing: when projections are property-only, `execute()` returns `Promise<Array<Record<string, Value>>>`; when `kind:"var"` appears (including the implicit default when `.select()` is omitted), the return type widens to `Array<Record<string, unknown>>` (documented in typings).
+
+#### TypeScript typing sketch
+
+```ts
+type RuntimeSchema<S extends Record<string, Record<string, unknown>>> = {
+  [L in keyof S & string]: Record<keyof S[L] & string, { type: string }>;
+};
+
+interface DatabaseConfig<S extends Record<string, Record<string, unknown>>> {
+  schema: RuntimeSchema<S>;
+  [extra: string]: unknown;
+}
+
+export type Expr = { readonly __expr: unique symbol; _node: any };
+
+export type ScopedExpr<S, L extends keyof S & string> = Expr & {
+  __scope?: { label: L };
+};
+
+interface NodeScope<S, L extends keyof S & string> {
+  where(expr: ScopedExpr<S, L> | ((ctx: NodeScope<S, L>) => ScopedExpr<S, L>)): this;
+  andWhere(expr: ScopedExpr<S, L>): this;
+  orWhere(expr: ScopedExpr<S, L>): this;
+  select(...keys: Array<keyof S[L] & string>): this;
+}
+```
+
+Operator helpers exported from `@sombra/query` (`and`, `or`, `eq`, `between`, etc.) return opaque `Expr` objects lacking label context. `.where()`/`.select()` stamp them with the active var name and validate each key/value pair against `cfg.schema` before serializing to the canonical predicate tree.
 
 ### Python (`bindings/python/sombra_py/query.py`)
 
@@ -293,6 +326,7 @@ Validation rules enforced before planning:
 | --- | --- |
 | `UnsupportedSchemaVersion` | Payload omitted `$schemaVersion` or used an unknown version. |
 | `UnknownVariable` | Predicate/edge referenced a var not declared in `matches`. |
+| `VarNotMatched` | Var was referenced in an edge/predicate/projection without a prior `match`. |
 | `UnknownProperty` | `(label, prop)` absent from catalog. |
 | `DuplicateVariable` | Same `var` declared more than once with conflicting metadata. |
 | `TooManyMatches` | Number of `matches` clauses exceeds configured maximum (default 1 000). |

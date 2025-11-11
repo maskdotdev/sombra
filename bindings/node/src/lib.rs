@@ -139,6 +139,12 @@ pub fn databasePragmaSet(handle: &DatabaseHandle, name: String, value: Value) ->
   handle.inner.pragma(&name, Some(value)).map_err(to_napi_err)
 }
 
+#[allow(non_snake_case)]
+#[napi]
+pub fn databaseCancelRequest(handle: &DatabaseHandle, request_id: String) -> NapiResult<bool> {
+  Ok(handle.inner.cancel_request(&request_id))
+}
+
 #[napi]
 impl StreamHandle {
   #[napi]

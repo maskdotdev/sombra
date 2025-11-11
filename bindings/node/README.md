@@ -41,8 +41,8 @@ const db = Database.open('/tmp/sombra.db').seedDemo()
 const rows = await db
   .query()
   .match('User')
-  .where('a', (pred) => pred.eq('name', 'Ada'))
-  .select([{ var: 'a', prop: 'name', as: 'label' }])
+  .where('n0', (pred) => pred.eq('name', 'Ada'))
+  .select([{ var: 'n0', prop: 'name', as: 'label' }])
   .execute()
 
 console.log(rows)

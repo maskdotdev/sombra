@@ -2,9 +2,12 @@
 
 use crate::query::ast::Var;
 use crate::query::Value;
+use crate::storage::PropValueOwned;
 use crate::types::{LabelId, PropId, TypeId};
+use rustc_hash::FxHashSet;
 use std::convert::TryInto;
 use std::ops::Bound;
+use std::sync::Arc;
 
 /// Physical plan produced by the planner.
 #[derive(Clone, Debug)]
@@ -271,6 +274,8 @@ pub enum PhysicalComparison {
         prop_name: String,
         /// Literal set to test membership against.
         values: Vec<LiteralValue>,
+        /// Lookup strategy for membership evaluation.
+        lookup: InLookup,
     },
     /// Checks whether the property key exists on the node.
     Exists {
@@ -359,5 +364,97 @@ impl From<&Value> for LiteralValue {
                 LiteralValue::DateTime(nanos)
             }
         }
+    }
+}
+
+/// Lookup strategy for IN predicates.
+#[derive(Clone, Debug)]
+pub enum InLookup {
+    /// Evaluate by scanning the literal vector.
+    Linear,
+    /// Evaluate via precomputed hash set.
+    Hash(Arc<FxHashSet<ValueKey>>),
+}
+
+impl InLookup {
+    /// Builds the lookup structure from the provided literal slice.
+    pub fn from_literals(values: &[LiteralValue]) -> Self {
+        if values.len() <= HASHED_IN_THRESHOLD {
+            return InLookup::Linear;
+        }
+        let mut set = FxHashSet::default();
+        for literal in values {
+            if let Some(key) = ValueKey::from_literal(literal) {
+                set.insert(key);
+            }
+        }
+        InLookup::Hash(Arc::new(set))
+    }
+
+    /// Returns the hash set when this lookup uses hashing.
+    pub fn hash_values(&self) -> Option<&FxHashSet<ValueKey>> {
+        match self {
+            InLookup::Linear => None,
+            InLookup::Hash(set) => Some(set.as_ref()),
+        }
+    }
+}
+
+const HASHED_IN_THRESHOLD: usize = 8;
+
+/// Canonical equality key for literal/value comparisons.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ValueKey {
+    /// Boolean literal key.
+    Bool(bool),
+    /// Numeric literal key stored as canonical float bits.
+    Number(NumberKey),
+    /// UTF-8 string literal key.
+    String(String),
+    /// Arbitrary binary literal key.
+    Bytes(Vec<u8>),
+}
+
+impl ValueKey {
+    /// Converts a literal into a hashable key (null literals are skipped).
+    pub fn from_literal(value: &LiteralValue) -> Option<Self> {
+        match value {
+            LiteralValue::Null => None,
+            LiteralValue::Bool(v) => Some(ValueKey::Bool(*v)),
+            LiteralValue::Int(v) => Some(ValueKey::Number(NumberKey::from_i64(*v))),
+            LiteralValue::Float(v) => Some(ValueKey::Number(NumberKey::from_f64(*v))),
+            LiteralValue::String(v) => Some(ValueKey::String(v.clone())),
+            LiteralValue::Bytes(v) => Some(ValueKey::Bytes(v.clone())),
+            LiteralValue::DateTime(v) => Some(ValueKey::Number(NumberKey::from_i64(*v))),
+        }
+    }
+
+    /// Converts a property value into a hashable key.
+    pub fn from_property(value: &PropValueOwned) -> Option<Self> {
+        match value {
+            PropValueOwned::Null => None,
+            PropValueOwned::Bool(v) => Some(ValueKey::Bool(*v)),
+            PropValueOwned::Int(v) => Some(ValueKey::Number(NumberKey::from_i64(*v))),
+            PropValueOwned::Float(v) => Some(ValueKey::Number(NumberKey::from_f64(*v))),
+            PropValueOwned::Str(v) => Some(ValueKey::String(v.clone())),
+            PropValueOwned::Bytes(v) => Some(ValueKey::Bytes(v.clone())),
+            PropValueOwned::Date(v) => Some(ValueKey::Number(NumberKey::from_i64(*v))),
+            PropValueOwned::DateTime(v) => Some(ValueKey::Number(NumberKey::from_i64(*v))),
+        }
+    }
+}
+
+/// Normalised floating-point representation that treats +0 and -0 equally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NumberKey(u64);
+
+impl NumberKey {
+    fn from_f64(value: f64) -> Self {
+        let canonical = if value == 0.0 { 0.0 } else { value };
+        NumberKey(canonical.to_bits())
+    }
+
+    fn from_i64(value: i64) -> Self {
+        NumberKey::from_f64(value as f64)
     }
 }

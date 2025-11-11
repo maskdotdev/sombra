@@ -15,13 +15,13 @@ test('executing fluent query returns seeded rows', async (t) => {
   const result = await db
     .query()
     .match('User')
-    .where('a', (pred) => pred.eq('name', 'Ada'))
-    .select(['a'])
+    .where('n0', (pred) => pred.eq('name', 'Ada'))
+    .select(['n0'])
     .execute()
 
   t.true(Array.isArray(result.rows))
   t.is(result.rows.length, 1)
-  const entity = result.rows[0].a as { _id: number; props: Record<string, unknown> }
+  const entity = result.rows[0].n0 as { _id: number; props: Record<string, unknown> }
   t.truthy(entity)
   t.true(typeof entity._id === 'number')
   t.true(typeof entity.props === 'object')
@@ -29,11 +29,11 @@ test('executing fluent query returns seeded rows', async (t) => {
 
 test('streaming query iterates over results', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
-  const stream = db.query().match('User').select(['a']).stream()
+  const stream = db.query().match('User').select(['n0']).stream()
 
   const encountered: Array<number> = []
   for await (const row of stream) {
-    const entity = row.a as { _id: number }
+    const entity = row.n0 as { _id: number }
     encountered.push(entity._id)
   }
 
@@ -47,10 +47,23 @@ test('explain produces plan JSON', async (t) => {
     .match('User')
     .where('FOLLOWS', 'User')
     .direction('out')
-    .select(['a', 'b'])
+    .select(['n0', 'n1'])
     .explain()
 
-  t.is(plan.plan.op, 'Project')
+  t.true(Array.isArray(plan.plan))
+  t.is(plan.plan[0]?.op, 'Project')
+})
+
+test('requestId flows through explain', async (t) => {
+  const db = Database.open(tempPath()).seedDemo()
+  const plan = await db
+    .query()
+    .requestId('req-node')
+    .match('User')
+    .select(['n0'])
+    .explain()
+
+  t.is(plan.request_id, 'req-node')
 })
 
 test('mutate supports basic CRUD operations', (t) => {
@@ -155,18 +168,43 @@ test('DateTime literals support Date objects and ISO strings', (t) => {
   const dateSpec = db
     .query()
     .match('User')
-    .where('a', (pred) => pred.eq('created_at', new Date('2020-01-01T00:00:00Z')))
+    .where('n0', (pred) => pred.eq('created_at', new Date('2020-01-01T00:00:00Z')))
     ._build()
   t.is(dateSpec.predicate?.value?.t ?? dateSpec.predicate?.args?.[0]?.value?.t, 'DateTime')
 
   const isoSpec = db
     .query()
     .match('User')
-    .where('a', (pred) => pred.eq('created_at', '2020-01-01T00:00:00Z'))
+    .where('n0', (pred) => pred.eq('created_at', '2020-01-01T00:00:00Z'))
     ._build()
   t.is(isoSpec.predicate?.value?.t ?? isoSpec.predicate?.args?.[0]?.value?.t, 'DateTime')
 
   t.throws(() =>
-    db.query().match('User').where('a', (pred) => pred.eq('created_at', '2020-01-01T00:00:00')),
+    db.query().match('User').where('n0', (pred) => pred.eq('created_at', '2020-01-01T00:00:00')),
+  )
+})
+
+test('runtime schema validation rejects unknown properties', (t) => {
+  const schema = {
+    User: {
+      name: { type: 'string' },
+      created_at: { type: 'datetime' },
+    },
+  }
+  const db = Database.open(tempPath(), { schema }).seedDemo()
+  t.notThrows(() =>
+    db
+      .query()
+      .match('User')
+      .where('n0', (pred) => pred.eq('name', 'Ada'))
+      .select(['n0']),
+  )
+  t.throws(
+    () => db.query().match('User').where('n0', (pred) => pred.eq('unknown_prop', 'oops')),
+    { message: /Unknown property 'unknown_prop'/ },
+  )
+  t.throws(
+    () => db.query().match('User').select([{ var: 'n0', prop: 'bogus' }]),
+    { message: /Unknown property 'bogus'/ },
   )
 })

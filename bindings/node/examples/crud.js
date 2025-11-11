@@ -10,7 +10,7 @@ function tempDbPath() {
   return path.join(dir, 'db')
 }
 
-function main() {
+async function main() {
   const db = Database.open(tempDbPath()).seedDemo()
 
   const newUserId = db.createNode('User', { name: 'Example User', bio: 'Hello from Node' })
@@ -18,11 +18,11 @@ function main() {
 
   db.updateNode(newUserId, { set: { bio: 'Updated bio' } })
 
-  const rows = db
+  const rows = await db
     .query()
     .match('User')
-    .where('a', (pred) => pred.eq('name', 'Example User'))
-    .select(['a'])
+    .where('n0', (pred) => pred.eq('name', 'Example User'))
+    .select(['n0'])
     .execute()
   console.log('Query results:', rows)
 

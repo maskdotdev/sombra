@@ -84,8 +84,8 @@ const db = Database.open<Schema>('/tmp/sombra.db').seedDemo()
 const rows = await db
   .query()
   .match('User')
-  .where('a', (pred) => pred.eq('name', 'Ada'))
-  .select([{ var: 'a', prop: 'name', as: 'label' }])
+  .where('n0', (pred) => pred.eq('name', 'Ada'))
+  .select([{ var: 'n0', prop: 'name', as: 'label' }])
   .execute()
 ```
 
@@ -97,7 +97,7 @@ from sombra_py import Database
 db = Database.open("/tmp/sombra.db")
 db.seed_demo()
 
-rows = db.query().match("User").where_var("a", lambda pred: pred.eq("name", "Ada")).select(["a"]).execute()
+rows = db.query().match("User").where_var("n0", lambda pred: pred.eq("name", "Ada")).select(["n0"]).execute()
 ```
 
 `seedDemo`/`seed_demo` materialises a small sample graph (Ada, Grace, Alan) so the fluent API can be exercised without bootstrapping a full dataset.
@@ -245,16 +245,16 @@ const rows = await db
   .match('User')
   .where('FOLLOWS', 'User')
   .bidirectional()
-  .select(['a','b'])
+  .select(['n0','n1'])
   .execute();
 ```
 
 * **Plan (high‑level)**:
-  `LabelScan(User as a)`
-  → `Expand(a -> b, dir=out, type=FOLLOWS)`
-  → `Expand(a -> b', dir=in, type=FOLLOWS)`
-  → `Intersect([b, b'])`
-  → `Project(a,b)`
+  `LabelScan(User as n0)`
+  → `Expand(n0 -> n1, dir=out, type=FOLLOWS)`
+  → `Expand(n0 -> n1', dir=in, type=FOLLOWS)`
+  → `Intersect([n1, n1'])`
+  → `Project(n0,n1)`
 
 ### 5.2 People named “Ada” following someone named “Grace”
 

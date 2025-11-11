@@ -15,11 +15,11 @@ db.seed_demo()
 rows = (
     db.query()
     .match("User")
-    .where_var("a", lambda pred: pred.eq("name", "Ada"))
-    .select([{"var": "a", "prop": "name", "as": "alias"}])
+    .where_var("n0", lambda pred: pred.eq("name", "Ada"))
+    .select([{"var": "n0", "prop": "name", "as": "alias"}])
     .execute()
 )
-doc = rows[0]["a"]
+doc = rows[0]["n0"]
 print(doc["_id"], doc["props"]["name"])
 
 user_id = db.create_node("User", {"name": "New User"})

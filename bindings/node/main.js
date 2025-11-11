@@ -1,7 +1,6 @@
 // Fluent query builder facade for the Sombra Node bindings.
 const native = require('./index.js')
 
-const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'
 const CREATE_HANDLE_SYMBOL = Symbol('sombra.createHandle')
 const NS_PER_MILLISECOND = 1_000_000n
 const I64_MIN = -(1n << 63n)
@@ -13,11 +12,7 @@ const MIN_DATETIME_NS = BigInt(Date.UTC(1900, 0, 1, 0, 0, 0)) * NS_PER_MILLISECO
 const MAX_DATETIME_NS = BigInt(Date.UTC(2100, 0, 1, 0, 0, 0)) * NS_PER_MILLISECOND
 
 function autoVarName(idx) {
-  const letter = ALPHABET[idx % ALPHABET.length]
-  if (idx < ALPHABET.length) {
-    return letter
-  }
-  return `${letter}${Math.floor(idx / ALPHABET.length)}`
+  return `n${idx}`
 }
 
 function normalizeTarget(target, fallback) {
@@ -30,6 +25,32 @@ function normalizeTarget(target, fallback) {
     return { var: varName, label }
   }
   throw new TypeError("target must be a string or an object with optional 'var'/'label'")
+}
+
+function normalizeRuntimeSchema(schema) {
+  if (schema === null || schema === undefined) {
+    return null
+  }
+  if (typeof schema !== 'object') {
+    throw new TypeError('schema must be an object mapping labels to property maps')
+  }
+  const normalized = {}
+  for (const [label, props] of Object.entries(schema)) {
+    if (typeof label !== 'string' || label.trim() === '') {
+      throw new TypeError('schema labels must be non-empty strings')
+    }
+    if (!props || typeof props !== 'object') {
+      throw new TypeError(`schema entry for label '${label}' must be an object`)
+    }
+    normalized[label] = {}
+    for (const propName of Object.keys(props)) {
+      if (typeof propName !== 'string' || propName.trim() === '') {
+        throw new TypeError(`schema for label '${label}' contains an invalid property name`)
+      }
+      normalized[label][propName] = props[propName]
+    }
+  }
+  return normalized
 }
 
 function normalizeLabels(input) {
@@ -45,6 +66,23 @@ function normalizeLabels(input) {
     })
   }
   throw new TypeError('node labels must be a string or an array of strings')
+}
+
+function encodeBytesLiteral(bytes) {
+  if (typeof Buffer !== 'undefined' && Buffer.from) {
+    return Buffer.from(bytes).toString('base64')
+  }
+  if (typeof Uint8Array !== 'undefined') {
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    if (typeof btoa === 'function') {
+      let binary = ''
+      for (const byte of view) {
+        binary += String.fromCharCode(byte)
+      }
+      return btoa(binary)
+    }
+  }
+  throw new TypeError('bytes literals require Buffer or btoa support in this environment')
 }
 
 function literalValue(value) {
@@ -74,10 +112,10 @@ function literalValue(value) {
     return { t: 'String', v: value }
   }
   if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
-    return { t: 'Bytes', v: Array.from(value.values()) }
+    return { t: 'Bytes', v: encodeBytesLiteral(value) }
   }
   if (value instanceof Uint8Array) {
-    return { t: 'Bytes', v: Array.from(value.values()) }
+    return { t: 'Bytes', v: encodeBytesLiteral(value) }
   }
   throw new TypeError(`unsupported literal type: ${typeof value}`)
 }
@@ -191,6 +229,24 @@ function cloneSpec(spec) {
   return JSON.parse(JSON.stringify(spec))
 }
 
+function normalizeExplainPayload(payload) {
+  if (payload && typeof payload === 'object') {
+    if (!('request_id' in payload)) {
+      payload.request_id = null
+    }
+    if (payload.plan === undefined || payload.plan === null) {
+      payload.plan = []
+    } else if (Array.isArray(payload.plan)) {
+      // ok
+    } else if (payload.plan && typeof payload.plan === 'object') {
+      payload.plan = [payload.plan]
+    } else {
+      throw new TypeError('plan must be an object or array when present')
+    }
+  }
+  return payload
+}
+
 class MutationBatch {
   constructor() {
     this._ops = []
@@ -270,13 +326,15 @@ class QueryStream {
 }
 
 class PredicateBuilder {
-  constructor(parent, varName, mode = 'and') {
+  constructor(parent, varName, mode = 'and', combinator = 'and', validator = null) {
     if (typeof varName !== 'string' || varName.trim() === '') {
       throw new TypeError('where(var) requires a non-empty variable name')
     }
     this._parent = parent ?? null
     this._var = varName
     this._mode = mode
+    this._combinator = combinator
+    this._validator = typeof validator === 'function' ? validator : null
     this._exprs = []
     this._sealed = false
   }
@@ -310,8 +368,15 @@ class PredicateBuilder {
       throw new Error('cannot finalize nested predicate group directly')
     }
     const expr = this._finalizeExpr()
-    this._parent._appendPredicate(expr)
+    this._parent._appendPredicate(expr, this._combinator)
     return this._parent
+  }
+
+  _normalizeProp(prop) {
+    if (this._validator) {
+      return this._validator(prop)
+    }
+    return normalizePropName(prop)
   }
 
   eq(prop, value) {
@@ -369,7 +434,7 @@ class PredicateBuilder {
     return this._push({
       op: 'between',
       var: this._var,
-      prop: normalizePropName(prop),
+      prop: this._normalizeProp(prop),
       low: literalValue(low),
       high: literalValue(high),
       inclusive,
@@ -398,7 +463,7 @@ class PredicateBuilder {
     return this._push({
       op: 'in',
       var: this._var,
-      prop: normalizePropName(prop),
+      prop: this._normalizeProp(prop),
       values: tagged,
     })
   }
@@ -407,7 +472,7 @@ class PredicateBuilder {
     return this._push({
       op: 'exists',
       var: this._var,
-      prop: normalizePropName(prop),
+      prop: this._normalizeProp(prop),
     })
   }
 
@@ -415,7 +480,7 @@ class PredicateBuilder {
     return this._push({
       op: 'isNull',
       var: this._var,
-      prop: normalizePropName(prop),
+      prop: this._normalizeProp(prop),
     })
   }
 
@@ -423,7 +488,7 @@ class PredicateBuilder {
     return this._push({
       op: 'isNotNull',
       var: this._var,
-      prop: normalizePropName(prop),
+      prop: this._normalizeProp(prop),
     })
   }
 
@@ -439,7 +504,7 @@ class PredicateBuilder {
     if (typeof callback !== 'function') {
       throw new TypeError('not() requires a callback')
     }
-    const nested = new PredicateBuilder(null, this._var, 'and')
+    const nested = new PredicateBuilder(null, this._var, 'and', 'and', this._validator)
     callback(nested)
     const expr = nested._finalizeExpr()
     return this._push({ op: 'not', args: [expr] })
@@ -449,7 +514,7 @@ class PredicateBuilder {
     return this._push({
       op,
       var: this._var,
-      prop: normalizePropName(prop),
+      prop: this._normalizeProp(prop),
       ...extras,
     })
   }
@@ -458,7 +523,7 @@ class PredicateBuilder {
     if (typeof callback !== 'function') {
       throw new TypeError(`${mode}() requires a callback`)
     }
-    const nested = new PredicateBuilder(null, this._var, mode)
+    const nested = new PredicateBuilder(null, this._var, mode, 'and', this._validator)
     callback(nested)
     const expr = nested._finalizeExpr()
     return this._push(expr)
@@ -466,8 +531,9 @@ class PredicateBuilder {
 }
 
 class QueryBuilder {
-  constructor(db) {
+  constructor(db, schema = null) {
     this._db = db
+    this._schema = schema ?? null
     this._matches = []
     this._edges = []
     this._predicate = null
@@ -476,6 +542,7 @@ class QueryBuilder {
     this._lastVar = null
     this._nextVarIdx = 0
     this._pendingDirection = 'out'
+    this._requestId = null
   }
 
   match(target) {
@@ -491,9 +558,17 @@ class QueryBuilder {
       throw new Error('where requires at least one argument')
     }
     if (arguments.length === 1 || typeof arg2 === 'function') {
-      return this._wherePredicate(arg1, arg2)
+      return this._wherePredicate(arg1, arg2, 'and')
     }
     return this._whereEdge(arg1, arg2)
+  }
+
+  andWhere(varName, builderFn) {
+    return this._wherePredicate(varName, builderFn, 'and')
+  }
+
+  orWhere(varName, builderFn) {
+    return this._wherePredicate(varName, builderFn, 'or')
   }
 
   _whereEdge(edgeType, target) {
@@ -514,12 +589,13 @@ class QueryBuilder {
     return this
   }
 
-  _wherePredicate(varName, builderFn) {
+  _wherePredicate(varName, builderFn, combinator = 'and') {
     if (typeof varName !== 'string' || varName.trim() === '') {
       throw new TypeError('where(var) requires a non-empty variable name')
     }
     this._assertMatch(varName)
-    const builder = new PredicateBuilder(this, varName)
+    const validator = this._makePropValidator(varName)
+    const builder = new PredicateBuilder(this, varName, 'and', combinator, validator)
     if (typeof builderFn === 'function') {
       builderFn(builder)
       return builder.done()
@@ -544,23 +620,31 @@ class QueryBuilder {
     return this
   }
 
+  requestId(value) {
+    if (value === null || value === undefined) {
+      this._requestId = null
+      return this
+    }
+    if (typeof value !== 'string') {
+      throw new TypeError('requestId requires a string value')
+    }
+    const trimmed = value.trim()
+    if (trimmed === '') {
+      throw new TypeError('requestId requires a non-empty string')
+    }
+    this._requestId = trimmed
+    return this
+  }
+
   select(fields) {
     const projections = []
     for (const field of fields) {
       if (typeof field === 'string') {
+        this._assertMatch(field)
         projections.push({ kind: 'var', var: field, alias: null })
         continue
       }
       if (field && typeof field === 'object') {
-        if ('expr' in field) {
-          const expr = field.expr
-          const alias = field.as
-          if (typeof expr !== 'string' || typeof alias !== 'string') {
-            throw new TypeError('projection expression requires string expr and alias')
-          }
-          projections.push({ kind: 'expr', expr, alias })
-          continue
-        }
         if ('prop' in field) {
           const varName = field.var
           const prop = field.prop
@@ -570,18 +654,25 @@ class QueryBuilder {
           if (typeof prop !== 'string' || !prop) {
             throw new TypeError('property projection requires a property name')
           }
+          this._assertMatch(varName)
+          const validator = this._makePropValidator(varName)
+          const normalizedProp = validator(prop)
           const alias = field.as ?? null
           if (alias !== null && alias !== undefined && typeof alias !== 'string') {
             throw new TypeError('property projection alias must be a string when provided')
           }
-          projections.push({ kind: 'prop', var: varName, prop, alias })
+          projections.push({ kind: 'prop', var: varName, prop: normalizedProp, alias })
           continue
         }
         if ('var' in field) {
           const varName = field.var
+          this._assertMatch(varName)
           const alias = field.as ?? null
           projections.push({ kind: 'var', var: varName, alias })
           continue
+        }
+        if ('expr' in field) {
+          throw new TypeError('expression projections are not supported; use property projections instead')
         }
       }
       throw new TypeError('unsupported projection field')
@@ -590,8 +681,12 @@ class QueryBuilder {
     return this
   }
 
-  async explain() {
-    return this._db._explain(this._build())
+  async explain(options) {
+    const spec = this._build()
+    if (options && options.redactLiterals) {
+      spec.redact_literals = true
+    }
+    return this._db._explain(spec)
   }
 
   async execute() {
@@ -608,16 +703,28 @@ class QueryBuilder {
     return this._buildSpec()
   }
 
-  _appendPredicate(expr) {
+  _appendPredicate(expr, combinator = 'and') {
     if (!this._predicate) {
       this._predicate = expr
       return
     }
-    if (this._predicate.op === 'and') {
-      this._predicate.args.push(expr)
-    } else {
-      this._predicate = { op: 'and', args: [this._predicate, expr] }
+    if (combinator === 'and') {
+      if (this._predicate.op === 'and') {
+        this._predicate.args.push(expr)
+      } else {
+        this._predicate = { op: 'and', args: [this._predicate, expr] }
+      }
+      return
     }
+    if (combinator === 'or') {
+      if (this._predicate.op === 'or') {
+        this._predicate.args.push(expr)
+      } else {
+        this._predicate = { op: 'or', args: [this._predicate, expr] }
+      }
+      return
+    }
+    throw new Error(`unsupported predicate combinator '${combinator}'`)
   }
 
   _ensureMatch(varName, label) {
@@ -645,6 +752,10 @@ class QueryBuilder {
   }
 
   _buildSpec() {
+    const projections =
+      this._projections.length > 0
+        ? this._projections
+        : this._matches.map((clause) => ({ kind: 'var', var: clause.var, alias: null }))
     const spec = {
       $schemaVersion: 1,
       matches: this._matches.map((clause) => ({
@@ -658,12 +769,42 @@ class QueryBuilder {
         direction: edge.direction,
       })),
       distinct: this._distinct,
-      projections: this._projections.map((proj) => cloneSpec(proj)),
+      projections: projections.map((proj) => cloneSpec(proj)),
+    }
+    if (this._requestId) {
+      spec.request_id = this._requestId
     }
     if (this._predicate) {
       spec.predicate = cloneSpec(this._predicate)
     }
     return spec
+  }
+
+  _labelForVar(varName) {
+    const entry = this._matches.find((clause) => clause.var === varName)
+    return entry && entry.label ? entry.label : null
+  }
+
+  _makePropValidator(varName) {
+    const hasSchema = this._schema && typeof this._schema === 'object'
+    if (!hasSchema) {
+      return (prop) => normalizePropName(prop)
+    }
+    const label = this._labelForVar(varName)
+    if (!label) {
+      return (prop) => normalizePropName(prop)
+    }
+    const labelSchema = this._schema[label]
+    if (!labelSchema || typeof labelSchema !== 'object') {
+      return (prop) => normalizePropName(prop)
+    }
+    return (prop) => {
+      const normalized = normalizePropName(prop)
+      if (!Object.prototype.hasOwnProperty.call(labelSchema, normalized)) {
+        throw new Error(`Unknown property '${normalized}' on label '${label}'`)
+      }
+      return normalized
+    }
   }
 }
 
@@ -835,17 +976,33 @@ function createSummaryWithAliasHelper(summary) {
 }
 
 class Database {
-  constructor(handle) {
+  constructor(handle, schema = null) {
     this._handle = handle
+    this._schema = null
+    if (schema !== null && schema !== undefined) {
+      this.withSchema(schema)
+    }
   }
 
   static open(path, options) {
-    const handle = native.openDatabase(path, options ?? undefined)
-    return new Database(handle)
+    let schema = null
+    let connectOptions = options ?? undefined
+    if (options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'schema')) {
+      const { schema: schemaValue, ...rest } = options
+      schema = schemaValue ?? null
+      connectOptions = Object.keys(rest).length > 0 ? rest : undefined
+    }
+    const handle = native.openDatabase(path, connectOptions ?? undefined)
+    return new Database(handle, schema)
   }
 
   query() {
-    return new QueryBuilder(this)
+    return new QueryBuilder(this, this._schema)
+  }
+
+  withSchema(schema) {
+    this._schema = normalizeRuntimeSchema(schema)
+    return this
   }
 
   create() {
@@ -930,12 +1087,20 @@ class Database {
     return native.databasePragmaSet(this._handle, name, value)
   }
 
+  cancelRequest(requestId) {
+    if (typeof requestId !== 'string' || requestId.trim() === '') {
+      throw new TypeError('cancelRequest requires a non-empty request id string')
+    }
+    return native.databaseCancelRequest(this._handle, requestId)
+  }
+
   _execute(spec) {
     return native.databaseExecute(this._handle, spec)
   }
 
   _explain(spec) {
-    return native.databaseExplain(this._handle, spec)
+    const payload = native.databaseExplain(this._handle, spec)
+    return normalizeExplainPayload(payload)
   }
 
   _stream(spec) {

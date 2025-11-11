@@ -917,7 +917,7 @@ impl<'m> Analyzer<'m> {
         self.var_index
             .get(&var.0)
             .copied()
-            .ok_or_else(|| AnalyzerError::unknown_var(var.0.clone(), context))
+            .ok_or_else(|| AnalyzerError::var_not_matched(var.0.clone(), context))
     }
 
     fn property(&mut self, name: &str) -> AnalyzeResult<PropRef> {
@@ -1232,7 +1232,7 @@ mod tests {
             value: Value::Int(1),
         }));
         let err = analyze(&ast, &metadata()).expect_err("analysis should fail");
-        assert!(matches!(err, AnalyzerError::UnknownVariable { .. }));
+        assert!(matches!(err, AnalyzerError::VarNotMatched { .. }));
     }
 
     #[test]

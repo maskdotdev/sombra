@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::primitives::pager::{PageStore, Pager, ReadGuard};
@@ -14,8 +15,8 @@ use crate::types::{LabelId, NodeId, PropId, Result, SombraError, TypeId};
 use crate::query::ast::Var;
 use crate::query::metadata::MetadataProvider;
 use crate::query::physical::{
-    LiteralValue, PhysicalBoolExpr, PhysicalComparison, PhysicalNode, PhysicalOp, PhysicalPlan,
-    ProjectField, PropPredicate as PhysicalPredicate,
+    InLookup, LiteralValue, PhysicalBoolExpr, PhysicalComparison, PhysicalNode, PhysicalOp,
+    PhysicalPlan, ProjectField, PropPredicate as PhysicalPredicate, ValueKey,
 };
 use crate::query::profile::{
     profile_timer as query_profile_timer, record_profile_timer as record_query_profile_timer,
@@ -135,15 +136,31 @@ pub struct ResultStream {
     bindings: BoxBindingStream,
     mapper: RowMapper,
     _context: Arc<ReadContext>,
+    cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl ResultStream {
-    fn new(bindings: BoxBindingStream, mapper: RowMapper, context: Arc<ReadContext>) -> Self {
+    fn new(
+        bindings: BoxBindingStream,
+        mapper: RowMapper,
+        context: Arc<ReadContext>,
+        cancel_token: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             bindings,
             mapper,
             _context: context,
+            cancel_token,
         }
+    }
+
+    fn check_cancel(&self) -> Result<()> {
+        if let Some(flag) = &self.cancel_token {
+            if flag.load(Ordering::SeqCst) {
+                return Err(SombraError::Cancelled);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -151,6 +168,9 @@ impl Iterator for ResultStream {
     type Item = Result<Row>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Err(err) = self.check_cancel() {
+            return Some(Err(err));
+        }
         match self.bindings.try_next() {
             Ok(Some(binding)) => Some(self.mapper.map(&binding)),
             Ok(None) => None,
@@ -177,8 +197,12 @@ impl Executor {
     }
 
     /// Executes a physical plan and materializes all results into memory.
-    pub fn execute(&self, plan: &PhysicalPlan) -> Result<QueryResult> {
-        let mut stream = self.stream(plan)?;
+    pub fn execute(
+        &self,
+        plan: &PhysicalPlan,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<QueryResult> {
+        let mut stream = self.stream_with_token(plan, cancel)?;
         let iter_timer = query_profile_timer();
         let rows: Vec<Row> = stream.by_ref().collect::<Result<_>>()?;
         record_query_profile_timer(QueryProfileKind::StreamIter, iter_timer);
@@ -186,7 +210,19 @@ impl Executor {
     }
 
     /// Executes a physical plan and returns a streaming iterator over results.
-    pub fn stream(&self, plan: &PhysicalPlan) -> Result<ResultStream> {
+    pub fn stream(
+        &self,
+        plan: &PhysicalPlan,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<ResultStream> {
+        self.stream_with_token(plan, cancel)
+    }
+
+    fn stream_with_token(
+        &self,
+        plan: &PhysicalPlan,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<ResultStream> {
         let guard_timer = query_profile_timer();
         let context = Arc::new(ReadContext::new(self.pager.begin_read()?));
         record_query_profile_timer(QueryProfileKind::ReadGuard, guard_timer);
@@ -216,7 +252,7 @@ impl Executor {
             },
             None => RowMapper::All,
         };
-        Ok(ResultStream::new(bindings, mapper, context))
+        Ok(ResultStream::new(bindings, mapper, context, cancel))
     }
 
     fn build_stream(
@@ -795,10 +831,14 @@ fn evaluate_comparison<R: BoolNodeResolver>(
             eval_between(&node, *prop, low, high)
         }
         PhysicalComparison::In {
-            var, prop, values, ..
+            var,
+            prop,
+            values,
+            lookup,
+            ..
         } => {
             let node = resolver.resolve(var)?;
-            eval_in(&node, *prop, values)
+            eval_in(&node, *prop, values, lookup)
         }
         PhysicalComparison::Exists { var, prop, .. } => {
             let node = resolver.resolve(var)?;
@@ -919,12 +959,22 @@ fn eval_between(
     Ok(meets_high)
 }
 
-fn eval_in(node: &NodeData, prop: PropId, values: &[LiteralValue]) -> Result<bool> {
+fn eval_in(
+    node: &NodeData,
+    prop: PropId,
+    values: &[LiteralValue],
+    lookup: &InLookup,
+) -> Result<bool> {
     let Some(actual) = find_prop(node, prop) else {
         return Ok(false);
     };
     if matches!(actual, PropValueOwned::Null) {
         return Ok(false);
+    }
+    if let Some(set) = lookup.hash_values() {
+        if let Some(key) = ValueKey::from_property(actual) {
+            return Ok(set.contains(&key));
+        }
     }
     for literal in values {
         if matches!(literal, LiteralValue::Null) {
@@ -1381,7 +1431,7 @@ mod tests {
     use crate::query::metadata::InMemoryMetadata;
     use crate::query::metadata::MetadataProvider;
     use crate::query::physical::{
-        LiteralValue, PhysicalNode, PhysicalOp, PhysicalPlan, ProjectField,
+        InLookup, LiteralValue, PhysicalNode, PhysicalOp, PhysicalPlan, ProjectField,
         PropPredicate as PhysicalPredicate,
     };
     use crate::query::planner::{Planner, PlannerConfig};
@@ -1466,7 +1516,7 @@ mod tests {
         let planner = Planner::new(PlannerConfig::default(), Arc::clone(&metadata));
         let plan = planner.plan(&ast)?;
         let executor = Executor::new(graph, pager, metadata);
-        let result = executor.execute(&plan.plan)?;
+        let result = executor.execute(&plan.plan, None)?;
         assert_eq!(result.rows.len(), 2);
         for row in result.rows {
             let value = row.get("a").expect("projected value");
@@ -1537,7 +1587,7 @@ mod tests {
 
         let plan = PhysicalPlan::new(project);
         let executor = Executor::new(graph, pager, metadata);
-        let rows = executor.execute(&plan)?.rows;
+        let rows = executor.execute(&plan, None)?.rows;
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         let a_id = node_id_from(row.get("a").expect("binding for a"));
@@ -1556,7 +1606,7 @@ mod tests {
         let planner = Planner::new(PlannerConfig::default(), Arc::clone(&metadata));
         let plan = planner.plan(&ast)?;
         let executor = Executor::new(graph, pager, metadata);
-        let stream = executor.stream(&plan.plan)?;
+        let stream = executor.stream(&plan.plan, None)?;
         let rows: Vec<Row> = stream.collect::<Result<_>>()?;
         assert_eq!(rows.len(), 2);
         Ok(())
@@ -1586,7 +1636,7 @@ mod tests {
         );
         let plan = PhysicalPlan::new(project);
         let executor = Executor::new(graph, pager, metadata);
-        let rows = executor.execute(&plan)?.rows;
+        let rows = executor.execute(&plan, None)?.rows;
         assert_eq!(rows.len(), 1);
         let value = rows[0].get("age").expect("projected column");
         assert!(matches!(value, Value::Int(42)));
@@ -1723,21 +1773,39 @@ mod tests {
 
     #[test]
     fn bool_expr_not_handles_in_with_nulls() {
-        let expr = PhysicalBoolExpr::Not(Box::new(PhysicalBoolExpr::Cmp(PhysicalComparison::In {
-            var: Var("a".into()),
-            prop: PropId(2),
-            prop_name: "scores".into(),
-            values: vec![
-                LiteralValue::Int(1),
-                LiteralValue::Null,
-                LiteralValue::Int(5),
-            ],
-        })));
+        let values = vec![
+            LiteralValue::Int(1),
+            LiteralValue::Null,
+            LiteralValue::Int(5),
+        ];
+        let expr = PhysicalBoolExpr::Not(Box::new(PhysicalBoolExpr::Cmp(
+            PhysicalComparison::In {
+                var: Var("a".into()),
+                prop: PropId(2),
+                prop_name: "scores".into(),
+                lookup: InLookup::from_literals(&values),
+                values,
+            },
+        )));
         let mut resolver = TestResolver::new(vec![(
             "a",
             bool_node(vec![(PropId(2), PropValueOwned::Int(10))]),
         )]);
         assert!(evaluate_bool_expr(&expr, &mut resolver).unwrap());
+    }
+
+    #[test]
+    fn eval_in_hash_lookup_matches_values() -> Result<()> {
+        let values: Vec<LiteralValue> = (0..16).map(LiteralValue::Int).collect();
+        let lookup = InLookup::from_literals(&values);
+        assert!(matches!(lookup, InLookup::Hash(_)));
+
+        let present = bool_node(vec![(PropId(30), PropValueOwned::Int(11))]);
+        assert!(eval_in(&present, PropId(30), &values, &lookup)?);
+
+        let absent = bool_node(vec![(PropId(30), PropValueOwned::Int(42))]);
+        assert!(!eval_in(&absent, PropId(30), &values, &lookup)?);
+        Ok(())
     }
 
     #[test]

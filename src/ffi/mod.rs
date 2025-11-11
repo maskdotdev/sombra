@@ -12,7 +12,7 @@ use crate::query::{
     ast::{
         BoolExpr, Comparison, EdgeClause, EdgeDirection, MatchClause, Projection, QueryAst, Var,
     },
-    errors::AnalyzerError,
+    errors::{AnalyzerError, SchemaVersionState},
     executor::{Executor, QueryResult, ResultStream, Row, Value as ExecValue},
     metadata::{CatalogMetadata, MetadataProvider},
     planner::{ExplainNode, PlanExplain, Planner, PlannerConfig, PlannerOutput},
@@ -30,7 +30,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use std::cmp::Ordering;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::{
     collections::{HashMap, HashSet},
     fs, mem,
@@ -289,6 +289,94 @@ impl Default for DatabaseOptions {
     }
 }
 
+#[derive(Default)]
+struct CancellationRegistry {
+    tokens: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl CancellationRegistry {
+    fn new() -> Self {
+        Self {
+            tokens: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn register(
+        self: &Arc<Self>,
+        request_id: &str,
+    ) -> Result<CancellationHandle> {
+        if request_id.trim().is_empty() {
+            return Err(FfiError::Message(
+                "request_id must be a non-empty string".into(),
+            ));
+        }
+        let mut guard = self.tokens.lock().map_err(|_| {
+            FfiError::Message("cancellation registry poisoned".into())
+        })?;
+        if guard.contains_key(request_id) {
+            return Err(FfiError::Message(format!(
+                "request '{request_id}' already has a running query"
+            )));
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        guard.insert(request_id.to_string(), Arc::clone(&flag));
+        Ok(CancellationHandle {
+            inner: Arc::new(CancellationHandleInner {
+                id: request_id.to_string(),
+                registry: Arc::clone(self),
+                flag,
+            }),
+        })
+    }
+
+    fn cancel(&self, request_id: &str) -> bool {
+        match self.tokens.lock() {
+            Ok(mut tokens) => {
+                if let Some(flag) = tokens.remove(request_id) {
+                    flag.store(true, AtomicOrdering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn unregister(&self, id: &str, flag: &Arc<AtomicBool>) {
+        if let Ok(mut tokens) = self.tokens.lock() {
+            if let Some(existing) = tokens.get(id) {
+                if Arc::ptr_eq(existing, flag) {
+                    tokens.remove(id);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CancellationHandle {
+    inner: Arc<CancellationHandleInner>,
+}
+
+impl CancellationHandle {
+    fn token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner.flag)
+    }
+}
+
+struct CancellationHandleInner {
+    id: String,
+    registry: Arc<CancellationRegistry>,
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for CancellationHandleInner {
+    fn drop(&mut self) {
+        self.registry.unregister(&self.id, &self.flag);
+    }
+}
+
 /// Shared database handle used by language bindings (Node.js, Python, etc.).
 ///
 /// This is the main entry point for FFI clients to interact with the Sombra database.
@@ -301,6 +389,7 @@ pub struct Database {
     metadata: Arc<dyn MetadataProvider>,
     planner: Planner,
     executor: Executor,
+    cancellations: Arc<CancellationRegistry>,
 }
 
 impl Database {
@@ -345,6 +434,7 @@ impl Database {
             Arc::clone(&pager),
             Arc::clone(&metadata),
         );
+        let cancellations = Arc::new(CancellationRegistry::new());
 
         Ok(Self {
             pager,
@@ -353,6 +443,7 @@ impl Database {
             metadata,
             planner,
             executor,
+            cancellations,
         })
     }
 
@@ -371,9 +462,9 @@ impl Database {
     /// Returns the query execution plan for inspection and optimization.
     pub fn explain_json(&self, spec: &Value) -> Result<Value> {
         enforce_payload_size(spec)?;
-        let spec: QuerySpec = serde_json::from_value(spec.clone())
+        let spec: ExplainSpec = serde_json::from_value(spec.clone())
             .map_err(|err| FfiError::Message(format!("invalid query spec: {err}")))?;
-        self.explain(spec)
+        self.explain_with_options(spec.query, spec.redact_literals)
     }
 
     /// Creates a streaming query from a JSON specification.
@@ -425,8 +516,10 @@ impl Database {
         let plan_timer = profile_timer();
         let plan = self.plan(spec)?;
         record_profile_timer(ProfileKind::Plan, plan_timer);
+        let guard = self.register_cancellation(plan.request_id.as_deref())?;
+        let cancel_token = guard.as_ref().map(|handle| handle.token());
         let exec_timer = profile_timer();
-        let result = self.executor.execute(&plan.plan)?;
+        let result = self.executor.execute(&plan.plan, cancel_token)?;
         record_profile_timer(ProfileKind::Execute, exec_timer);
         let serde_timer = profile_timer();
         let rows = rows_to_values(&result)?;
@@ -436,19 +529,35 @@ impl Database {
 
     /// Returns the query execution plan for a specification.
     pub fn explain(&self, spec: QuerySpec) -> Result<Value> {
+        self.explain_with_options(spec, false)
+    }
+
+    fn explain_with_options(
+        &self,
+        spec: QuerySpec,
+        redact_literals: bool,
+    ) -> Result<Value> {
         let plan = self.plan(spec)?;
         Ok(explain_payload(
             plan.request_id.clone(),
             plan.plan_hash,
             &plan.explain,
+            redact_literals,
         ))
     }
 
     /// Creates a streaming query result.
     pub fn stream(&self, spec: QuerySpec) -> Result<QueryStream> {
         let plan = self.plan(spec)?;
-        let stream = self.executor.stream(&plan.plan)?;
-        Ok(QueryStream::new(stream))
+        let guard = self.register_cancellation(plan.request_id.as_deref())?;
+        let token = guard.as_ref().map(|h| h.token());
+        let stream = self.executor.stream(&plan.plan, token)?;
+        Ok(QueryStream::new(stream, guard))
+    }
+
+    /// Issues a best-effort cancellation signal for a running query.
+    pub fn cancel_request(&self, request_id: &str) -> bool {
+        self.cancellations.cancel(request_id)
     }
 
     /// Interns a string in the dictionary and returns its ID.
@@ -772,19 +881,37 @@ impl Database {
             .plan_analyzed(&analyzed)
             .map_err(FfiError::from)
     }
+
+    fn register_cancellation(
+        &self,
+        request_id: Option<&str>,
+    ) -> Result<Option<CancellationHandle>> {
+        match request_id {
+            Some(id) => Ok(Some(self.cancellations.register(id)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+struct StreamInner {
+    stream: Mutex<ResultStream>,
+    _guard: Option<CancellationHandle>,
 }
 
 /// A streaming query result that can be consumed incrementally.
 ///
 /// This allows processing large result sets without loading everything into memory.
 pub struct QueryStream {
-    inner: Arc<Mutex<ResultStream>>,
+    inner: Arc<StreamInner>,
 }
 
 impl QueryStream {
-    fn new(stream: ResultStream) -> Self {
+    fn new(stream: ResultStream, guard: Option<CancellationHandle>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(stream)),
+            inner: Arc::new(StreamInner {
+                stream: Mutex::new(stream),
+                _guard: guard,
+            }),
         }
     }
 
@@ -795,6 +922,7 @@ impl QueryStream {
     pub fn next(&self) -> Result<Option<Value>> {
         let mut guard = self
             .inner
+            .stream
             .lock()
             .map_err(|_| FfiError::Message("stream poisoned".into()))?;
         match guard.next() {
@@ -867,8 +995,8 @@ fn enforce_payload_size(spec: &Value) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub struct QuerySpec {
     /// Schema version for the query payload.
-    #[serde(rename = "$schemaVersion", default = "default_schema_version")]
-    pub schema_version: u32,
+    #[serde(rename = "$schemaVersion")]
+    pub schema_version: Option<u32>,
     /// Optional client-supplied request identifier.
     #[serde(default, alias = "request_id")]
     pub request_id: Option<String>,
@@ -889,21 +1017,39 @@ pub struct QuerySpec {
     pub distinct: bool,
 }
 
+/// Explain-specific options layered on top of [`QuerySpec`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainSpec {
+    /// Core query specification.
+    #[serde(flatten)]
+    pub query: QuerySpec,
+    /// Whether to redact literal values in explain output.
+    #[serde(default, rename = "redact_literals", alias = "redactLiterals")]
+    pub redact_literals: bool,
+}
+
 #[allow(dead_code)]
 const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
-fn default_schema_version() -> u32 {
-    1
-}
-
 impl QuerySpec {
     fn into_ast(self) -> Result<QueryAst> {
-        if self.schema_version != 1 {
-            return Err(FfiError::Message(format!(
-                "unsupported schema version {}",
-                self.schema_version
-            )));
-        }
+        let schema_version = self
+            .schema_version
+            .map(SchemaVersionState::Value)
+            .unwrap_or(SchemaVersionState::Missing);
+        let schema_version = match schema_version {
+            SchemaVersionState::Value(version) if version == 1 => version,
+            state => {
+                return Err(
+                    AnalyzerError::UnsupportedSchemaVersion {
+                        found: state,
+                        supported: 1,
+                    }
+                    .into(),
+                )
+            }
+        };
 
         if self.matches.is_empty() {
             return Err(FfiError::Message(
@@ -933,7 +1079,7 @@ impl QuerySpec {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(QueryAst {
-            schema_version: self.schema_version,
+            schema_version,
             request_id: self.request_id,
             matches,
             edges,
@@ -994,36 +1140,94 @@ impl EdgeSpec {
             from: Var(self.from),
             to: Var(self.to),
             edge_type: self.edge_type,
-            direction: self.direction.into(),
+            direction: self.direction.into_direction()?,
         })
     }
 }
 
 /// Edge traversal direction specification.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DirectionSpec {
-    /// Outgoing edges only.
-    Out,
-    /// Incoming edges only.
-    In,
-    /// Both incoming and outgoing edges.
-    Both,
-}
+#[derive(Debug, Clone)]
+pub struct DirectionSpec(String);
 
 impl DirectionSpec {
     fn default_out() -> Self {
-        DirectionSpec::Out
+        Self("out".into())
+    }
+
+    /// Convenience constructor for outgoing traversals.
+    pub fn out() -> Self {
+        Self("out".into())
+    }
+
+    /// Convenience constructor for incoming traversals.
+    pub fn r#in() -> Self {
+        Self("in".into())
+    }
+
+    /// Convenience constructor for bidirectional traversals.
+    pub fn both() -> Self {
+        Self("both".into())
+    }
+
+    fn into_direction(self) -> Result<EdgeDirection> {
+        match self.0.as_str() {
+            "out" => Ok(EdgeDirection::Out),
+            "in" => Ok(EdgeDirection::In),
+            "both" => Ok(EdgeDirection::Both),
+            other => Err(AnalyzerError::DirectionInvalid {
+                direction: other.to_string(),
+            }
+            .into()),
+        }
     }
 }
 
-impl From<DirectionSpec> for EdgeDirection {
-    fn from(value: DirectionSpec) -> Self {
-        match value {
-            DirectionSpec::Out => EdgeDirection::Out,
-            DirectionSpec::In => EdgeDirection::In,
-            DirectionSpec::Both => EdgeDirection::Both,
-        }
+impl<'de> Deserialize<'de> for DirectionSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(DirectionSpec(value))
+    }
+}
+
+/// Literal value emitted by bindings before semantic validation.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "t", content = "v")]
+pub enum PayloadValue {
+    /// Null literal.
+    Null,
+    /// Boolean literal.
+    Bool(bool),
+    /// Signed 64-bit integer literal.
+    Int(i64),
+    /// 64-bit floating point literal.
+    Float(f64),
+    /// UTF-8 string literal.
+    String(String),
+    /// Base64-encoded bytes literal (decoded later).
+    Bytes(String),
+    /// Nanoseconds since Unix epoch (UTC).
+    DateTime(i128),
+}
+
+impl PayloadValue {
+    fn into_value(self) -> Result<QueryValue> {
+        Ok(match self {
+            PayloadValue::Null => QueryValue::Null,
+            PayloadValue::Bool(v) => QueryValue::Bool(v),
+            PayloadValue::Int(v) => QueryValue::Int(v),
+            PayloadValue::Float(v) => QueryValue::Float(v),
+            PayloadValue::String(v) => QueryValue::String(v),
+            PayloadValue::Bytes(raw) => {
+                let decoded = BASE64
+                    .decode(raw.as_bytes())
+                    .map_err(|_| AnalyzerError::BytesEncoding)?;
+                QueryValue::Bytes(decoded)
+            }
+            PayloadValue::DateTime(v) => QueryValue::DateTime(v),
+        })
     }
 }
 
@@ -1057,7 +1261,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal value to compare against.
-        value: QueryValue,
+        value: PayloadValue,
     },
     /// Inequality comparison.
     #[serde(rename = "ne")]
@@ -1067,7 +1271,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal value to compare against.
-        value: QueryValue,
+        value: PayloadValue,
     },
     /// Less-than comparison.
     #[serde(rename = "lt")]
@@ -1077,7 +1281,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal value to compare against.
-        value: QueryValue,
+        value: PayloadValue,
     },
     /// Less-than-or-equal comparison.
     #[serde(rename = "le")]
@@ -1087,7 +1291,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal value to compare against.
-        value: QueryValue,
+        value: PayloadValue,
     },
     /// Greater-than comparison.
     #[serde(rename = "gt")]
@@ -1097,7 +1301,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal value to compare against.
-        value: QueryValue,
+        value: PayloadValue,
     },
     /// Greater-than-or-equal comparison.
     #[serde(rename = "ge")]
@@ -1107,7 +1311,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal value to compare against.
-        value: QueryValue,
+        value: PayloadValue,
     },
     /// Between comparison with optional bound inclusivity.
     #[serde(rename = "between")]
@@ -1117,9 +1321,9 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Lower bound literal.
-        low: QueryValue,
+        low: PayloadValue,
         /// Upper bound literal.
-        high: QueryValue,
+        high: PayloadValue,
         #[serde(default)]
         /// Inclusive flags for the lower/upper bounds.
         inclusive: Option<[bool; 2]>,
@@ -1132,7 +1336,7 @@ pub enum PredicateSpec {
         /// Property name being compared.
         prop: String,
         /// Literal set to test membership against.
-        values: Vec<QueryValue>,
+        values: Vec<PayloadValue>,
     },
     /// Property existence test.
     #[serde(rename = "exists")]
@@ -1315,6 +1519,7 @@ impl PredicateSpec {
                 Ok(BoolExpr::Not(Box::new(inner)))
             }
             PredicateSpec::Eq { var, prop, value } => {
+                let value = value.into_value()?;
                 validate_scalar_value(&value)?;
                 Ok(BoolExpr::Cmp(Comparison::Eq {
                     var: into_var(var)?,
@@ -1323,6 +1528,7 @@ impl PredicateSpec {
                 }))
             }
             PredicateSpec::Ne { var, prop, value } => {
+                let value = value.into_value()?;
                 validate_scalar_value(&value)?;
                 Ok(BoolExpr::Cmp(Comparison::Ne {
                     var: into_var(var)?,
@@ -1331,6 +1537,7 @@ impl PredicateSpec {
                 }))
             }
             PredicateSpec::Lt { var, prop, value } => {
+                let value = value.into_value()?;
                 validate_scalar_value(&value)?;
                 ensure_orderable(&value, "lt()")?;
                 Ok(BoolExpr::Cmp(Comparison::Lt {
@@ -1340,6 +1547,7 @@ impl PredicateSpec {
                 }))
             }
             PredicateSpec::Le { var, prop, value } => {
+                let value = value.into_value()?;
                 validate_scalar_value(&value)?;
                 ensure_orderable(&value, "le()")?;
                 Ok(BoolExpr::Cmp(Comparison::Le {
@@ -1349,6 +1557,7 @@ impl PredicateSpec {
                 }))
             }
             PredicateSpec::Gt { var, prop, value } => {
+                let value = value.into_value()?;
                 validate_scalar_value(&value)?;
                 ensure_orderable(&value, "gt()")?;
                 Ok(BoolExpr::Cmp(Comparison::Gt {
@@ -1358,6 +1567,7 @@ impl PredicateSpec {
                 }))
             }
             PredicateSpec::Ge { var, prop, value } => {
+                let value = value.into_value()?;
                 validate_scalar_value(&value)?;
                 ensure_orderable(&value, "ge()")?;
                 Ok(BoolExpr::Cmp(Comparison::Ge {
@@ -1373,6 +1583,8 @@ impl PredicateSpec {
                 high,
                 inclusive,
             } => {
+                let low = low.into_value()?;
+                let high = high.into_value()?;
                 validate_between_literals(&low, &high)?;
                 let (low_bound, high_bound) = between_bounds(low, high, inclusive);
                 Ok(BoolExpr::Cmp(Comparison::Between {
@@ -1383,11 +1595,15 @@ impl PredicateSpec {
                 }))
             }
             PredicateSpec::In { var, prop, values } => {
-                validate_in_values(&values)?;
+                let mut literals = Vec::with_capacity(values.len());
+                for value in values {
+                    literals.push(value.into_value()?);
+                }
+                validate_in_values(&literals)?;
                 Ok(BoolExpr::Cmp(Comparison::In {
                     var: into_var(var)?,
                     prop: into_prop(prop)?,
-                    values,
+                    values: literals,
                 }))
             }
             PredicateSpec::Exists { var, prop } => Ok(BoolExpr::Cmp(Comparison::Exists {
@@ -1728,9 +1944,12 @@ fn rows_to_values(result: &QueryResult) -> Result<Vec<Value>> {
 
 fn execution_payload(request_id: Option<String>, rows: Vec<Value>) -> Value {
     let mut map = Map::new();
-    if let Some(id) = request_id {
-        map.insert("request_id".into(), Value::String(id));
-    }
+    map.insert(
+        "request_id".into(),
+        request_id
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
     map.insert("features".into(), Value::Array(Vec::new()));
     map.insert("rows".into(), Value::Array(rows));
     Value::Object(map)
@@ -1805,34 +2024,50 @@ fn prop_value_ref(value: &PropValueOwned) -> PropValue<'_> {
     }
 }
 
-fn explain_payload(request_id: Option<String>, plan_hash: u64, explain: &PlanExplain) -> Value {
+fn explain_payload(
+    request_id: Option<String>,
+    plan_hash: u64,
+    explain: &PlanExplain,
+    redact_literals: bool,
+) -> Value {
     let mut root = Map::new();
-    if let Some(id) = request_id {
-        root.insert("request_id".into(), Value::String(id));
-    }
+    root.insert(
+        "request_id".into(),
+        request_id
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
     root.insert("features".into(), Value::Array(Vec::new()));
     root.insert(
         "plan_hash".into(),
         Value::String(format_plan_hash(plan_hash)),
     );
-    root.insert("plan".into(), explain_node_to_value(&explain.root));
+    root.insert(
+        "plan".into(),
+        Value::Array(vec![explain_node_to_value(&explain.root, redact_literals)]),
+    );
     Value::Object(root)
 }
 
-fn explain_node_to_value(node: &ExplainNode) -> Value {
+fn explain_node_to_value(node: &ExplainNode, redact_literals: bool) -> Value {
     let mut map = Map::new();
     map.insert("op".into(), Value::String(node.op.clone()));
     if !node.props.is_empty() {
         let mut props = Map::new();
-        for (k, v) in &node.props {
-            props.insert(k.clone(), Value::String(v.clone()));
+        for prop in &node.props {
+            let value = if redact_literals && prop.redactable {
+                Value::String("<redacted>".into())
+            } else {
+                Value::String(prop.value.clone())
+            };
+            props.insert(prop.key.clone(), value);
         }
         map.insert("props".into(), Value::Object(props));
     }
     let inputs = node
         .inputs
         .iter()
-        .map(explain_node_to_value)
+        .map(|child| explain_node_to_value(child, redact_literals))
         .collect::<Vec<_>>();
     map.insert("inputs".into(), Value::Array(inputs));
     Value::Object(map)
@@ -2240,6 +2475,29 @@ mod tests {
         map
     }
 
+    fn find_plan_node_with_prop<'a>(
+        value: &'a Value,
+        predicate_key: &str,
+    ) -> Option<&'a Map<String, Value>> {
+        let obj = value.as_object()?;
+        let matches = obj
+            .get("props")
+            .and_then(Value::as_object)
+            .and_then(|props| props.get(predicate_key))
+            .is_some();
+        if matches {
+            return Some(obj);
+        }
+        if let Some(inputs) = obj.get("inputs").and_then(Value::as_array) {
+            for child in inputs {
+                if let Some(found) = find_plan_node_with_prop(child, predicate_key) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn create_builder_supports_handles_and_aliases() -> Result<()> {
         let dir = tempdir().unwrap();
@@ -2261,7 +2519,7 @@ mod tests {
     #[test]
     fn predicate_and_empty_normalizes_to_true() -> Result<()> {
         let spec = QuerySpec {
-            schema_version: 1,
+            schema_version: Some(1),
             request_id: None,
             matches: vec![MatchSpec {
                 var: "a".into(),
@@ -2280,7 +2538,7 @@ mod tests {
     #[test]
     fn predicate_or_empty_normalizes_to_false() -> Result<()> {
         let spec = QuerySpec {
-            schema_version: 1,
+            schema_version: Some(1),
             request_id: None,
             matches: vec![MatchSpec {
                 var: "a".into(),
@@ -2302,6 +2560,7 @@ mod tests {
     #[test]
     fn json_predicate_spec_parses_into_ast() -> Result<()> {
         let spec = json!({
+            "$schemaVersion": 1,
             "matches": [
                 { "var": "a", "label": "User" }
             ],
@@ -2322,12 +2581,96 @@ mod tests {
     }
 
     #[test]
+    fn missing_schema_version_rejected() {
+        let spec = QuerySpec {
+            schema_version: None,
+            request_id: None,
+            matches: vec![MatchSpec {
+                var: "a".into(),
+                label: Some("User".into()),
+            }],
+            edges: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+        };
+        let err = spec.into_ast().expect_err("schema version required");
+        match err {
+            FfiError::Analyzer(AnalyzerError::UnsupportedSchemaVersion { found, supported }) => {
+                assert_eq!(supported, 1);
+                assert_eq!(found, SchemaVersionState::Missing);
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_direction_reports_code() {
+        let spec = QuerySpec {
+            schema_version: Some(1),
+            request_id: None,
+            matches: vec![
+                MatchSpec {
+                    var: "a".into(),
+                    label: Some("User".into()),
+                },
+                MatchSpec {
+                    var: "b".into(),
+                    label: Some("User".into()),
+                },
+            ],
+            edges: vec![EdgeSpec {
+                from: "a".into(),
+                to: "b".into(),
+                edge_type: None,
+                direction: DirectionSpec("sideways".into()),
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+        };
+        let err = spec.into_ast().expect_err("direction check");
+        match err {
+            FfiError::Analyzer(AnalyzerError::DirectionInvalid { direction }) => {
+                assert_eq!(direction, "sideways");
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_bytes_literal_returns_bytes_encoding() {
+        let spec = json!({
+            "$schemaVersion": 1,
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "edges": [],
+            "projections": [],
+            "distinct": false,
+            "predicate": {
+                "op": "eq",
+                "var": "a",
+                "prop": "blob",
+                "value": { "t": "Bytes", "v": "**not-base64**" }
+            }
+        });
+        let spec: QuerySpec = serde_json::from_value(spec).expect("spec parses");
+        let err = spec.into_ast().expect_err("bytes literal should fail");
+        assert!(matches!(
+            err,
+            FfiError::Analyzer(AnalyzerError::BytesEncoding)
+        ));
+    }
+
+    #[test]
     fn execute_json_with_predicate_filters_rows() -> Result<()> {
         let dir = tempdir().unwrap();
         let path = dir.path().join("predicate_filter.db");
         let db = Database::open(&path, DatabaseOptions::default())?;
         db.seed_demo()?;
         let spec = json!({
+            "$schemaVersion": 1,
             "matches": [
                 { "var": "a", "label": "User" }
             ],
@@ -2541,10 +2884,13 @@ mod tests {
         );
         let plan = explain
             .get("plan")
-            .and_then(Value::as_object)
-            .expect("plan node");
-        assert_eq!(plan.get("op").and_then(Value::as_str), Some("Project"));
-        let inputs = plan
+            .and_then(Value::as_array)
+            .expect("plan array");
+        dbg!(plan);
+        assert_eq!(plan.len(), 1);
+        let project = plan[0].as_object().expect("plan node");
+        assert_eq!(project.get("op").and_then(Value::as_str), Some("Project"));
+        let inputs = project
             .get("inputs")
             .and_then(Value::as_array)
             .expect("project inputs");
@@ -2567,6 +2913,77 @@ mod tests {
             .and_then(Value::as_str)
             .expect("plan hash");
         assert!(plan_hash.starts_with("0x"));
+        Ok(())
+    }
+
+    #[test]
+    fn explain_json_can_redact_literals() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("explain_redact.db");
+        let db = Database::open(&path, DatabaseOptions::default())?;
+        db.seed_demo()?;
+        let spec = json!({
+            "$schemaVersion": 1,
+            "request_id": "req-redact",
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "predicate": {
+                "op": "eq",
+                "var": "a",
+                "prop": "name",
+                "value": { "t": "String", "v": "Ada" }
+            },
+            "projections": [
+                { "kind": "var", "var": "a" }
+            ],
+            "redact_literals": true
+        });
+        let explain = db.explain_json(&spec)?;
+        let plan = explain
+            .get("plan")
+            .and_then(Value::as_array)
+            .expect("plan array");
+        let project = plan[0].as_object().expect("project node");
+        assert_eq!(project.get("op").and_then(Value::as_str), Some("Project"));
+        let predicate_node = plan
+            .iter()
+            .find_map(|node| find_plan_node_with_prop(node, "predicate"))
+            .expect("predicate node");
+        let props = predicate_node
+            .get("props")
+            .and_then(Value::as_object)
+            .expect("predicate props");
+        assert_eq!(
+            props.get("predicate").and_then(Value::as_str),
+            Some("<redacted>")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancel_request_interrupts_stream() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cancel_stream.db");
+        let db = Database::open(&path, DatabaseOptions::default())?;
+        db.seed_demo()?;
+        let spec = json!({
+            "$schemaVersion": 1,
+            "request_id": "req-cancel",
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "projections": [
+                { "kind": "var", "var": "a" }
+            ]
+        });
+        let stream = db.stream_json(&spec)?;
+        assert!(db.cancel_request("req-cancel"));
+        match stream.next() {
+            Err(FfiError::Core(SombraError::Cancelled)) => {}
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+        assert!(!db.cancel_request("req-cancel"));
         Ok(())
     }
 

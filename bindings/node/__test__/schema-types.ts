@@ -17,8 +17,8 @@ type Schema = {
 async function typedExamples() {
   const db = Database.open<Schema>(':memory:')
 
-  const nodes = await db.query().match('User').select(['a']).execute()
-  const entity = nodes.rows[0]?.a
+  const nodes = await db.query().match('User').select(['n0']).execute()
+  const entity = nodes.rows[0]?.n0
   const entityRecord = entity as Record<string, unknown> | undefined
   console.log(entityRecord)
 
