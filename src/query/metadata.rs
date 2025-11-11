@@ -5,15 +5,16 @@
 //! or adjacency operators, so these helpers provide the translation layer.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::primitives::pager::PageStore;
 use crate::storage::catalog::{Dict, DictOptions};
 use crate::storage::index::{IndexCatalog, IndexDef, IndexKind, TypeTag};
-use crate::types::{LabelId, PageId, PropId, Result, SombraError, TypeId};
+use crate::storage::{Graph, PropStats};
+use crate::types::{LabelId, PageId, PropId, Result, SombraError, StrId, TypeId};
 
 /// Provides name-to-identifier resolution for planner consumers.
-pub trait MetadataProvider: Send + Sync {
+pub trait MetadataProvider {
     /// Resolves a label name to its numeric identifier.
     fn resolve_label(&self, name: &str) -> Result<LabelId>;
     /// Resolves a property name to its numeric identifier.
@@ -22,12 +23,18 @@ pub trait MetadataProvider: Send + Sync {
     fn resolve_edge_type(&self, name: &str) -> Result<TypeId>;
     /// Looks up an index definition for the given label and property.
     fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>>;
+    /// Resolves a property identifier back to its canonical name.
+    fn property_name(&self, id: PropId) -> Result<String>;
+    /// Returns statistics for the given (label, property) pair when available.
+    fn property_stats(&self, label: LabelId, prop: PropId) -> Result<Option<PropStats>>;
 }
 
 /// Metadata provider backed by the Stage 5 string dictionary.
 pub struct CatalogMetadata {
     dict: Arc<Dict>,
     catalog: Arc<IndexCatalog>,
+    graph: Arc<Graph>,
+    prop_stats: Mutex<HashMap<(LabelId, PropId), Arc<PropStats>>>,
 }
 
 impl CatalogMetadata {
@@ -36,21 +43,25 @@ impl CatalogMetadata {
         store: Arc<dyn PageStore>,
         opts: DictOptions,
         catalog_root: PageId,
+        graph: Arc<Graph>,
     ) -> Result<Self> {
         let dict = Dict::open(Arc::clone(&store), opts)?;
-        Self::from_dict(Arc::new(dict), store, catalog_root)
+        Self::from_parts(Arc::new(dict), store, catalog_root, graph)
     }
 
     /// Wraps an existing dictionary handle and catalog.
-    pub fn from_dict(
+    pub fn from_parts(
         dict: Arc<Dict>,
         store: Arc<dyn PageStore>,
         catalog_root: PageId,
+        graph: Arc<Graph>,
     ) -> Result<Self> {
-        let (catalog, _) = IndexCatalog::open(&store, catalog_root, false)?;
+        let (catalog, _) = IndexCatalog::open(&store, catalog_root)?;
         Ok(Self {
             dict,
             catalog: Arc::new(catalog),
+            graph,
+            prop_stats: Mutex::new(HashMap::new()),
         })
     }
 
@@ -82,12 +93,34 @@ impl MetadataProvider for CatalogMetadata {
         let read = self.catalog.store().begin_read()?;
         self.catalog.get(&read, label, prop)
     }
+
+    fn property_name(&self, id: PropId) -> Result<String> {
+        self.dict.resolve_str(StrId(id.0))
+    }
+
+    fn property_stats(&self, label: LabelId, prop: PropId) -> Result<Option<PropStats>> {
+        if let Some(stats) = self.prop_stats.lock().unwrap().get(&(label, prop)).cloned() {
+            return Ok(Some((*stats).clone()));
+        }
+        let stats = self.graph.property_stats(label, prop)?;
+        if let Some(stats) = stats {
+            let arc = Arc::new(stats);
+            self.prop_stats
+                .lock()
+                .unwrap()
+                .insert((label, prop), arc.clone());
+            Ok(Some((*arc).clone()))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// Simple in-memory metadata provider used for tests or prototyping.
 pub struct InMemoryMetadata {
     labels: HashMap<String, LabelId>,
     props: HashMap<String, PropId>,
+    prop_names: HashMap<PropId, String>,
     edge_types: HashMap<String, TypeId>,
     prop_indexes: HashMap<(LabelId, PropId), IndexDef>,
 }
@@ -98,6 +131,7 @@ impl InMemoryMetadata {
         Self {
             labels: HashMap::new(),
             props: HashMap::new(),
+            prop_names: HashMap::new(),
             edge_types: HashMap::new(),
             prop_indexes: HashMap::new(),
         }
@@ -111,7 +145,9 @@ impl InMemoryMetadata {
 
     /// Registers a property name with its identifier.
     pub fn with_property(mut self, name: impl Into<String>, id: PropId) -> Self {
-        self.props.insert(name.into(), id);
+        let name = name.into();
+        self.props.insert(name.clone(), id);
+        self.prop_names.insert(id, name);
         self
     }
 
@@ -178,5 +214,16 @@ impl MetadataProvider for InMemoryMetadata {
 
     fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
         Ok(self.prop_indexes.get(&(label, prop)).copied())
+    }
+
+    fn property_name(&self, id: PropId) -> Result<String> {
+        self.prop_names
+            .get(&id)
+            .cloned()
+            .ok_or(SombraError::NotFound)
+    }
+
+    fn property_stats(&self, _label: LabelId, _prop: PropId) -> Result<Option<PropStats>> {
+        Ok(None)
     }
 }
