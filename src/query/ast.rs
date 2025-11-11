@@ -187,6 +187,8 @@ pub enum Projection {
 /// Top-level AST produced by the query builder.
 #[derive(Clone, Debug, Default)]
 pub struct QueryAst {
+    /// Optional client-specified identifier for correlating requests.
+    pub request_id: Option<String>,
     /// Match clauses defining initial variable bindings.
     pub matches: Vec<MatchClause>,
     /// Edge traversal clauses connecting variables.

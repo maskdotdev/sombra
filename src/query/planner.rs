@@ -1,8 +1,12 @@
 //! Rule-based planner scaffolding.
 
 use crate::query::{
-    analyze,
-    ast::{BoolExpr, Comparison, EdgeDirection, MatchClause, Projection, QueryAst, Var},
+    analyze::{
+        self, AnalyzedComparison, AnalyzedExpr, AnalyzedProjection, AnalyzedQuery, PropRef,
+        VarBinding, VarId,
+    },
+    ast::{EdgeDirection, QueryAst, Var},
+    errors::AnalyzerErrorWithCode,
     logical::{LogicalOp, LogicalPlan, PlanNode, PropPredicate as AstPredicate},
     metadata::MetadataProvider,
     physical::{
@@ -13,7 +17,7 @@ use crate::query::{
 };
 use crate::storage::index::IndexDef;
 use crate::storage::{PropStats, PropValueOwned};
-use crate::types::{LabelId, PropId, Result, SombraError, TypeId};
+use crate::types::{LabelId, PropId, Result, SombraError};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
@@ -82,9 +86,15 @@ impl Planner {
 
     /// Converts an AST into a physical plan.
     pub fn plan(&self, ast: &QueryAst) -> Result<PlannerOutput> {
-        let normalized = analyze::normalize(ast)?;
+        let analyzed = analyze::analyze(ast, self.metadata.as_ref())
+            .map_err(|err| SombraError::InvalidOwned(AnalyzerErrorWithCode(&err).to_string()))?;
+        self.plan_analyzed(&analyzed)
+    }
+
+    /// Converts an analyzed query into a physical plan.
+    pub fn plan_analyzed(&self, analyzed: &AnalyzedQuery) -> Result<PlannerOutput> {
         let mut ctx = PlanContext::new(self.metadata.as_ref());
-        let logical = self.build_logical_plan(&normalized, &mut ctx)?;
+        let logical = self.build_logical_plan(analyzed, &mut ctx)?;
         let physical = self.lower_to_physical(&logical, &mut ctx)?;
         let explain = PlanExplain {
             root: build_explain_tree(&physical.root),
@@ -95,99 +105,145 @@ impl Planner {
         })
     }
 
-    fn build_logical_plan(&self, ast: &QueryAst, ctx: &mut PlanContext<'_>) -> Result<LogicalPlan> {
-        if ast.matches.is_empty() {
+    fn build_logical_plan(
+        &self,
+        analyzed: &AnalyzedQuery,
+        ctx: &mut PlanContext<'_>,
+    ) -> Result<LogicalPlan> {
+        if analyzed.vars().is_empty() {
             return Err(SombraError::Invalid(
                 "query must include at least one match",
             ));
         }
 
-        if ast.matches.iter().any(|m| m.label.is_none()) {
-            return Err(SombraError::Invalid(
-                "match clause requires a label in the current planner",
-            ));
-        }
-
-        let mut preds_by_var: HashMap<Var, Vec<VarPredicate>> = HashMap::new();
-        let mut residual_predicate = ast.predicate.clone();
-        if let Some(expr) = ast.predicate.as_ref() {
+        let mut preds_by_var: HashMap<VarId, Vec<VarPredicate>> = HashMap::new();
+        let mut residual_predicate = analyzed.predicate.clone();
+        if let Some(expr) = analyzed.predicate.as_ref() {
             let mut pushdowns = Vec::new();
-            residual_predicate = extract_pushdown_predicates(expr, &mut pushdowns);
-            for pred in pushdowns {
-                let key = predicate_var(&pred);
-                let selectivity = predicate_selectivity(&pred, ctx)?;
-                preds_by_var.entry(key).or_default().push(VarPredicate {
-                    predicate: pred,
-                    selectivity,
-                });
+            residual_predicate =
+                extract_pushdown_predicates(analyzed, expr.clone(), &mut pushdowns);
+            for candidate in pushdowns {
+                match candidate {
+                    PushdownCandidate::Comparison(cmp) => {
+                        let key = predicate_var(&cmp);
+                        let selectivity = predicate_selectivity(analyzed, &cmp, ctx)?;
+                        preds_by_var.entry(key).or_default().push(VarPredicate {
+                            var: key,
+                            selectivity,
+                            kind: VarPredicateKind::Comparison(cmp),
+                        });
+                    }
+                    PushdownCandidate::Union { var, expr, terms } => {
+                        let mut union_terms = Vec::with_capacity(terms.len());
+                        for cmp in terms {
+                            let sel = predicate_selectivity(analyzed, &cmp, ctx)?;
+                            union_terms.push(UnionTerm {
+                                cmp,
+                                selectivity: sel,
+                            });
+                        }
+                        let selectivity = union_terms_selectivity(&union_terms);
+                        preds_by_var.entry(var).or_default().push(VarPredicate {
+                            var,
+                            selectivity,
+                            kind: VarPredicateKind::Union {
+                                expr,
+                                terms: union_terms,
+                            },
+                        });
+                    }
+                }
             }
         }
 
-        let labels_by_var = self.resolve_label_ids(&ast.matches, ctx)?;
-        let anchor_idx = self.select_anchor(&ast.matches, &labels_by_var, &preds_by_var, ctx)?;
-        let anchor_match = &ast.matches[anchor_idx];
-        let anchor_label = labels_by_var
-            .get(&anchor_match.var)
-            .expect("missing label id for anchor")
-            .id;
-        let indexed_preds =
-            self.take_indexed_predicates(anchor_label, &anchor_match.var, &mut preds_by_var, ctx)?;
-        let mut current = match indexed_preds.len() {
-            0 => PlanNode::new(LogicalOp::LabelScan {
-                label: anchor_match.label.clone(),
-                as_var: anchor_match.var.clone(),
-            }),
-            1 => {
-                let (var_pred, prop) = indexed_preds.into_iter().next().unwrap();
-                let VarPredicate {
-                    predicate,
-                    selectivity,
-                } = var_pred;
-                PlanNode::new(LogicalOp::PropIndexScan {
-                    label: anchor_match.label.clone(),
-                    prop,
-                    predicate,
-                    selectivity,
-                    as_var: anchor_match.var.clone(),
-                })
-            }
-            _ => {
-                let children = indexed_preds
-                    .into_iter()
-                    .map(|(var_pred, prop)| {
-                        let VarPredicate {
-                            predicate,
-                            selectivity,
-                        } = var_pred;
-                        PlanNode::new(LogicalOp::PropIndexScan {
-                            label: anchor_match.label.clone(),
-                            prop,
-                            predicate,
-                            selectivity,
-                            as_var: anchor_match.var.clone(),
+        let bindings = analyzed.vars();
+        ctx.register_bindings(bindings);
+        let anchor_idx = self.select_anchor(bindings, &preds_by_var, ctx)?;
+        let anchor_binding = &bindings[anchor_idx];
+        let anchor_label = anchor_binding.label_id;
+        let mut indexed = self.take_indexed_predicates(anchor_binding, &mut preds_by_var, ctx)?;
+        if let Some(expr) = indexed.union_fallback.take() {
+            residual_predicate = merge_residual(residual_predicate, expr);
+        }
+        let mut current = if let Some(union_pred) = indexed.union {
+            self.build_union_scan(analyzed, anchor_binding, union_pred, analyzed.distinct)?
+        } else {
+            match indexed.scans.len() {
+                0 => PlanNode::new(LogicalOp::LabelScan {
+                    label: anchor_binding.label.clone(),
+                    label_id: anchor_label,
+                    as_var: anchor_binding.var.clone(),
+                }),
+                1 => {
+                    let pred = indexed.scans.into_iter().next().unwrap();
+                    match pred.kind {
+                        VarPredicateKind::Comparison(cmp) => {
+                            PlanNode::new(LogicalOp::PropIndexScan {
+                                label: anchor_binding.label.clone(),
+                                label_id: anchor_label,
+                                prop: prop_from_cmp(&cmp),
+                                predicate: cmp_to_prop_predicate(analyzed, &cmp)?,
+                                selectivity: pred.selectivity,
+                                as_var: anchor_binding.var.clone(),
+                            })
+                        }
+                        VarPredicateKind::Union { .. } => {
+                            return Err(SombraError::Invalid(
+                                "unexpected union predicate in indexed scans",
+                            ))
+                        }
+                    }
+                }
+                _ => {
+                    let children = indexed
+                        .scans
+                        .into_iter()
+                        .map(|var_pred| -> Result<PlanNode> {
+                            match var_pred.kind {
+                                VarPredicateKind::Comparison(cmp) => {
+                                    Ok(PlanNode::new(LogicalOp::PropIndexScan {
+                                        label: anchor_binding.label.clone(),
+                                        label_id: anchor_label,
+                                        prop: prop_from_cmp(&cmp),
+                                        predicate: cmp_to_prop_predicate(analyzed, &cmp)?,
+                                        selectivity: var_pred.selectivity,
+                                        as_var: anchor_binding.var.clone(),
+                                    }))
+                                }
+                                VarPredicateKind::Union { .. } => Err(SombraError::Invalid(
+                                    "unexpected union predicate in indexed scans",
+                                )),
+                            }
                         })
-                    })
-                    .collect();
-                PlanNode::with_inputs(
-                    LogicalOp::Intersect {
-                        vars: vec![anchor_match.var.clone()],
-                    },
-                    children,
-                )
+                        .collect::<Result<Vec<_>>>()?;
+                    PlanNode::with_inputs(
+                        LogicalOp::Intersect {
+                            vars: vec![anchor_binding.var.clone()],
+                        },
+                        children,
+                    )
+                }
             }
         };
 
-        current = self.apply_var_predicates(current, &anchor_match.var, &mut preds_by_var);
+        current =
+            self.apply_var_predicates(analyzed, current, anchor_binding.id, &mut preds_by_var)?;
 
         let mut bound_vars: HashSet<Var> = HashSet::new();
-        bound_vars.insert(anchor_match.var.clone());
-        let mut remaining_edges = ast.edges.clone();
+        bound_vars.insert(anchor_binding.var.clone());
+        let mut remaining_edges = analyzed.edges.clone();
 
-        while bound_vars.len() < ast.matches.len() {
+        while bound_vars.len() < bindings.len() {
             let Some((edge_idx, reverse)) =
                 remaining_edges.iter().enumerate().find_map(|(idx, edge)| {
-                    let from_bound = bound_vars.contains(&edge.from);
-                    let to_bound = bound_vars.contains(&edge.to);
+                    let from_binding = analyzed
+                        .var_binding(edge.from)
+                        .expect("edge references known var");
+                    let to_binding = analyzed
+                        .var_binding(edge.to)
+                        .expect("edge references known var");
+                    let from_bound = bound_vars.contains(&from_binding.var);
+                    let to_bound = bound_vars.contains(&to_binding.var);
                     match (from_bound, to_bound) {
                         (true, false) => Some((idx, false)),
                         (false, true) => Some((idx, true)),
@@ -201,13 +257,23 @@ impl Planner {
             };
 
             let edge = remaining_edges.remove(edge_idx);
-            let (expand_from, expand_to, direction) = if !reverse {
-                (edge.from.clone(), edge.to.clone(), edge.direction)
-            } else {
+            let (expand_from, expand_to, direction, target_binding) = if !reverse {
+                let from_binding = analyzed.var_binding(edge.from).expect("binding exists");
+                let to_binding = analyzed.var_binding(edge.to).expect("binding exists");
                 (
-                    edge.to.clone(),
-                    edge.from.clone(),
+                    from_binding.var.clone(),
+                    to_binding.var.clone(),
+                    edge.direction,
+                    to_binding,
+                )
+            } else {
+                let from_binding = analyzed.var_binding(edge.to).expect("binding exists");
+                let to_binding = analyzed.var_binding(edge.from).expect("binding exists");
+                (
+                    from_binding.var.clone(),
+                    to_binding.var.clone(),
                     invert_direction(edge.direction),
+                    from_binding,
                 )
             };
 
@@ -221,7 +287,8 @@ impl Planner {
                 },
                 vec![current],
             );
-            current = self.apply_var_predicates(current, &expand_to, &mut preds_by_var);
+            current =
+                self.apply_var_predicates(analyzed, current, target_binding.id, &mut preds_by_var)?;
             bound_vars.insert(expand_to);
         }
 
@@ -230,14 +297,14 @@ impl Planner {
                 PlanNode::with_inputs(LogicalOp::BoolFilter { expr: expr.clone() }, vec![current]);
         }
 
-        if ast.distinct {
+        if analyzed.distinct && !plan_is_inherently_distinct(&current) {
             current = PlanNode::with_inputs(LogicalOp::Distinct, vec![current]);
         }
 
-        if !ast.projections.is_empty() {
+        if !analyzed.projections.is_empty() {
             current = PlanNode::with_inputs(
                 LogicalOp::Project {
-                    fields: ast.projections.clone(),
+                    fields: analyzed.projections.clone(),
                 },
                 vec![current],
             );
@@ -248,70 +315,62 @@ impl Planner {
 
     fn apply_var_predicates(
         &self,
+        analyzed: &AnalyzedQuery,
         mut node: PlanNode,
-        var: &Var,
-        preds_by_var: &mut HashMap<Var, Vec<VarPredicate>>,
-    ) -> PlanNode {
-        if let Some(mut preds) = preds_by_var.remove(var) {
+        var_id: VarId,
+        preds_by_var: &mut HashMap<VarId, Vec<VarPredicate>>,
+    ) -> Result<PlanNode> {
+        if let Some(mut preds) = preds_by_var.remove(&var_id) {
             preds.sort_by(|a, b| {
                 a.selectivity
                     .partial_cmp(&b.selectivity)
                     .unwrap_or(Ordering::Equal)
             });
             for predicate in preds {
-                let VarPredicate {
-                    predicate,
-                    selectivity,
-                } = predicate;
-                node = PlanNode::with_inputs(
-                    LogicalOp::Filter {
-                        predicate,
-                        selectivity,
+                match predicate.kind {
+                    VarPredicateKind::Comparison(cmp) => match cmp {
+                        AnalyzedComparison::Eq { .. }
+                        | AnalyzedComparison::Lt { .. }
+                        | AnalyzedComparison::Le { .. }
+                        | AnalyzedComparison::Gt { .. }
+                        | AnalyzedComparison::Ge { .. }
+                        | AnalyzedComparison::Between { .. } => {
+                            node = PlanNode::with_inputs(
+                                LogicalOp::Filter {
+                                    predicate: cmp_to_prop_predicate(analyzed, &cmp)?,
+                                    selectivity: predicate.selectivity,
+                                },
+                                vec![node],
+                            );
+                        }
+                        _ => {
+                            node = PlanNode::with_inputs(
+                                LogicalOp::BoolFilter {
+                                    expr: AnalyzedExpr::Cmp(cmp),
+                                },
+                                vec![node],
+                            );
+                        }
                     },
-                    vec![node],
-                );
+                    VarPredicateKind::Union { expr, .. } => {
+                        node = PlanNode::with_inputs(LogicalOp::BoolFilter { expr }, vec![node]);
+                    }
+                }
             }
         }
-        node
-    }
-
-    fn resolve_label_ids(
-        &self,
-        matches: &[MatchClause],
-        ctx: &mut PlanContext<'_>,
-    ) -> Result<HashMap<Var, VarLabel>> {
-        let mut map = HashMap::new();
-        for m in matches {
-            let label_name = m
-                .label
-                .as_ref()
-                .ok_or(SombraError::Invalid("match clause requires a label"))?
-                .clone();
-            let id = ctx.label(&m.label)?;
-            let info = VarLabel {
-                id,
-                name: label_name,
-            };
-            ctx.record_var_label(&m.var, info.clone());
-            map.insert(m.var.clone(), info);
-        }
-        Ok(map)
+        Ok(node)
     }
 
     fn select_anchor(
         &self,
-        matches: &[MatchClause],
-        labels_by_var: &HashMap<Var, VarLabel>,
-        preds_by_var: &HashMap<Var, Vec<VarPredicate>>,
+        bindings: &[VarBinding],
+        preds_by_var: &HashMap<VarId, Vec<VarPredicate>>,
         ctx: &mut PlanContext<'_>,
     ) -> Result<usize> {
         let mut best_idx = 0;
         let mut best_score = AnchorScore::Label;
-        for (idx, m) in matches.iter().enumerate() {
-            let label = labels_by_var
-                .get(&m.var)
-                .expect("label id missing for match variable");
-            let score = self.anchor_score(&m.var, label.id, preds_by_var, ctx)?;
+        for (idx, binding) in bindings.iter().enumerate() {
+            let score = self.anchor_score(binding, preds_by_var, ctx)?;
             if score > best_score {
                 best_score = score;
                 best_idx = idx;
@@ -322,26 +381,38 @@ impl Planner {
 
     fn anchor_score(
         &self,
-        var: &Var,
-        label: LabelId,
-        preds_by_var: &HashMap<Var, Vec<VarPredicate>>,
+        binding: &VarBinding,
+        preds_by_var: &HashMap<VarId, Vec<VarPredicate>>,
         ctx: &mut PlanContext<'_>,
     ) -> Result<AnchorScore> {
-        let Some(preds) = preds_by_var.get(var) else {
+        let Some(preds) = preds_by_var.get(&binding.id) else {
             return Ok(AnchorScore::Label);
         };
         let mut best = AnchorScore::Label;
         for pred in preds {
-            let (prop_name, score_candidate) = match &pred.predicate {
-                AstPredicate::Eq { prop, .. } => (prop.as_str(), AnchorScore::Eq),
-                AstPredicate::Range { prop, .. } => (prop.as_str(), AnchorScore::Range),
-            };
-            let prop_id = ctx.property(prop_name)?;
-            if ctx.property_index(label, prop_id)?.is_some() {
-                if score_candidate == AnchorScore::Eq {
-                    return Ok(AnchorScore::Eq);
+            match &pred.kind {
+                VarPredicateKind::Comparison(cmp) => {
+                    if let Some((prop, score_candidate)) = cmp_anchor_class(cmp) {
+                        if ctx.property_index(binding.label_id, prop.id)?.is_some() {
+                            if score_candidate == AnchorScore::Eq {
+                                return Ok(AnchorScore::Eq);
+                            }
+                            best = AnchorScore::Range;
+                        }
+                    }
                 }
-                best = AnchorScore::Range;
+                VarPredicateKind::Union { terms, .. } => {
+                    for term in terms {
+                        if let Some((prop, score_candidate)) = cmp_anchor_class(&term.cmp) {
+                            if ctx.property_index(binding.label_id, prop.id)?.is_some() {
+                                if score_candidate == AnchorScore::Eq {
+                                    return Ok(AnchorScore::Eq);
+                                }
+                                best = AnchorScore::Range;
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(best)
@@ -349,53 +420,117 @@ impl Planner {
 
     fn take_indexed_predicates(
         &self,
-        label_id: LabelId,
-        var: &Var,
-        preds_by_var: &mut HashMap<Var, Vec<VarPredicate>>,
+        binding: &VarBinding,
+        preds_by_var: &mut HashMap<VarId, Vec<VarPredicate>>,
         ctx: &mut PlanContext<'_>,
-    ) -> Result<Vec<(VarPredicate, String)>> {
-        let Some(mut preds) = preds_by_var.remove(var) else {
-            return Ok(Vec::new());
+    ) -> Result<IndexedSelection> {
+        let Some(mut preds) = preds_by_var.remove(&binding.id) else {
+            return Ok(IndexedSelection::default());
         };
 
-        let mut indexed_eq: Vec<(VarPredicate, String)> = Vec::new();
-        let mut indexed_range: Vec<(VarPredicate, String)> = Vec::new();
+        let mut selection = IndexedSelection::default();
+        let mut indexed_eq: Vec<VarPredicate> = Vec::new();
+        let mut indexed_range: Vec<VarPredicate> = Vec::new();
         let mut remaining: Vec<VarPredicate> = Vec::new();
 
         for predicate in preds.drain(..) {
-            let (prop_name, class) = match &predicate.predicate {
-                AstPredicate::Eq { prop, .. } => (prop.as_str(), AnchorScore::Eq),
-                AstPredicate::Range { prop, .. } => (prop.as_str(), AnchorScore::Range),
-            };
-
-            let prop_id = ctx.property(prop_name)?;
-            if ctx.property_index(label_id, prop_id)?.is_some() {
-                let prop = prop_name.to_owned();
-                match class {
-                    AnchorScore::Eq => indexed_eq.push((predicate, prop)),
-                    AnchorScore::Range => indexed_range.push((predicate, prop)),
-                    AnchorScore::Label => unreachable!("label score never assigned here"),
+            let VarPredicate {
+                var,
+                selectivity,
+                kind,
+            } = predicate;
+            match kind {
+                VarPredicateKind::Comparison(cmp) => {
+                    let rebuilt = VarPredicate {
+                        var,
+                        selectivity,
+                        kind: VarPredicateKind::Comparison(cmp.clone()),
+                    };
+                    if let Some((prop, class)) = cmp_anchor_class(&cmp) {
+                        if ctx.property_index(binding.label_id, prop.id)?.is_some() {
+                            match class {
+                                AnchorScore::Eq => indexed_eq.push(rebuilt),
+                                AnchorScore::Range => indexed_range.push(rebuilt),
+                                AnchorScore::Label => unreachable!("label score not used here"),
+                            }
+                            continue;
+                        }
+                    }
+                    remaining.push(rebuilt);
                 }
-            } else {
-                remaining.push(predicate);
+                VarPredicateKind::Union { expr, terms } => {
+                    if selection.union.is_some() {
+                        selection.union_fallback =
+                            merge_residual(selection.union_fallback.take(), expr);
+                        continue;
+                    }
+                    if union_terms_indexed(binding, ctx, &terms)? {
+                        selection.union = Some(VarPredicate {
+                            var,
+                            selectivity,
+                            kind: VarPredicateKind::Union { expr, terms },
+                        });
+                    } else {
+                        selection.union_fallback =
+                            merge_residual(selection.union_fallback.take(), expr);
+                    }
+                }
             }
         }
 
         if !remaining.is_empty() {
-            preds_by_var.insert(var.clone(), remaining);
+            preds_by_var.insert(binding.id, remaining);
         }
 
-        let by_selectivity = |a: &(VarPredicate, String), b: &(VarPredicate, String)| {
-            a.0.selectivity
-                .partial_cmp(&b.0.selectivity)
+        let by_selectivity = |a: &VarPredicate, b: &VarPredicate| {
+            a.selectivity
+                .partial_cmp(&b.selectivity)
                 .unwrap_or(Ordering::Equal)
         };
         indexed_eq.sort_by(by_selectivity);
         indexed_range.sort_by(by_selectivity);
+        selection.scans.extend(indexed_eq);
+        selection.scans.extend(indexed_range);
+        Ok(selection)
+    }
 
-        let mut indexed = indexed_eq;
-        indexed.extend(indexed_range);
-        Ok(indexed)
+    fn build_union_scan(
+        &self,
+        analyzed: &AnalyzedQuery,
+        binding: &VarBinding,
+        predicate: VarPredicate,
+        dedup: bool,
+    ) -> Result<PlanNode> {
+        let VarPredicate {
+            kind: VarPredicateKind::Union { terms, .. },
+            ..
+        } = predicate
+        else {
+            return Err(SombraError::Invalid(
+                "expected union predicate when building union scan",
+            ));
+        };
+        if terms.is_empty() {
+            return Err(SombraError::Invalid("union predicate has no children"));
+        }
+        let mut children = Vec::with_capacity(terms.len());
+        for term in terms {
+            children.push(PlanNode::new(LogicalOp::PropIndexScan {
+                label: binding.label.clone(),
+                label_id: binding.label_id,
+                prop: prop_from_cmp(&term.cmp),
+                predicate: cmp_to_prop_predicate(analyzed, &term.cmp)?,
+                selectivity: term.selectivity,
+                as_var: binding.var.clone(),
+            }));
+        }
+        Ok(PlanNode::with_inputs(
+            LogicalOp::Union {
+                vars: vec![binding.var.clone()],
+                dedup,
+            },
+            children,
+        ))
     }
 
     fn lower_to_physical(
@@ -415,24 +550,32 @@ impl Planner {
             .collect::<Result<Vec<_>>>()?;
 
         let op = match &node.op {
-            LogicalOp::LabelScan { label, as_var } => PhysicalOp::LabelScan {
-                label: ctx.label(label)?,
+            LogicalOp::LabelScan {
+                label,
+                label_id,
+                as_var,
+            } => PhysicalOp::LabelScan {
+                label: *label_id,
+                label_name: label.clone(),
                 as_var: as_var.clone(),
             },
             LogicalOp::PropIndexScan {
                 label,
+                label_id,
+                prop: _,
                 predicate,
                 selectivity,
                 as_var,
-                ..
             } => {
                 let pred = self.convert_prop_predicate(predicate, ctx)?;
                 let prop = prop_from_predicate(&pred).ok_or(SombraError::Invalid(
                     "property index scans require concrete predicates",
                 ))?;
                 PhysicalOp::PropIndexScan {
-                    label: ctx.label(label)?,
+                    label: *label_id,
+                    label_name: label.clone(),
                     prop,
+                    prop_name: prop_name_from_predicate(&pred),
                     pred,
                     selectivity: *selectivity,
                     as_var: as_var.clone(),
@@ -448,7 +591,7 @@ impl Planner {
                 from: from.clone(),
                 to: to.clone(),
                 dir: convert_direction(*direction),
-                ty: ctx.edge_type(edge_type)?,
+                ty: edge_type.id,
                 distinct_nodes: *distinct_nodes,
             },
             LogicalOp::Filter {
@@ -457,6 +600,10 @@ impl Planner {
             } => PhysicalOp::Filter {
                 pred: self.convert_prop_predicate(predicate, ctx)?,
                 selectivity: *selectivity,
+            },
+            LogicalOp::Union { vars, dedup } => PhysicalOp::Union {
+                vars: vars.clone(),
+                dedup: *dedup,
             },
             LogicalOp::Intersect { vars } => PhysicalOp::Intersect { vars: vars.clone() },
             LogicalOp::HashJoin { left, right } => PhysicalOp::HashJoin {
@@ -485,12 +632,13 @@ impl Planner {
     fn convert_prop_predicate(
         &self,
         predicate: &AstPredicate,
-        ctx: &mut PlanContext<'_>,
+        _ctx: &mut PlanContext<'_>,
     ) -> Result<PhysicalPredicate> {
         match predicate {
             AstPredicate::Eq { var, prop, value } => Ok(PhysicalPredicate::Eq {
                 var: var.clone(),
-                prop: ctx.property(prop)?,
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             }),
             AstPredicate::Range {
@@ -500,7 +648,8 @@ impl Planner {
                 upper,
             } => Ok(PhysicalPredicate::Range {
                 var: var.clone(),
-                prop: ctx.property(prop)?,
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 lower: convert_bound(lower),
                 upper: convert_bound(upper),
             }),
@@ -509,12 +658,12 @@ impl Planner {
 
     fn convert_bool_expr(
         &self,
-        expr: &BoolExpr,
+        expr: &AnalyzedExpr,
         ctx: &mut PlanContext<'_>,
     ) -> Result<PhysicalBoolExpr> {
         match expr {
-            BoolExpr::Cmp(cmp) => Ok(PhysicalBoolExpr::Cmp(self.convert_comparison(cmp, ctx)?)),
-            BoolExpr::And(children) => {
+            AnalyzedExpr::Cmp(cmp) => Ok(PhysicalBoolExpr::Cmp(self.convert_comparison(cmp, ctx)?)),
+            AnalyzedExpr::And(children) => {
                 let mut converted = Vec::with_capacity(children.len());
                 for child in children {
                     converted.push(self.convert_bool_expr(child, ctx)?);
@@ -526,7 +675,7 @@ impl Planner {
                 });
                 Ok(PhysicalBoolExpr::And(converted))
             }
-            BoolExpr::Or(children) => {
+            AnalyzedExpr::Or(children) => {
                 let mut converted = Vec::with_capacity(children.len());
                 for child in children {
                     converted.push(self.convert_bool_expr(child, ctx)?);
@@ -538,7 +687,7 @@ impl Planner {
                 });
                 Ok(PhysicalBoolExpr::Or(converted))
             }
-            BoolExpr::Not(child) => {
+            AnalyzedExpr::Not(child) => {
                 let inner = self.convert_bool_expr(child, ctx)?;
                 Ok(PhysicalBoolExpr::Not(Box::new(inner)))
             }
@@ -547,67 +696,78 @@ impl Planner {
 
     fn convert_comparison(
         &self,
-        cmp: &Comparison,
-        ctx: &mut PlanContext<'_>,
+        cmp: &AnalyzedComparison,
+        ctx: &PlanContext<'_>,
     ) -> Result<PhysicalComparison> {
         Ok(match cmp {
-            Comparison::Eq { var, prop, value } => PhysicalComparison::Eq {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Eq { var, prop, value } => PhysicalComparison::Eq {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             },
-            Comparison::Ne { var, prop, value } => PhysicalComparison::Ne {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Ne { var, prop, value } => PhysicalComparison::Ne {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             },
-            Comparison::Lt { var, prop, value } => PhysicalComparison::Lt {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Lt { var, prop, value } => PhysicalComparison::Lt {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             },
-            Comparison::Le { var, prop, value } => PhysicalComparison::Le {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Le { var, prop, value } => PhysicalComparison::Le {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             },
-            Comparison::Gt { var, prop, value } => PhysicalComparison::Gt {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Gt { var, prop, value } => PhysicalComparison::Gt {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             },
-            Comparison::Ge { var, prop, value } => PhysicalComparison::Ge {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Ge { var, prop, value } => PhysicalComparison::Ge {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 value: LiteralValue::from(value),
             },
-            Comparison::Between {
+            AnalyzedComparison::Between {
                 var,
                 prop,
                 low,
                 high,
             } => PhysicalComparison::Between {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 low: convert_bound(low),
                 high: convert_bound(high),
             },
-            Comparison::In { var, prop, values } => PhysicalComparison::In {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::In { var, prop, values } => PhysicalComparison::In {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
                 values: values.iter().map(LiteralValue::from).collect(),
             },
-            Comparison::Exists { var, prop } => PhysicalComparison::Exists {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::Exists { var, prop } => PhysicalComparison::Exists {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
             },
-            Comparison::IsNull { var, prop } => PhysicalComparison::IsNull {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::IsNull { var, prop } => PhysicalComparison::IsNull {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
             },
-            Comparison::IsNotNull { var, prop } => PhysicalComparison::IsNotNull {
-                var: var.clone(),
-                prop: ctx.property(prop)?,
+            AnalyzedComparison::IsNotNull { var, prop } => PhysicalComparison::IsNotNull {
+                var: ctx.var_for_id(*var),
+                prop: prop.id,
+                prop_name: prop.name.clone(),
             },
         })
     }
@@ -637,38 +797,51 @@ fn convert_bound(bound: &Bound<Value>) -> Bound<LiteralValue> {
     }
 }
 
-fn convert_projection(proj: Projection, ctx: &mut PlanContext<'_>) -> Result<ProjectField> {
+fn convert_projection(proj: AnalyzedProjection, ctx: &PlanContext<'_>) -> Result<ProjectField> {
     match proj {
-        Projection::Var { var, alias } => Ok(ProjectField::Var { var, alias }),
-        Projection::Prop { var, prop, alias } => {
-            let prop_id = ctx.property(&prop)?;
-            Ok(ProjectField::Prop {
-                var,
-                prop: prop_id,
-                prop_name: prop,
-                alias,
-            })
-        }
+        AnalyzedProjection::Var { var, alias } => Ok(ProjectField::Var {
+            var: ctx.var_for_id(var),
+            alias,
+        }),
+        AnalyzedProjection::Prop { var, prop, alias } => Ok(ProjectField::Prop {
+            var: ctx.var_for_id(var),
+            prop: prop.id,
+            prop_name: prop.name.clone(),
+            alias,
+        }),
     }
 }
 
-fn extract_pushdown_predicates(expr: &BoolExpr, out: &mut Vec<AstPredicate>) -> Option<BoolExpr> {
+fn extract_pushdown_predicates(
+    query: &AnalyzedQuery,
+    expr: AnalyzedExpr,
+    out: &mut Vec<PushdownCandidate>,
+) -> Option<AnalyzedExpr> {
     match expr {
-        BoolExpr::Cmp(cmp) => {
-            if let Some(pred) = predicate_from_comparison(cmp) {
-                out.push(pred);
+        AnalyzedExpr::Cmp(cmp) => match cmp {
+            AnalyzedComparison::In { ref values, .. } if values.len() <= MAX_SARGABLE_IN_VALUES => {
+                let var = predicate_var(&cmp);
+                let eq_terms = expand_in_terms(&cmp);
+                out.push(PushdownCandidate::Union {
+                    var,
+                    expr: AnalyzedExpr::Cmp(cmp),
+                    terms: eq_terms,
+                });
                 None
-            } else {
-                Some(expr.clone())
             }
-        }
-        BoolExpr::And(children) => {
+            _ if is_pushdown_comparison(&cmp) => {
+                out.push(PushdownCandidate::Comparison(cmp));
+                None
+            }
+            _ => Some(AnalyzedExpr::Cmp(cmp)),
+        },
+        AnalyzedExpr::And(children) => {
             let mut residual = Vec::new();
             for child in children {
-                match child {
-                    BoolExpr::Or(_) | BoolExpr::Not(_) => residual.push(child.clone()),
+                match &child {
+                    AnalyzedExpr::Not(_) => residual.push(child.clone()),
                     _ => {
-                        if let Some(rest) = extract_pushdown_predicates(child, out) {
+                        if let Some(rest) = extract_pushdown_predicates(query, child.clone(), out) {
                             residual.push(rest);
                         }
                     }
@@ -677,101 +850,300 @@ fn extract_pushdown_predicates(expr: &BoolExpr, out: &mut Vec<AstPredicate>) -> 
             match residual.len() {
                 0 => None,
                 1 => Some(residual.remove(0)),
-                _ => Some(BoolExpr::And(residual)),
+                _ => Some(AnalyzedExpr::And(residual)),
             }
         }
-        BoolExpr::Or(_) | BoolExpr::Not(_) => Some(expr.clone()),
+        AnalyzedExpr::Or(children) => {
+            if let Some(candidate) = build_or_union_candidate(children.clone()) {
+                out.push(candidate);
+                None
+            } else {
+                let mut residual = Vec::new();
+                for child in children {
+                    if let Some(rest) = extract_pushdown_predicates(query, child, out) {
+                        residual.push(rest);
+                    }
+                }
+                match residual.len() {
+                    0 => None,
+                    1 => Some(residual.remove(0)),
+                    _ => Some(AnalyzedExpr::Or(residual)),
+                }
+            }
+        }
+        AnalyzedExpr::Not(child) => Some(AnalyzedExpr::Not(child)),
     }
 }
 
-fn predicate_from_comparison(cmp: &Comparison) -> Option<AstPredicate> {
+fn expand_in_terms(cmp: &AnalyzedComparison) -> Vec<AnalyzedComparison> {
     match cmp {
-        Comparison::Eq { var, prop, value } => Some(AstPredicate::Eq {
-            var: var.clone(),
+        AnalyzedComparison::In { var, prop, values } => values
+            .iter()
+            .map(|value| AnalyzedComparison::Eq {
+                var: *var,
+                prop: prop.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        _ => vec![cmp.clone()],
+    }
+}
+
+fn build_or_union_candidate(children: Vec<AnalyzedExpr>) -> Option<PushdownCandidate> {
+    let mut leaves = Vec::new();
+    flatten_or(children.clone(), &mut leaves);
+    if leaves.is_empty() {
+        return None;
+    }
+    let fallback = AnalyzedExpr::Or(children);
+    let mut terms = Vec::new();
+    let mut var_id: Option<VarId> = None;
+    for leaf in leaves {
+        let cmp = match leaf {
+            AnalyzedExpr::Cmp(cmp) => cmp,
+            _ => return None,
+        };
+        let mut cmp_terms = match &cmp {
+            AnalyzedComparison::In { values, .. } => {
+                if values.len() > MAX_SARGABLE_IN_VALUES {
+                    return None;
+                }
+                expand_in_terms(&cmp)
+            }
+            _ => {
+                if !is_pushdown_comparison(&cmp) {
+                    return None;
+                }
+                vec![cmp.clone()]
+            }
+        };
+        for term in cmp_terms.drain(..) {
+            if !is_pushdown_comparison(&term) {
+                return None;
+            }
+            let this_var = predicate_var(&term);
+            if let Some(expected) = var_id {
+                if expected != this_var {
+                    return None;
+                }
+            } else {
+                var_id = Some(this_var);
+            }
+            terms.push(term);
+        }
+    }
+    let var = var_id?;
+    Some(PushdownCandidate::Union {
+        var,
+        expr: fallback,
+        terms,
+    })
+}
+
+fn flatten_or(exprs: Vec<AnalyzedExpr>, out: &mut Vec<AnalyzedExpr>) {
+    for expr in exprs {
+        match expr {
+            AnalyzedExpr::Or(children) => flatten_or(children, out),
+            other => out.push(other),
+        }
+    }
+}
+
+fn is_pushdown_comparison(cmp: &AnalyzedComparison) -> bool {
+    match cmp {
+        AnalyzedComparison::Eq { .. }
+        | AnalyzedComparison::Lt { .. }
+        | AnalyzedComparison::Le { .. }
+        | AnalyzedComparison::Gt { .. }
+        | AnalyzedComparison::Ge { .. }
+        | AnalyzedComparison::Between { .. } => true,
+        _ => false,
+    }
+}
+
+fn predicate_var(cmp: &AnalyzedComparison) -> VarId {
+    match cmp {
+        AnalyzedComparison::Eq { var, .. }
+        | AnalyzedComparison::Ne { var, .. }
+        | AnalyzedComparison::Lt { var, .. }
+        | AnalyzedComparison::Le { var, .. }
+        | AnalyzedComparison::Gt { var, .. }
+        | AnalyzedComparison::Ge { var, .. }
+        | AnalyzedComparison::Between { var, .. }
+        | AnalyzedComparison::In { var, .. }
+        | AnalyzedComparison::Exists { var, .. }
+        | AnalyzedComparison::IsNull { var, .. }
+        | AnalyzedComparison::IsNotNull { var, .. } => *var,
+    }
+}
+
+fn prop_from_cmp(cmp: &AnalyzedComparison) -> PropRef {
+    match cmp {
+        AnalyzedComparison::Eq { prop, .. }
+        | AnalyzedComparison::Ne { prop, .. }
+        | AnalyzedComparison::Lt { prop, .. }
+        | AnalyzedComparison::Le { prop, .. }
+        | AnalyzedComparison::Gt { prop, .. }
+        | AnalyzedComparison::Ge { prop, .. }
+        | AnalyzedComparison::Between { prop, .. }
+        | AnalyzedComparison::In { prop, .. }
+        | AnalyzedComparison::Exists { prop, .. }
+        | AnalyzedComparison::IsNull { prop, .. }
+        | AnalyzedComparison::IsNotNull { prop, .. } => prop.clone(),
+    }
+}
+
+fn cmp_to_prop_predicate(
+    analyzed: &AnalyzedQuery,
+    cmp: &AnalyzedComparison,
+) -> Result<AstPredicate> {
+    let var = analyzed
+        .var_binding(predicate_var(cmp))
+        .expect("binding exists")
+        .var
+        .clone();
+    match cmp {
+        AnalyzedComparison::Eq { prop, value, .. } => Ok(AstPredicate::Eq {
+            var,
             prop: prop.clone(),
             value: value.clone(),
         }),
-        Comparison::Lt { var, prop, value } => Some(range_predicate(
+        AnalyzedComparison::Lt { prop, value, .. } => Ok(AstPredicate::Range {
             var,
-            prop,
-            &Bound::Unbounded,
-            &Bound::Excluded(value.clone()),
+            prop: prop.clone(),
+            lower: Bound::Unbounded,
+            upper: Bound::Excluded(value.clone()),
+        }),
+        AnalyzedComparison::Le { prop, value, .. } => Ok(AstPredicate::Range {
+            var,
+            prop: prop.clone(),
+            lower: Bound::Unbounded,
+            upper: Bound::Included(value.clone()),
+        }),
+        AnalyzedComparison::Gt { prop, value, .. } => Ok(AstPredicate::Range {
+            var,
+            prop: prop.clone(),
+            lower: Bound::Excluded(value.clone()),
+            upper: Bound::Unbounded,
+        }),
+        AnalyzedComparison::Ge { prop, value, .. } => Ok(AstPredicate::Range {
+            var,
+            prop: prop.clone(),
+            lower: Bound::Included(value.clone()),
+            upper: Bound::Unbounded,
+        }),
+        AnalyzedComparison::Between {
+            prop, low, high, ..
+        } => Ok(AstPredicate::Range {
+            var,
+            prop: prop.clone(),
+            lower: low.clone(),
+            upper: high.clone(),
+        }),
+        _ => Err(SombraError::Invalid(
+            "cannot convert comparison into property predicate",
         )),
-        Comparison::Le { var, prop, value } => Some(range_predicate(
-            var,
-            prop,
-            &Bound::Unbounded,
-            &Bound::Included(value.clone()),
-        )),
-        Comparison::Gt { var, prop, value } => Some(range_predicate(
-            var,
-            prop,
-            &Bound::Excluded(value.clone()),
-            &Bound::Unbounded,
-        )),
-        Comparison::Ge { var, prop, value } => Some(range_predicate(
-            var,
-            prop,
-            &Bound::Included(value.clone()),
-            &Bound::Unbounded,
-        )),
-        Comparison::Between {
-            var,
-            prop,
-            low,
-            high,
-        } => Some(range_predicate(var, prop, low, high)),
-        _ => None,
-    }
-}
-
-fn range_predicate(
-    var: &Var,
-    prop: &str,
-    lower: &Bound<Value>,
-    upper: &Bound<Value>,
-) -> AstPredicate {
-    AstPredicate::Range {
-        var: var.clone(),
-        prop: prop.to_string(),
-        lower: lower.clone(),
-        upper: upper.clone(),
-    }
-}
-
-fn predicate_var(pred: &AstPredicate) -> Var {
-    match pred {
-        AstPredicate::Eq { var, .. } | AstPredicate::Range { var, .. } => var.clone(),
     }
 }
 
 const DEFAULT_EQ_SELECTIVITY: f64 = 0.05;
 const DEFAULT_RANGE_SELECTIVITY: f64 = 0.3;
+const DEFAULT_FILTER_SELECTIVITY: f64 = 0.25;
 const MIN_SELECTIVITY: f64 = 1e-6;
+const MAX_SARGABLE_IN_VALUES: usize = 8;
 
-fn predicate_selectivity(pred: &AstPredicate, ctx: &mut PlanContext<'_>) -> Result<f64> {
-    let selectivity = match pred {
-        AstPredicate::Eq { var, prop, .. } => {
-            if let Some(stats) = ctx.property_stats_for(var, prop)? {
+fn predicate_selectivity(
+    analyzed: &AnalyzedQuery,
+    cmp: &AnalyzedComparison,
+    ctx: &mut PlanContext<'_>,
+) -> Result<f64> {
+    let binding = analyzed
+        .var_binding(predicate_var(cmp))
+        .expect("binding exists");
+    let selectivity = match cmp {
+        AnalyzedComparison::Eq { prop, .. } => {
+            if let Some(stats) = ctx.property_stats_by_id(binding.label_id, prop.id)? {
                 eq_selectivity(stats.as_ref())
             } else {
                 DEFAULT_EQ_SELECTIVITY
             }
         }
-        AstPredicate::Range {
-            var,
-            prop,
-            lower,
-            upper,
-        } => {
-            if let Some(stats) = ctx.property_stats_for(var, prop)? {
-                range_selectivity(stats.as_ref(), lower, upper)
-            } else {
-                DEFAULT_RANGE_SELECTIVITY
-            }
+        AnalyzedComparison::Lt { prop, value, .. } => {
+            let upper = Bound::Excluded(value.clone());
+            range_stats_selectivity(ctx, binding.label_id, prop.id, &Bound::Unbounded, &upper)?
         }
+        AnalyzedComparison::Le { prop, value, .. } => {
+            let upper = Bound::Included(value.clone());
+            range_stats_selectivity(ctx, binding.label_id, prop.id, &Bound::Unbounded, &upper)?
+        }
+        AnalyzedComparison::Gt { prop, value, .. } => {
+            let lower = Bound::Excluded(value.clone());
+            range_stats_selectivity(ctx, binding.label_id, prop.id, &lower, &Bound::Unbounded)?
+        }
+        AnalyzedComparison::Ge { prop, value, .. } => {
+            let lower = Bound::Included(value.clone());
+            range_stats_selectivity(ctx, binding.label_id, prop.id, &lower, &Bound::Unbounded)?
+        }
+        AnalyzedComparison::Between {
+            prop, low, high, ..
+        } => range_stats_selectivity(ctx, binding.label_id, prop.id, low, high)?,
+        AnalyzedComparison::In { prop, values, .. } => {
+            let count = values.len().max(1) as f64;
+            let per_value =
+                if let Some(stats) = ctx.property_stats_by_id(binding.label_id, prop.id)? {
+                    eq_selectivity(stats.as_ref())
+                } else {
+                    DEFAULT_EQ_SELECTIVITY
+                };
+            per_value * count
+        }
+        AnalyzedComparison::Exists { prop, .. } | AnalyzedComparison::IsNotNull { prop, .. } => {
+            presence_selectivity(ctx, binding.label_id, prop.id)?
+        }
+        AnalyzedComparison::IsNull { prop, .. } => {
+            null_selectivity(ctx, binding.label_id, prop.id)?
+        }
+        _ => DEFAULT_RANGE_SELECTIVITY,
     };
     Ok(selectivity.clamp(MIN_SELECTIVITY, 1.0))
+}
+
+fn union_terms_selectivity(terms: &[UnionTerm]) -> f64 {
+    let mut remaining = 1.0;
+    for term in terms {
+        remaining *= 1.0 - term.selectivity.clamp(MIN_SELECTIVITY, 1.0);
+    }
+    (1.0 - remaining).clamp(MIN_SELECTIVITY, 1.0)
+}
+
+fn range_stats_selectivity(
+    ctx: &mut PlanContext<'_>,
+    label: LabelId,
+    prop: PropId,
+    lower: &Bound<Value>,
+    upper: &Bound<Value>,
+) -> Result<f64> {
+    if let Some(stats) = ctx.property_stats_by_id(label, prop)? {
+        Ok(range_selectivity(stats.as_ref(), lower, upper))
+    } else {
+        Ok(DEFAULT_RANGE_SELECTIVITY)
+    }
+}
+
+fn presence_selectivity(ctx: &mut PlanContext<'_>, label: LabelId, prop: PropId) -> Result<f64> {
+    if let Some(stats) = ctx.property_stats_by_id(label, prop)? {
+        Ok(non_null_fraction(stats.as_ref()))
+    } else {
+        Ok(DEFAULT_FILTER_SELECTIVITY)
+    }
+}
+
+fn null_selectivity(ctx: &mut PlanContext<'_>, label: LabelId, prop: PropId) -> Result<f64> {
+    if let Some(stats) = ctx.property_stats_by_id(label, prop)? {
+        Ok(property_null_fraction(stats.as_ref()))
+    } else {
+        Ok(DEFAULT_FILTER_SELECTIVITY)
+    }
 }
 
 fn eq_selectivity(stats: &PropStats) -> f64 {
@@ -796,6 +1168,20 @@ fn range_selectivity(stats: &PropStats, lower: &Bound<Value>, upper: &Bound<Valu
     (density * DEFAULT_RANGE_SELECTIVITY)
         .max(DEFAULT_RANGE_SELECTIVITY)
         .clamp(MIN_SELECTIVITY, 1.0)
+}
+
+fn non_null_fraction(stats: &PropStats) -> f64 {
+    if stats.row_count == 0 {
+        return DEFAULT_FILTER_SELECTIVITY;
+    }
+    (stats.non_null_count as f64 / stats.row_count as f64).clamp(MIN_SELECTIVITY, 1.0)
+}
+
+fn property_null_fraction(stats: &PropStats) -> f64 {
+    if stats.row_count == 0 {
+        return DEFAULT_FILTER_SELECTIVITY;
+    }
+    (stats.null_count as f64 / stats.row_count as f64).clamp(MIN_SELECTIVITY, 1.0)
 }
 
 fn numeric_range_fraction(
@@ -857,83 +1243,34 @@ fn value_to_prop_value(value: &Value) -> Option<PropValueOwned> {
 
 struct PlanContext<'a> {
     metadata: &'a dyn MetadataProvider,
-    labels: HashMap<String, LabelId>,
-    props: HashMap<String, PropId>,
-    edge_types: HashMap<String, TypeId>,
-    var_labels: HashMap<String, VarLabel>,
     prop_stats: HashMap<(LabelId, PropId), Arc<PropStats>>,
+    var_names: HashMap<VarId, Var>,
 }
 
 impl<'a> PlanContext<'a> {
     fn new(metadata: &'a dyn MetadataProvider) -> Self {
         Self {
             metadata,
-            labels: HashMap::new(),
-            props: HashMap::new(),
-            edge_types: HashMap::new(),
-            var_labels: HashMap::new(),
             prop_stats: HashMap::new(),
+            var_names: HashMap::new(),
         }
     }
 
-    fn label(&mut self, label: &Option<String>) -> Result<LabelId> {
-        match label {
-            Some(name) => self.label_by_name(name),
-            None => Err(SombraError::Invalid("label resolution requires a name")),
+    fn register_bindings(&mut self, bindings: &[VarBinding]) {
+        for binding in bindings {
+            self.var_names.insert(binding.id, binding.var.clone());
         }
     }
 
-    fn property(&mut self, name: &str) -> Result<PropId> {
-        if let Some(id) = self.props.get(name) {
-            return Ok(*id);
-        }
-        let id = self.metadata.resolve_property(name)?;
-        self.props.insert(name.to_owned(), id);
-        Ok(id)
-    }
-
-    fn edge_type(&mut self, ty: &Option<String>) -> Result<Option<TypeId>> {
-        match ty {
-            Some(name) => {
-                if let Some(id) = self.edge_types.get(name) {
-                    return Ok(Some(*id));
-                }
-                let id = self.metadata.resolve_edge_type(name)?;
-                self.edge_types.insert(name.to_owned(), id);
-                Ok(Some(id))
-            }
-            None => Ok(None),
-        }
+    fn var_for_id(&self, id: VarId) -> Var {
+        self.var_names
+            .get(&id)
+            .expect("unknown variable id")
+            .clone()
     }
 
     fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
         self.metadata.property_index(label, prop)
-    }
-
-    fn label_by_name(&mut self, name: &str) -> Result<LabelId> {
-        if let Some(id) = self.labels.get(name) {
-            return Ok(*id);
-        }
-        let id = self.metadata.resolve_label(name)?;
-        self.labels.insert(name.to_owned(), id);
-        Ok(id)
-    }
-
-    fn record_var_label(&mut self, var: &Var, info: VarLabel) {
-        self.var_labels.insert(var.0.clone(), info);
-    }
-
-    fn var_label_info(&self, var: &Var) -> Option<&VarLabel> {
-        self.var_labels.get(&var.0)
-    }
-
-    fn property_stats_for(&mut self, var: &Var, prop: &str) -> Result<Option<Arc<PropStats>>> {
-        let label_id = match self.var_label_info(var) {
-            Some(info) => info.id,
-            None => return Ok(None),
-        };
-        let prop_id = self.property(prop)?;
-        self.property_stats_by_id(label_id, prop_id)
     }
 
     fn property_stats_by_id(
@@ -963,15 +1300,32 @@ enum AnchorScore {
 }
 
 #[derive(Clone)]
-struct VarLabel {
-    id: LabelId,
-    name: String,
+enum VarPredicateKind {
+    Comparison(AnalyzedComparison),
+    Union {
+        expr: AnalyzedExpr,
+        terms: Vec<UnionTerm>,
+    },
 }
 
 #[derive(Clone)]
 struct VarPredicate {
-    predicate: AstPredicate,
+    var: VarId,
     selectivity: f64,
+    kind: VarPredicateKind,
+}
+
+#[derive(Clone)]
+struct UnionTerm {
+    cmp: AnalyzedComparison,
+    selectivity: f64,
+}
+
+#[derive(Clone, Default)]
+struct IndexedSelection {
+    scans: Vec<VarPredicate>,
+    union: Option<VarPredicate>,
+    union_fallback: Option<AnalyzedExpr>,
 }
 
 fn build_explain_tree(node: &PhysicalNode) -> ExplainNode {
@@ -992,6 +1346,7 @@ fn op_name(op: &PhysicalOp) -> &'static str {
         PhysicalOp::Expand { .. } => "Expand",
         PhysicalOp::Filter { .. } => "Filter",
         PhysicalOp::BoolFilter { .. } => "BoolFilter",
+        PhysicalOp::Union { .. } => "Union",
         PhysicalOp::Intersect { .. } => "Intersect",
         PhysicalOp::HashJoin { .. } => "HashJoin",
         PhysicalOp::Distinct => "Distinct",
@@ -1001,23 +1356,39 @@ fn op_name(op: &PhysicalOp) -> &'static str {
 
 fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
     match op {
-        PhysicalOp::LabelScan { label, as_var } => vec![
-            ("label".into(), label.0.to_string()),
-            ("as".into(), as_var.0.clone()),
-        ],
+        PhysicalOp::LabelScan {
+            label,
+            label_name,
+            as_var,
+        } => {
+            let mut props = vec![
+                ("label_id".into(), label.0.to_string()),
+                ("as".into(), as_var.0.clone()),
+            ];
+            if let Some(name) = label_name {
+                props.insert(0, ("label".into(), name.clone()));
+            }
+            props
+        }
         PhysicalOp::PropIndexScan {
             label,
+            label_name,
             prop,
+            prop_name,
             pred,
             as_var,
             selectivity,
         } => {
             let mut props = vec![
-                ("label".into(), label.0.to_string()),
-                ("prop".into(), prop.0.to_string()),
+                ("label_id".into(), label.0.to_string()),
+                ("prop_id".into(), prop.0.to_string()),
+                ("prop".into(), prop_name.clone()),
                 ("as".into(), as_var.0.clone()),
                 ("predicate".into(), describe_predicate(pred)),
             ];
+            if let Some(name) = label_name {
+                props.insert(0, ("label".into(), name.clone()));
+            }
             props.push(("selectivity".into(), fmt_selectivity(*selectivity)));
             props
         }
@@ -1043,6 +1414,16 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
                 ("selectivity".into(), fmt_selectivity(*selectivity)),
             ]
         }
+        PhysicalOp::Union { vars, dedup } => vec![
+            (
+                "vars".into(),
+                vars.iter()
+                    .map(|v| v.0.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            ("dedup".into(), dedup.to_string()),
+        ],
         PhysicalOp::BoolFilter { expr } => vec![
             ("expr".into(), describe_bool_expr(expr)),
             (
@@ -1075,18 +1456,22 @@ fn op_props(op: &PhysicalOp) -> Vec<(String, String)> {
 
 fn describe_predicate(pred: &PhysicalPredicate) -> String {
     match pred {
-        PhysicalPredicate::Eq { var, prop, value } => {
-            format!("{}.{} = {}", var.0, prop.0, literal_to_string(value))
-        }
+        PhysicalPredicate::Eq {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} = {}", var.0, prop_name, literal_to_string(value)),
         PhysicalPredicate::Range {
             var,
-            prop,
+            prop_name,
             lower,
             upper,
+            ..
         } => format!(
             "{}.{} in {}..{}",
             var.0,
-            prop.0,
+            prop_name,
             bound_to_string(lower),
             bound_to_string(upper)
         ),
@@ -1118,50 +1503,78 @@ fn describe_bool_expr(expr: &PhysicalBoolExpr) -> String {
 
 fn describe_comparison(cmp: &PhysicalComparison) -> String {
     match cmp {
-        PhysicalComparison::Eq { var, prop, value } => {
-            format!("{}.{} = {}", var.0, prop.0, literal_to_string(value))
-        }
-        PhysicalComparison::Ne { var, prop, value } => {
-            format!("{}.{} != {}", var.0, prop.0, literal_to_string(value))
-        }
-        PhysicalComparison::Lt { var, prop, value } => {
-            format!("{}.{} < {}", var.0, prop.0, literal_to_string(value))
-        }
-        PhysicalComparison::Le { var, prop, value } => {
-            format!("{}.{} <= {}", var.0, prop.0, literal_to_string(value))
-        }
-        PhysicalComparison::Gt { var, prop, value } => {
-            format!("{}.{} > {}", var.0, prop.0, literal_to_string(value))
-        }
-        PhysicalComparison::Ge { var, prop, value } => {
-            format!("{}.{} >= {}", var.0, prop.0, literal_to_string(value))
-        }
+        PhysicalComparison::Eq {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} = {}", var.0, prop_name, literal_to_string(value)),
+        PhysicalComparison::Ne {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} != {}", var.0, prop_name, literal_to_string(value)),
+        PhysicalComparison::Lt {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} < {}", var.0, prop_name, literal_to_string(value)),
+        PhysicalComparison::Le {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} <= {}", var.0, prop_name, literal_to_string(value)),
+        PhysicalComparison::Gt {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} > {}", var.0, prop_name, literal_to_string(value)),
+        PhysicalComparison::Ge {
+            var,
+            prop_name,
+            value,
+            ..
+        } => format!("{}.{} >= {}", var.0, prop_name, literal_to_string(value)),
         PhysicalComparison::Between {
             var,
-            prop,
+            prop_name,
             low,
             high,
+            ..
         } => format!(
             "{}.{} in {}..{}",
             var.0,
-            prop.0,
+            prop_name,
             bound_to_string(low),
             bound_to_string(high)
         ),
-        PhysicalComparison::In { var, prop, values } => format!(
+        PhysicalComparison::In {
+            var,
+            prop_name,
+            values,
+            ..
+        } => format!(
             "{}.{} IN [{}]",
             var.0,
-            prop.0,
+            prop_name,
             values
                 .iter()
                 .map(literal_to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        PhysicalComparison::Exists { var, prop } => format!("EXISTS({}.{})", var.0, prop.0),
-        PhysicalComparison::IsNull { var, prop } => format!("{}.{} IS NULL", var.0, prop.0),
-        PhysicalComparison::IsNotNull { var, prop } => {
-            format!("{}.{} IS NOT NULL", var.0, prop.0)
+        PhysicalComparison::Exists { var, prop_name, .. } => {
+            format!("EXISTS({}.{})", var.0, prop_name)
+        }
+        PhysicalComparison::IsNull { var, prop_name, .. } => {
+            format!("{}.{} IS NULL", var.0, prop_name)
+        }
+        PhysicalComparison::IsNotNull { var, prop_name, .. } => {
+            format!("{}.{} IS NOT NULL", var.0, prop_name)
         }
     }
 }
@@ -1208,6 +1621,59 @@ fn prop_from_predicate(pred: &PhysicalPredicate) -> Option<PropId> {
     match pred {
         PhysicalPredicate::Eq { prop, .. } => Some(*prop),
         PhysicalPredicate::Range { prop, .. } => Some(*prop),
+    }
+}
+
+fn prop_name_from_predicate(pred: &PhysicalPredicate) -> String {
+    match pred {
+        PhysicalPredicate::Eq { prop_name, .. } | PhysicalPredicate::Range { prop_name, .. } => {
+            prop_name.clone()
+        }
+    }
+}
+
+fn cmp_anchor_class(cmp: &AnalyzedComparison) -> Option<(PropRef, AnchorScore)> {
+    match cmp {
+        AnalyzedComparison::Eq { prop, .. } => Some((prop.clone(), AnchorScore::Eq)),
+        AnalyzedComparison::Lt { prop, .. }
+        | AnalyzedComparison::Le { prop, .. }
+        | AnalyzedComparison::Gt { prop, .. }
+        | AnalyzedComparison::Ge { prop, .. }
+        | AnalyzedComparison::Between { prop, .. } => Some((prop.clone(), AnchorScore::Range)),
+        _ => None,
+    }
+}
+
+fn union_terms_indexed(
+    binding: &VarBinding,
+    ctx: &mut PlanContext<'_>,
+    terms: &[UnionTerm],
+) -> Result<bool> {
+    for term in terms {
+        let Some((prop, _)) = cmp_anchor_class(&term.cmp) else {
+            return Ok(false);
+        };
+        if ctx.property_index(binding.label_id, prop.id)?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn merge_residual(existing: Option<AnalyzedExpr>, extra: AnalyzedExpr) -> Option<AnalyzedExpr> {
+    match existing {
+        None => Some(extra),
+        Some(current) => Some(AnalyzedExpr::And(vec![current, extra])),
+    }
+}
+
+fn plan_is_inherently_distinct(node: &PlanNode) -> bool {
+    match &node.op {
+        LogicalOp::Project { .. } | LogicalOp::Filter { .. } | LogicalOp::BoolFilter { .. } => {
+            node.inputs.len() == 1 && plan_is_inherently_distinct(&node.inputs[0])
+        }
+        LogicalOp::Union { dedup, .. } => *dedup,
+        _ => false,
     }
 }
 
@@ -1280,7 +1746,6 @@ mod tests {
         let planner = planner_with_metadata();
         let ast = QueryBuilder::new().r#match("User").select(["a"]).build();
         let output = planner.plan(&ast).expect("plan succeeds");
-
         match &output.plan.root.op {
             PhysicalOp::Project { fields } => {
                 assert_eq!(fields.len(), 1);
@@ -1378,6 +1843,192 @@ mod tests {
     }
 
     #[test]
+    fn planner_pushes_down_in_list_as_union() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(4))
+            .with_property_index(LabelId(1), PropId(4));
+        let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
+        let ast = QueryBuilder::new()
+            .r#match("User")
+            .where_var("a", |pred| {
+                pred.in_list("name", ["Ada", "Grace"]);
+            })
+            .select(["a"])
+            .build();
+        let output = planner.plan(&ast).expect("plan succeeds");
+        let project_input = output.plan.root.inputs.first().expect("project input");
+        match &project_input.op {
+            PhysicalOp::Union { vars, dedup } => {
+                assert_eq!(vars.len(), 1);
+                assert_eq!(vars[0].0, "a");
+                assert!(!dedup);
+                assert_eq!(project_input.inputs.len(), 2);
+                let mut seen = Vec::new();
+                for child in &project_input.inputs {
+                    match &child.op {
+                        PhysicalOp::PropIndexScan { pred, .. } => match pred {
+                            PhysicalPredicate::Eq { value, .. } => {
+                                if let LiteralValue::String(name) = value {
+                                    seen.push(name.clone());
+                                } else {
+                                    panic!("expected string literal in IN child");
+                                }
+                            }
+                            other => panic!("expected eq predicate, found {other:?}"),
+                        },
+                        other => panic!("expected PropIndexScan child, found {other:?}"),
+                    }
+                }
+                seen.sort();
+                assert_eq!(seen, vec!["Ada".to_string(), "Grace".to_string()]);
+            }
+            other => panic!("expected Union, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planner_lowers_or_expression_to_union() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(4))
+            .with_property_index(LabelId(1), PropId(4));
+        let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
+        let ast = QueryBuilder::new()
+            .r#match("User")
+            .where_var("a", |pred| {
+                pred.or_group(|or| {
+                    or.eq("name", "Ada");
+                    or.eq("name", "Grace");
+                });
+            })
+            .select(["a"])
+            .build();
+        let output = planner.plan(&ast).expect("plan succeeds");
+        let project_input = output.plan.root.inputs.first().expect("project input");
+        match &project_input.op {
+            PhysicalOp::Union { vars, dedup } => {
+                assert_eq!(vars, &[Var("a".into())]);
+                assert!(!dedup);
+                assert_eq!(project_input.inputs.len(), 2);
+            }
+            other => panic!("expected Union, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planner_falls_back_to_filter_when_or_not_indexable() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(4));
+        let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
+        let ast = QueryBuilder::new()
+            .r#match("User")
+            .where_var("a", |pred| {
+                pred.or_group(|or| {
+                    or.eq("name", "Ada");
+                    or.eq("name", "Grace");
+                });
+            })
+            .select(["a"])
+            .build();
+        let output = planner.plan(&ast).expect("plan succeeds");
+        let project_input = output.plan.root.inputs.first().expect("project input");
+        match &project_input.op {
+            PhysicalOp::BoolFilter { .. } => {}
+            other => panic!("expected BoolFilter fallback, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planner_marks_union_for_dedup_when_distinct() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(4))
+            .with_property_index(LabelId(1), PropId(4));
+        let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
+        let ast = QueryBuilder::new()
+            .distinct()
+            .r#match("User")
+            .where_var("a", |pred| {
+                pred.or_group(|or| {
+                    or.eq("name", "Ada");
+                    or.eq("name", "Grace");
+                });
+            })
+            .select(["a"])
+            .build();
+        assert!(ast.distinct);
+        let output = planner.plan(&ast).expect("plan succeeds");
+        let project_input = output.plan.root.inputs.first().expect("project input");
+        match &project_input.op {
+            PhysicalOp::Union { dedup, .. } => assert!(*dedup),
+            other => panic!("expected Union, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planner_skips_distinct_when_union_dedups() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(4))
+            .with_property_index(LabelId(1), PropId(4));
+        let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
+        let ast = QueryBuilder::new()
+            .distinct()
+            .r#match("User")
+            .where_var("a", |pred| {
+                pred.or_group(|or| {
+                    or.eq("name", "Ada");
+                    or.eq("name", "Grace");
+                });
+            })
+            .select(["a"])
+            .build();
+        assert!(ast.distinct);
+        let output = planner.plan(&ast).expect("plan succeeds");
+        match &output.plan.root.op {
+            PhysicalOp::Project { .. } => {
+                let child = output.plan.root.inputs.first().expect("project child");
+                match &child.op {
+                    PhysicalOp::Union { dedup, .. } => assert!(*dedup),
+                    other => panic!("expected union child, found {other:?}"),
+                }
+            }
+            other => panic!("expected project root, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planner_keeps_distinct_when_pipeline_not_dedup_safe() {
+        let metadata = InMemoryMetadata::new()
+            .with_label("User", LabelId(1))
+            .with_property("name", PropId(4))
+            .with_property("status", PropId(6))
+            .with_edge_type("FOLLOWS", TypeId(5))
+            .with_property_index(LabelId(1), PropId(4));
+        let planner = Planner::new(PlannerConfig::default(), Arc::new(metadata));
+        let ast = QueryBuilder::new()
+            .distinct()
+            .r#match(("a", "User"))
+            .where_edge("FOLLOWS", ("b", "User"))
+            .where_var("a", |pred| {
+                pred.eq("name", "Ada");
+            })
+            .select(["a", "b"])
+            .build();
+        assert!(ast.distinct);
+        let output = planner.plan(&ast).expect("plan succeeds");
+        match &output.plan.root.op {
+            PhysicalOp::Project { .. } => {
+                let distinct = output.plan.root.inputs.first().expect("project child");
+                assert!(matches!(distinct.op, PhysicalOp::Distinct));
+            }
+            other => panic!("expected Project root, found {other:?}"),
+        }
+    }
+
+    #[test]
     fn planner_can_reanchor_mid_chain_using_index() {
         let metadata = InMemoryMetadata::new()
             .with_label("User", LabelId(1))
@@ -1409,4 +2060,13 @@ mod tests {
             other => panic!("expected Expand, found {other:?}"),
         }
     }
+}
+#[derive(Clone)]
+enum PushdownCandidate {
+    Comparison(AnalyzedComparison),
+    Union {
+        var: VarId,
+        expr: AnalyzedExpr,
+        terms: Vec<AnalyzedComparison>,
+    },
 }

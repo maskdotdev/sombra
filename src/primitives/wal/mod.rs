@@ -823,6 +823,7 @@ fn clone_error(err: &SombraError) -> SombraError {
         }
         SombraError::Corruption(msg) => SombraError::Corruption(msg),
         SombraError::Invalid(msg) => SombraError::Invalid(msg),
+        SombraError::InvalidOwned(msg) => SombraError::InvalidOwned(msg.clone()),
         SombraError::NotFound => SombraError::NotFound,
     }
 }

@@ -8,9 +8,11 @@
 
 use crate::primitives::pager::{PageStore, Pager, PagerOptions, Synchronous, WriteGuard};
 use crate::query::{
+    analyze::{self, MAX_BYTES_LITERAL, MAX_IN_VALUES},
     ast::{
         BoolExpr, Comparison, EdgeClause, EdgeDirection, MatchClause, Projection, QueryAst, Var,
     },
+    errors::AnalyzerError,
     executor::{Executor, QueryResult, ResultStream, Row, Value as ExecValue},
     metadata::{CatalogMetadata, MetadataProvider},
     planner::{ExplainNode, PlanExplain, Planner, PlannerConfig, PlannerOutput},
@@ -255,6 +257,9 @@ pub enum FfiError {
     /// A custom error message.
     #[error("{0}")]
     Message(String),
+    /// Analyzer error surfaced with structured information.
+    #[error(transparent)]
+    Analyzer(#[from] AnalyzerError),
     /// An error from the core Sombra database engine.
     #[error(transparent)]
     Core(#[from] SombraError),
@@ -758,8 +763,10 @@ impl Database {
 
     fn plan(&self, spec: QuerySpec) -> Result<PlannerOutput> {
         let ast = spec.into_ast()?;
-        validate_catalog_refs(&ast, self.metadata.as_ref())?;
-        self.planner.plan(&ast).map_err(FfiError::from)
+        let analyzed = analyze::analyze(&ast, self.metadata.as_ref())?;
+        self.planner
+            .plan_analyzed(&analyzed)
+            .map_err(FfiError::from)
     }
 }
 
@@ -878,11 +885,7 @@ pub struct QuerySpec {
     pub distinct: bool,
 }
 
-const MAX_MATCHES: usize = 1_000;
-const MAX_IN_VALUES: usize = 10_000;
-const MAX_PREDICATE_NODES: usize = 10_000;
-const MAX_PREDICATE_DEPTH: usize = 256;
-const MAX_BYTES_LITERAL: usize = 1 << 20;
+#[allow(dead_code)]
 const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_schema_version() -> u32 {
@@ -925,9 +928,8 @@ impl QuerySpec {
             .map(ProjectionSpec::into_projection)
             .collect::<Result<Vec<_>>>()?;
 
-        validate_query_components(&matches, &edges, &projections, predicate.as_ref())?;
-
         Ok(QueryAst {
+            request_id: self.request_id,
             matches,
             edges,
             predicate,
@@ -935,251 +937,6 @@ impl QuerySpec {
             projections,
         })
     }
-}
-
-fn validate_query_components(
-    matches: &[MatchClause],
-    edges: &[EdgeClause],
-    projections: &[Projection],
-    predicate_tree: Option<&BoolExpr>,
-) -> Result<()> {
-    if matches.len() > MAX_MATCHES {
-        return Err(FfiError::Message(format!(
-            "query may contain at most {} match clauses",
-            MAX_MATCHES
-        )));
-    }
-    let declared = collect_declared_vars(matches)?;
-    validate_edges(edges, &declared)?;
-    validate_projections(projections, &declared)?;
-    if let Some(expr) = predicate_tree {
-        validate_bool_expr(expr, &declared)?;
-    }
-    Ok(())
-}
-
-fn validate_catalog_refs(ast: &QueryAst, metadata: &dyn MetadataProvider) -> Result<()> {
-    let mut prop_cache: HashMap<String, PropId> = HashMap::new();
-
-    for clause in &ast.matches {
-        if let Some(label) = &clause.label {
-            metadata
-                .resolve_label(label)
-                .map_err(|_| FfiError::Message(format!("unknown label '{label}'")))?;
-        }
-    }
-
-    for edge in &ast.edges {
-        if let Some(edge_type) = &edge.edge_type {
-            metadata
-                .resolve_edge_type(edge_type)
-                .map_err(|_| FfiError::Message(format!("unknown edge type '{edge_type}'")))?;
-        }
-    }
-
-    for projection in &ast.projections {
-        if let Projection::Prop { prop, .. } = projection {
-            ensure_property_known(prop, metadata, &mut prop_cache)?;
-        }
-    }
-
-    if let Some(expr) = &ast.predicate {
-        visit_bool_expr_props(expr, &mut |prop| {
-            ensure_property_known(prop, metadata, &mut prop_cache)
-        })?;
-    }
-
-    Ok(())
-}
-
-fn collect_declared_vars(matches: &[MatchClause]) -> Result<HashSet<String>> {
-    let mut declared = HashSet::new();
-    for clause in matches {
-        let name = clause.var.0.clone();
-        if !declared.insert(name.clone()) {
-            return Err(FfiError::Message(format!(
-                "duplicate match variable '{name}'"
-            )));
-        }
-    }
-    Ok(declared)
-}
-
-fn ensure_declared(var: &Var, declared: &HashSet<String>, ctx: &str) -> Result<()> {
-    if declared.contains(&var.0) {
-        Ok(())
-    } else {
-        Err(FfiError::Message(format!(
-            "{} references undeclared variable '{}'",
-            ctx, var.0
-        )))
-    }
-}
-
-fn validate_edges(edges: &[EdgeClause], declared: &HashSet<String>) -> Result<()> {
-    for edge in edges {
-        ensure_declared(&edge.from, declared, "edge source")?;
-        ensure_declared(&edge.to, declared, "edge destination")?;
-    }
-    Ok(())
-}
-
-fn validate_projections(projections: &[Projection], declared: &HashSet<String>) -> Result<()> {
-    for projection in projections {
-        match projection {
-            Projection::Var { var, .. } | Projection::Prop { var, .. } => {
-                ensure_declared(var, declared, "projection")?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_bool_expr(expr: &BoolExpr, declared: &HashSet<String>) -> Result<()> {
-    let stats = bool_expr_stats(expr, declared)?;
-    if stats.nodes > MAX_PREDICATE_NODES {
-        return Err(FfiError::Message(format!(
-            "predicate tree exceeds {} nodes",
-            MAX_PREDICATE_NODES
-        )));
-    }
-    if stats.depth > MAX_PREDICATE_DEPTH {
-        return Err(FfiError::Message(format!(
-            "predicate tree depth exceeds {} levels",
-            MAX_PREDICATE_DEPTH
-        )));
-    }
-    Ok(())
-}
-
-fn ensure_property_known(
-    prop: &str,
-    metadata: &dyn MetadataProvider,
-    cache: &mut HashMap<String, PropId>,
-) -> Result<()> {
-    if cache.contains_key(prop) {
-        return Ok(());
-    }
-    metadata
-        .resolve_property(prop)
-        .map(|id| {
-            cache.insert(prop.to_owned(), id);
-        })
-        .map_err(|_| FfiError::Message(format!("unknown property '{prop}'")))?;
-    Ok(())
-}
-
-fn visit_bool_expr_props<F>(expr: &BoolExpr, visitor: &mut F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<()>,
-{
-    match expr {
-        BoolExpr::Cmp(cmp) => visit_comparison_props(cmp, visitor),
-        BoolExpr::And(children) | BoolExpr::Or(children) => {
-            for child in children {
-                visit_bool_expr_props(child, visitor)?;
-            }
-            Ok(())
-        }
-        BoolExpr::Not(child) => visit_bool_expr_props(child, visitor),
-    }
-}
-
-fn visit_comparison_props<F>(cmp: &Comparison, visitor: &mut F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<()>,
-{
-    let prop = match cmp {
-        Comparison::Eq { prop, .. }
-        | Comparison::Ne { prop, .. }
-        | Comparison::Lt { prop, .. }
-        | Comparison::Le { prop, .. }
-        | Comparison::Gt { prop, .. }
-        | Comparison::Ge { prop, .. }
-        | Comparison::Between { prop, .. }
-        | Comparison::In { prop, .. }
-        | Comparison::Exists { prop, .. }
-        | Comparison::IsNull { prop, .. }
-        | Comparison::IsNotNull { prop, .. } => prop,
-    };
-    visitor(prop)
-}
-
-struct BoolExprStats {
-    nodes: usize,
-    depth: usize,
-}
-
-fn bool_expr_stats(expr: &BoolExpr, declared: &HashSet<String>) -> Result<BoolExprStats> {
-    match expr {
-        BoolExpr::Cmp(cmp) => {
-            validate_comparison(cmp, declared)?;
-            Ok(BoolExprStats { nodes: 1, depth: 1 })
-        }
-        BoolExpr::And(children) | BoolExpr::Or(children) => {
-            let mut nodes = 1;
-            let mut max_depth = 0;
-            for child in children {
-                let stats = bool_expr_stats(child, declared)?;
-                nodes += stats.nodes;
-                max_depth = max_depth.max(stats.depth);
-            }
-            Ok(BoolExprStats {
-                nodes,
-                depth: max_depth + 1,
-            })
-        }
-        BoolExpr::Not(child) => {
-            let stats = bool_expr_stats(child, declared)?;
-            Ok(BoolExprStats {
-                nodes: stats.nodes + 1,
-                depth: stats.depth + 1,
-            })
-        }
-    }
-}
-
-fn validate_comparison(cmp: &Comparison, declared: &HashSet<String>) -> Result<()> {
-    match cmp {
-        Comparison::Eq { var, value, .. } | Comparison::Ne { var, value, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_scalar_value(value)?;
-        }
-        Comparison::Lt { var, value, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_scalar_value(value)?;
-            ensure_orderable(value, "lt()")?;
-        }
-        Comparison::Le { var, value, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_scalar_value(value)?;
-            ensure_orderable(value, "le()")?;
-        }
-        Comparison::Gt { var, value, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_scalar_value(value)?;
-            ensure_orderable(value, "gt()")?;
-        }
-        Comparison::Ge { var, value, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_scalar_value(value)?;
-            ensure_orderable(value, "ge()")?;
-        }
-        Comparison::Between { var, low, high, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_range_bounds(low, high, "between()")?;
-        }
-        Comparison::In { var, values, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-            validate_in_values(values)?;
-        }
-        Comparison::Exists { var, .. }
-        | Comparison::IsNull { var, .. }
-        | Comparison::IsNotNull { var, .. } => {
-            ensure_declared(var, declared, "predicate")?;
-        }
-    }
-    Ok(())
 }
 
 /// Specification for a MATCH clause in a query.
@@ -1510,6 +1267,7 @@ fn ensure_bounds_order(low: &QueryValue, high: &QueryValue) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn bound_value(bound: &Bound<QueryValue>) -> Option<&QueryValue> {
     match bound {
         Bound::Included(value) | Bound::Excluded(value) => Some(value),
@@ -1517,6 +1275,7 @@ fn bound_value(bound: &Bound<QueryValue>) -> Option<&QueryValue> {
     }
 }
 
+#[allow(dead_code)]
 fn validate_range_bounds(
     lower: &Bound<QueryValue>,
     upper: &Bound<QueryValue>,
@@ -2707,6 +2466,63 @@ mod tests {
         assert_eq!(current, Value::Number(Number::from(10)));
         let cleared = db.pragma("autocheckpoint_ms", Some(Value::Null))?;
         assert_eq!(cleared, Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn explain_json_includes_union_dedup_flag() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("explain_union_dedup.db");
+        let db = Database::open(&path, DatabaseOptions::default())?;
+        db.seed_demo()?;
+        let spec = json!({
+            "$schemaVersion": 1,
+            "matches": [
+                { "var": "a", "label": "User" }
+            ],
+            "projections": [
+                { "kind": "var", "var": "a" }
+            ],
+            "distinct": true,
+            "predicate": {
+                "op": "or",
+                "args": [
+                    {
+                        "op": "eq",
+                        "var": "a",
+                        "prop": "name",
+                        "value": { "t": "String", "v": "Ada" }
+                    },
+                    {
+                        "op": "eq",
+                        "var": "a",
+                        "prop": "name",
+                        "value": { "t": "String", "v": "Grace" }
+                    }
+                ]
+            }
+        });
+        let explain = db.explain_json(&spec)?;
+        let plan = explain
+            .get("plan")
+            .and_then(Value::as_object)
+            .expect("plan node");
+        assert_eq!(plan.get("op").and_then(Value::as_str), Some("Project"));
+        let inputs = plan
+            .get("inputs")
+            .and_then(Value::as_array)
+            .expect("project inputs");
+        assert_eq!(inputs.len(), 1);
+        let union = inputs[0]
+            .as_object()
+            .expect("union node object");
+        assert_eq!(union.get("op").and_then(Value::as_str), Some("Union"));
+        let dedup = union
+            .get("props")
+            .and_then(Value::as_object)
+            .and_then(|props| props.get("dedup"))
+            .and_then(Value::as_str);
+        assert_eq!(dedup, Some("true"));
         Ok(())
     }
 }

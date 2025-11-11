@@ -226,7 +226,7 @@ impl Executor {
         cache: NodeCache,
     ) -> Result<BoxBindingStream> {
         match &node.op {
-            PhysicalOp::LabelScan { label, as_var } => {
+            PhysicalOp::LabelScan { label, as_var, .. } => {
                 let scan = self
                     .graph
                     .label_scan(context.guard(), *label)?
@@ -280,6 +280,16 @@ impl Executor {
                     cache,
                     filter,
                 )))
+            }
+            PhysicalOp::Union { dedup, .. } => {
+                if node.inputs.is_empty() {
+                    return Err(SombraError::Invalid("union expects at least one child"));
+                }
+                let mut children = Vec::with_capacity(node.inputs.len());
+                for child in &node.inputs {
+                    children.push(self.build_stream(child, Arc::clone(&context), cache.clone())?);
+                }
+                Ok(Box::new(UnionStream::new(children, *dedup)))
             }
             PhysicalOp::BoolFilter { expr } => {
                 if node.inputs.len() != 1 {
@@ -462,6 +472,42 @@ impl BindingStream for DistinctStream {
         while let Some(row) = self.input.try_next()? {
             if self.seen.insert(row.nodes.clone()) {
                 return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+}
+
+struct UnionStream {
+    inputs: Vec<BoxBindingStream>,
+    current: usize,
+    seen: Option<BTreeSet<BTreeMap<String, NodeId>>>,
+}
+
+impl UnionStream {
+    fn new(inputs: Vec<BoxBindingStream>, dedup: bool) -> Self {
+        let seen = if dedup { Some(BTreeSet::new()) } else { None };
+        Self {
+            inputs,
+            current: 0,
+            seen,
+        }
+    }
+}
+
+impl BindingStream for UnionStream {
+    fn try_next(&mut self) -> Result<Option<BindingRow>> {
+        while self.current < self.inputs.len() {
+            match self.inputs[self.current].try_next()? {
+                Some(row) => {
+                    if let Some(seen) = self.seen.as_mut() {
+                        if !seen.insert(row.nodes.clone()) {
+                            continue;
+                        }
+                    }
+                    return Ok(Some(row));
+                }
+                None => self.current += 1,
             }
         }
         Ok(None)
@@ -702,27 +748,39 @@ fn evaluate_comparison<R: BoolNodeResolver>(
     resolver: &mut R,
 ) -> Result<bool> {
     match cmp {
-        PhysicalComparison::Eq { var, prop, value } => {
+        PhysicalComparison::Eq {
+            var, prop, value, ..
+        } => {
             let node = resolver.resolve(var)?;
             eval_eq(&node, *prop, value)
         }
-        PhysicalComparison::Ne { var, prop, value } => {
+        PhysicalComparison::Ne {
+            var, prop, value, ..
+        } => {
             let node = resolver.resolve(var)?;
             eval_ne(&node, *prop, value)
         }
-        PhysicalComparison::Lt { var, prop, value } => {
+        PhysicalComparison::Lt {
+            var, prop, value, ..
+        } => {
             let node = resolver.resolve(var)?;
             compare_with(&node, *prop, value, |ord| ord.is_lt())
         }
-        PhysicalComparison::Le { var, prop, value } => {
+        PhysicalComparison::Le {
+            var, prop, value, ..
+        } => {
             let node = resolver.resolve(var)?;
             compare_with(&node, *prop, value, |ord| ord.is_le())
         }
-        PhysicalComparison::Gt { var, prop, value } => {
+        PhysicalComparison::Gt {
+            var, prop, value, ..
+        } => {
             let node = resolver.resolve(var)?;
             compare_with(&node, *prop, value, |ord| ord.is_gt())
         }
-        PhysicalComparison::Ge { var, prop, value } => {
+        PhysicalComparison::Ge {
+            var, prop, value, ..
+        } => {
             let node = resolver.resolve(var)?;
             compare_with(&node, *prop, value, |ord| ord.is_ge())
         }
@@ -731,25 +789,28 @@ fn evaluate_comparison<R: BoolNodeResolver>(
             prop,
             low,
             high,
+            ..
         } => {
             let node = resolver.resolve(var)?;
             eval_between(&node, *prop, low, high)
         }
-        PhysicalComparison::In { var, prop, values } => {
+        PhysicalComparison::In {
+            var, prop, values, ..
+        } => {
             let node = resolver.resolve(var)?;
             eval_in(&node, *prop, values)
         }
-        PhysicalComparison::Exists { var, prop } => {
+        PhysicalComparison::Exists { var, prop, .. } => {
             let node = resolver.resolve(var)?;
             Ok(find_prop(&node, *prop).is_some())
         }
-        PhysicalComparison::IsNull { var, prop } => {
+        PhysicalComparison::IsNull { var, prop, .. } => {
             let node = resolver.resolve(var)?;
             Ok(find_prop(&node, *prop)
                 .map(|value| matches!(value, PropValueOwned::Null))
                 .unwrap_or(true))
         }
-        PhysicalComparison::IsNotNull { var, prop } => {
+        PhysicalComparison::IsNotNull { var, prop, .. } => {
             let node = resolver.resolve(var)?;
             Ok(find_prop(&node, *prop)
                 .map(|value| !matches!(value, PropValueOwned::Null))
@@ -1426,11 +1487,13 @@ mod tests {
 
         let left = PhysicalNode::new(PhysicalOp::LabelScan {
             label: LabelId(1),
+            label_name: None,
             as_var: Var("a".into()),
         });
 
         let right_scan = PhysicalNode::new(PhysicalOp::LabelScan {
             label: LabelId(1),
+            label_name: None,
             as_var: Var("b".into()),
         });
 
@@ -1439,6 +1502,7 @@ mod tests {
                 pred: PhysicalPredicate::Range {
                     var: Var("b".into()),
                     prop: PropId(1),
+                    prop_name: "age".into(),
                     lower: Bound::Included(LiteralValue::Int(30)),
                     upper: Bound::Unbounded,
                 },
@@ -1506,6 +1570,7 @@ mod tests {
 
         let scan = PhysicalNode::new(PhysicalOp::LabelScan {
             label: LabelId(1),
+            label_name: None,
             as_var: Var("a".into()),
         });
         let project = PhysicalNode::with_inputs(
@@ -1526,6 +1591,75 @@ mod tests {
         let value = rows[0].get("age").expect("projected column");
         assert!(matches!(value, Value::Int(42)));
         Ok(())
+    }
+
+    #[test]
+    fn union_stream_concatenates_inputs() -> Result<()> {
+        let rows_left = vec![
+            BindingRow::from_binding("a", NodeId(1)),
+            BindingRow::from_binding("a", NodeId(2)),
+        ];
+        let rows_right = vec![BindingRow::from_binding("a", NodeId(3))];
+        let mut stream = UnionStream::new(
+            vec![
+                Box::new(MockStream::new(rows_left)),
+                Box::new(MockStream::new(rows_right)),
+            ],
+            false,
+        );
+        let mut seen = Vec::new();
+        while let Some(row) = stream.try_next()? {
+            seen.push(row.get("a").expect("binding present"));
+        }
+        assert_eq!(seen, vec![NodeId(1), NodeId(2), NodeId(3)]);
+        Ok(())
+    }
+
+    #[test]
+    fn union_stream_deduplicates_when_enabled() -> Result<()> {
+        let rows_left = vec![
+            BindingRow::from_binding("a", NodeId(1)),
+            BindingRow::from_binding("a", NodeId(2)),
+        ];
+        let rows_right = vec![
+            BindingRow::from_binding("a", NodeId(2)),
+            BindingRow::from_binding("a", NodeId(3)),
+        ];
+        let mut stream = UnionStream::new(
+            vec![
+                Box::new(MockStream::new(rows_left)),
+                Box::new(MockStream::new(rows_right)),
+            ],
+            true,
+        );
+        let mut seen = Vec::new();
+        while let Some(row) = stream.try_next()? {
+            seen.push(row.get("a").expect("binding present"));
+        }
+        assert_eq!(seen, vec![NodeId(1), NodeId(2), NodeId(3)]);
+        Ok(())
+    }
+
+    struct MockStream {
+        rows: Vec<BindingRow>,
+        idx: usize,
+    }
+
+    impl MockStream {
+        fn new(rows: Vec<BindingRow>) -> Self {
+            Self { rows, idx: 0 }
+        }
+    }
+
+    impl BindingStream for MockStream {
+        fn try_next(&mut self) -> Result<Option<BindingRow>> {
+            if self.idx >= self.rows.len() {
+                return Ok(None);
+            }
+            let row = self.rows[self.idx].clone();
+            self.idx += 1;
+            Ok(Some(row))
+        }
     }
 
     fn bool_node(props: Vec<(PropId, PropValueOwned)>) -> NodeData {
@@ -1570,11 +1704,13 @@ mod tests {
             PhysicalBoolExpr::Cmp(PhysicalComparison::Eq {
                 var: Var("a".into()),
                 prop: PropId(1),
+                prop_name: "username".into(),
                 value: LiteralValue::String("Ada".into()),
             }),
             PhysicalBoolExpr::Cmp(PhysicalComparison::Eq {
                 var: Var("a".into()),
                 prop: PropId(1),
+                prop_name: "username".into(),
                 value: LiteralValue::String("Bob".into()),
             }),
         ]);
@@ -1590,6 +1726,7 @@ mod tests {
         let expr = PhysicalBoolExpr::Not(Box::new(PhysicalBoolExpr::Cmp(PhysicalComparison::In {
             var: Var("a".into()),
             prop: PropId(2),
+            prop_name: "scores".into(),
             values: vec![
                 LiteralValue::Int(1),
                 LiteralValue::Null,
@@ -1608,6 +1745,7 @@ mod tests {
         let expr = PhysicalBoolExpr::Cmp(PhysicalComparison::Eq {
             var: Var("a".into()),
             prop: PropId(3),
+            prop_name: "optional".into(),
             value: LiteralValue::Null,
         });
         let mut resolver = TestResolver::new(vec![(
@@ -1622,6 +1760,7 @@ mod tests {
         let cmp = PhysicalComparison::Exists {
             var: Var("a".into()),
             prop: PropId(10),
+            prop_name: "flag".into(),
         };
         assert!(eval_cmp_with_props(
             cmp.clone(),
@@ -1635,6 +1774,7 @@ mod tests {
         let cmp = PhysicalComparison::IsNull {
             var: Var("a".into()),
             prop: PropId(11),
+            prop_name: "maybe".into(),
         };
         assert!(eval_cmp_with_props(cmp.clone(), vec![]));
         assert!(eval_cmp_with_props(
@@ -1652,6 +1792,7 @@ mod tests {
         let cmp = PhysicalComparison::IsNotNull {
             var: Var("a".into()),
             prop: PropId(12),
+            prop_name: "maybe".into(),
         };
         assert!(eval_cmp_with_props(
             cmp.clone(),
@@ -1669,6 +1810,7 @@ mod tests {
         let cmp = PhysicalComparison::Eq {
             var: Var("a".into()),
             prop: PropId(13),
+            prop_name: "maybe".into(),
             value: LiteralValue::Null,
         };
         assert!(!eval_cmp_with_props(
@@ -1682,6 +1824,7 @@ mod tests {
         let cmp = PhysicalComparison::Ne {
             var: Var("a".into()),
             prop: PropId(14),
+            prop_name: "maybe".into(),
             value: LiteralValue::Null,
         };
         assert!(eval_cmp_with_props(
@@ -1700,6 +1843,7 @@ mod tests {
         let cmp = PhysicalComparison::Lt {
             var: Var("a".into()),
             prop: PropId(15),
+            prop_name: "score".into(),
             value: LiteralValue::Null,
         };
         assert!(!eval_cmp_with_props(
@@ -1713,6 +1857,7 @@ mod tests {
         let cmp = PhysicalComparison::Between {
             var: Var("a".into()),
             prop: PropId(16),
+            prop_name: "range".into(),
             low: Bound::Included(LiteralValue::Null),
             high: Bound::Excluded(LiteralValue::Int(5)),
         };
@@ -1724,6 +1869,7 @@ mod tests {
         let cmp_value_null = PhysicalComparison::Between {
             var: Var("a".into()),
             prop: PropId(16),
+            prop_name: "range".into(),
             low: Bound::Unbounded,
             high: Bound::Excluded(LiteralValue::Int(5)),
         };

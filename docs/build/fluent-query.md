@@ -253,19 +253,34 @@ Validation rules enforced before planning:
 
 **Files**: `src/query/analyze.rs`, `src/query/errors.rs`, `src/catalog/*`
 
-- Resolve variables and properties to ids (`VarId`, `PropId`, `LabelId`) and attach `TypeId` + collation metadata.
-- Normalize predicates:
+- Pipeline = **`QueryAst → normalize → analyze → AnalyzedQuery`**.
+  - `normalize()` stays side-effect free: canonicalizes predicates/projections so identical trees hash identically.
+  - `analyze()` resolves every symbol against the catalog and emits typed structures the planner can consume directly.
+- Resolver details:
+  - Assign `VarId` to each match clause; store `(VarId, Var, LabelId, label_name)` inside `VarBinding`.
+  - Edge clauses become `AnalyzedEdge` with `VarId` endpoints + optional `TypeId`.
+  - Projection nodes become `AnalyzedProjection::{Var,Prop}` where prop includes `(PropId, name, type_hint, collation)`.
+  - Boolean predicates lower to `AnalyzedExpr` trees whose leaves are `AnalyzedComparison::{Eq,Range,In,...}` with resolved `VarId` + fully annotated property metadata (id/name/type/collation) so planner & executor can reason about string ordering later.
+  - Analyzer enforces resource budgets (`MAX_MATCHES`, predicate depth/node limits, `MAX_IN_VALUES`, bytes budgets) before planning ever runs.
+- Predicate normalization rules:
   1. Flatten nested `And`/`Or`.
-  2. Push `Not` to leaves (De Morgan) and rewrite where possible (`Not(Eq)` → `Ne`, `Not(IsNull)` → `IsNotNull`).
+  2. Push/absorb `Not` when legal (`Not(Eq)` → `Ne`, `Not(IsNull)` → `IsNotNull`).
   3. Sort `And`/`Or` children deterministically for plan caching.
-  4. Deduplicate identical leaves.
-  5. Validate `Between` bounds (`low <= high`) using property ordering.
-  6. Canonicalize `In` lists (sort deduplicated values using the property’s ordering/collation). Analyzer stores the sorted order in the AST so plan cache keys stay stable across platforms.
-  7. Replace empty `And` nodes with the constant `true` predicate and empty `Or` nodes with `false` (after validation ensures builders never emit them intentionally).
+  4. Deduplicate identical children.
+  5. Enforce `Between` ordering (`low <= high`) using literal ordering rules.
+  6. Canonicalize `In` lists: drop `Null`, dedupe via value sort key, then sort per property collation so fingerprints match across platforms.
+  7. Replace empty `And` with TRUE and empty `Or` with FALSE (canonical constants).
 - Reject `In` lists that normalize to empty after deduplication with `InListEmpty`.
-- Output `AnalyzedQuery` with `AnalyzedPredicate` nodes referencing dictionary ids.
-- **Exists semantics**: true iff the property key is physically present (even if value is null). `IsNotNull` couples `Exists` + non-null value; `IsNull` is true when the property is missing or explicitly null (documented so users know the distinction).
-- **Error model**: structured variants (`UnknownVariable`, `UnknownProperty`, `TypeMismatch`, `InvalidBounds`, `InListEmpty`, `VarNotMatched`, `DirectionInvalid`). Bindings surface them verbatim so developers fix queries quickly.
+- **Exists semantics**: true iff the property key is physically present (even if value is null). `IsNotNull` couples `Exists` + non-null value; `IsNull` is true when the property is missing or explicitly null.
+- Analyzer output (`AnalyzedQuery`):
+  - `vars: Vec<VarBinding>` (each includes `LabelId` + human-readable label)
+  - `edges: Vec<AnalyzedEdge>` (VarIds + optional `TypeId`)
+  - `predicate: Option<AnalyzedExpr>` (normalized, leaves carry `PropId`, `prop_name`, `type_hint`, and `collation`, defaulting to binary collation until catalog exposes more detail)
+  - `projections: Vec<AnalyzedProjection>`
+  - `distinct` flag forwarded unchanged
+  - Callers (planner, FFI) no longer hit dictionaries—every node already carries ids and string labels for explain output.
+- `Planner::plan` now just delegates to `plan_analyzed(&AnalyzedQuery)`; `Database::plan` (FFI) runs the analyzer first and bubbles errors as `FfiError::Analyzer`.
+- **Error model**: `AnalyzerError` enumerates structured variants (`UnknownVariable`, `UnknownProperty`, `TypeMismatch`, `InvalidBounds`, `InListEmpty`, `VarNotMatched`, `DirectionInvalid`, etc.). Bindings surface both the code + message so developers can branch on the failure cause.
 
 ### Error codes surfaced by FFI
 
@@ -305,7 +320,30 @@ Validation rules enforced before planning:
 
 - `And` of multiple sargable predicates on the **same** variable: choose the most selective single index (using stats) and keep the rest as residual filters in v1. Future work may intersect posting lists.
 - `And` across different variables uses joins/expand semantics already present in Stage 8.
-- `Or` across predicates on the **same** variable becomes `Union` of child scans followed by optional `Distinct`. With `distinct:false`, overlapping ranges may emit duplicate rows; `distinct:true` cleans them up later. `Or` spanning different variables lowers to multiple pipelines joined upstream (no change from Stage 8 semantics).
+- `Or` across predicates on the **same** variable becomes `Union` of any sargable children. Each branch may itself come from an `Eq`/`Range` comparison or a small `In` list—`In` expands to multiple point scans before unioning. Residual boolean nodes that are not fully pushdownable stay as `BoolFilter` so semantics match legacy behavior. With `distinct:false`, overlapping ranges may emit duplicate rows; `distinct:true` cleans them up either inside the union (when all children share the same var) or via the outer `Distinct`. `Or` spanning different variables still materializes separate pipelines joined upstream (no change from Stage 8 semantics).
+- `explain_json` calls surface the union shape — deduped unions show `"dedup": "true"` so callers can reason about duplicate elimination. Example for `SELECT DISTINCT a FROM User WHERE name='Ada' OR name='Grace'`:
+
+```json
+{
+  "plan": [
+    {
+      "op": "Project",
+      "props": { "fields": "a" },
+      "inputs": [
+        {
+          "op": "Union",
+          "props": { "vars": "a", "dedup": "true" },
+          "inputs": [
+            { "op": "PropIndexScan", "props": { "predicate": "a.name = \"Ada\"" } },
+            { "op": "PropIndexScan", "props": { "predicate": "a.name = \"Grace\"" } }
+          ]
+        }
+      ]
+    }
+  ],
+  "plan_hash": "0x…"
+}
+```
 
 **Range bound encoding**
 
@@ -334,7 +372,7 @@ Analyzer/planner attach these estimates to predicate leaves and propagate descen
 ### 4.3 Execution operators
 
 - Logical operators: `LabelScan`, `PropIndexScan`, `Expand`, `Filter`, `Union`, `Intersect`, `Distinct`, `Project`.
-- OR semantics: when all OR children reference the same `(var, label)` the planner emits a `Union` of the child scans and dedups only if `distinct` is requested. OR across different variables materializes separate pipelines combined via existing join/expand operators.
+- OR semantics: when all OR children reference the same `(var, label)` the planner emits a `Union` of the child scans (flattening nested ORs and expanding `In` leaves). `Union` streams children in order and, when marked `dedup:true`, owns duplicate removal so the planner can skip a redundant top-level `Distinct`. OR across different variables still lowers to multiple pipelines combined via join/expand operators.
 - Physical operators mirror them with iterator-style APIs.
 - `Union` and `Intersect` stream results without buffering where possible; fallback to HashSet for dedup if needed.
 - Predicate evaluator short-circuits boolean expressions using selectivity hints. `In` uses small-vector comparisons for ≤8 entries else pre-builds an `FxHashSet<ValueKey>` per operator instance.

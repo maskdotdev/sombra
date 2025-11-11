@@ -68,6 +68,9 @@ pub enum SombraError {
     /// Invalid argument or configuration.
     #[error("invalid argument: {0}")]
     Invalid(&'static str),
+    /// Invalid argument with runtime-provided context.
+    #[error("invalid argument: {0}")]
+    InvalidOwned(String),
     /// Requested item not found.
     #[error("not found")]
     NotFound,

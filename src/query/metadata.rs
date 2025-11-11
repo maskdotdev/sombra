@@ -27,6 +27,10 @@ pub trait MetadataProvider {
     fn property_name(&self, id: PropId) -> Result<String>;
     /// Returns statistics for the given (label, property) pair when available.
     fn property_stats(&self, label: LabelId, prop: PropId) -> Result<Option<PropStats>>;
+    /// Returns the type hint for the given property, when known.
+    fn property_type_hint(&self, _prop: PropId) -> Result<Option<TypeTag>> {
+        Ok(None)
+    }
 }
 
 /// Metadata provider backed by the Stage 5 string dictionary.

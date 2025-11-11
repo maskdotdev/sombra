@@ -51,6 +51,8 @@ pub enum PhysicalOp {
     LabelScan {
         /// The label ID to scan for.
         label: LabelId,
+        /// Optional human-readable label.
+        label_name: Option<String>,
         /// Variable name to bind matched nodes.
         as_var: Var,
     },
@@ -58,8 +60,12 @@ pub enum PhysicalOp {
     PropIndexScan {
         /// The label of nodes to scan.
         label: LabelId,
+        /// Optional human-readable label.
+        label_name: Option<String>,
         /// The property to filter on.
         prop: PropId,
+        /// Property name retained for explain output.
+        prop_name: String,
         /// The predicate to apply.
         pred: PropPredicate,
         /// Estimated predicate selectivity.
@@ -86,6 +92,13 @@ pub enum PhysicalOp {
         pred: PropPredicate,
         /// Estimated predicate selectivity.
         selectivity: f64,
+    },
+    /// Concatenates multiple child streams.
+    Union {
+        /// Variables preserved by the union.
+        vars: Vec<Var>,
+        /// Whether to deduplicate outputs eagerly.
+        dedup: bool,
     },
     /// Intersects multiple node ID streams.
     Intersect {
@@ -133,6 +146,8 @@ pub enum PropPredicate {
         var: Var,
         /// Property ID to check.
         prop: PropId,
+        /// Property name for explain output.
+        prop_name: String,
         /// Value to compare against.
         value: LiteralValue,
     },
@@ -142,6 +157,8 @@ pub enum PropPredicate {
         var: Var,
         /// Property ID to check.
         prop: PropId,
+        /// Property name for explain output.
+        prop_name: String,
         /// Lower bound of the range (inclusive or exclusive).
         lower: Bound<LiteralValue>,
         /// Upper bound of the range (inclusive or exclusive).
@@ -171,6 +188,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal value to compare against.
         value: LiteralValue,
     },
@@ -180,6 +199,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal value to compare against.
         value: LiteralValue,
     },
@@ -189,6 +210,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal value to compare against.
         value: LiteralValue,
     },
@@ -198,6 +221,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal value to compare against.
         value: LiteralValue,
     },
@@ -207,6 +232,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal value to compare against.
         value: LiteralValue,
     },
@@ -216,6 +243,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal value to compare against.
         value: LiteralValue,
     },
@@ -225,6 +254,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Lower bound literal (inclusive/exclusive).
         low: Bound<LiteralValue>,
         /// Upper bound literal (inclusive/exclusive).
@@ -236,6 +267,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
         /// Literal set to test membership against.
         values: Vec<LiteralValue>,
     },
@@ -245,6 +278,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
     },
     /// Checks whether the property value is null or missing.
     IsNull {
@@ -252,6 +287,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
     },
     /// Checks whether the property is present and not null.
     IsNotNull {
@@ -259,6 +296,8 @@ pub enum PhysicalComparison {
         var: Var,
         /// Resolved property identifier.
         prop: PropId,
+        /// Property name used for explain output.
+        prop_name: String,
     },
 }
 

@@ -2,9 +2,11 @@
 //! optimisation.
 
 use crate::query::{
-    ast::{BoolExpr, EdgeDirection, Projection, Var},
+    analyze::{AnalyzedExpr, AnalyzedProjection, EdgeTypeRef, PropRef},
+    ast::{EdgeDirection, Var},
     value::Value,
 };
+use crate::types::LabelId;
 use std::ops::Bound;
 
 /// Logical operator tree for a query.
@@ -52,6 +54,8 @@ pub enum LogicalOp {
     LabelScan {
         /// Optional label name to filter by.
         label: Option<String>,
+        /// Resolved label identifier.
+        label_id: LabelId,
         /// Variable name to bind matched nodes.
         as_var: Var,
     },
@@ -59,8 +63,10 @@ pub enum LogicalOp {
     PropIndexScan {
         /// Optional label to scan within.
         label: Option<String>,
-        /// Property name to filter on.
-        prop: String,
+        /// Resolved label identifier.
+        label_id: LabelId,
+        /// Property reference to filter on.
+        prop: PropRef,
         /// Predicate to apply on the property.
         predicate: PropPredicate,
         /// Estimated predicate selectivity.
@@ -77,7 +83,7 @@ pub enum LogicalOp {
         /// Direction of edge traversal.
         direction: EdgeDirection,
         /// Optional edge type filter.
-        edge_type: Option<String>,
+        edge_type: EdgeTypeRef,
         /// Whether to ensure distinct target nodes.
         distinct_nodes: bool,
     },
@@ -87,6 +93,13 @@ pub enum LogicalOp {
         predicate: PropPredicate,
         /// Estimated predicate selectivity.
         selectivity: f64,
+    },
+    /// Unions multiple child streams.
+    Union {
+        /// Variables preserved by the union.
+        vars: Vec<Var>,
+        /// Whether to deduplicate outputs eagerly.
+        dedup: bool,
     },
     /// Intersects multiple node ID streams.
     Intersect {
@@ -103,16 +116,17 @@ pub enum LogicalOp {
     /// Projects specific fields into the output.
     Project {
         /// Fields to include in the projection.
-        fields: Vec<Projection>,
+        fields: Vec<AnalyzedProjection>,
     },
     /// Removes duplicate rows from the result stream.
     Distinct,
     /// Filters rows using a boolean predicate tree.
     BoolFilter {
         /// Predicate to evaluate.
-        expr: BoolExpr,
+        expr: AnalyzedExpr,
     },
 }
+
 /// Simple property predicate used for pushdown planning decisions.
 #[derive(Clone, Debug)]
 pub enum PropPredicate {
@@ -121,7 +135,7 @@ pub enum PropPredicate {
         /// Variable to test the property on.
         var: Var,
         /// Property name to check.
-        prop: String,
+        prop: PropRef,
         /// Expected value for the property.
         value: Value,
     },
@@ -130,7 +144,7 @@ pub enum PropPredicate {
         /// Variable to test the property on.
         var: Var,
         /// Property name to check.
-        prop: String,
+        prop: PropRef,
         /// Lower bound for the range (inclusive or exclusive).
         lower: Bound<Value>,
         /// Upper bound for the range (inclusive or exclusive).

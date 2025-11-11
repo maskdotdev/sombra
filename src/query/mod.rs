@@ -18,6 +18,9 @@ pub mod builder;
 /// Query normalization utilities (Phase 3).
 pub mod analyze;
 
+/// Query error types surfaced across planner/analyzer boundaries.
+pub mod errors;
+
 /// Canonical scalar value representation shared across the query stack.
 pub mod value;
 
