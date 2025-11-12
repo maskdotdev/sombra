@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { Database } from '..'
+import { Database, eq } from '..'
 
 function tempPath(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sombra-node-'))
@@ -12,24 +12,38 @@ function tempPath(): string {
 
 test('executing fluent query returns seeded rows', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
-  const result = await db
+  const rows = await db
     .query()
-    .match('User')
-    .where('n0', (pred) => pred.eq('name', 'Ada'))
-    .select(['n0'])
+    .nodes('User')
+    .where(eq('name', 'Ada'))
     .execute()
 
-  t.true(Array.isArray(result.rows))
-  t.is(result.rows.length, 1)
-  const entity = result.rows[0].n0 as { _id: number; props: Record<string, unknown> }
+  t.true(Array.isArray(rows))
+  t.is(rows.length, 1)
+  const entity = rows[0].n0 as { _id: number; props: Record<string, unknown> }
   t.truthy(entity)
   t.true(typeof entity._id === 'number')
   t.true(typeof entity.props === 'object')
 })
 
+test('execute optionally returns metadata payload', async (t) => {
+  const db = Database.open(tempPath()).seedDemo()
+  const payload = await db
+    .query()
+    .nodes('User')
+    .select('name')
+    .requestId('req-meta')
+    .execute(true)
+
+  t.true(Array.isArray(payload.rows))
+  t.true(payload.rows.length > 0)
+  t.is(payload.request_id, 'req-meta')
+  t.true(Array.isArray(payload.features))
+})
+
 test('streaming query iterates over results', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
-  const stream = db.query().match('User').select(['n0']).stream()
+  const stream = db.query().nodes('User').stream()
 
   const encountered: Array<number> = []
   for await (const row of stream) {
@@ -58,9 +72,9 @@ test('requestId flows through explain', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
   const plan = await db
     .query()
+    .nodes('User')
     .requestId('req-node')
-    .match('User')
-    .select(['n0'])
+    .where(eq('name', 'Ada'))
     .explain()
 
   t.is(plan.request_id, 'req-node')
@@ -153,35 +167,29 @@ test('pragma toggles autocheckpoint window', (t) => {
 
 test('property projections return scalar columns', async (t) => {
   const db = Database.open(tempPath()).seedDemo()
-  const result = await db
+  const rows = await db
     .query()
-    .match({ var: 'a', label: 'User' })
-    .select([{ var: 'a', prop: 'name', as: 'label' }])
+    .nodes('User')
+    .select('name')
     .execute()
 
-  t.true(result.rows.length > 0)
-  t.true(typeof result.rows[0].label === 'string')
+  t.true(rows.length > 0)
+  t.true(typeof rows[0].name === 'string')
 })
 
 test('DateTime literals support Date objects and ISO strings', (t) => {
   const db = Database.open(tempPath())
-  const dateSpec = db
-    .query()
-    .match('User')
-    .where('n0', (pred) => pred.eq('created_at', new Date('2020-01-01T00:00:00Z')))
-    ._build()
+  const dateBuilder = db.query()
+  dateBuilder.nodes('User').where(eq('created_at', new Date('2020-01-01T00:00:00Z')))
+  const dateSpec = dateBuilder._build()
   t.is(dateSpec.predicate?.value?.t ?? dateSpec.predicate?.args?.[0]?.value?.t, 'DateTime')
 
-  const isoSpec = db
-    .query()
-    .match('User')
-    .where('n0', (pred) => pred.eq('created_at', '2020-01-01T00:00:00Z'))
-    ._build()
+  const isoBuilder = db.query()
+  isoBuilder.nodes('User').where(eq('created_at', '2020-01-01T00:00:00Z'))
+  const isoSpec = isoBuilder._build()
   t.is(isoSpec.predicate?.value?.t ?? isoSpec.predicate?.args?.[0]?.value?.t, 'DateTime')
 
-  t.throws(() =>
-    db.query().match('User').where('n0', (pred) => pred.eq('created_at', '2020-01-01T00:00:00')),
-  )
+  t.throws(() => db.query().nodes('User').where(eq('created_at', '2020-01-01T00:00:00')))
 })
 
 test('runtime schema validation rejects unknown properties', (t) => {
@@ -195,12 +203,11 @@ test('runtime schema validation rejects unknown properties', (t) => {
   t.notThrows(() =>
     db
       .query()
-      .match('User')
-      .where('n0', (pred) => pred.eq('name', 'Ada'))
-      .select(['n0']),
+      .nodes('User')
+      .where(eq('name', 'Ada')),
   )
   t.throws(
-    () => db.query().match('User').where('n0', (pred) => pred.eq('unknown_prop', 'oops')),
+    () => db.query().nodes('User').where(eq('unknown_prop', 'oops')),
     { message: /Unknown property 'unknown_prop'/ },
   )
   t.throws(

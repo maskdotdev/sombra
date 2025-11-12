@@ -87,7 +87,7 @@ Key points:
 **Node (TypeScript)**
 
 ```ts
-const result = await db
+const rows = await db
   .query()
   .match({ var: 'a', label: 'User' })
   .where('FOLLOWS', { var: 'b', label: 'User' })
@@ -96,8 +96,15 @@ const result = await db
   .select([{ var: 'a', as: 'source' }, { var: 'b', as: 'target' }])
   .execute();
 
-const rows = result.rows;
 console.log(rows[0]?.source._id, rows[0]?.target.props.name);
+// Pass true if you need metadata such as request_id:
+const { rows: withMeta, request_id } = await db
+  .query()
+  .nodes('User')
+  .requestId('demo')
+  .select('name')
+  .execute(true);
+console.log(request_id, withMeta.length);
 ```
 
 **Python**

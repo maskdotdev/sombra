@@ -2,6 +2,7 @@
 const native = require('./index.js')
 
 const CREATE_HANDLE_SYMBOL = Symbol('sombra.createHandle')
+const EXPR_BRAND = Symbol('sombra.expr')
 const NS_PER_MILLISECOND = 1_000_000n
 const I64_MIN = -(1n << 63n)
 const I64_MAX = (1n << 63n) - 1n
@@ -25,6 +26,17 @@ function normalizeTarget(target, fallback) {
     return { var: varName, label }
   }
   throw new TypeError("target must be a string or an object with optional 'var'/'label'")
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  if (Array.isArray(value)) {
+    return false
+  }
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
 }
 
 function normalizeRuntimeSchema(schema) {
@@ -125,6 +137,123 @@ function normalizePropName(prop) {
     throw new TypeError('property name must be a non-empty string')
   }
   return prop
+}
+
+function createExpr(node) {
+  if (!node || typeof node !== 'object') {
+    throw new TypeError('expression node must be an object')
+  }
+  return Object.freeze({ __expr: EXPR_BRAND, _node: node })
+}
+
+function isExpr(value) {
+  return Boolean(value && value.__expr === EXPR_BRAND && value._node)
+}
+
+function unwrapExpr(value, ctx = 'expression') {
+  if (!isExpr(value)) {
+    throw new TypeError(`${ctx} must be created via the sombra expression helpers`)
+  }
+  return value._node
+}
+
+function andExpr(...exprs) {
+  if (exprs.length === 0) {
+    throw new TypeError('and() requires at least one expression')
+  }
+  const nodes = exprs.map((expr, idx) => unwrapExpr(expr, `and()[${idx}]`))
+  return createExpr({ op: 'and', args: nodes })
+}
+
+function orExpr(...exprs) {
+  if (exprs.length === 0) {
+    throw new TypeError('or() requires at least one expression')
+  }
+  const nodes = exprs.map((expr, idx) => unwrapExpr(expr, `or()[${idx}]`))
+  return createExpr({ op: 'or', args: nodes })
+}
+
+function notExpr(expr) {
+  const node = unwrapExpr(expr, 'not() argument')
+  return createExpr({ op: 'not', args: [node] })
+}
+
+function assertPropName(prop, ctx) {
+  if (typeof prop !== 'string' || prop.trim() === '') {
+    throw new TypeError(`${ctx} requires a non-empty property name`)
+  }
+  return prop
+}
+
+function comparisonExpr(op, prop, payload) {
+  return createExpr({ op, prop: assertPropName(prop, op), ...payload })
+}
+
+function eqExpr(prop, value) {
+  return comparisonExpr('eq', prop, { value })
+}
+
+function neExpr(prop, value) {
+  return comparisonExpr('ne', prop, { value })
+}
+
+function ltExpr(prop, value) {
+  return comparisonExpr('lt', prop, { value })
+}
+
+function leExpr(prop, value) {
+  return comparisonExpr('le', prop, { value })
+}
+
+function gtExpr(prop, value) {
+  return comparisonExpr('gt', prop, { value })
+}
+
+function geExpr(prop, value) {
+  return comparisonExpr('ge', prop, { value })
+}
+
+function betweenExpr(prop, low, high, opts = undefined) {
+  if (low === undefined || high === undefined) {
+    throw new TypeError('between() requires both low and high values')
+  }
+  let inclusive = [true, true]
+  if (opts && opts.inclusive !== undefined) {
+    const tuple = opts.inclusive
+    if (
+      !Array.isArray(tuple) ||
+      tuple.length !== 2 ||
+      typeof tuple[0] !== 'boolean' ||
+      typeof tuple[1] !== 'boolean'
+    ) {
+      throw new TypeError('between().inclusive must be a [boolean, boolean] tuple')
+    }
+    inclusive = tuple
+  }
+  return comparisonExpr('between', prop, { low, high, inclusive })
+}
+
+function inListExpr(prop, values) {
+  if (!Array.isArray(values)) {
+    throw new TypeError('inList() requires an array of literal values')
+  }
+  if (values.length === 0) {
+    throw new TypeError('inList() requires at least one literal value')
+  }
+  values.forEach((value) => ensureScalarLiteral(value, 'inList()'))
+  return comparisonExpr('in', prop, { values: [...values] })
+}
+
+function existsExpr(prop) {
+  return comparisonExpr('exists', prop, {})
+}
+
+function isNullExpr(prop) {
+  return comparisonExpr('isNull', prop, {})
+}
+
+function isNotNullExpr(prop) {
+  return comparisonExpr('isNotNull', prop, {})
 }
 
 function ensureScalarLiteral(value, ctx) {
@@ -530,6 +659,208 @@ class PredicateBuilder {
   }
 }
 
+class NodeScope {
+  constructor(builder, varName) {
+    this._builder = builder
+    this._var = varName
+  }
+
+  where(exprOrFn) {
+    const stamped = this._stampExpr(exprOrFn, 'where()')
+    this._builder._appendPredicate(stamped, 'and')
+    return this
+  }
+
+  andWhere(exprOrFn) {
+    const stamped = this._stampExpr(exprOrFn, 'andWhere()')
+    this._builder._appendPredicate(stamped, 'and')
+    return this
+  }
+
+  orWhere(exprOrFn) {
+    const stamped = this._stampExpr(exprOrFn, 'orWhere()')
+    this._builder._appendPredicate(stamped, 'or')
+    return this
+  }
+
+  select(...keys) {
+    if (keys.length === 0) {
+      throw new TypeError('select() requires at least one property name')
+    }
+    ensureScopeLabel(this._builder, this._var)
+    const validator = this._builder._makePropValidator(this._var)
+    for (const key of keys) {
+      const normalized = validator(key)
+      this._builder._projections.push({ kind: 'prop', var: this._var, prop: normalized, alias: null })
+    }
+    return this
+  }
+
+  distinct() {
+    this._builder.distinct(true)
+    return this
+  }
+
+  direction(dir) {
+    this._builder.direction(dir)
+    return this
+  }
+
+  bidirectional(flag = true) {
+    return this.direction(flag === false ? 'out' : 'both')
+  }
+
+  requestId(value) {
+    this._builder.requestId(value)
+    return this
+  }
+
+  explain(options) {
+    return this._builder.explain(options)
+  }
+
+  execute(withMeta = false) {
+    return this._builder.execute(withMeta)
+  }
+
+  stream() {
+    return this._builder.stream()
+  }
+
+  _stampExpr(exprOrFn, ctx) {
+    let exprValue = exprOrFn
+    if (typeof exprValue === 'function') {
+      exprValue = exprValue(this)
+    }
+    return stampExprForVar(this._builder, this._var, exprValue, ctx)
+  }
+}
+
+function ensureScopeLabel(builder, varName) {
+  const label = builder._labelForVar(varName)
+  if (!label) {
+    throw new Error(`variable '${varName}' requires a label before applying predicates`)
+  }
+  return label
+}
+
+function stampExprForVar(builder, varName, exprValue, ctx) {
+  if (!exprValue) {
+    throw new TypeError(`${ctx} requires an expression built via the sombra helpers`)
+  }
+  ensureScopeLabel(builder, varName)
+  const node = unwrapExpr(exprValue, ctx)
+  return translateExprNode(builder, varName, node, ctx)
+}
+
+function translateExprNode(builder, varName, node, ctx, validator = null) {
+  if (!node || typeof node !== 'object') {
+    throw new TypeError(`${ctx} must be built via the sombra expression helpers`)
+  }
+  const op = node.op
+  if (op === 'and' || op === 'or') {
+    if (!Array.isArray(node.args) || node.args.length === 0) {
+      throw new TypeError(`${ctx} ${op}() requires at least one child expression`)
+    }
+    return {
+      op,
+      args: node.args.map((child, idx) => translateExprNode(builder, varName, child, `${ctx}.${op}[${idx}]`, validator)),
+    }
+  }
+  if (op === 'not') {
+    if (!Array.isArray(node.args) || node.args.length !== 1) {
+      throw new TypeError(`${ctx} not() requires exactly one child expression`)
+    }
+    return { op: 'not', args: [translateExprNode(builder, varName, node.args[0], `${ctx}.not`, validator)] }
+  }
+  const propValidator = validator ?? builder._makePropValidator(varName)
+  return translateComparisonNode(builder, varName, node, ctx, propValidator)
+}
+
+function translateComparisonNode(builder, varName, node, ctx, validator) {
+  const prop = validator(node.prop)
+  switch (node.op) {
+    case 'eq':
+    case 'ne':
+    case 'lt':
+    case 'le':
+    case 'gt':
+    case 'ge':
+      if (node.value === undefined) {
+        throw new TypeError(`${ctx} ${node.op}() requires a value`)
+      }
+      return {
+        op: node.op,
+        var: varName,
+        prop,
+        value: literalValue(node.value),
+      }
+    case 'between': {
+      if (node.low === undefined || node.high === undefined) {
+        throw new TypeError(`${ctx} between() requires both low and high values`)
+      }
+      const inclusive = normalizeInclusiveTuple(node.inclusive)
+      return {
+        op: 'between',
+        var: varName,
+        prop,
+        low: literalValue(node.low),
+        high: literalValue(node.high),
+        inclusive,
+      }
+    }
+    case 'in': {
+      if (!Array.isArray(node.values) || node.values.length === 0) {
+        throw new TypeError(`${ctx} inList() requires at least one literal value`)
+      }
+      const tagged = convertInListValues(node.values)
+      return {
+        op: 'in',
+        var: varName,
+        prop,
+        values: tagged,
+      }
+    }
+    case 'exists':
+    case 'isNull':
+    case 'isNotNull':
+      return { op: node.op, var: varName, prop }
+    default:
+      throw new Error(`unsupported expression operator '${node.op}'`)
+  }
+}
+
+function normalizeInclusiveTuple(tuple) {
+  if (tuple === undefined) {
+    return [true, true]
+  }
+  if (
+    !Array.isArray(tuple) ||
+    tuple.length !== 2 ||
+    typeof tuple[0] !== 'boolean' ||
+    typeof tuple[1] !== 'boolean'
+  ) {
+    throw new TypeError('between().inclusive must be a [boolean, boolean] tuple')
+  }
+  return tuple
+}
+
+function convertInListValues(values) {
+  const tagged = values.map((value) => {
+    ensureScalarLiteral(value, 'inList()')
+    return literalValue(value)
+  })
+  const exemplar = tagged.find((entry) => entry.t !== 'Null')
+  if (exemplar) {
+    for (const entry of tagged) {
+      if (entry.t !== 'Null' && entry.t !== exemplar.t) {
+        throw new TypeError('inList() requires all literals to share the same type')
+      }
+    }
+  }
+  return tagged
+}
+
 class QueryBuilder {
   constructor(db, schema = null) {
     this._db = db
@@ -545,11 +876,71 @@ class QueryBuilder {
     this._requestId = null
   }
 
+  nodes(label) {
+    if (typeof label !== 'string' || label.trim() === '') {
+      throw new TypeError('nodes(label) requires a non-empty label string')
+    }
+    const varName = this._nextAutoVar()
+    this._ensureMatch(varName, label)
+    this._lastVar = varName
+    return new NodeScope(this, varName)
+  }
+
   match(target) {
+    if (isPlainObject(target)) {
+      const hasVarKey = Object.prototype.hasOwnProperty.call(target, 'var')
+      const hasLabelKey = Object.prototype.hasOwnProperty.call(target, 'label')
+      if (!hasVarKey && !hasLabelKey) {
+        return this._matchMap(target)
+      }
+    }
     const fallback = this._nextAutoVar()
     const normalized = normalizeTarget(target, fallback)
     this._ensureMatch(normalized.var, normalized.label)
     this._lastVar = normalized.var
+    return this
+  }
+
+  on(varName, callback) {
+    if (typeof varName !== 'string' || varName.trim() === '') {
+      throw new TypeError('on(var, fn) requires a non-empty variable name')
+    }
+    if (typeof callback !== 'function') {
+      throw new TypeError('on(var, fn) requires a callback function')
+    }
+    this._assertMatch(varName)
+    ensureScopeLabel(this, varName)
+    const scope = new NodeScope(this, varName)
+    callback(scope)
+    return this
+  }
+
+  _matchMap(targetMap) {
+    const entries = Object.entries(targetMap)
+    if (entries.length === 0) {
+      throw new TypeError('match({...}) requires at least one entry')
+    }
+    for (const [varNameRaw, value] of entries) {
+      if (typeof varNameRaw !== 'string' || varNameRaw.trim() === '') {
+        throw new TypeError('match({...}) keys must be non-empty strings')
+      }
+      const varName = varNameRaw
+      let normalized
+      if (typeof value === 'string') {
+        normalized = { var: varName, label: value }
+      } else if (value === null || value === undefined) {
+        normalized = { var: varName, label: null }
+      } else if (isPlainObject(value)) {
+        normalized = normalizeTarget({ ...value, var: varName }, varName)
+      } else {
+        throw new TypeError("match({...}) values must be label strings or objects with optional 'label'")
+      }
+      this._ensureMatch(normalized.var, normalized.label)
+    }
+    const lastEntry = entries[entries.length - 1]
+    if (lastEntry) {
+      this._lastVar = lastEntry[0]
+    }
     return this
   }
 
@@ -689,8 +1080,16 @@ class QueryBuilder {
     return this._db._explain(spec)
   }
 
-  async execute() {
-    return this._db._execute(this._build())
+  async execute(withMeta = false) {
+    const payload = await this._db._execute(this._build())
+    if (withMeta) {
+      return payload
+    }
+    const rows = payload && Array.isArray(payload.rows) ? payload.rows : null
+    if (!rows) {
+      throw new Error('query execution payload missing rows array')
+    }
+    return rows
   }
 
   stream() {
@@ -1116,6 +1515,21 @@ module.exports = {
   Database,
   PredicateBuilder,
   QueryBuilder,
+  NodeScope,
   openDatabase,
   native,
+  and: andExpr,
+  or: orExpr,
+  not: notExpr,
+  eq: eqExpr,
+  ne: neExpr,
+  lt: ltExpr,
+  le: leExpr,
+  gt: gtExpr,
+  ge: geExpr,
+  between: betweenExpr,
+  inList: inListExpr,
+  exists: existsExpr,
+  isNull: isNullExpr,
+  isNotNull: isNotNullExpr,
 }

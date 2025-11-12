@@ -35,17 +35,19 @@ The test suite uses [AVA](https://github.com/avajs/ava) and exercises the fluent
 ## Usage example
 
 ```ts
-import { Database } from 'sombradb'
+import { Database, eq } from 'sombradb'
 
 const db = Database.open('/tmp/sombra.db').seedDemo()
 const rows = await db
   .query()
-  .match('User')
-  .where('n0', (pred) => pred.eq('name', 'Ada'))
-  .select([{ var: 'n0', prop: 'name', as: 'label' }])
+  .nodes('User')
+  .where(eq('name', 'Ada'))
+  .select('name')
   .execute()
 
 console.log(rows)
+// Pass true if you need the metadata wrapper ({ rows, request_id, features }):
+const { request_id } = await db.query().nodes('User').requestId('example').execute(true)
 
 const createdId = db.createNode('User', { name: 'New User', bio: 'Hello from Node' })
 db.updateNode(createdId, { set: { bio: 'updated' } })

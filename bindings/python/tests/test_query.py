@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from sombra_py import Database
-from sombra_py.query import _literal_value
+from sombra_py.query import _literal_value, eq
 
 
 def temp_db_path() -> str:
@@ -17,13 +17,7 @@ def test_execute_query_returns_rows() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    result = (
-        db.query()
-        .match("User")
-        .where_var("n0", lambda pred: pred.eq("name", "Ada"))
-        .select(["n0"])
-        .execute()
-    )
+    result = db.query().nodes("User").where(eq("name", "Ada")).execute()
     rows = result.rows()
     assert len(rows) == 1
     record = rows[0]["n0"]
@@ -38,7 +32,7 @@ def test_stream_iterates_results() -> None:
 
     async def collect():
         results = []
-        async for row in db.query().match("User").select(["n0"]).stream():
+        async for row in db.query().nodes("User").stream():
             results.append(row)
         return results
 
@@ -60,13 +54,7 @@ def test_request_id_round_trip() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    plan = (
-        db.query()
-        .request_id("req-py")
-        .match("User")
-        .select(["n0"])
-        .explain()
-    )
+    plan = db.query().nodes("User").request_id("req-py").where(eq("name", "Ada")).explain()
     assert plan["request_id"] == "req-py"
 
 
@@ -148,15 +136,10 @@ def test_property_projections_return_scalars() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    result = (
-        db.query()
-        .match({"var": "a", "label": "User"})
-        .select([{"var": "a", "prop": "name", "as": "alias"}])
-        .execute()
-    )
+    result = db.query().nodes("User").select("name").execute()
     rows = result.rows()
     assert len(rows) > 0
-    assert isinstance(rows[0]["alias"], str)
+    assert isinstance(rows[0]["name"], str)
 
 
 def test_literal_value_datetime_supports_timezone() -> None:
@@ -178,17 +161,17 @@ def test_runtime_schema_validation_rejects_unknown_property() -> None:
     db = Database.open(temp_db_path(), schema={"User": {"name": {"type": "string"}}})
     db.seed_demo()
 
-    db.query().match("User").where_var("n0", lambda pred: pred.eq("name", "Ada"))
+    db.query().nodes("User").where(eq("name", "Ada"))
 
     try:
-        db.query().match("User").where_var("n0", lambda pred: pred.eq("unknown_prop", "x"))
+        db.query().nodes("User").where(eq("unknown_prop", "x"))
     except ValueError as exc:
         assert "Unknown property 'unknown_prop'" in str(exc)
     else:
         raise AssertionError("expected ValueError for invalid predicate property")
 
     try:
-        db.query().match("User").select([{"var": "n0", "prop": "bogus"}])
+        db.query().nodes("User").select("bogus")
     except ValueError as exc:
         assert "Unknown property 'bogus'" in str(exc)
     else:

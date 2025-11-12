@@ -168,6 +168,137 @@ def _normalize_labels(labels: Union[str, Sequence[str]]) -> List[str]:
     raise ValueError("labels must be a string or sequence of strings")
 
 
+class Expr:
+    """Opaque expression tree produced by the helper functions below."""
+
+    __slots__ = ("_node",)
+
+    def __init__(self, node: Dict[str, Any]):
+        if not isinstance(node, dict):
+            raise TypeError("expression node must be a dict")
+        self._node = node
+
+
+def _wrap_expr(node: Dict[str, Any]) -> Expr:
+    return Expr(node)
+
+
+def _ensure_expr(value: Any, ctx: str) -> Dict[str, Any]:
+    if isinstance(value, Expr):
+        return value._node
+    raise TypeError(f"{ctx} must be created via the sombra query helpers")
+
+
+def _ensure_expr_prop(prop: Any, ctx: str) -> str:
+    if not isinstance(prop, str) or not prop.strip():
+        raise ValueError(f"{ctx} requires a non-empty property name")
+    return prop
+
+
+def _ensure_scalar_literal(value: Any, ctx: str) -> None:
+    if isinstance(value, (list, tuple, set, dict)):
+        raise TypeError(f"{ctx} does not accept nested arrays or objects")
+    if isinstance(value, (datetime, bytes, bytearray, memoryview)):
+        return
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return
+    raise TypeError(f"{ctx} requires scalar literal values")
+
+
+def and_(*exprs: Expr) -> Expr:
+    if not exprs:
+        raise ValueError("and_() requires at least one expression")
+    nodes = [_ensure_expr(expr, f"and_[{idx}]") for idx, expr in enumerate(exprs)]
+    return _wrap_expr({"op": "and", "args": nodes})
+
+
+def or_(*exprs: Expr) -> Expr:
+    if not exprs:
+        raise ValueError("or_() requires at least one expression")
+    nodes = [_ensure_expr(expr, f"or_[{idx}]") for idx, expr in enumerate(exprs)]
+    return _wrap_expr({"op": "or", "args": nodes})
+
+
+def not_(expr: Expr) -> Expr:
+    node = _ensure_expr(expr, "not_() argument")
+    return _wrap_expr({"op": "not", "args": [node]})
+
+
+def eq(prop: str, value: LiteralInput) -> Expr:
+    return _wrap_expr({"op": "eq", "prop": _ensure_expr_prop(prop, "eq"), "value": value})
+
+
+def ne(prop: str, value: LiteralInput) -> Expr:
+    return _wrap_expr({"op": "ne", "prop": _ensure_expr_prop(prop, "ne"), "value": value})
+
+
+def lt(prop: str, value: LiteralInput) -> Expr:
+    return _wrap_expr({"op": "lt", "prop": _ensure_expr_prop(prop, "lt"), "value": value})
+
+
+def le(prop: str, value: LiteralInput) -> Expr:
+    return _wrap_expr({"op": "le", "prop": _ensure_expr_prop(prop, "le"), "value": value})
+
+
+def gt(prop: str, value: LiteralInput) -> Expr:
+    return _wrap_expr({"op": "gt", "prop": _ensure_expr_prop(prop, "gt"), "value": value})
+
+
+def ge(prop: str, value: LiteralInput) -> Expr:
+    return _wrap_expr({"op": "ge", "prop": _ensure_expr_prop(prop, "ge"), "value": value})
+
+
+def between(
+    prop: str,
+    low: LiteralInput,
+    high: LiteralInput,
+    *,
+    inclusive: Optional[Sequence[bool]] = None,
+) -> Expr:
+    if inclusive is not None:
+        if (
+            not isinstance(inclusive, Sequence)
+            or len(inclusive) != 2
+            or not all(isinstance(flag, bool) for flag in inclusive)
+        ):
+            raise ValueError("inclusive must be a two-element sequence of booleans")
+        flags: Optional[List[bool]] = [bool(inclusive[0]), bool(inclusive[1])]
+    else:
+        flags = None
+    return _wrap_expr(
+        {
+            "op": "between",
+            "prop": _ensure_expr_prop(prop, "between"),
+            "low": low,
+            "high": high,
+            "inclusive": flags,
+        }
+    )
+
+
+def in_list(prop: str, values: Sequence[LiteralInput]) -> Expr:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        raise TypeError("in_list() requires a sequence of literal values")
+    items = list(values)
+    if not items:
+        raise ValueError("in_list() requires at least one literal")
+    for idx, item in enumerate(items):
+        _ensure_scalar_literal(item, f"in_list()[{idx}]")
+    return _wrap_expr({"op": "in", "prop": _ensure_expr_prop(prop, "in_list"), "values": items})
+
+
+def exists(prop: str) -> Expr:
+    return _wrap_expr({"op": "exists", "prop": _ensure_expr_prop(prop, "exists")})
+
+
+def is_null(prop: str) -> Expr:
+    return _wrap_expr({"op": "isNull", "prop": _ensure_expr_prop(prop, "is_null")})
+
+
+def is_not_null(prop: str) -> Expr:
+    return _wrap_expr({"op": "isNotNull", "prop": _ensure_expr_prop(prop, "is_not_null")})
+
+
 _PRAGMA_SENTINEL = object()
 
 
@@ -437,6 +568,182 @@ class _PredicateBuilder:
         callback(nested)
         expr = nested._finalize_expr()
         return self._push(expr)
+
+
+class _NodeScope:
+    def __init__(self, builder: "QueryBuilder", var_name: str):
+        self._builder = builder
+        self._var = var_name
+
+    def where(self, expr: Union[Expr, Callable[["_NodeScope"], Expr]]) -> "_NodeScope":
+        stamped = _stamp_expr_for_var(self._builder, self._var, expr, "where()", self)
+        self._builder._append_predicate(stamped, combinator="and")
+        return self
+
+    def and_where(self, expr: Union[Expr, Callable[["_NodeScope"], Expr]]) -> "_NodeScope":
+        stamped = _stamp_expr_for_var(self._builder, self._var, expr, "and_where()", self)
+        self._builder._append_predicate(stamped, combinator="and")
+        return self
+
+    def or_where(self, expr: Union[Expr, Callable[["_NodeScope"], Expr]]) -> "_NodeScope":
+        stamped = _stamp_expr_for_var(self._builder, self._var, expr, "or_where()", self)
+        self._builder._append_predicate(stamped, combinator="or")
+        return self
+
+    def select(self, *keys: str) -> "_NodeScope":
+        if not keys:
+            raise ValueError("select() requires at least one property name")
+        self._builder._select_props(self._var, keys)
+        return self
+
+    def distinct(self) -> "_NodeScope":
+        self._builder.distinct()
+        return self
+
+    def direction(self, direction: str) -> "_NodeScope":
+        self._builder.direction(direction)
+        return self
+
+    def bidirectional(self) -> "_NodeScope":
+        self._builder.bidirectional()
+        return self
+
+    def request_id(self, value: Optional[str]) -> "_NodeScope":
+        self._builder.request_id(value)
+        return self
+
+    def explain(self, *, redact_literals: bool = False) -> QueryResult:
+        return self._builder.explain(redact_literals=redact_literals)
+
+    def execute(self) -> QueryResult:
+        return self._builder.execute()
+
+    def stream(self) -> AsyncIterator[Any]:
+        return self._builder.stream()
+
+    def _as_expr(self, expr: Union[Expr, Callable[["_NodeScope"], Expr]], ctx: str) -> Expr:
+        if callable(expr):
+            result = expr(self)
+        else:
+            result = expr
+        if not isinstance(result, Expr):
+            raise TypeError(f"{ctx} must return an Expr built via the sombra query helpers")
+        return result
+
+
+def _stamp_expr_for_var(
+    builder: "QueryBuilder",
+    var_name: str,
+    expr: Union[Expr, Callable[["_NodeScope"], Expr]],
+    ctx: str,
+    scope: Optional[_NodeScope] = None,
+) -> Dict[str, Any]:
+    active_scope = scope or _NodeScope(builder, var_name)
+    resolved = active_scope._as_expr(expr, ctx)
+    node = _ensure_expr(resolved, ctx)
+    builder._require_label(var_name)
+    return _translate_expr_node(builder, var_name, node, ctx)
+
+
+def _translate_expr_node(
+    builder: "QueryBuilder",
+    var_name: str,
+    node: Dict[str, Any],
+    ctx: str,
+    validator: Optional[Callable[[str], str]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(node, dict):
+        raise TypeError(f"{ctx} must be built via the sombra query helpers")
+    op = node.get("op")
+    if op in ("and", "or"):
+        args = node.get("args")
+        if not isinstance(args, list) or not args:
+            raise ValueError(f"{ctx} {op}_() requires at least one expression")
+        return {
+            "op": op,
+            "args": [
+                _translate_expr_node(builder, var_name, child, f"{ctx}.{op}[{idx}]", validator)
+                for idx, child in enumerate(args)
+            ],
+        }
+    if op == "not":
+        args = node.get("args")
+        if not isinstance(args, list) or len(args) != 1:
+            raise ValueError(f"{ctx} not_() requires exactly one child expression")
+        return {
+            "op": "not",
+            "args": [_translate_expr_node(builder, var_name, args[0], f"{ctx}.not", validator)],
+        }
+    prop_validator = validator or builder._make_prop_validator(var_name)
+    return _translate_comparison_node(builder, var_name, node, ctx, prop_validator)
+
+
+def _translate_comparison_node(
+    builder: "QueryBuilder",
+    var_name: str,
+    node: Dict[str, Any],
+    ctx: str,
+    validator: Callable[[str], str],
+) -> Dict[str, Any]:
+    prop = validator(_ensure_expr_prop(node.get("prop"), ctx))
+    op = node.get("op")
+    if op in {"eq", "ne", "lt", "le", "gt", "ge"}:
+        if "value" not in node:
+            raise ValueError(f"{ctx} {op}() requires a value")
+        literal = _literal_value(node["value"])
+        if op in {"lt", "le", "gt", "ge"} and literal["t"] == "Null":
+            raise ValueError(f"{ctx} {op}() does not accept null literals")
+        return {"op": op, "var": var_name, "prop": prop, "value": literal}
+    if op == "between":
+        if "low" not in node or "high" not in node:
+            raise ValueError(f"{ctx} between() requires low and high bounds")
+        low_literal = _literal_value(node["low"])
+        high_literal = _literal_value(node["high"])
+        if low_literal["t"] == "Null" or high_literal["t"] == "Null":
+            raise ValueError(f"{ctx} between() does not accept null bounds")
+        inclusive = _normalize_inclusive_tuple(node.get("inclusive"))
+        return {
+            "op": "between",
+            "var": var_name,
+            "prop": prop,
+            "low": low_literal,
+            "high": high_literal,
+            "inclusive": inclusive,
+        }
+    if op == "in":
+        raw_values = node.get("values")
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ValueError(f"{ctx} in_list() requires at least one literal")
+        tagged = _convert_in_list_values(raw_values)
+        return {"op": "in", "var": var_name, "prop": prop, "values": tagged}
+    if op in {"exists", "isNull", "isNotNull"}:
+        return {"op": op, "var": var_name, "prop": prop}
+    raise ValueError(f"unsupported expression operator '{op}'")
+
+
+def _normalize_inclusive_tuple(value: Any) -> List[bool]:
+    if value is None:
+        return [True, True]
+    if (
+        isinstance(value, Sequence)
+        and len(value) == 2
+        and all(isinstance(flag, bool) for flag in value)
+    ):
+        return [bool(value[0]), bool(value[1])]
+    raise ValueError("between().inclusive must be a two-element sequence of booleans")
+
+
+def _convert_in_list_values(values: Sequence[Any]) -> List[Dict[str, Any]]:
+    tagged: List[Dict[str, Any]] = []
+    for idx, entry in enumerate(values):
+        _ensure_scalar_literal(entry, f"in_list()[{idx}]")
+        tagged.append(_literal_value(entry))
+    exemplar = next((item for item in tagged if item["t"] != "Null"), None)
+    if exemplar is not None:
+        for entry in tagged:
+            if entry["t"] != "Null" and entry["t"] != exemplar["t"]:
+                raise ValueError("in_list() requires all literals to share the same type")
+    return tagged
 
 
 class _CreateHandle:
@@ -721,11 +1028,31 @@ class QueryBuilder:
         self._pending_direction = "out"
         self._request_id: Optional[str] = None
 
+    def nodes(self, label: str) -> _NodeScope:
+        if not isinstance(label, str) or not label:
+            raise ValueError("nodes() requires a non-empty label name")
+        var_name = self._next_auto_var()
+        self._ensure_match(var_name, label)
+        self._last_var = var_name
+        return _NodeScope(self, var_name)
+
     def match(self, target: Union[str, Dict[str, Optional[str]]]) -> "QueryBuilder":
+        if isinstance(target, Mapping) and "var" not in target and "label" not in target:
+            return self._match_map(target)
         fallback = self._next_auto_var()
         normalized = _normalize_target(target, fallback)
         self._ensure_match(normalized["var"], normalized.get("label"))
         self._last_var = normalized["var"]
+        return self
+
+    def on(self, var_name: str, scope: Callable[[_NodeScope], None]) -> "QueryBuilder":
+        if not isinstance(var_name, str) or not var_name:
+            raise ValueError("on() requires a non-empty variable name")
+        if not callable(scope):
+            raise TypeError("on() requires a callback function")
+        self._assert_match(var_name)
+        self._require_label(var_name)
+        scope(_NodeScope(self, var_name))
         return self
 
     def where(
@@ -841,6 +1168,25 @@ class QueryBuilder:
         handle = self._db._stream(self._build())
         return _QueryStream(handle)
 
+    def _match_map(self, mapping: Mapping[str, Any]) -> "QueryBuilder":
+        entries = list(mapping.items())
+        if not entries:
+            raise ValueError("match({...}) requires at least one entry")
+        for var_name, value in entries:
+            if not isinstance(var_name, str) or not var_name:
+                raise ValueError("match({...}) keys must be non-empty strings")
+            if isinstance(value, str):
+                normalized = {"var": var_name, "label": value}
+            elif value is None:
+                normalized = {"var": var_name, "label": None}
+            elif isinstance(value, Mapping):
+                normalized = _normalize_target({**value, "var": var_name}, var_name)
+            else:
+                raise ValueError("match({...}) values must be labels or dicts with optional 'label'")
+            self._ensure_match(normalized["var"], normalized.get("label"))
+        self._last_var = entries[-1][0]
+        return self
+
     def _ensure_match(self, var_name: str, label: Optional[str]) -> None:
         for match in self._matches:
             if match["var"] == var_name:
@@ -853,14 +1199,23 @@ class QueryBuilder:
         if not any(match["var"] == var_name for match in self._matches):
             raise ValueError(f"unknown variable '{var_name}' - call match() first")
 
-    def _append_predicate(self, expr: Dict[str, Any]) -> None:
+    def _append_predicate(self, expr: Dict[str, Any], *, combinator: str = "and") -> None:
         if self._predicate is None:
             self._predicate = expr
             return
-        if self._predicate.get("op") == "and":
-            self._predicate["args"].append(expr)
-        else:
-            self._predicate = {"op": "and", "args": [self._predicate, expr]}
+        if combinator == "and":
+            if self._predicate.get("op") == "and":
+                self._predicate["args"].append(expr)
+            else:
+                self._predicate = {"op": "and", "args": [self._predicate, expr]}
+            return
+        if combinator == "or":
+            if self._predicate.get("op") == "or":
+                self._predicate["args"].append(expr)
+            else:
+                self._predicate = {"op": "or", "args": [self._predicate, expr]}
+            return
+        raise ValueError(f"unsupported predicate combinator '{combinator}'")
 
     def _next_auto_var(self) -> str:
         name = _auto_var_name(self._next_var_idx)
@@ -905,6 +1260,19 @@ class QueryBuilder:
                     return label
                 return None
         return None
+
+    def _require_label(self, var_name: str) -> str:
+        label = self._label_for_var(var_name)
+        if not label:
+            raise ValueError(f"variable '{var_name}' requires a label before applying predicates")
+        return label
+
+    def _select_props(self, var_name: str, keys: Sequence[str]) -> None:
+        self._assert_match(var_name)
+        validator = self._make_prop_validator(var_name)
+        for key in keys:
+            normalized = validator(key)
+            self._projections.append({"kind": "prop", "var": var_name, "prop": normalized, "alias": None})
 
     def _make_prop_validator(self, var_name: str) -> Callable[[str], str]:
         schema = self._schema

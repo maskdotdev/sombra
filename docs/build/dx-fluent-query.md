@@ -109,14 +109,14 @@ interface NodeScope<S, L extends keyof S & string> {
   direction(dir: 'out'|'in'|'any'): this;
   bidirectional(flag?: boolean): this;
 
-  execute(): Promise<any>;
+  execute(withMeta?: boolean): Promise<any>; // default returns rows[]; withMeta=true returns { rows, request_id, ... }
   explain(): Promise<any>;
   stream(): AsyncIterable<any>;
 }
 ```
 
 > Note: `NodeScope` **does not** expose `eq/and/...` methods. Those come from **imported helpers** for a clean call-site.
-> `.where()` and `.andWhere()` always AND the new predicate with the scope-local root; `.orWhere()` ORs the entire accumulated predicate with the new clause. Reach for the explicit `and()`/`or()` helpers when you need finer grouping.
+> `.where()` and `.andWhere()` always AND the new predicate with the scope-local root; `.orWhere()` ORs the entire accumulated predicate with the new clause. Reach for the explicit `and()`/`or()` helpers when you need finer grouping. `.execute()` hands back the `rows[]` array by default; pass `true` when you need the full payload `{ rows, request_id, features }`.
 
 ## 2.2 Type-safe, importable operators
 

@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from sombra_py import Database
+from sombra_py.query import eq
 
 
 def temp_db_path() -> str:
@@ -22,13 +23,7 @@ def main() -> None:
 
     db.update_node(user_id, set_props={"bio": "Updated from Python"})
 
-    result = (
-        db.query()
-        .match("User")
-        .where_var("n0", lambda pred: pred.eq("name", "Example User"))
-        .select(["n0"])
-        .execute()
-    )
+    result = db.query().nodes("User").where(eq("name", "Example User")).execute()
     print("Query rows:", result.rows())
 
     db.delete_node(user_id, cascade=True)

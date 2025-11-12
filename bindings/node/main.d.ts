@@ -30,6 +30,13 @@ export type TargetSpec<S extends NodeSchema = DefaultSchema> =
       label?: TargetLabel<S> | null
     }
 
+export type Expr = { readonly __expr: unique symbol; _node: unknown }
+
+export type ScopedExpr<
+  S extends NodeSchema = DefaultSchema,
+  L extends TargetLabel<S> = TargetLabel<S>,
+> = Expr & { __scope?: { label: L } }
+
 export type NodeLabels = string | string[]
 
 type BaseVarProjectionField =
@@ -50,6 +57,32 @@ export interface PredicateBetweenOptions {
 }
 
 export type QueryStream<T = Record<string, any>> = AsyncIterable<T>
+export interface QueryResultMeta<Row = Record<string, any>> {
+  rows: Array<Row>
+  request_id: string | null
+  features: ReadonlyArray<unknown>
+  [key: string]: unknown
+}
+
+export function and(...exprs: ReadonlyArray<Expr>): Expr
+export function or(...exprs: ReadonlyArray<Expr>): Expr
+export function not(expr: Expr): Expr
+export function eq<K extends string, V>(prop: K, value: V): Expr
+export function ne<K extends string, V>(prop: K, value: V): Expr
+export function lt<K extends string, V>(prop: K, value: V): Expr
+export function le<K extends string, V>(prop: K, value: V): Expr
+export function gt<K extends string, V>(prop: K, value: V): Expr
+export function ge<K extends string, V>(prop: K, value: V): Expr
+export function between<K extends string, V>(
+  prop: K,
+  low: V,
+  high: V,
+  opts?: PredicateBetweenOptions,
+): Expr
+export function inList<K extends string, V>(prop: K, values: ReadonlyArray<V>): Expr
+export function exists<K extends string>(prop: K): Expr
+export function isNull<K extends string>(prop: K): Expr
+export function isNotNull<K extends string>(prop: K): Expr
 
 type BindingMap<S extends NodeSchema> = Record<string, TargetLabel<S>>
 
@@ -58,6 +91,26 @@ type BindingLabel<
   B extends BindingMap<S>,
   V extends string,
 > = V extends keyof B ? B[V] : TargetLabel<S>
+
+type SpecLabel<
+  S extends NodeSchema,
+  Spec,
+> = Spec extends TargetLabel<S>
+  ? Spec
+  : Spec extends { label?: infer L }
+    ? L extends TargetLabel<S>
+      ? L
+      : TargetLabel<S>
+    : TargetLabel<S>
+
+type UpdateBindingsFromMap<
+  S extends NodeSchema,
+  B extends BindingMap<S>,
+  M extends Record<string, any>,
+> = Omit<B, keyof M & string> &
+  {
+    [K in keyof M & string]: SpecLabel<S, M[K]>
+  }
 
 type TypedPropProjectionField<
   S extends NodeSchema,
@@ -163,6 +216,25 @@ export class PredicateBuilder<
   done(): Parent
 }
 
+export interface NodeScope<
+  S extends NodeSchema = DefaultSchema,
+  L extends TargetLabel<S> = TargetLabel<S>,
+  HasVar extends boolean = true,
+> {
+  where(expr: ScopedExpr<S, L> | ((scope: NodeScope<S, L, HasVar>) => ScopedExpr<S, L>)): NodeScope<S, L, HasVar>
+  andWhere(expr: ScopedExpr<S, L> | ((scope: NodeScope<S, L, HasVar>) => ScopedExpr<S, L>)): NodeScope<S, L, HasVar>
+  orWhere(expr: ScopedExpr<S, L> | ((scope: NodeScope<S, L, HasVar>) => ScopedExpr<S, L>)): NodeScope<S, L, HasVar>
+  select(...keys: Array<keyof S[L] & string>): NodeScope<S, L, false>
+  distinct(): NodeScope<S, L, HasVar>
+  direction(dir: Direction): NodeScope<S, L, HasVar>
+  bidirectional(flag?: boolean): NodeScope<S, L, HasVar>
+  requestId(id?: string | null): NodeScope<S, L, HasVar>
+  explain(options?: ExplainOptions): Promise<any>
+  execute(withMeta: true): Promise<QueryResultMeta<QueryRow<HasVar>>>
+  execute(withMeta?: false): Promise<Array<QueryRow<HasVar>>>
+  stream(): QueryStream<QueryRow<HasVar>>
+}
+
 type UpdateBindings<
   S extends NodeSchema,
   B extends BindingMap<S>,
@@ -177,9 +249,18 @@ export class QueryBuilder<
   B extends BindingMap<S> = {},
   HasVar extends boolean = true,
 > {
+  nodes<L extends TargetLabel<S>>(label: L): NodeScope<S, L, HasVar>
   match<L extends TargetLabel<S>>(label: L): QueryBuilder<S, B, HasVar>
   match<V extends string, L extends TargetLabel<S>>(target: { var: V; label: L }): QueryBuilder<S, UpdateBindings<S, B, V, L>, HasVar>
+  match<M extends Record<string, TargetSpec<S>>>(
+    targets: M,
+  ): QueryBuilder<S, UpdateBindingsFromMap<S, B, M>, HasVar>
   match(target: TargetSpec<S>): QueryBuilder<S, B, HasVar>
+  on<V extends KnownBindings<B>>(
+    varName: V,
+    scope: (ctx: NodeScope<S, BindingLabel<S, B, V>, HasVar>) => unknown,
+  ): QueryBuilder<S, B, HasVar>
+  on(varName: string, scope: (ctx: NodeScope<S, TargetLabel<S>, HasVar>) => unknown): QueryBuilder<S, B, HasVar>
   where<V extends KnownBindings<B>>(varName: V): PredicateBuilder<S, BindingLabel<S, B, V>, QueryBuilder<S, B, HasVar>>
   where<V extends KnownBindings<B>>(
     varName: V,
@@ -217,7 +298,8 @@ export class QueryBuilder<
     fields: Fields,
   ): QueryBuilder<S, B, ContainsNonPropField<Fields> extends true ? true : false>
   explain(options?: ExplainOptions): Promise<any>
-  execute(): Promise<Array<QueryRow<HasVar>>>
+  execute(withMeta: true): Promise<QueryResultMeta<QueryRow<HasVar>>>
+  execute(withMeta?: false): Promise<Array<QueryRow<HasVar>>>
   stream(): QueryStream<QueryRow<HasVar>>
 }
 

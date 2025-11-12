@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from sombra_py import Database
+from sombra_py.query import between, eq
 
 
 def temp_db_path() -> str:
@@ -19,18 +20,18 @@ def main() -> None:
 
     result = (
         db.query()
-        .match({"var": "a", "label": "User"})
-        .where("FOLLOWS", {"var": "b", "label": "User"})
-        .where_var("a", lambda pred: pred.eq("country", "US"))
-        .where_var("b", lambda pred: pred.between("name", "Ada", "Grace"))
-        .select(["a", "b"])
+        .match({"source": "User", "target": "User"})
+        .where("FOLLOWS", {"var": "target", "label": "User"})
+        .on("source", lambda scope: scope.where(eq("country", "US")))
+        .on("target", lambda scope: scope.where(between("name", "Ada", "Grace")))
+        .select(["source", "target"])
         .distinct()
         .execute()
     )
 
     for row in result.rows():
-        src = row["a"]
-        dst = row["b"]
+        src = row["source"]
+        dst = row["target"]
         print(
             f"source={src['_id']} ({src['props'].get('name')}) "
             f"-> target={dst['_id']} ({dst['props'].get('name')})"

@@ -8,19 +8,13 @@ Rust planner/executor through `pyo3`.
 
 ```python
 from sombra_py import Database
+from sombra_py.query import eq
 
 db = Database.open("/tmp/sombra.db")
 db.seed_demo()
 
-rows = (
-    db.query()
-    .match("User")
-    .where_var("n0", lambda pred: pred.eq("name", "Ada"))
-    .select([{"var": "n0", "prop": "name", "as": "alias"}])
-    .execute()
-)
-doc = rows[0]["n0"]
-print(doc["_id"], doc["props"]["name"])
+rows = db.query().nodes("User").where(eq("name", "Ada")).select("name").execute()
+print(rows[0]["name"])
 
 user_id = db.create_node("User", {"name": "New User"})
 db.update_node(user_id, set_props={"bio": "updated"})

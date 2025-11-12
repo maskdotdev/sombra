@@ -1,4 +1,4 @@
-import { Database } from '..'
+import { Database, eq } from '..'
 
 type Schema = {
   User: {
@@ -17,32 +17,29 @@ type Schema = {
 async function typedExamples() {
   const db = Database.open<Schema>(':memory:')
 
-  const nodes = await db.query().match('User').select(['n0']).execute()
-  const entity = nodes.rows[0]?.n0
+  const nodes = await db.query().nodes('User').execute()
+  const entity = nodes[0]?.n0
   const entityRecord = entity as Record<string, unknown> | undefined
   console.log(entityRecord)
 
   const scalars = await db
     .query()
-    .match({ var: 'u', label: 'User' })
-    .select([{ var: 'u', prop: 'name', as: 'userName' }])
+    .nodes('User')
+    .select('name')
     .execute()
-  const label = scalars.rows[0]?.userName
+  const label = scalars[0]?.name
   if (typeof label === 'string') {
     label.toUpperCase()
   }
 
-  db.query()
-    .match({ var: 'u', label: 'User' })
-    .where('u', (pred) => pred.eq('country', 'US'))
-  db.query()
-    .match({ var: 'u', label: 'User' })
-    // @ts-expect-error name typo should fail
-    .where('u', (pred) => pred.eq('unknown_prop', 'value'))
+  db.query().nodes('User').where(eq('country', 'US'))
+  db
+    .query()
+    .nodes('User')
+    // @ts-expect-error invalid property selection should fail
+    .select('unknown_prop')
 
-  db.query()
-    .match({ var: 'p', label: 'Post' })
-    .where('p', (pred) => pred.eq('title', 'Hello'))
+  db.query().nodes('Post').where(eq('title', 'Hello'))
 }
 
 void typedExamples()
