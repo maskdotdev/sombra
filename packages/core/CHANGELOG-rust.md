@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.4.0](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.6...sombra-v0.4.0) (2025-11-13)
+
+
+### Features
+
+* **mvcc:** add ConcurrentGraphDB API with file locking and comprehensive testing ([dd01ecc](https://github.com/maskdotdev/sombra/commit/dd01ecc174413144cbd570e4ef796f35f90a531f))
+* **mvcc:** add core MVCC infrastructure modules ([fedab22](https://github.com/maskdotdev/sombra/commit/fedab22e43f81a9864bb955e07d2936b38122cbc))
+* **mvcc:** add max_concurrent_transactions config option ([92bb9e4](https://github.com/maskdotdev/sombra/commit/92bb9e4f5f521321f6b5859a46f15d1fc1477474))
+* **mvcc:** add read/write tracking to transactions ([48edc91](https://github.com/maskdotdev/sombra/commit/48edc911d20c7c86c491a9cc2bd07ca7cbdd4129))
+* **mvcc:** add snapshot isolation support to graph traversal operations ([d054cb3](https://github.com/maskdotdev/sombra/commit/d054cb3956bb0fd21b1a3e1cf2539d9d961fc6f5))
+* **mvcc:** add transaction manager and WAL extension modules for Phase 1 infrastructure ([6484a38](https://github.com/maskdotdev/sombra/commit/6484a387091039898d12bde4a27a98812e14230d))
+* **mvcc:** add version support for edge records ([19e4bfe](https://github.com/maskdotdev/sombra/commit/19e4bfef05da57d8732c5344e31a88e64617c306))
+* **mvcc:** enable concurrent transactions in MVCC mode ([43e6406](https://github.com/maskdotdev/sombra/commit/43e6406b562890ca93e7b04aa47fb97e458e3880))
+* **mvcc:** implement snapshot-isolated read operations for Phase 2 ([ff06def](https://github.com/maskdotdev/sombra/commit/ff06def84aa682bfe9829f7fcce3e61246c9e0db))
+* **mvcc:** implement version chains with BTree checksum fix ([cd5854e](https://github.com/maskdotdev/sombra/commit/cd5854ed93e401846403eeb834a5f3c0f789e3bd))
+* **mvcc:** integrate MvccTransactionManager with GraphDB ([e77dc52](https://github.com/maskdotdev/sombra/commit/e77dc52a5237c7409ad1813707c04b888956f604))
+* **mvcc:** persist timestamp oracle state in database header ([638b136](https://github.com/maskdotdev/sombra/commit/638b1369aede4a533f835535e566b2566281fee7))
+* **rwlock:** complete Phase 1 - interior mutability with Mutex ([646f05d](https://github.com/maskdotdev/sombra/commit/646f05d91b30cf9799fd5af202e9b52341fa4c63))
+
+
+### Bug Fixes
+
+* **gc:** count all freed slots in compact_version_chains, not just page-emptying ones ([229f0f5](https://github.com/maskdotdev/sombra/commit/229f0f5823b18ba5d7244734cc18fa16f4979d9b))
+* **index:** implement differential label and property index updates ([62faf6c](https://github.com/maskdotdev/sombra/commit/62faf6c4832f713239cf0c3fe9b8a77fb36b80df))
+* **mvcc:** add tombstone checks for auto-commit reads to handle MVCC deletions ([fa39f08](https://github.com/maskdotdev/sombra/commit/fa39f0836bdfc2c1af0684d216690f89428d0860))
+* **mvcc:** implement snapshot lifecycle management for GC watermark tracking ([57794fa](https://github.com/maskdotdev/sombra/commit/57794fa28cb06832222259c5b85d630dc6adc0ea))
+* **mvcc:** implement transaction cleanup to prevent slot leakage ([74f1cf5](https://github.com/maskdotdev/sombra/commit/74f1cf5c79426895d2eaeba571b33e80f0575b80))
+* **mvcc:** resolve commit_ts bug preventing GC from reclaiming versions ([ef44753](https://github.com/maskdotdev/sombra/commit/ef447535c5876c3475d552e6c936cceda0162d0d))
+* prevent false corruption errors when scanning index pages ([75c52f0](https://github.com/maskdotdev/sombra/commit/75c52f0d3484912cc7c8d282e3058e2aa630a759))
+* **storage:** properly handle mixed page types in insert_new_slot() ([6382687](https://github.com/maskdotdev/sombra/commit/638268711da2cde4c346dbbed778cfa18607a8e2))
+
+
+### Performance Improvements
+
+* **mvcc:** implement adaptive group commit timeout for low-latency workloads ([e22b6e0](https://github.com/maskdotdev/sombra/commit/e22b6e030b0966b9379c5544a36079c98148623c))
+* **mvcc:** optimize commit timestamp updates with version pointer tracking ([3559647](https://github.com/maskdotdev/sombra/commit/35596475d44f12929b51a011ee2dcf630d4678ff))
+* **mvcc:** run comprehensive performance benchmarks and document findings ([7ec1f65](https://github.com/maskdotdev/sombra/commit/7ec1f658822ca2efcbf7f05750602f3f4354993e))
+* **traversal:** optimize BFS with batch loading and fix cache race condition ([677c4ac](https://github.com/maskdotdev/sombra/commit/677c4acda3e5b1930d787767b7ac68678262d926))
+
+
+### Documentation
+
+* archive completed MVCC and RwLock implementation planning documents ([7956ec1](https://github.com/maskdotdev/sombra/commit/7956ec1a7509101faac9a87c68a10ac121ca7b0c))
+* **mvcc:** add MVCC implementation plans and status ([e8f63f1](https://github.com/maskdotdev/sombra/commit/e8f63f1a0b0e0a82cb1cc1c0c8458dec3a998785))
+* **mvcc:** add performance analysis and production guide ([bf57f29](https://github.com/maskdotdev/sombra/commit/bf57f292c0e505db6b77d6c99e82fd6bd4ed7a01))
+* **mvcc:** update documentation for Phase 4 completion and performance results ([2582112](https://github.com/maskdotdev/sombra/commit/2582112fd1aedc09a6a37dbd3cbbe118c12558d6))
+* **mvcc:** update plan to reflect Phase 2 and Phase 5 completion ([7fd89fc](https://github.com/maskdotdev/sombra/commit/7fd89fce9652eebb31d643baf3dfcecedd07f148))
+* **mvcc:** update status after Phase 3 and Phase 4 completion ([cbbaee4](https://github.com/maskdotdev/sombra/commit/cbbaee43e1a7ed21d6951a17cd4fbd27c266ed71))
+
 ## [Unreleased]
 
 ### Features
