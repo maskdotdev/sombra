@@ -63,7 +63,8 @@ name = "vstore"
 path = "tests/integration/vstore.rs"
 
 [features]
-default = []
+default = ["bundled-dashboard"]
+bundled-dashboard = ["include_dir", "mime_guess"]
 degree-cache = []
 ffi-benches = []
 btree-in-place-debug = []
@@ -95,6 +96,8 @@ siphasher = "0.3"
 ahash = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 time = { version = "0.3", features = ["macros", "parsing"] }
+include_dir = { version = "0.7", optional = true }
+mime_guess = { version = "2.0", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"

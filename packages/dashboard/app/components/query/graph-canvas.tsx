@@ -10,7 +10,6 @@ import {
   forceSimulation,
   forceX,
   forceY,
-  interpolateZoom,
   select,
   zoom,
   zoomIdentity,
@@ -36,6 +35,20 @@ type ForceLink = Omit<GraphEdgeDatum, "source" | "target"> & {
   source: number | ForceNode
   target: number | ForceNode
 }
+
+type HoveredEdgeInfo = {
+  id: string
+  sourceId: number
+  targetId: number
+}
+
+type HighlightContext =
+  | {
+      focusNodeIds: Set<number>
+      primaryNodeIds: Set<number>
+      hoveredEdgeId: string | null
+    }
+  | null
 
 const GROUP_COLORS = [
   "#60a5fa",
@@ -78,7 +91,7 @@ export function GraphCanvas({
   const [zoomLevel, setZoomLevel] = useState(1)
   const nodeSelectionRef = useRef<Selection<SVGGElement, ForceNode, SVGGElement, unknown> | null>(null)
   const linkSelectionRef = useRef<Selection<SVGLineElement, ForceLink, SVGGElement, unknown> | null>(null)
-  const edgeLabelGroupRef = useRef<Selection<SVGGElement, unknown, SVGGElement, unknown> | null>(null)
+  const edgeLabelGroupRef = useRef<Selection<SVGGElement, unknown, null, undefined> | null>(null)
   const edgeLabelSelectionRef = useRef<
     Selection<SVGTextElement, ForceLink, SVGGElement, unknown> | null
   >(null)
@@ -89,6 +102,8 @@ export function GraphCanvas({
   const zoomFrameRef = useRef<number | null>(null)
   const showEdgeLabelsRef = useRef(showEdgeLabels)
   const [tooltip, setTooltip] = useState<{ node: ForceNode; x: number; y: number } | null>(null)
+  const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null)
+  const [hoveredEdge, setHoveredEdge] = useState<HoveredEdgeInfo | null>(null)
   const ids = useMemo(() => {
     const sanitize = (value: string) => value.replace(/:/g, "-")
     return {
@@ -98,7 +113,7 @@ export function GraphCanvas({
     }
   }, [markerId, glowId, gradientId])
   useEffect(() => {
-    selectedNodeIdRef.current = selectedNodeId
+    selectedNodeIdRef.current = selectedNodeId ?? null
   }, [selectedNodeId])
   const updateTooltip = useCallback(
     (event: MouseEvent, node: ForceNode | null) => {
@@ -143,6 +158,37 @@ export function GraphCanvas({
     () => Array.from(groupColors.entries()).sort((a, b) => a[0].localeCompare(b[0])),
     [groupColors]
   )
+  const highlightContext = useMemo<HighlightContext>(() => {
+    if (hoveredNodeId) {
+      const focusNodes = new Set<number>([hoveredNodeId])
+      const neighbors = adjacencyMap.get(hoveredNodeId)
+      neighbors?.forEach((id) => focusNodes.add(id))
+      return {
+        focusNodeIds: focusNodes,
+        primaryNodeIds: new Set<number>([hoveredNodeId]),
+        hoveredEdgeId: null,
+      }
+    }
+    if (hoveredEdge) {
+      const primary = new Set<number>([hoveredEdge.sourceId, hoveredEdge.targetId])
+      return {
+        focusNodeIds: new Set(primary),
+        primaryNodeIds: primary,
+        hoveredEdgeId: hoveredEdge.id,
+      }
+    }
+    if (selectedNodeId) {
+      const focusNodes = new Set<number>([selectedNodeId])
+      const neighbors = adjacencyMap.get(selectedNodeId)
+      neighbors?.forEach((id) => focusNodes.add(id))
+      return {
+        focusNodeIds: focusNodes,
+        primaryNodeIds: new Set<number>([selectedNodeId]),
+        hoveredEdgeId: null,
+      }
+    }
+    return null
+  }, [hoveredNodeId, hoveredEdge, selectedNodeId, adjacencyMap])
 
   const focusNodes = useCallback(
     (idsToFocus: number[]) => {
@@ -342,16 +388,6 @@ export function GraphCanvas({
 
     const zoomBehavior = zoom<SVGSVGElement, unknown>()
       .scaleExtent([MIN_ZOOM, MAX_ZOOM])
-      .interpolate((a, b) => {
-        const i = interpolateZoom(
-          [a.x, a.y, 1 / a.k],
-          [b.x, b.y, 1 / b.k]
-        )
-        return (t: number) => {
-          const [x, y, r] = i(t)
-          return zoomIdentity.translate(x, y).scale(1 / r)
-        }
-      })
       .on("zoom", (event: D3ZoomEvent<SVGSVGElement, unknown>) => {
         container.attr("transform", event.transform.toString())
         updateZoomLevel(event.transform.k)
@@ -372,14 +408,31 @@ export function GraphCanvas({
       .join("line")
       .attr("stroke-width", 1.4)
       .attr("marker-end", edges.length ? `url(#${ids.marker})` : null)
+      .style("cursor", "pointer")
+      .on("mouseenter", (_event: MouseEvent, link: ForceLink) => {
+        setHoveredNodeId(null)
+        setHoveredEdge({
+          id: link.id,
+          sourceId: getLinkNodeId(link.source),
+          targetId: getLinkNodeId(link.target),
+        })
+      })
+      .on("mouseleave", (_event: MouseEvent, link: ForceLink) => {
+        setHoveredEdge((current) => {
+          if (current && current.id === link.id) {
+            return null
+          }
+          return current
+        })
+      })
 
-    linkSelectionRef.current = linkElements as Selection<SVGLineElement, ForceLink, SVGGElement, unknown>
+    linkSelectionRef.current = linkElements
 
     const labelGroup = container
-      .append("g")
+      .append<SVGGElement>("g")
       .attr("class", "edge-labels")
       .attr("pointer-events", "none")
-    edgeLabelGroupRef.current = labelGroup as Selection<SVGGElement, unknown, SVGGElement, unknown>
+    edgeLabelGroupRef.current = labelGroup
     const labelElements = labelGroup
       .selectAll<SVGTextElement, ForceLink>("text")
       .data(linkData, (d) => d.id)
@@ -395,7 +448,7 @@ export function GraphCanvas({
       .attr("stroke-width", 2)
       .attr("stroke-linejoin", "round")
       .text((d) => formatEdgeLabel(d))
-    edgeLabelSelectionRef.current = labelElements as Selection<SVGTextElement, ForceLink, SVGGElement, unknown>
+    edgeLabelSelectionRef.current = labelElements
     labelGroup.attr("display", showEdgeLabelsRef.current ? null : "none")
 
     const nodeGroup = container.append("g")
@@ -449,12 +502,15 @@ export function GraphCanvas({
         }
       })
       .on("mouseenter", (event: MouseEvent, node: ForceNode) => {
+        setHoveredNodeId(node.id)
+        setHoveredEdge(null)
         updateTooltip(event, node)
       })
       .on("mousemove", (event: MouseEvent, node: ForceNode) => {
         updateTooltip(event, node)
       })
-      .on("mouseleave", (event: MouseEvent) => {
+      .on("mouseleave", (event: MouseEvent, node: ForceNode) => {
+        setHoveredNodeId((current) => (current === node.id ? null : current))
         updateTooltip(event, null)
       })
 
@@ -548,19 +604,20 @@ export function GraphCanvas({
   }, [showEdgeLabels])
 
   useEffect(() => {
+    setHoveredNodeId(null)
+    setHoveredEdge(null)
+  }, [nodes, edges])
+
+  useEffect(() => {
     if (!nodeSelectionRef.current) {
       return
     }
-    const focusSet = new Set<number>()
-    if (selectedNodeId) {
-      focusSet.add(selectedNodeId)
-      const neighbors = adjacencyMap.get(selectedNodeId)
-      neighbors?.forEach((id) => focusSet.add(id))
-    }
+    const focusSet = highlightContext?.focusNodeIds ?? null
+    const primaryNodes = highlightContext?.primaryNodeIds ?? new Set<number>()
     nodeSelectionRef.current
       .attr("data-selected", (node) => (node.id === selectedNodeId ? "true" : null))
       .attr("opacity", (node) => {
-        if (!selectedNodeId) {
+        if (!focusSet) {
           return 1
         }
         return focusSet.has(node.id) ? 1 : 0.15
@@ -569,21 +626,24 @@ export function GraphCanvas({
       'circle[data-circle-role="core"]'
     )
     coreSelection
-      .attr("stroke", (node) => (node.id === selectedNodeId ? "#fbbf24" : NODE_STROKE))
-      .attr("stroke-width", (node) => (node.id === selectedNodeId ? 2.4 : 1.4))
-      .attr("r", (node) => (node.id === selectedNodeId ? 18 : 16))
+      .attr("stroke", (node) => (primaryNodes.has(node.id) ? "#fbbf24" : NODE_STROKE))
+      .attr("stroke-width", (node) => (primaryNodes.has(node.id) ? 2.4 : 1.4))
+      .attr("r", (node) => (primaryNodes.has(node.id) ? 18 : 16))
     const haloSelection = nodeSelectionRef.current.selectAll<SVGCircleElement, ForceNode>(
       'circle[data-circle-role="halo"]'
     )
     haloSelection.attr("opacity", (node) => {
-      if (!selectedNodeId) {
+      if (!focusSet) {
         return 0.4
       }
-      return node.id === selectedNodeId ? 0.9 : focusSet.has(node.id) ? 0.5 : 0.05
+      if (primaryNodes.has(node.id)) {
+        return 0.9
+      }
+      return focusSet.has(node.id) ? 0.5 : 0.05
     })
     const textSelection = nodeSelectionRef.current.selectAll<SVGTextElement, ForceNode>("text")
     textSelection.attr("fill-opacity", (node) => {
-      if (!selectedNodeId) {
+      if (!focusSet) {
         return 1
       }
       return focusSet.has(node.id) ? 1 : 0.35
@@ -591,27 +651,36 @@ export function GraphCanvas({
     if (linkSelectionRef.current) {
       linkSelectionRef.current
         .attr("stroke-opacity", (link) => {
-          if (!selectedNodeId) {
+          if (!focusSet) {
             return 0.55
           }
-          return doesLinkTouchNode(link, selectedNodeId) ? 0.95 : 0.08
+          if (highlightContext?.hoveredEdgeId && link.id === highlightContext.hoveredEdgeId) {
+            return 1
+          }
+          return doesLinkTouchNodes(link, primaryNodes) ? 0.95 : 0.08
         })
         .attr("stroke-width", (link) => {
-          if (!selectedNodeId) {
+          if (!focusSet) {
             return 1.4
           }
-          return doesLinkTouchNode(link, selectedNodeId) ? 2.2 : 0.8
+          if (highlightContext?.hoveredEdgeId && link.id === highlightContext.hoveredEdgeId) {
+            return 2.6
+          }
+          return doesLinkTouchNodes(link, primaryNodes) ? 2.2 : 0.8
         })
     }
     if (edgeLabelSelectionRef.current) {
       edgeLabelSelectionRef.current.attr("opacity", (link) => {
-        if (!selectedNodeId) {
+        if (!focusSet) {
           return 0.8
         }
-        return doesLinkTouchNode(link, selectedNodeId) ? 1 : 0.1
+        if (highlightContext?.hoveredEdgeId && link.id === highlightContext.hoveredEdgeId) {
+          return 1
+        }
+        return doesLinkTouchNodes(link, primaryNodes) ? 1 : 0.1
       })
     }
-  }, [selectedNodeId, nodes, adjacencyMap])
+  }, [selectedNodeId, nodes, highlightContext])
 
   useEffect(() => {
     if (!selectedNodeId) {
@@ -813,15 +882,18 @@ function getPosition(value: ForceLink["source"]) {
   return { x: 0, y: 0 }
 }
 
-function doesLinkTouchNode(link: ForceLink, nodeId: number) {
-  const sourceId = getLinkNodeId(link.source)
-  const targetId = getLinkNodeId(link.target)
-  return sourceId === nodeId || targetId === nodeId
-}
-
 function getLinkNodeId(value: ForceLink["source"]): number {
   if (typeof value === "object" && value !== null) {
     return value.id
   }
   return value
+}
+
+function doesLinkTouchNodes(link: ForceLink, nodeIds: Set<number>) {
+  if (nodeIds.size === 0) {
+    return false
+  }
+  const sourceId = getLinkNodeId(link.source)
+  const targetId = getLinkNodeId(link.target)
+  return nodeIds.has(sourceId) || nodeIds.has(targetId)
 }

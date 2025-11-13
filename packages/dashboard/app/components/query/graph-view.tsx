@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { ActivityIcon, Maximize2Icon, Share2Icon, XIcon } from "lucide-react"
 
-import { GraphCanvas } from "./graph-canvas"
+import { GraphCanvas, type GraphCanvasProps } from "./graph-canvas"
 import { deriveNodeLabel, isGraphEntity } from "./graph-types"
 import type { GraphEdgeDatum, GraphEntity, GraphNodeDatum } from "./graph-types"
 import { Badge } from "../ui/badge"
@@ -25,11 +25,14 @@ type ColumnStat = {
   count: number
 }
 
+type GraphRendererComponent = React.ComponentType<GraphCanvasProps>
+
 type GraphViewProps = {
   rows: QueryRow[]
+  GraphRenderer?: GraphRendererComponent
 }
 
-export function GraphView({ rows }: GraphViewProps) {
+export function GraphView({ rows, GraphRenderer = GraphCanvas }: GraphViewProps) {
   const nodeColumns = useMemo(() => detectNodeColumns(rows), [rows])
   const [sourceColumn, setSourceColumn] = useState<string>("")
   const [targetColumn, setTargetColumn] = useState<string>("")
@@ -230,7 +233,7 @@ export function GraphView({ rows }: GraphViewProps) {
               <Maximize2Icon className="mr-1.5 size-4" />
               {isGraphExpanded ? "Expanded" : "Expand"}
             </Button>
-            <GraphCanvas
+            <GraphRenderer
               nodes={graph.nodes}
               edges={graph.edges}
               height={600}
@@ -264,7 +267,7 @@ export function GraphView({ rows }: GraphViewProps) {
                 Close
               </Button>
             </div>
-            <GraphCanvas
+            <GraphRenderer
               nodes={graph.nodes}
               edges={graph.edges}
               height={780}

@@ -44,11 +44,11 @@ Phase 1 Decisions
 - Bind to `127.0.0.1` by default with a CLI flag (`--bind`) required for remote access; require explicit `--allow-origin` to enable CORS when running remotely.
 - Ship the MVP in read-only mode by default; disable import/vacuum/checkpoint/mutation routes entirely so the dashboard can be run safely against production replicas without extra auth. Token-based auth will be revisited once mutating endpoints ship.
 - Enforce CSRF protection by avoiding cookie auth entirely when tokens arrive; for now rely on loopback-only defaults and log any remote access attempts.
-- Default to serving static assets with `Content-Security-Policy: default-src 'self'` and `Referrer-Policy: no-referrer`. Allow users to point `--assets` at a custom bundle but keep CSP strict unless `--relax-csp` is provided.
+- Default to serving static assets from the embedded React bundle (via `include_dir`) with `Content-Security-Policy: default-src 'self'` and `Referrer-Policy: no-referrer`. Allow users to point `--assets` at a custom bundle but keep CSP strict unless `--relax-csp` is provided.
 
 Dashboard MVP Behavior
 ----------------------
-- `sombra dashboard` spins up an Axum server with `/health` and `/api/stats` plus a static-file fallback served from `--assets <dir>`. When assets are omitted a minimal inline HTML page explains how to build and provide the frontend bundle.
+- `sombra dashboard` spins up an Axum server with `/health` and `/api/stats` plus a static-file layer that serves the embedded bundle by default. Supplying `--assets <dir>` overrides the bundle; when neither embedded assets nor an override exist a minimal inline HTML page explains how to build and provide the frontend bundle.
 - The server currently exposes read-only APIs only (`/health`, `/api/stats`, `/api/query`); mutations/import/export routes remain disabled until auth and background job infrastructure land.
 
 Phase 2 – CLI Surface & Runtime
@@ -71,7 +71,7 @@ Phase 4 – Frontend Assets
 1. Scaffold SPA in `packages/dashboard` (Vite + React/Svelte) with environment-driven API base URL.
 2. Pages: Overview (stats), Query console, Maintenance controls & job list.
 3. Simple API client wrapper for `/api/*` endpoints; poll or use WebSockets for job updates.
-4. Build pipeline emits static files to `packages/dashboard/dist`; optionally embed with `include_dir`.
+4. Build pipeline emits static files to `packages/dashboard/build/client`; embed them with `include_dir`.
 
 Phase 5 – UX & Ops Polish
 -------------------------

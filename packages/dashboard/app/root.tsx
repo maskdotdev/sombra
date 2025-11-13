@@ -6,11 +6,13 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
-} from "react-router";
+} from "react-router"
 
-import type { Route } from "./+types/root";
-import "./app.css";
-import { cn } from "./lib/utils";
+import type { Route } from "./+types/root"
+import "./app.css"
+import { ThemeProvider } from "./components/theme-provider"
+import { ThemeSwitch } from "./components/theme-switch"
+import { cn } from "./lib/utils"
 
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -27,7 +29,7 @@ export const links: Route.LinksFunction = () => [
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -35,12 +37,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <Links />
       </head>
       <body className="bg-background text-foreground">
-        {children}
+        <ThemeProvider>{children}</ThemeProvider>
         <ScrollRestoration />
         <Scripts />
       </body>
     </html>
-  );
+  )
 }
 
 export default function App() {
@@ -57,7 +59,7 @@ export default function App() {
 function SiteHeader() {
   return (
     <header className="border-b bg-background/90 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-4 py-4">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4">
         <NavLink
           to="/"
           end
@@ -65,15 +67,18 @@ function SiteHeader() {
         >
           Sombra Dashboard
         </NavLink>
-        <nav className="flex items-center gap-1">
-          <NavItem to="/" end>
-            Overview
-          </NavItem>
-          <NavItem to="/graph">Graph Explorer</NavItem>
-        </nav>
+        <div className="flex items-center gap-2">
+          <nav className="flex items-center gap-1">
+            <NavItem to="/" end>
+              Overview
+            </NavItem>
+            <NavItem to="/graph">Graph Explorer</NavItem>
+          </nav>
+          <ThemeSwitch />
+        </div>
       </div>
     </header>
-  );
+  )
 }
 
 function NavItem({

@@ -6,17 +6,25 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+#[cfg(feature = "bundled-dashboard")]
+use axum::{body::Body, http::Uri};
 use axum::{
     extract::{Query, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderValue, Method, StatusCode,
     },
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+#[cfg(not(feature = "bundled-dashboard"))]
+use axum::response::Html;
+#[cfg(feature = "bundled-dashboard")]
+use bytes::Bytes;
 use hyper::Error as HyperError;
+#[cfg(feature = "bundled-dashboard")]
+use include_dir::{include_dir, Dir, File};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use thiserror::Error;
@@ -80,21 +88,38 @@ type AppState = Arc<ServerState>;
 
 const MAX_STREAMED_ROWS: usize = 1_000;
 
+#[cfg(feature = "bundled-dashboard")]
+static EMBEDDED_DASHBOARD_ASSETS: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/packages/dashboard/build/client");
+
+#[cfg(feature = "bundled-dashboard")]
+type EmbeddedFile = File<'static>;
+
+#[derive(Clone, Debug)]
+enum AssetMode {
+    Filesystem(PathBuf),
+    #[cfg(feature = "bundled-dashboard")]
+    Embedded,
+    #[cfg(not(feature = "bundled-dashboard"))]
+    Inline,
+}
+
 struct ServerState {
     db_path: PathBuf,
     open_opts: AdminOpenOptions,
     read_only: bool,
-    assets_dir: Option<PathBuf>,
+    asset_mode: AssetMode,
     allow_origins: Vec<String>,
 }
 
 impl ServerState {
     fn new(opts: DashboardOptions) -> Result<Self, DashboardError> {
+        let asset_mode = resolve_asset_mode(opts.assets_dir);
         Ok(Self {
             db_path: opts.db_path,
             open_opts: opts.open_opts,
             read_only: opts.read_only,
-            assets_dir: opts.assets_dir,
+            asset_mode,
             allow_origins: opts.allow_origins,
         })
     }
@@ -107,6 +132,33 @@ impl ServerState {
         let db = ffi::Database::open(&self.db_path, db_opts)?;
         Ok(db)
     }
+}
+
+fn resolve_asset_mode(dir: Option<PathBuf>) -> AssetMode {
+    match dir {
+        Some(path) => {
+            if path.is_dir() {
+                AssetMode::Filesystem(path)
+            } else {
+                tracing::warn!(
+                    provided = %path.display(),
+                    "dashboard assets directory not found; falling back to embedded assets (if available)"
+                );
+                default_asset_mode()
+            }
+        }
+        None => default_asset_mode(),
+    }
+}
+
+#[cfg(feature = "bundled-dashboard")]
+fn default_asset_mode() -> AssetMode {
+    AssetMode::Embedded
+}
+
+#[cfg(not(feature = "bundled-dashboard"))]
+fn default_asset_mode() -> AssetMode {
+    AssetMode::Inline
 }
 
 /// Starts the dashboard server and runs until shutdown.
@@ -127,7 +179,7 @@ pub async fn serve(options: DashboardOptions) -> Result<(), DashboardError> {
         %addr,
         db_path = %state.db_path.display(),
         read_only = state.read_only,
-        assets_dir = ?state.assets_dir,
+        asset_mode = ?state.asset_mode,
         allow_origins = ?state.allow_origins,
         "dashboard listening"
     );
@@ -148,11 +200,19 @@ fn build_router(state: AppState) -> Router {
         .route("/api/labels", get(labels_handler))
         .route("/api/labels/indexes", post(ensure_label_indexes_handler));
 
-    if let Some(dir) = state.assets_dir.clone() {
-        let service = ServeDir::new(dir).append_index_html_on_directories(true);
-        router = router.fallback_service(service);
-    } else {
-        router = router.route("/", get(inline_index));
+    match state.asset_mode.clone() {
+        AssetMode::Filesystem(dir) => {
+            let service = ServeDir::new(dir).append_index_html_on_directories(true);
+            router = router.fallback_service(service);
+        }
+        #[cfg(feature = "bundled-dashboard")]
+        AssetMode::Embedded => {
+            router = router.fallback(embedded_dashboard_handler);
+        }
+        #[cfg(not(feature = "bundled-dashboard"))]
+        AssetMode::Inline => {
+            router = router.route("/", get(inline_index));
+        }
     }
 
     if let Some(layer) = cors {
@@ -212,6 +272,7 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+#[cfg(not(feature = "bundled-dashboard"))]
 async fn inline_index() -> Html<&'static str> {
     Html(
         r#"<!doctype html>
@@ -226,16 +287,87 @@ async fn inline_index() -> Html<&'static str> {
   </head>
   <body>
     <main>
-      <h1>Sombra dashboard assets not configured</h1>
+      <h1>No dashboard assets available</h1>
+      <p>
+        This binary was built without embedded dashboard assets and no <code>--assets</code>
+        directory was provided.
+      </p>
       <p>
         Build the frontend bundle and pass
-        <code>--assets /path/to/dist</code>
+        <code>--assets /path/to/packages/dashboard/build/client</code>
         to <code>sombra dashboard</code> to serve the compiled UI.
       </p>
     </main>
   </body>
 </html>"#,
     )
+}
+
+#[cfg(feature = "bundled-dashboard")]
+async fn embedded_dashboard_handler(method: Method, uri: Uri) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    let request_path = uri.path().to_owned();
+
+    match embedded_file_for_path(request_path) {
+        Some(file) => {
+            let mut response = build_embedded_response(file);
+            if method == Method::HEAD {
+                *response.body_mut() = Body::empty();
+            }
+            response
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(feature = "bundled-dashboard")]
+fn embedded_file_for_path(path: String) -> Option<&'static EmbeddedFile> {
+    let sanitized = sanitize_asset_path(path.as_str())?;
+    if let Some(file) = EMBEDDED_DASHBOARD_ASSETS.get_file(sanitized.as_str()) {
+        return Some(file);
+    }
+
+    if sanitized.ends_with('/') {
+        let mut nested = sanitized.clone();
+        nested.push_str("index.html");
+        if let Some(file) = EMBEDDED_DASHBOARD_ASSETS.get_file(&nested) {
+            return Some(file);
+        }
+    }
+
+    if sanitized.starts_with("assets/") || sanitized.contains('.') {
+        return None;
+    }
+
+    EMBEDDED_DASHBOARD_ASSETS.get_file("index.html")
+}
+
+#[cfg(feature = "bundled-dashboard")]
+fn sanitize_asset_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.contains("..") {
+        return None;
+    }
+    if trimmed.is_empty() {
+        return Some("index.html".to_string());
+    }
+    Some(trimmed.to_string())
+}
+
+#[cfg(feature = "bundled-dashboard")]
+fn build_embedded_response(file: &'static EmbeddedFile) -> Response {
+    let mime = mime_guess::from_path(file.path()).first_or_octet_stream();
+    let body = Body::from(Bytes::from_static(file.contents()));
+    let mut response = Response::new(body);
+
+    let value = HeaderValue::from_str(mime.as_ref())
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    response.headers_mut().insert(CONTENT_TYPE, value);
+
+    response
 }
 
 async fn stats_handler(State(state): State<AppState>) -> Result<Json<StatsReport>, AppError> {

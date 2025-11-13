@@ -70,14 +70,16 @@ cargo run --bin cli -- import tests/fixtures/demo-db/graph-demo.sombra \
 
 ### Build static assets for the CLI
 
+The prebuilt CLI already embeds the latest `packages/dashboard/build/client`
+bundle, so `sombra dashboard path/to/db.sombra` just works.
+
+If you make frontend changes locally, rebuild and either override the embedded
+files or refresh them before cutting a release:
+
 ```bash
 npm run build
-```
 
-React Router outputs the production bundle to `packages/dashboard/build`.
-Serve the compiled assets by pointing the CLI to the build directory:
-
-```bash
+# Optional: point the CLI at your fresh assets instead of the embedded bundle
 sombra dashboard path/to/db.sombra \
   --assets /absolute/path/to/packages/dashboard/build/client
 ```
