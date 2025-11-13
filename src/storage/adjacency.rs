@@ -8,14 +8,18 @@ pub const DEGREE_DIR_OUT: u8 = 0;
 pub const DEGREE_DIR_IN: u8 = 1;
 
 #[cfg(feature = "degree-cache")]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// Direction of the edges tracked inside the degree cache.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum DegreeDir {
+    /// Outgoing edge counts.
     Out,
+    /// Incoming edge counts.
     In,
 }
 
 #[cfg(feature = "degree-cache")]
 impl DegreeDir {
+    /// Encodes this direction into its on-disk byte representation.
     pub fn into_u8(self) -> u8 {
         match self {
             DegreeDir::Out => DEGREE_DIR_OUT,
@@ -23,6 +27,7 @@ impl DegreeDir {
         }
     }
 
+    /// Decodes a direction byte from the degree cache key.
     pub fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             DEGREE_DIR_OUT => Some(DegreeDir::Out),

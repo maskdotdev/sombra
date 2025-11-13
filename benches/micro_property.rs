@@ -1,4 +1,6 @@
+//! Micro benchmarks for property index lookups and intersections.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 use std::sync::Arc;
 

@@ -1,4 +1,6 @@
+//! CRUD workload benchmarks for the FFI layer.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 #[cfg(not(feature = "ffi-benches"))]
 fn main() {
@@ -7,17 +9,16 @@ fn main() {
 
 #[cfg(feature = "ffi-benches")]
 mod bench {
-    use super::*;
-
     use std::collections::{HashSet, VecDeque};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+    use serde_json::Value;
     use sombra::{
         ffi::{
-            Database, DatabaseOptions, LiteralSpec, MatchSpec, MutationOp, MutationSpec,
-            MutationSummary, PredicateSpec, ProjectionSpec, QuerySpec,
+            Database, DatabaseOptions, MatchSpec, MutationOp, MutationSpec, MutationSummary,
+            PayloadValue, PredicateSpec, ProjectionSpec, QuerySpec,
         },
         primitives::pager::Synchronous,
     };
@@ -82,7 +83,7 @@ mod bench {
         }
     }
 
-    fn crud_benchmarks(c: &mut Criterion) {
+    pub fn crud_benchmarks(c: &mut Criterion) {
         let tuning = BenchTuning::detect();
         let profiles = [
             (Synchronous::Full, "synchronous_full"),
@@ -181,9 +182,11 @@ mod bench {
         fn new(synchronous: Synchronous, label: &str, tuning: BenchTuning) -> Self {
             let tmpdir = tempfile::tempdir().expect("tempdir");
             let path = tmpdir.path().join(format!("{label}.sombra"));
-            let mut opts = DatabaseOptions::default();
-            opts.create_if_missing = true;
-            opts.distinct_neighbors_default = false;
+            let mut opts = DatabaseOptions {
+                create_if_missing: true,
+                distinct_neighbors_default: false,
+                ..DatabaseOptions::default()
+            };
             // Modify pager options through the DatabaseOptions to use the same types
             opts.pager.synchronous = synchronous;
             opts.pager.wal_commit_coalesce_ms = 5;
@@ -343,26 +346,30 @@ mod bench {
 
         fn read_users_op(&mut self) {
             let spec = user_scan_spec();
-            let rows = self.db.execute(spec).expect("execute query");
-            black_box(rows.len());
+            let result = self.db.execute(spec).expect("execute query");
+            black_box(rows_len(&result));
         }
 
         fn read_user_by_name_op(&mut self) {
             let name = self.next_lookup_key();
             let spec = user_lookup_spec(name);
-            let rows = self.db.execute(spec).expect("execute lookup query");
-            if rows.is_empty() {
+            let result = self
+                .db
+                .execute(spec)
+                .expect("execute lookup query");
+            let count = rows_len(&result);
+            if count == 0 {
                 panic!("lookup query returned no rows");
             }
-            black_box(rows.len());
+            black_box(count);
         }
 
         fn dataset_stats(&self) -> DatasetStats {
-            let total_users = self
+            let result = self
                 .db
                 .execute(user_scan_spec())
-                .expect("count users for stats")
-                .len();
+                .expect("count users for stats");
+            let total_users = rows_len(&result);
             DatasetStats {
                 total_users,
                 lookup_keys: self.lookup_keys.len(),
@@ -518,11 +525,11 @@ mod bench {
 
         fn populate_users_for_read_bench(&mut self, target_count: usize) {
             // Check current user count
-            let current_count = self
+            let result = self
                 .db
                 .execute(user_scan_spec())
-                .expect("count users")
-                .len();
+                .expect("count users");
+            let current_count = rows_len(&result);
 
             if current_count >= target_count {
                 let needed = target_count.saturating_sub(self.lookup_keys.len());
@@ -572,10 +579,10 @@ mod bench {
             }
         }
 
-        fn create_named_users(&mut self, count: usize, progress: Option<bool>) -> usize {
-            if count == 0 {
-                return 0;
-            }
+    fn create_named_users(&mut self, count: usize, progress: Option<bool>) -> usize {
+        if count == 0 {
+            return 0;
+        }
             let mut names = Vec::with_capacity(count);
             let ops = (0..count)
                 .map(|_| {
@@ -597,39 +604,51 @@ mod bench {
         }
     }
 
+    fn rows_len(value: &Value) -> usize {
+        value
+            .get("rows")
+            .and_then(|rows| rows.as_array())
+            .map(|rows| rows.len())
+            .unwrap_or(0)
+    }
+
     fn user_scan_spec() -> QuerySpec {
         QuerySpec {
+            schema_version: Some(1),
+            request_id: None,
             matches: vec![MatchSpec {
                 var: "a".to_string(),
                 label: Some(LABEL_USER.to_string()),
             }],
             edges: Vec::new(),
-            predicates: Vec::new(),
-            distinct: false,
+            predicate: None,
             projections: vec![ProjectionSpec::Var {
                 var: "a".to_string(),
                 alias: None,
             }],
+            distinct: false,
         }
     }
 
     fn user_lookup_spec(name: String) -> QuerySpec {
         QuerySpec {
+            schema_version: Some(1),
+            request_id: None,
             matches: vec![MatchSpec {
                 var: "a".to_string(),
                 label: Some(LABEL_USER.to_string()),
             }],
             edges: Vec::new(),
-            predicates: vec![PredicateSpec::Eq {
+            predicate: Some(PredicateSpec::Eq {
                 var: "a".to_string(),
                 prop: "name".to_string(),
-                value: LiteralSpec::String(name),
-            }],
-            distinct: false,
+                value: PayloadValue::String(name),
+            }),
             projections: vec![ProjectionSpec::Var {
                 var: "a".to_string(),
                 alias: None,
             }],
+            distinct: false,
         }
     }
 
@@ -645,6 +664,9 @@ mod bench {
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str).unwrap()
     }
 }
+
+#[cfg(feature = "ffi-benches")]
+use criterion::{criterion_group, criterion_main};
 
 #[cfg(feature = "ffi-benches")]
 use bench::crud_benchmarks;

@@ -1,4 +1,6 @@
+//! Micro benchmarks for the value store component.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

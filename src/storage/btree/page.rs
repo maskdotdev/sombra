@@ -169,7 +169,6 @@ impl Header {
 }
 
 /// Update helpers for callers that operate on a mutable page payload.
-
 /// Sets the slot count in the page header.
 pub fn set_slot_count(payload: &mut [u8], value: u16) {
     write_u16(payload, NSLOTS_OFFSET, value);

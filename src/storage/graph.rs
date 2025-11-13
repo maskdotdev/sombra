@@ -161,7 +161,7 @@ impl Graph {
         let (indexes, index_roots_actual) = IndexStore::open(Arc::clone(&store), index_roots)?;
 
         #[cfg(feature = "degree-cache")]
-        let mut degree_cache_enabled = opts.degree_cache
+        let degree_cache_enabled = opts.degree_cache
             || (meta.storage_flags & STORAGE_FLAG_DEGREE_CACHE) != 0
             || meta.storage_degree_root.0 != 0;
         #[cfg(not(feature = "degree-cache"))]
@@ -508,6 +508,7 @@ impl Graph {
     }
 
     #[cfg(test)]
+    /// Collects all entries from a property index for use in assertions.
     pub fn debug_collect_property_index(
         &self,
         tx: &ReadGuard,
@@ -2247,6 +2248,7 @@ impl Graph {
     }
 
     #[cfg(feature = "degree-cache")]
+    /// Returns every stored degree cache entry for debugging purposes.
     pub fn debug_collect_degree(
         &self,
         tx: &ReadGuard,
@@ -2265,6 +2267,7 @@ impl Graph {
     }
 
     #[cfg(feature = "degree-cache")]
+    /// Verifies that the degree cache matches the adjacency trees.
     pub fn validate_degree_cache(&self, tx: &ReadGuard) -> Result<()> {
         let Some(tree) = &self.degree else {
             return Ok(());
@@ -2308,7 +2311,8 @@ impl Graph {
         Ok(())
     }
 
-    #[cfg(all(test, feature = "degree-cache"))]
+    #[cfg(feature = "degree-cache")]
+    /// Inserts or removes a single degree cache entry while running tests.
     pub fn debug_set_degree_entry(
         &self,
         tx: &mut WriteGuard<'_>,

@@ -1,4 +1,6 @@
+//! Micro benchmarks for the on-disk B-Tree implementation.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 use std::ops::Bound;
 use std::sync::Arc;

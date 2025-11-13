@@ -105,7 +105,7 @@ fn edge_roundtrip() -> Result<()> {
             dst,
             ty: TypeId(9),
             props: &[
-                PropEntry::new(PropId(2), PropValue::Float(3.14)),
+                PropEntry::new(PropId(2), PropValue::Float(std::f64::consts::PI)),
                 PropEntry::new(PropId(8), PropValue::Bytes(&[1, 2, 3])),
             ],
         },

@@ -8,10 +8,13 @@ use rand_chacha::ChaCha8Rng;
 
 /// Synthetic dataset backed by generated CSV files for benchmarking.
 pub struct SyntheticDataset {
+    #[allow(dead_code)]
     base: PathBuf,
     pub nodes_csv: PathBuf,
     pub edges_csv: PathBuf,
+    #[allow(dead_code)]
     pub node_count: usize,
+    #[allow(dead_code)]
     pub edge_count: usize,
 }
 
@@ -37,8 +40,10 @@ impl SyntheticDataset {
         }
     }
 
+    #[allow(dead_code)]
     pub fn scratch_dir(&self) -> PathBuf {
-        self.base.join("scratch")
+        self.base
+            .join(format!("scratch_{}_{}", self.node_count, self.edge_count))
     }
 }
 

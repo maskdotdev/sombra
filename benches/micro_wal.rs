@@ -1,4 +1,6 @@
+//! Micro benchmarks focused on WAL append and checkpoint costs.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 use std::sync::Arc;
 

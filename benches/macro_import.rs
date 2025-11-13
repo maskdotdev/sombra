@@ -1,8 +1,11 @@
+//! Macro benchmark that exercises the CSV import pipeline.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 mod support;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use std::collections::HashMap;
 use sombra::admin::AdminOpenOptions;
 use sombra::cli::import_export::{run_import, EdgeImportConfig, ImportConfig, NodeImportConfig};
 use support::datasets::SyntheticDataset;
@@ -39,12 +42,15 @@ impl ImportHarness {
         let config = ImportConfig {
             db_path: db_path.clone(),
             create_if_missing: true,
+            disable_indexes: false,
+            build_indexes: false,
             nodes: Some(NodeImportConfig {
                 path: self.dataset.nodes_csv.clone(),
                 id_column: "id".into(),
                 label_column: Some("label".into()),
                 static_labels: Vec::new(),
                 prop_columns: Some(vec!["name".into()]),
+                prop_types: HashMap::new(),
             }),
             edges: Some(EdgeImportConfig {
                 path: self.dataset.edges_csv.clone(),
@@ -55,6 +61,7 @@ impl ImportHarness {
                 prop_columns: None,
                 trusted_endpoints: false,
                 exists_cache_capacity: 1024,
+                prop_types: HashMap::new(),
             }),
         };
         let summary = run_import(&config, &self.opts).expect("import");

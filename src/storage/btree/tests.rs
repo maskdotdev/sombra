@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::{page, BTree, BTreeOptions, PutItem};
 use crate::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions, ReadGuard};
 use crate::types::{PageId, Result, SombraError};

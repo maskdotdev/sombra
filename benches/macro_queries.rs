@@ -1,4 +1,7 @@
+//! Macro benchmark that runs representative query mixes over synthetic data.
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
+#![allow(missing_docs)]
 
 #[cfg(feature = "ffi-benches")]
 mod support;
@@ -10,26 +13,26 @@ fn main() {
 
 #[cfg(feature = "ffi-benches")]
 mod bench {
-    use super::*;
-
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
     use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+    use serde_json::Value;
     use sombra::admin::AdminOpenOptions;
     use sombra::cli::import_export::{
         run_import, EdgeImportConfig, ImportConfig, NodeImportConfig,
     };
     use sombra::ffi::{
-        Database, DatabaseOptions, DirectionSpec, EdgeSpec, LiteralSpec, MatchSpec, PredicateSpec,
+        Database, DatabaseOptions, DirectionSpec, EdgeSpec, MatchSpec, PayloadValue, PredicateSpec,
         ProjectionSpec, QuerySpec,
     };
-    use support::datasets::SyntheticDataset;
+    use super::support::datasets::SyntheticDataset;
 
     const NODE_COUNT: usize = 50_000;
     const EDGE_COUNT: usize = 200_000;
 
-    fn macro_queries(c: &mut Criterion) {
+    pub fn macro_queries(c: &mut Criterion) {
         let mut group = c.benchmark_group("macro/query_mix");
         group.sample_size(20);
         let harness = QueryHarness::new(NODE_COUNT, EDGE_COUNT);
@@ -61,23 +64,34 @@ mod bench {
             let specs = [mutual_follows(), two_hop(), name_filter_expand()];
             let mut total = 0usize;
             for spec in specs {
-                let rows = self.db.execute(spec).expect("query");
-                total += rows.len();
+                let result = self.db.execute(spec).expect("query");
+                total += rows_len(&result);
             }
             total
         }
+    }
+
+    fn rows_len(value: &Value) -> usize {
+        value
+            .get("rows")
+            .and_then(|rows| rows.as_array())
+            .map(|rows| rows.len())
+            .unwrap_or(0)
     }
 
     fn build_import_config(dataset: &SyntheticDataset, db_path: PathBuf) -> ImportConfig {
         ImportConfig {
             db_path,
             create_if_missing: true,
+            disable_indexes: false,
+            build_indexes: false,
             nodes: Some(NodeImportConfig {
                 path: dataset.nodes_csv.clone(),
                 id_column: "id".into(),
                 label_column: Some("label".into()),
                 static_labels: Vec::new(),
                 prop_columns: Some(vec!["name".into()]),
+                prop_types: HashMap::new(),
             }),
             edges: Some(EdgeImportConfig {
                 path: dataset.edges_csv.clone(),
@@ -88,12 +102,15 @@ mod bench {
                 prop_columns: None,
                 trusted_endpoints: false,
                 exists_cache_capacity: 1024,
+                prop_types: HashMap::new(),
             }),
         }
     }
 
     fn mutual_follows() -> QuerySpec {
         QuerySpec {
+            schema_version: Some(1),
+            request_id: None,
             matches: vec![
                 MatchSpec {
                     var: "a".into(),
@@ -118,8 +135,7 @@ mod bench {
                     direction: DirectionSpec::out(),
                 },
             ],
-            predicates: Vec::new(),
-            distinct: true,
+            predicate: None,
             projections: vec![
                 ProjectionSpec::Var {
                     var: "a".into(),
@@ -130,11 +146,14 @@ mod bench {
                     alias: None,
                 },
             ],
+            distinct: true,
         }
     }
 
     fn two_hop() -> QuerySpec {
         QuerySpec {
+            schema_version: Some(1),
+            request_id: None,
             matches: vec![
                 MatchSpec {
                     var: "src".into(),
@@ -163,17 +182,19 @@ mod bench {
                     direction: DirectionSpec::out(),
                 },
             ],
-            predicates: Vec::new(),
-            distinct: false,
+            predicate: None,
             projections: vec![ProjectionSpec::Var {
                 var: "dst".into(),
                 alias: None,
             }],
+            distinct: false,
         }
     }
 
     fn name_filter_expand() -> QuerySpec {
         QuerySpec {
+            schema_version: Some(1),
+            request_id: None,
             matches: vec![MatchSpec {
                 var: "u".into(),
                 label: Some("User".into()),
@@ -181,15 +202,14 @@ mod bench {
             edges: vec![EdgeSpec {
                 from: "u".into(),
                 to: "f".into(),
-                edge_type: Some("FOLLOWS".into()),
-                direction: DirectionSpec::out(),
-            }],
-            predicates: vec![PredicateSpec::Eq {
+                    edge_type: Some("FOLLOWS".into()),
+                    direction: DirectionSpec::out(),
+                }],
+            predicate: Some(PredicateSpec::Eq {
                 var: "u".into(),
                 prop: "name".into(),
-                value: LiteralSpec::String("user-123".into()),
-            }],
-            distinct: false,
+                value: PayloadValue::String("user-123".into()),
+            }),
             projections: vec![
                 ProjectionSpec::Var {
                     var: "u".into(),
@@ -200,9 +220,13 @@ mod bench {
                     alias: Some("neighbor".into()),
                 },
             ],
+            distinct: false,
         }
     }
 }
+
+#[cfg(feature = "ffi-benches")]
+use criterion::{criterion_group, criterion_main};
 
 #[cfg(feature = "ffi-benches")]
 use bench::macro_queries;
