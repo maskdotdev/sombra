@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/maskdotdev/sombra/compare/sombrapy-v0.3.7...sombrapy-v0.4.0) (2025-11-13)
+
+
+### Features
+
+* **mvcc:** implement version chains with BTree checksum fix ([cd5854e](https://github.com/maskdotdev/sombra/commit/cd5854ed93e401846403eeb834a5f3c0f789e3bd))
+
 ## [0.3.7](https://github.com/maskdotdev/sombra/compare/sombrapy-v0.3.6...sombrapy-v0.3.7) (2025-10-26)
 
 
