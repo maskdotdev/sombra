@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   PYO3_USE_ABI3_PY3: "1"
+  DEBUG: napi:*
+  APP_NAME: sombradb
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
 
 jobs:
   rust:
@@ -23,21 +26,16 @@ jobs:
           - windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.80.0
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Format check
         run: cargo fmt --all -- --check
-
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
       - name: Test
         run: cargo test --all --all-features
 
@@ -45,18 +43,164 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Build Python bindings
         uses: PyO3/maturin-action@v1
         with:
           command: develop
           args: --release
           working-directory: bindings/python
-
       - name: Smoke test module
-        run: python -c "import sombra_py; print(sombra_py.version())"
+        run: python -c "import sombra; print(sombra.version())"
         working-directory: bindings/python
+
+  node-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install dependencies
+        run: cd bindings/node && npm ci
+      - name: Lint (oxlint)
+        run: cd bindings/node && npm run lint
+      - name: Cargo fmt (bindings)
+        run: cargo fmt --manifest-path bindings/node/Cargo.toml -- --check
+      - name: Cargo clippy (bindings)
+        run: cargo clippy --manifest-path bindings/node/Cargo.toml --all-targets -- -D warnings
+
+  node-build:
+    needs: node-lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: macos-13
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu --use-napi-cross
+    runs-on: ${{ matrix.host }}
+    name: Node build (${{ matrix.target }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.napi-rs
+            bindings/node/target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('bindings/node/Cargo.lock') }}
+      - name: Install dependencies
+        run: cd bindings/node && npm ci
+      - name: Build bindings
+        run: cd bindings/node && ${{ matrix.build }}
+      - name: List build artifacts
+        run: |
+          cd bindings/node
+          ls -la *.node 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: |
+            bindings/node/*.node
+            bindings/node/*.wasm
+            bindings/node/index.js
+            bindings/node/index.d.ts
+
+  node-test-macos-windows:
+    needs: node-build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            architecture: x64
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - host: macos-13
+            target: x86_64-apple-darwin
+            architecture: x64
+        node: ['20', '22']
+    runs-on: ${{ matrix.host }}
+    name: Node test (${{ matrix.target }}) @ node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          architecture: ${{ matrix.architecture }}
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install dependencies
+        run: cd bindings/node && npm ci
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: bindings/node
+      - name: List packages
+        run: |
+          cd bindings/node
+          ls -la
+      - name: Test bindings
+        run: cd bindings/node && npm test
+
+  node-test-linux:
+    needs: node-build
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    runs-on: ubuntu-latest
+    name: Node test (x86_64-unknown-linux-gnu) @ node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install dependencies
+        run: cd bindings/node && npm ci
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-x86_64-unknown-linux-gnu
+          path: bindings/node
+      - name: List packages
+        run: |
+          cd bindings/node
+          ls -la
+      - name: Test bindings
+        run: cd bindings/node && npm test

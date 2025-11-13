@@ -1,0 +1,129 @@
+name: Publish npm Package
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Git tag to publish (e.g., sombrajs-v0.5.4)'
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: true
+  push:
+    tags:
+      - 'sombrajs-v*'
+
+env:
+  DEBUG: napi:*
+  APP_NAME: sombradb
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug workflow inputs
+        run: |
+          echo "=== Workflow Debug Info ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag input: ${{ inputs.tag }}"
+          echo "Build condition: ${{ inputs.tag != '' || startsWith(github.ref, 'refs/tags/sombrajs-v') }}"
+
+  build:
+    if: |
+      inputs.tag != '' || 
+      startsWith(github.ref, 'refs/tags/sombrajs-v')
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-13
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - name: Install dependencies
+        run: cd bindings/node && npm ci
+      - name: Build bindings
+        run: cd bindings/node && ${{ matrix.settings.build }}
+      - name: Inspect build output
+        shell: bash
+        run: |
+          cd bindings/node
+          echo "Listing *.node files for target ${{ matrix.settings.target }}"
+          find . -name "*.node" -print
+          if [ -d npm ]; then
+            echo "npm directory snapshot:"
+            find npm -type f -print
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: |
+            bindings/node/*.node
+            bindings/node/*.wasm
+            bindings/node/index.js
+            bindings/node/index.d.ts
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    if: |
+      inputs.tag != '' || 
+      startsWith(github.ref, 'refs/tags/sombrajs-v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install dependencies
+        run: cd bindings/node && npm ci
+      - name: Prepare npm dirs
+        run: cd bindings/node && npx napi create-npm-dirs
+      - uses: actions/download-artifact@v4
+        with:
+          path: bindings/node/artifacts
+      - name: Move artifacts
+        run: cd bindings/node && npm run artifacts
+      - name: Copy index files from artifacts
+        run: |
+          cd bindings/node
+          cp artifacts/bindings-x86_64-apple-darwin/index.js . || true
+          cp artifacts/bindings-x86_64-apple-darwin/index.d.ts . || true
+          ls -la index.js index.d.ts
+      - name: Publish to npm
+        run: |
+          cd bindings/node
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
