@@ -56,3 +56,10 @@ python -m pytest tests
 
 Use `maturin build` to produce distributable wheels once you are ready to
 publish the bindings.
+
+## Release Workflow
+
+1. Land a `feat` commit that touches `bindings/python/**` whenever you want the PyO3 wheel to bump its minor version. Release Please maps that commit to a new `sombrapy` release PR.
+2. Before merging the PR, build and test the wheel locally: `maturin develop`, `pytest -q`, and `maturin build --release` (or `maturin publish --dry-run`).
+3. Merge the release PR to tag the repo; the `publish-python.yml` workflow uploads the wheels to PyPI. Re-run `maturin publish` manually only if the workflow fails.
+

@@ -164,3 +164,10 @@ git push --follow-tags
 ```
 
 GitHub Actions will build the platform-specific artifacts with `napi prepublish`. Ensure `NPM_TOKEN` is configured in the repository secrets before triggering a release.
+
+## Release Workflow
+
+1. Land a Conventional Commit using the `feat` type that touches `bindings/node/**`. Release Please treats that as the trigger for a **minor** bump of `sombradb` while we remain on 0.x.
+2. Verify the addon builds and tests still pass before cutting the release: `bun run build`, `bun run test`, and (optionally) `npm pack` to inspect the tarball.
+3. Run the Release Please workflow (or let CI schedule it) to open the `sombrajs` release PR. Merging that PR tags the repo and kicks off `publish-npm.yml`, which publishes the compiled artifacts to npm.
+
