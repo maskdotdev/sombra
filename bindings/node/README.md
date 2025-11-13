@@ -1,173 +1,141 @@
-# `sombradb` Node bindings
+# `sombradb` for Node.js
 
-This package surfaces the Sombra graph database planner/executor to Node.js. It is built with [`napi-rs`](https://napi.rs) and ships the same fluent query builder used in Stage 8 of the build docs.
+> ⚠️ **Alpha warning:** the JavaScript/TypeScript bindings track the rapidly evolving Sombra core. Expect sharp edges, breaking API changes between minor versions, and limited platform coverage (currently macOS/Linux on x64 and arm64 with Node 18+).
 
-## Prerequisites
+The package ships a fluent graph query builder, transactional CRUD helpers, and typed schema support via the same execution engine that powers the Rust CLI. Everything runs in-process—no daemon to manage—so you can embed Sombra anywhere you can run Node.
 
-- [Rust toolchain](https://www.rust-lang.org/tools/install)
-- Node.js 18+
-- [Bun 1.3+](https://bun.sh) for dependency management and scripts
+## Installation
 
-## Setup
+Install from npm like any other dependency; the prebuilt native addon is included in the tarball.
 
 ```bash
-bun install
+npm install sombradb
+# or
+pnpm add sombradb
+bun add sombradb
 ```
 
-The command above installs dependencies and produces the native addon (`sombradb.*.node`).
+If you need to build from source (for contrib work), install the Rust toolchain plus [Bun](https://bun.sh) and run `bun install`.
 
-## Build
-
-```bash
-bun run build
-```
-
-This runs `napi build --platform --release` and refreshes the compiled addon via Cargo.
-
-## Test
-
-```bash
-bun run test
-```
-
-The test suite uses [AVA](https://github.com/avajs/ava) and exercises the fluent API against the in-process demo dataset (`seedDemo`).
-
-## Usage example
+## Quick start
 
 ```ts
 import { Database, eq } from 'sombradb'
 
 const db = Database.open('/tmp/sombra.db').seedDemo()
-const rows = await db
+const users = await db
   .query()
   .nodes('User')
-  .where(eq('name', 'Ada'))
-  .select('name')
+  .where(eq('name', 'Ada Lovelace'))
+  .select('name', 'bio')
   .execute()
 
-console.log(rows)
-// Pass true if you need the metadata wrapper ({ rows, request_id, features }):
-const { request_id } = await db.query().nodes('User').requestId('example').execute(true)
+console.log(users)
 
-const createdId = db.createNode('User', { name: 'New User', bio: 'Hello from Node' })
+const createdId = db.createNode('User', { name: 'New User', bio: 'from Node' })
 db.updateNode(createdId, { set: { bio: 'updated' } })
 db.deleteNode(createdId, true)
 ```
 
-`Database.seedDemo()` materialises a small example graph so the builder can be exercised without any additional seeding. Predicate helpers understand JS `Date` objects and ISO 8601 strings with timezone offsets and automatically convert them into nanosecond timestamps. Property projections (`{ var, prop, as }`) return flat scalar result sets when you only need specific values instead of entire nodes.
+- `Database.open(path, options?)` boots the embedded engine. Pass `':memory:'` for ephemeral work or a file path for persistence.
+- `seedDemo()` materialises a tiny sample graph so you can explore the query surface immediately.
+- `execute(true)` returns `{ rows, request_id, features }` when you need metadata; omit the flag for a plain row array.
 
-## CRUD helpers
+## Query builder at a glance
 
-`Database.mutate(script)` submits batched mutations directly to the core engine. The `Database` class also exposes ergonomic helpers:
+The fluent builder mirrors Cypher-like traversal but stays fully typed:
 
-- `createNode(labels, props)` / `createEdge(src, dst, type, props)`
-- `updateNode(id, { set, unset })` / `updateEdge(...)`
-- `deleteNode(id, cascade?)` / `deleteEdge(id)`
+```ts
+import { and, between, eq, inList, Database } from 'sombradb'
 
-See `examples/crud.js` for an end-to-end walkthrough:
-
-```bash
-node examples/crud.js
+const db = Database.open(':memory:').seedDemo()
+const result = await db
+  .query()
+  .nodes('User')
+  .where(
+    and(
+      inList('name', ['Ada Lovelace', 'Alan Turing']),
+      between('created_at', new Date('1840-01-01'), new Date('1955-01-01')),
+    ),
+  )
+  .select(['node', 'name', 'bio'])
+  .orderBy('name', 'asc')
+  .limit(10)
+  .execute()
 ```
 
-### Bulk creation example
+- Predicate helpers (`eq`, `and`, `or`, `not`, `between`, `inList`, `gt`, `lt`, etc.) understand JS primitives, Dates, and ISO strings and handle nanosecond conversions for you.
+- `select()` accepts strings for scalar projections or `{ var, prop, as }` objects to alias nested values.
+- Chain `.edges(type)` or `.path()` calls to traverse relationships; everything compiles into a single plan executed inside the Rust core.
 
-`examples/bulk_create.js` shows how to use the fluent create builder to batch 10,000 nodes and 20,000 edges (counts are configurable):
+## Mutations and bulk ingest
 
-```bash
-# Defaults to 10k nodes / 20k edges
-node examples/bulk_create.js
+`Database.mutate()` accepts raw mutation scripts, but the higher-level helpers cover most cases:
 
-# Override the counts
-node examples/bulk_create.js 5000 10000
+```ts
+const created = db.createNode(['User'], { name: 'Nova', followerCount: 0 })
+db.createEdge(created, created, 'KNOWS', { strength: 1 })
+db.updateNode(created, { set: { followerCount: 5 }, unset: ['temporary_flag'] })
+db.deleteNode(created, true) // cascade through connected edges
 ```
 
-The script executes everything in a single transaction and prints a small sample query so you can verify the inserts.
+For high-volume ingestion, use the builder returned by `db.create()`:
 
-### Scaling bulk loads
+```ts
+const summary = db.create()
+  .node(['User'], { name: 'User 1' })
+  .node(['User'], { name: 'User 2' })
+  .edge(0, 'KNOWS', 1, { since: 2024 })
+  .execute()
 
-Large one-shot builders keep every staged node/edge in memory until `execute()` runs, and the pager must cache a comparable number of leaf pages. If you want to ingest 100k+ nodes and hundreds of thousands of edges as fast as possible, you have two options:
-
-1. **Single transaction with a bigger cache (fastest per-row).**
-
-   ```js
-   const db = Database.open(path, {
-     synchronous: 'normal',      // relaxed fsyncs for bulk loads
-     commitCoalesceMs: 0,        // flush immediately after execute()
-     commitMaxFrames: 16384,     // allow larger WAL batches
-     cachePages: 8192,           // ~512 MiB cache to avoid evictions
-   })
-   const summary = db.create()
-     // ... enqueue 10k+ nodes / 50k+ edges ...
-     .execute()
-   console.log(summary.nodes.length, summary.edges.length)
-   ```
-
-   **Pros:** one commit, highest throughput, easy progress accounting.  
-   **Cons:** needs plenty of RAM; with default cache settings the pager will eventually run out of eviction candidates and abort.
-
-2. **Chunked batches (less memory, more commits).**
-
-   ```js
-   async function loadChunks(db, totalNodes, totalEdges, chunkSize = 10000) {
-     let nodesDone = 0
-     let edgesDone = 0
-     while (nodesDone < totalNodes) {
-       const builder = db.create()
-       const handles = []
-       const take = Math.min(chunkSize, totalNodes - nodesDone)
-       for (let i = 0; i < take; i++) {
-         handles.push(builder.node(['User'], { name: `User ${nodesDone + i}` }))
-       }
-       const edgesThisChunk = Math.min(
-         Math.floor((take / chunkSize) * totalEdges),
-         totalEdges - edgesDone,
-       )
-       for (let e = 0; e < edgesThisChunk; e++) {
-         builder.edge(
-           handles[e % take],
-           'KNOWS',
-           handles[(e * 13 + 7) % take],
-           {},
-         )
-       }
-       const summary = builder.execute()
-       nodesDone += summary.nodes.length
-       edgesDone += summary.edges.length
-     }
-   }
-   ```
-
-   **Pros:** works with default cache sizes; keeps process memory bounded.  
-   **Cons:** more commits (one per chunk) so total runtime is slightly higher.
-
-Regardless of the approach, build the addon in release mode (`bun run build`) before benchmarking; debug builds of the Rust core are ~100× slower.
-
-## Benchmarks
-
-The `tinybench` harness in `benchmark/crud.mjs` measures basic create/read/update/delete throughput:
-
-```bash
-bun run bench
+console.log(summary.nodes.length, summary.edges.length)
 ```
 
-Each benchmark run spins up a fresh database under `/tmp` to avoid polluting your workspace.
+The builder batches everything into one transaction. Chunk the work manually if you need to cap memory usage (see `examples/bulk_create.js`).
 
-## Release workflow
+## Typing your schema
 
-When you are ready to publish a new revision, bump the version and push the tag:
+Supply a `NodeSchema` to get end-to-end type hints in editors:
 
-```bash
-bun run prepublishOnly
-npm version [major|minor|patch]
-git push --follow-tags
+```ts
+import type { NodeSchema } from 'sombradb'
+import { Database, eq } from 'sombradb'
+
+interface Schema extends NodeSchema {
+  User: {
+    labels: ['User']
+    properties: {
+      id: string
+      name: string
+      created_at: Date
+      tags: string[]
+    }
+  }
+}
+
+const db = Database.open<Schema>('app.db')
+await db.query().nodes('User').where(eq('name', 'Trillian')).select('name').execute()
 ```
 
-GitHub Actions will build the platform-specific artifacts with `napi prepublish`. Ensure `NPM_TOKEN` is configured in the repository secrets before triggering a release.
+Every projection, predicate, and mutation now benefits from compile-time checks.
 
-## Release Workflow
+## Examples and scripts
 
-1. Land a Conventional Commit using the `feat` type that touches `bindings/node/**`. Release Please treats that as the trigger for a **minor** bump of `sombradb` while we remain on 0.x.
-2. Verify the addon builds and tests still pass before cutting the release: `bun run build`, `bun run test`, and (optionally) `npm pack` to inspect the tarball.
-3. Run the Release Please workflow (or let CI schedule it) to open the `sombrajs` release PR. Merging that PR tags the repo and kicks off `publish-npm.yml`, which publishes the compiled artifacts to npm.
+- `examples/crud.js` – end-to-end walkthrough of opening the DB, seeding data, and exercising CRUD helpers.
+- `examples/bulk_create.js` – demonstrates the bulk builder and scaling knobs for large inserts.
+- `examples/fluent_query.ts` – a TypeScript-first tour of predicates, ordering, pagination, and configuration options.
+- `benchmark/crud.mjs` – micro-benchmarks using `tinybench`; helpful for smoke-testing performance-sensitive changes.
 
+Run any of the scripts with `node`/`bun` from the `bindings/node` directory.
+
+## Working inside this repo
+
+If you are hacking on the bindings themselves:
+
+```bash
+bun install        # installs JS deps and builds the native addon
+bun run build      # release-mode napi build
+bun run test       # AVA-based contract tests
+```
+
+Release automation is handled by Release Please; see `CHANGELOG-js.md` for the latest published notes.
