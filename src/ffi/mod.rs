@@ -25,7 +25,7 @@ use crate::storage::{
     NodeSpec as StorageNodeSpec, PropEntry, PropPatch, PropPatchOp, PropValue, PropValueOwned,
     TypeTag,
 };
-use crate::types::{EdgeId, LabelId, NodeId, PropId, SombraError, TypeId};
+use crate::types::{EdgeId, LabelId, NodeId, PropId, SombraError, StrId, TypeId};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
@@ -301,18 +301,16 @@ impl CancellationRegistry {
         }
     }
 
-    fn register(
-        self: &Arc<Self>,
-        request_id: &str,
-    ) -> Result<CancellationHandle> {
+    fn register(self: &Arc<Self>, request_id: &str) -> Result<CancellationHandle> {
         if request_id.trim().is_empty() {
             return Err(FfiError::Message(
                 "request_id must be a non-empty string".into(),
             ));
         }
-        let mut guard = self.tokens.lock().map_err(|_| {
-            FfiError::Message("cancellation registry poisoned".into())
-        })?;
+        let mut guard = self
+            .tokens
+            .lock()
+            .map_err(|_| FfiError::Message("cancellation registry poisoned".into()))?;
         if guard.contains_key(request_id) {
             return Err(FfiError::Message(format!(
                 "request '{request_id}' already has a running query"
@@ -477,6 +475,78 @@ impl Database {
         self.stream(spec)
     }
 
+    /// Samples label IDs from the first `node_limit` nodes and returns the top `max_labels` names.
+    pub fn sample_labels(
+        &self,
+        node_limit: usize,
+        max_labels: usize,
+    ) -> Result<Vec<(String, u64)>> {
+        if node_limit == 0 || max_labels == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.pager.begin_read()?;
+        let samples = self.graph.sample_node_labels(&read, node_limit)?;
+        drop(read);
+
+        let mut counts: HashMap<u32, u64> = HashMap::new();
+        for label_list in samples {
+            for label in label_list {
+                *counts.entry(label.0).or_insert(0) += 1;
+            }
+        }
+
+        let mut entries: Vec<(u32, u64)> = counts.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let mut results = Vec::new();
+        for (label_id, count) in entries.into_iter().take(max_labels) {
+            let name = match self.dict.resolve_str(StrId(label_id)) {
+                Ok(value) => value,
+                Err(_) => format!("LABEL#{label_id}"),
+            };
+            results.push((name, count));
+        }
+        Ok(results)
+    }
+
+    /// Ensures label indexes exist for the provided label names. Returns how many were created.
+    pub fn ensure_label_indexes(&self, labels: &[String]) -> Result<usize> {
+        if labels.is_empty() {
+            return Ok(0);
+        }
+        let mut unique = HashSet::new();
+        for label in labels {
+            let trimmed = label.trim();
+            if !trimmed.is_empty() {
+                unique.insert(trimmed.to_string());
+            }
+        }
+        if unique.is_empty() {
+            return Ok(0);
+        }
+
+        let mut to_create = Vec::new();
+        for name in unique {
+            let label_id = self
+                .metadata
+                .resolve_label(&name)
+                .map_err(|_| FfiError::Message(format!("unknown label '{name}'")))?;
+            if !self.graph.has_label_index(label_id)? {
+                to_create.push(label_id);
+            }
+        }
+        if to_create.is_empty() {
+            return Ok(0);
+        }
+
+        let mut write = self.pager.begin_write()?;
+        for label_id in &to_create {
+            self.graph.create_label_index(&mut write, *label_id)?;
+        }
+        self.pager.commit(write)?;
+        Ok(to_create.len())
+    }
+
     /// Applies a JSON mutation specification (create, update, delete operations).
     pub fn mutate_json(&self, spec: &Value) -> Result<Value> {
         let spec: MutationSpec = serde_json::from_value(spec.clone())
@@ -532,11 +602,7 @@ impl Database {
         self.explain_with_options(spec, false)
     }
 
-    fn explain_with_options(
-        &self,
-        spec: QuerySpec,
-        redact_literals: bool,
-    ) -> Result<Value> {
+    fn explain_with_options(&self, spec: QuerySpec, redact_literals: bool) -> Result<Value> {
         let plan = self.plan(spec)?;
         Ok(explain_payload(
             plan.request_id.clone(),
@@ -1041,13 +1107,11 @@ impl QuerySpec {
         let schema_version = match schema_version {
             SchemaVersionState::Value(version) if version == 1 => version,
             state => {
-                return Err(
-                    AnalyzerError::UnsupportedSchemaVersion {
-                        found: state,
-                        supported: 1,
-                    }
-                    .into(),
-                )
+                return Err(AnalyzerError::UnsupportedSchemaVersion {
+                    found: state,
+                    supported: 1,
+                }
+                .into())
             }
         };
 
@@ -1946,9 +2010,7 @@ fn execution_payload(request_id: Option<String>, rows: Vec<Value>) -> Value {
     let mut map = Map::new();
     map.insert(
         "request_id".into(),
-        request_id
-            .map(Value::String)
-            .unwrap_or(Value::Null),
+        request_id.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("features".into(), Value::Array(Vec::new()));
     map.insert("rows".into(), Value::Array(rows));
@@ -2033,9 +2095,7 @@ fn explain_payload(
     let mut root = Map::new();
     root.insert(
         "request_id".into(),
-        request_id
-            .map(Value::String)
-            .unwrap_or(Value::Null),
+        request_id.map(Value::String).unwrap_or(Value::Null),
     );
     root.insert("features".into(), Value::Array(Vec::new()));
     root.insert(
@@ -2465,6 +2525,7 @@ mod tests {
     use super::*;
     use crate::query::Value as QueryValue;
     use serde_json::json;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn props(entries: &[(&str, Value)]) -> Map<String, Value> {
@@ -2554,6 +2615,19 @@ mod tests {
             Some(BoolExpr::Or(children)) => assert!(children.is_empty()),
             other => panic!("unexpected predicate shape: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn sample_labels_returns_entries_for_demo_db() -> Result<()> {
+        let path = Path::new("tests/fixtures/demo-db/graph-demo.sombra");
+        let opts = DatabaseOptions {
+            create_if_missing: false,
+            ..DatabaseOptions::default()
+        };
+        let db = Database::open(path, opts)?;
+        let labels = db.sample_labels(100, 5)?;
+        assert!(!labels.is_empty(), "expected at least one label in demo db");
         Ok(())
     }
 

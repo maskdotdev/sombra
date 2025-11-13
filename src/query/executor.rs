@@ -263,13 +263,10 @@ impl Executor {
     ) -> Result<BoxBindingStream> {
         match &node.op {
             PhysicalOp::LabelScan { label, as_var, .. } => {
-                let scan = self
-                    .graph
-                    .label_scan(context.guard(), *label)?
-                    .ok_or(SombraError::Invalid("label index not found"))?;
+                let stream = self.graph.label_scan_stream(context.guard(), *label)?;
                 Ok(Box::new(PostingBindingStream::from_stream(
                     as_var.0.clone(),
-                    Box::new(scan),
+                    stream,
                 )?))
             }
             PhysicalOp::PropIndexScan {
@@ -1778,15 +1775,13 @@ mod tests {
             LiteralValue::Null,
             LiteralValue::Int(5),
         ];
-        let expr = PhysicalBoolExpr::Not(Box::new(PhysicalBoolExpr::Cmp(
-            PhysicalComparison::In {
-                var: Var("a".into()),
-                prop: PropId(2),
-                prop_name: "scores".into(),
-                lookup: InLookup::from_literals(&values),
-                values,
-            },
-        )));
+        let expr = PhysicalBoolExpr::Not(Box::new(PhysicalBoolExpr::Cmp(PhysicalComparison::In {
+            var: Var("a".into()),
+            prop: PropId(2),
+            prop_name: "scores".into(),
+            lookup: InLookup::from_literals(&values),
+            values,
+        })));
         let mut resolver = TestResolver::new(vec![(
             "a",
             bool_node(vec![(PropId(2), PropValueOwned::Int(10))]),

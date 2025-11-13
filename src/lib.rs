@@ -5,6 +5,8 @@
 
 pub mod admin;
 pub mod cli;
+#[path = "../packages/api-server/mod.rs"]
+pub mod dashboard;
 pub mod ffi;
 pub mod primitives;
 pub mod query;

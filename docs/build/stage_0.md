@@ -42,7 +42,7 @@ sombra/
 │  ├─ python/
 │  │  ├─ pyproject.toml            # maturin + pyo3 (abi3)
 │  │  ├─ README.md
-│  │  └─ sombra_py/                # package root
+│  │  └─ sombra/                   # package root
 │  │     ├─ __init__.py            # re-exports, small helpers
 │  │     └─ _native.rs             # Rust module compiled by maturin (stub)
 │  └─ node/
@@ -194,12 +194,12 @@ classifiers = ["Programming Language :: Python :: 3"]
 readme = "README.md"
 
 [tool.maturin]
-module-name = "sombra_py._native"
+module-name = "sombra._native"
 bindings = "pyo3"
 manifest-path = "Cargo.toml"
 ```
 
-**Python Rust module stub (`bindings/python/sombra_py/_native.rs`)**
+**Python Rust module stub (`bindings/python/sombra/_native.rs`)**
 
 ```rust
 use pyo3::{prelude::*, wrap_pyfunction};
@@ -262,7 +262,7 @@ jobs:
           command: develop
           args: --release
           working-directory: bindings/python
-      - run: python -c "import sombra_py; print(sombra_py.version())"
+      - run: python -c "import sombra; print(sombra.version())"
         working-directory: bindings/python
 ```
 

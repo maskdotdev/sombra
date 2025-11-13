@@ -42,6 +42,10 @@ res = db.query() \
   )) \
   .select("id", "name") \
   .execute()
+
+# Pass with_meta=True when you need request ids or feature flags:
+payload = db.query().nodes("Person").request_id("demo").select("id").execute(with_meta=True)
+rows = payload.rows()
 ```
 
 ---

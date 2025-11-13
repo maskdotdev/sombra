@@ -59,7 +59,10 @@ sombra import <DB> \
 
 * **Nodes file** (required): CSV with an `id` column (default name `id`). Labels can come from `--node-labels` (pipe-separated literal list) and/or `--node-label-column`. Property columns default to “everything except ID/label columns” but you can pass `--node-props` with a comma-separated list.
 * **Edges file** (optional): CSV with source/destination columns (`src`/`dst` by default). Edge type can be a constant (`--edge-type`) or read from `--edge-type-column`. You must import nodes first so the importer can map external IDs.
-* Values are parsed as bool/int/float/string/null automatically. Import batches are executed through the storage layer (no `MutationSpec` indirection) and a final checkpoint is issued so data is durable immediately.
+* Values are parsed as bool/int/float/string/null automatically, with optional type overrides via `--node-prop-types col:type` / `--edge-prop-types col:type`. Accepted types: `auto` (default), `string`, `bool`, `int`, `float`, `date`, `datetime`, `bytes`. Date/datetime values accept ISO-8601 strings (`YYYY-MM-DD`, RFC3339 datetimes) or pre-computed epoch days/milliseconds; byte values expect a `0x`-prefixed hex string. Use the overrides to force `string` when you need to disable the built-in heuristics.
+* `--disable-indexes` drops existing Stage 7 property indexes before importing so writes can skip index maintenance. Pair it with `--build-indexes` to rebuild every dropped index offline after the load completes (the command enforces this pairing automatically).
+* Sample CSV fixtures live under `tests/fixtures/import/` (e.g., `people_nodes.csv`, `follows_edges.csv`) and cover typed columns, dates/datetimes, and byte payloads.
+* Import batches are executed through the storage layer (no `MutationSpec` indirection) and a final checkpoint is issued so data is durable immediately.
 
 Example:
 
@@ -67,8 +70,10 @@ Example:
 sombra import graph.sombra \
   --nodes people.csv --node-id-column person_id --node-labels Person \
   --node-props name,age,email \
+  --node-prop-types age:int,birth_date:date \
   --edges follows.csv --edge-src-column src --edge-dst-column dst \
   --edge-type FOLLOWS \
+  --edge-prop-types weight:float,created_at:datetime \
   --create
 ```
 
@@ -89,6 +94,17 @@ sombra export graph.sombra \
   --nodes nodes_out.csv --node-props name,age \
   --edges edges_out.csv --edge-props since,weight
 ```
+
+## Demo Seeding
+
+```
+sombra seed-demo <DB> [--create]
+```
+
+Populates the database with a tiny Stage 8 demo graph (three `User` nodes and
+`FOLLOWS` edges). Pass `--create` the first time so the CLI can create the file
+if it does not exist yet. Once seeded you can immediately run queries such as
+`MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a,b` from the dashboard or bindings.
 
 ## JSON Output
 

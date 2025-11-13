@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Deque, List
 
-from sombra_py import Database
+from sombra import Database
 
 LABEL_USER = "User"
 EDGE_TYPE_FOLLOWS = "FOLLOWS"
@@ -132,7 +132,7 @@ class CrudHarness:
         self.db.mutate_many(ops)
 
     def read_users(self) -> None:
-        self.db.query().match(LABEL_USER).select(["n0"]).execute().rows()
+        self.db.query().match(LABEL_USER).select(["n0"]).execute()
 
     def create_user(self, name: str) -> int:
         summary = self.db.mutate_many([{"op": "createNode", "labels": [LABEL_USER], "props": {"name": name}}])

@@ -63,7 +63,7 @@ export class QueryBuilder {
 ### 0.2 Python parity
 
 ```python
-# sombra_py/query.py
+# bindings/python/sombra/query.py
 q = db.query().match('User').where('FOLLOWS', 'User').bidirectional()
 rows = list(q.execute())         # list of dicts {'a': int, 'b': int}
 plan = q.explain()
@@ -92,7 +92,7 @@ const rows = await db
 **Python**
 
 ```python
-from sombra_py import Database
+from sombra import Database
 
 db = Database.open("/tmp/sombra.db")
 db.seed_demo()

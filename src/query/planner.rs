@@ -1736,7 +1736,10 @@ fn op_props(op: &PhysicalOp) -> Vec<ExplainProp> {
             if let Some(name) = label_name {
                 props.insert(0, ExplainProp::plain("label", name.clone()));
             }
-            props.push(ExplainProp::plain("selectivity", fmt_selectivity(*selectivity)));
+            props.push(ExplainProp::plain(
+                "selectivity",
+                fmt_selectivity(*selectivity),
+            ));
             props
         }
         PhysicalOp::Expand {
@@ -1773,10 +1776,7 @@ fn op_props(op: &PhysicalOp) -> Vec<ExplainProp> {
         ],
         PhysicalOp::BoolFilter { expr } => vec![
             ExplainProp::literal("expr", describe_bool_expr(expr)),
-            ExplainProp::plain(
-                "selectivity",
-                fmt_selectivity(bool_expr_selectivity(expr)),
-            ),
+            ExplainProp::plain("selectivity", fmt_selectivity(bool_expr_selectivity(expr))),
         ],
         PhysicalOp::Intersect { vars } => vec![ExplainProp::plain(
             "vars",
@@ -2053,9 +2053,9 @@ fn comparison_selectivity(cmp: &PhysicalComparison) -> f64 {
         PhysicalComparison::Lt { .. } | PhysicalComparison::Le { .. } => 0.3,
         PhysicalComparison::Gt { .. } | PhysicalComparison::Ge { .. } => 0.3,
         PhysicalComparison::Between { .. } => 0.2,
-        PhysicalComparison::In { values, lookup: _, .. } => {
-            (values.len() as f64 * 0.05).clamp(0.05, 1.0)
-        }
+        PhysicalComparison::In {
+            values, lookup: _, ..
+        } => (values.len() as f64 * 0.05).clamp(0.05, 1.0),
         PhysicalComparison::Exists { .. } => 0.5,
         PhysicalComparison::IsNull { .. } => 0.1,
         PhysicalComparison::IsNotNull { .. } => 0.9,

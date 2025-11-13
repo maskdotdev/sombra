@@ -5,8 +5,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from sombra_py import Database
-from sombra_py.query import eq
+from sombra import Database
+from sombra.query import eq
 
 
 def temp_db_path() -> str:
@@ -23,8 +23,8 @@ def main() -> None:
 
     db.update_node(user_id, set_props={"bio": "Updated from Python"})
 
-    result = db.query().nodes("User").where(eq("name", "Example User")).execute()
-    print("Query rows:", result.rows())
+    rows = db.query().nodes("User").where(eq("name", "Example User")).execute()
+    print("Query rows:", rows)
 
     db.delete_node(user_id, cascade=True)
     print("Deleted user:", user_id)

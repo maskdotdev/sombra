@@ -7,30 +7,75 @@ use crate::admin::{open_graph, AdminOpenOptions, CheckpointMode, GraphHandle};
 use crate::primitives::pager::{PageStore, Pager, ReadGuard, WriteGuard};
 use crate::storage::catalog::Dict;
 use crate::storage::{
-    BulkEdgeValidator, CreateEdgeOptions, EdgeSpec, Graph, GraphWriter, NodeSpec, PropEntry,
-    PropValue, PropValueOwned,
+    index::IndexDef, BulkEdgeValidator, CreateEdgeOptions, EdgeSpec, Graph, GraphWriter, NodeSpec,
+    PropEntry, PropValue, PropValueOwned,
 };
 use crate::types::{LabelId, NodeId, PropId, SombraError, StrId, TypeId};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
-use serde_json::{Map, Value};
 use thiserror::Error;
+use time::format_description::{well_known::Rfc3339, FormatItem};
+use time::macros::format_description;
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime};
 
 const NODE_BATCH_SIZE: usize = 256;
 const EDGE_BATCH_SIZE: usize = 512;
+
+const DATE_FMT: &[FormatItem<'static>] = format_description!("[year]-[month]-[day]");
+const DATETIME_FMT_T: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+const DATETIME_FMT_T_FRAC: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond]");
+const DATETIME_FMT_SPACE: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+const DATETIME_FMT_SPACE_FRAC: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond]");
 
 type ExtIdMap = HashMap<String, u64>;
 
 struct NodeInsert {
     ext_id: String,
     labels: Vec<String>,
-    props: Map<String, Value>,
+    props: Vec<PropInput>,
 }
 
 struct EdgeInsert {
     src: u64,
     dst: u64,
     ty: String,
-    props: Map<String, Value>,
+    props: Vec<PropInput>,
+}
+
+#[derive(Clone, Debug)]
+struct PropInput {
+    name: String,
+    value: PropValueOwned,
+}
+
+/// Supported property type coercions for CSV imports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PropertyType {
+    /// Let the importer infer the type from literals (default).
+    Auto,
+    /// Boolean literal (`true`/`false`).
+    Bool,
+    /// 64-bit signed integer.
+    Int,
+    /// 64-bit floating point value.
+    Float,
+    /// UTF-8 string literal (disables heuristics).
+    String,
+    /// Calendar date (epoch days or `YYYY-MM-DD`).
+    Date,
+    /// Timestamp (epoch milliseconds or RFC3339).
+    DateTime,
+    /// `0x`-prefixed hex blob.
+    Bytes,
+}
+
+impl Default for PropertyType {
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 /// Configuration for importing nodes from a CSV file.
@@ -47,6 +92,8 @@ pub struct NodeImportConfig {
     /// Optional list of CSV columns to import as node properties.
     /// If None, all columns except id and label columns are imported.
     pub prop_columns: Option<Vec<String>>,
+    /// Explicit property type overrides keyed by column name.
+    pub prop_types: HashMap<String, PropertyType>,
 }
 
 /// Configuration for importing edges from a CSV file.
@@ -69,6 +116,8 @@ pub struct EdgeImportConfig {
     pub trusted_endpoints: bool,
     /// Cache capacity for endpoint existence probes (0 disables caching).
     pub exists_cache_capacity: usize,
+    /// Explicit property type overrides keyed by column name.
+    pub prop_types: HashMap<String, PropertyType>,
 }
 
 /// Configuration for the complete import operation.
@@ -78,6 +127,10 @@ pub struct ImportConfig {
     pub db_path: PathBuf,
     /// Whether to create the database if it doesn't exist.
     pub create_if_missing: bool,
+    /// Whether to drop property indexes before importing.
+    pub disable_indexes: bool,
+    /// Whether to rebuild property indexes after import (requires disable).
+    pub build_indexes: bool,
     /// Optional configuration for node import.
     pub nodes: Option<NodeImportConfig>,
     /// Optional configuration for edge import.
@@ -165,6 +218,11 @@ pub fn run_import(cfg: &ImportConfig, opts: &AdminOpenOptions) -> Result<ImportS
         .nodes
         .as_ref()
         .ok_or_else(|| CliError::Message("--nodes is required for import".into()))?;
+    if cfg.build_indexes && !cfg.disable_indexes {
+        return Err(CliError::Message(
+            "--build-indexes requires --disable-indexes".into(),
+        ));
+    }
 
     if !cfg.db_path.exists() {
         if cfg.create_if_missing {
@@ -179,21 +237,33 @@ pub fn run_import(cfg: &ImportConfig, opts: &AdminOpenOptions) -> Result<ImportS
         }
     }
 
-    let handle = open_graph(&cfg.db_path, opts)?;
     let mut summary = ImportSummary::default();
-    let mut id_map: ExtIdMap = ExtIdMap::new();
-    summary.nodes_imported = import_nodes(&handle, nodes_cfg, &mut id_map)?;
-
-    if let Some(edges_cfg) = &cfg.edges {
-        if id_map.is_empty() {
-            return Err(CliError::Message(
-                "cannot import edges without node id mapping".into(),
-            ));
+    let mut dropped_indexes = Vec::new();
+    {
+        let handle = open_graph(&cfg.db_path, opts)?;
+        if cfg.disable_indexes {
+            dropped_indexes = drop_all_property_indexes(&handle)?;
         }
-        summary.edges_imported = import_edges(&handle, edges_cfg, &mut id_map)?;
+        let mut id_map: ExtIdMap = ExtIdMap::new();
+        summary.nodes_imported = import_nodes(&handle, nodes_cfg, &mut id_map)?;
+
+        if let Some(edges_cfg) = &cfg.edges {
+            if id_map.is_empty() {
+                return Err(CliError::Message(
+                    "cannot import edges without node id mapping".into(),
+                ));
+            }
+            summary.edges_imported = import_edges(&handle, edges_cfg, &mut id_map)?;
+        }
+
+        handle.pager.checkpoint(CheckpointMode::Force)?;
     }
 
-    handle.pager.checkpoint(CheckpointMode::Force)?;
+    if cfg.build_indexes {
+        let handle = open_graph(&cfg.db_path, opts)?;
+        rebuild_property_indexes(&handle, &dropped_indexes)?;
+        handle.pager.checkpoint(CheckpointMode::Force)?;
+    }
 
     Ok(summary)
 }
@@ -232,6 +302,7 @@ pub fn run_export(cfg: &ExportConfig, opts: &AdminOpenOptions) -> Result<ExportS
 struct ColumnSpec {
     name: String,
     index: usize,
+    prop_type: PropertyType,
 }
 
 fn import_nodes(
@@ -251,7 +322,7 @@ fn import_nodes(
     if let Some(idx) = label_index {
         skip.push(idx);
     }
-    let prop_columns = resolve_prop_columns(&headers, &cfg.prop_columns, &skip)?;
+    let prop_columns = resolve_prop_columns(&headers, &cfg.prop_columns, &cfg.prop_types, &skip)?;
 
     let mut batch: Vec<NodeInsert> = Vec::with_capacity(NODE_BATCH_SIZE);
     let mut imported = 0u64;
@@ -289,7 +360,7 @@ fn import_nodes(
             )));
         }
 
-        let props = build_props(&record, &prop_columns);
+        let props = build_props(&record, &prop_columns)?;
         batch.push(NodeInsert {
             ext_id: ext_id.to_string(),
             labels,
@@ -328,7 +399,7 @@ fn import_edges(
     if let Some(idx) = ty_index {
         skip.push(idx);
     }
-    let prop_columns = resolve_prop_columns(&headers, &cfg.prop_columns, &skip)?;
+    let prop_columns = resolve_prop_columns(&headers, &cfg.prop_columns, &cfg.prop_types, &skip)?;
 
     let validator = cfg.trusted_endpoints.then(|| {
         Box::new(SnapshotEdgeValidator::new(
@@ -366,7 +437,7 @@ fn import_edges(
             _ => unreachable!(),
         };
 
-        let props = build_props(&record, &prop_columns);
+        let props = build_props(&record, &prop_columns)?;
         batch.push(EdgeInsert {
             src,
             dst,
@@ -510,20 +581,47 @@ fn resolve_type(
 fn collect_prop_storage(
     dict: &Arc<Dict>,
     write: &mut WriteGuard<'_>,
-    props: &Map<String, Value>,
+    props: &[PropInput],
 ) -> Result<Vec<(PropId, PropValueOwned)>, CliError> {
     let mut storage = Vec::with_capacity(props.len());
-    for (name, value) in props {
-        let id = dict.intern(write, name)?;
-        let owned = value_to_prop_value(value)?;
-        storage.push((PropId(id.0), owned));
+    for prop in props {
+        let id = dict.intern(write, &prop.name)?;
+        storage.push((PropId(id.0), prop.value.clone()));
     }
     Ok(storage)
+}
+
+fn drop_all_property_indexes(handle: &GraphHandle) -> Result<Vec<IndexDef>, CliError> {
+    let defs = handle.graph.all_property_indexes()?;
+    if defs.is_empty() {
+        return Ok(defs);
+    }
+    let mut write = handle.pager.begin_write()?;
+    for def in &defs {
+        handle
+            .graph
+            .drop_property_index(&mut write, def.label, def.prop)?;
+    }
+    handle.pager.commit(write)?;
+    Ok(defs)
+}
+
+fn rebuild_property_indexes(handle: &GraphHandle, defs: &[IndexDef]) -> Result<(), CliError> {
+    if defs.is_empty() {
+        return Ok(());
+    }
+    let mut write = handle.pager.begin_write()?;
+    for def in defs {
+        handle.graph.create_property_index(&mut write, *def)?;
+    }
+    handle.pager.commit(write)?;
+    Ok(())
 }
 
 fn resolve_prop_columns(
     headers: &StringRecord,
     requested: &Option<Vec<String>>,
+    types: &HashMap<String, PropertyType>,
     skip: &[usize],
 ) -> Result<Vec<ColumnSpec>, CliError> {
     if let Some(list) = requested {
@@ -533,6 +631,10 @@ fn resolve_prop_columns(
             cols.push(ColumnSpec {
                 name: name.clone(),
                 index: idx,
+                prop_type: types
+                    .get(&name.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or_default(),
             });
         }
         Ok(cols)
@@ -545,6 +647,10 @@ fn resolve_prop_columns(
             cols.push(ColumnSpec {
                 name: header.to_string(),
                 index: idx,
+                prop_type: types
+                    .get(&header.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or_default(),
             });
         }
         Ok(cols)
@@ -574,68 +680,181 @@ fn parse_labels(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn build_props(record: &StringRecord, columns: &[ColumnSpec]) -> Map<String, Value> {
-    let mut props = Map::new();
+fn build_props(record: &StringRecord, columns: &[ColumnSpec]) -> Result<Vec<PropInput>, CliError> {
+    let mut props = Vec::new();
     for col in columns {
         if let Some(raw) = record.get(col.index) {
             let raw = raw.trim();
             if raw.is_empty() {
                 continue;
             }
-            let value = parse_value(raw);
-            if !value.is_null() {
-                props.insert(col.name.clone(), value);
+            if let Some(value) = parse_literal(raw, col.prop_type)? {
+                props.push(PropInput {
+                    name: col.name.clone(),
+                    value,
+                });
             }
         }
     }
-    props
+    Ok(props)
 }
 
-fn parse_value(raw: &str) -> Value {
-    let lower = raw.to_ascii_lowercase();
-    if lower == "null" {
-        return Value::Null;
+fn parse_literal(raw: &str, ty: PropertyType) -> Result<Option<PropValueOwned>, CliError> {
+    if !matches!(ty, PropertyType::String) && raw.eq_ignore_ascii_case("null") {
+        return Ok(None);
     }
-    if lower == "true" {
-        return Value::Bool(true);
+    let value = match ty {
+        PropertyType::Auto => return parse_auto_literal(raw),
+        PropertyType::String => PropValueOwned::Str(raw.to_string()),
+        PropertyType::Bool => {
+            let parsed = parse_bool_literal(raw)
+                .ok_or_else(|| CliError::Message(format!("invalid boolean literal '{}'", raw)))?;
+            PropValueOwned::Bool(parsed)
+        }
+        PropertyType::Int => {
+            let parsed = raw
+                .parse::<i64>()
+                .map_err(|_| CliError::Message(format!("invalid integer literal '{}'", raw)))?;
+            PropValueOwned::Int(parsed)
+        }
+        PropertyType::Float => {
+            let parsed = raw
+                .parse::<f64>()
+                .map_err(|_| CliError::Message(format!("invalid float literal '{}'", raw)))?;
+            PropValueOwned::Float(parsed)
+        }
+        PropertyType::Date => {
+            if let Ok(days) = raw.parse::<i64>() {
+                PropValueOwned::Date(days)
+            } else {
+                PropValueOwned::Date(parse_iso_date(raw)?)
+            }
+        }
+        PropertyType::DateTime => {
+            if let Ok(ms) = raw.parse::<i64>() {
+                PropValueOwned::DateTime(ms)
+            } else {
+                PropValueOwned::DateTime(parse_iso_datetime(raw)?)
+            }
+        }
+        PropertyType::Bytes => {
+            let bytes = parse_bytes_literal(raw)?;
+            PropValueOwned::Bytes(bytes)
+        }
+    };
+    Ok(Some(value))
+}
+
+fn parse_auto_literal(raw: &str) -> Result<Option<PropValueOwned>, CliError> {
+    if raw.eq_ignore_ascii_case("null") {
+        return Ok(None);
     }
-    if lower == "false" {
-        return Value::Bool(false);
+    if let Some(val) = parse_bool_literal(raw) {
+        return Ok(Some(PropValueOwned::Bool(val)));
     }
     if let Ok(int_val) = raw.parse::<i64>() {
-        return Value::Number(int_val.into());
+        return Ok(Some(PropValueOwned::Int(int_val)));
     }
     if let Ok(float_val) = raw.parse::<f64>() {
-        if let Some(num) = serde_json::Number::from_f64(float_val) {
-            return Value::Number(num);
-        }
+        return Ok(Some(PropValueOwned::Float(float_val)));
     }
-    Value::String(raw.to_string())
+    if raw.starts_with("0x") || raw.starts_with("0X") {
+        let bytes = parse_bytes_literal(raw)?;
+        return Ok(Some(PropValueOwned::Bytes(bytes)));
+    }
+    if looks_like_datetime(raw) {
+        let millis = parse_iso_datetime(raw)?;
+        return Ok(Some(PropValueOwned::DateTime(millis)));
+    }
+    if looks_like_date(raw) {
+        let days = parse_iso_date(raw)?;
+        return Ok(Some(PropValueOwned::Date(days)));
+    }
+    Ok(Some(PropValueOwned::Str(raw.to_string())))
 }
 
-fn value_to_prop_value(value: &Value) -> Result<PropValueOwned, CliError> {
-    match value {
-        Value::Null => Ok(PropValueOwned::Null),
-        Value::Bool(v) => Ok(PropValueOwned::Bool(*v)),
-        Value::Number(num) => {
-            if let Some(i) = num.as_i64() {
-                return Ok(PropValueOwned::Int(i));
-            }
-            if let Some(u) = num.as_u64() {
-                if u <= i64::MAX as u64 {
-                    return Ok(PropValueOwned::Int(u as i64));
-                }
-            }
-            if let Some(f) = num.as_f64() {
-                return Ok(PropValueOwned::Float(f));
-            }
-            Err(CliError::Message("numeric literal out of range".into()))
-        }
-        Value::String(s) => Ok(PropValueOwned::Str(s.clone())),
-        _ => Err(CliError::Message(
-            "only bool/int/float/string/null property literals are supported".into(),
-        )),
+fn parse_bool_literal(raw: &str) -> Option<bool> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
+}
+
+fn parse_bytes_literal(raw: &str) -> Result<Vec<u8>, CliError> {
+    let body = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .ok_or_else(|| CliError::Message("byte literal must start with 0x".into()))?;
+    if body.len() % 2 != 0 {
+        return Err(CliError::Message(
+            "byte literal must contain an even number of hex digits".into(),
+        ));
+    }
+    hex::decode(body).map_err(|_| {
+        CliError::Message(format!(
+            "byte literal '{}' contains non-hex characters",
+            raw
+        ))
+    })
+}
+
+fn looks_like_date(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn looks_like_datetime(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 16 || !looks_like_date(raw) {
+        return false;
+    }
+    matches!(bytes[10], b'T' | b' ')
+}
+
+fn parse_iso_date(raw: &str) -> Result<i64, CliError> {
+    let date = Date::parse(raw, DATE_FMT)
+        .map_err(|_| CliError::Message(format!("invalid date literal '{}'", raw)))?;
+    let epoch = Date::from_calendar_date(1970, Month::January, 1)
+        .expect("1970-01-01 is a valid calendar date");
+    Ok((date - epoch).whole_days())
+}
+
+fn parse_iso_datetime(raw: &str) -> Result<i64, CliError> {
+    if let Ok(dt) = OffsetDateTime::parse(raw, &Rfc3339) {
+        return nanos_to_millis(dt.unix_timestamp_nanos());
+    }
+    if let Ok(dt) = PrimitiveDateTime::parse(raw, DATETIME_FMT_T) {
+        return nanos_to_millis(dt.assume_utc().unix_timestamp_nanos());
+    }
+    if let Ok(dt) = PrimitiveDateTime::parse(raw, DATETIME_FMT_T_FRAC) {
+        return nanos_to_millis(dt.assume_utc().unix_timestamp_nanos());
+    }
+    if let Ok(dt) = PrimitiveDateTime::parse(raw, DATETIME_FMT_SPACE) {
+        return nanos_to_millis(dt.assume_utc().unix_timestamp_nanos());
+    }
+    if let Ok(dt) = PrimitiveDateTime::parse(raw, DATETIME_FMT_SPACE_FRAC) {
+        return nanos_to_millis(dt.assume_utc().unix_timestamp_nanos());
+    }
+    Err(CliError::Message(format!(
+        "invalid datetime literal '{}', expected RFC3339 or 'YYYY-MM-DD HH:MM:SS'",
+        raw
+    )))
+}
+
+fn nanos_to_millis(nanos: i128) -> Result<i64, CliError> {
+    let millis = nanos / 1_000_000;
+    if millis < i64::MIN as i128 || millis > i64::MAX as i128 {
+        return Err(CliError::Message(
+            "datetime literal is outside the supported range".into(),
+        ));
+    }
+    Ok(millis as i64)
 }
 
 fn prop_value_ref(value: &PropValueOwned) -> PropValue<'_> {

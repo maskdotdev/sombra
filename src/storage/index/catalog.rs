@@ -201,4 +201,29 @@ impl IndexCatalog {
         })?;
         Ok(results)
     }
+
+    /// Iterates over every property index definition in the catalog.
+    pub fn iter_all(&self, tx: &ReadGuard) -> Result<Vec<IndexDef>> {
+        let mut cursor = self.tree.range(tx, Bound::Unbounded, Bound::Unbounded)?;
+        let mut results = Vec::new();
+        while let Some((key, value)) = cursor.next()? {
+            if key.len() != 8 {
+                return Err(SombraError::Corruption("catalog key length invalid"));
+            }
+            let mut label_bytes = [0u8; 4];
+            label_bytes.copy_from_slice(&key[..4]);
+            let label = LabelId(u32::from_be_bytes(label_bytes));
+            let mut prop_bytes = [0u8; 4];
+            prop_bytes.copy_from_slice(&key[4..8]);
+            let prop = PropId(u32::from_be_bytes(prop_bytes));
+            let (kind, ty) = Self::decode_value(&value)?;
+            results.push(IndexDef {
+                label,
+                prop,
+                kind,
+                ty,
+            });
+        }
+        Ok(results)
+    }
 }

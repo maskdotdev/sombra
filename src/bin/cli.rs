@@ -1,10 +1,12 @@
 //! Binary entry point for the Sombra administrative CLI.
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::error::Error;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use sombra::{
     admin::{
         checkpoint, stats, vacuum_into, verify, AdminOpenOptions, CheckpointMode, PagerOptions,
@@ -12,8 +14,10 @@ use sombra::{
     },
     cli::import_export::{
         run_export, run_import, CliError, EdgeImportConfig, ExportConfig, ImportConfig,
-        NodeImportConfig,
+        NodeImportConfig, PropertyType,
     },
+    dashboard::{self, DashboardOptions as DashboardServeOptions},
+    ffi::{self, DatabaseOptions},
     primitives::pager::Synchronous,
 };
 
@@ -89,6 +93,13 @@ struct ImportCmd {
     )]
     node_props: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "col:type",
+        help = "Comma-separated node property type mapping (e.g. birth:date)"
+    )]
+    node_prop_types: Option<String>,
+
     #[arg(long, default_value = "src", help = "Edge source column name")]
     edge_src_column: String,
 
@@ -108,6 +119,13 @@ struct ImportCmd {
     )]
     edge_props: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "col:type",
+        help = "Comma-separated edge property type mapping"
+    )]
+    edge_prop_types: Option<String>,
+
     #[arg(long, help = "Trust edge endpoints after each validated batch")]
     trusted_endpoints: bool,
 
@@ -121,6 +139,15 @@ struct ImportCmd {
 
     #[arg(long, help = "Create the database if it does not exist")]
     create: bool,
+
+    #[arg(long, help = "Drop existing property indexes before importing")]
+    disable_indexes: bool,
+
+    #[arg(
+        long,
+        help = "Rebuild property indexes after import (implies --disable-indexes)"
+    )]
+    build_indexes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -147,6 +174,53 @@ struct ExportCmd {
         help = "Edge property columns to include"
     )]
     edge_props: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct SeedDemoCmd {
+    #[arg(value_name = "DB")]
+    db_path: PathBuf,
+
+    #[arg(long, help = "Create the database if it does not exist")]
+    create: bool,
+}
+
+#[derive(Args, Debug)]
+struct DashboardCmd {
+    #[arg(value_name = "DB")]
+    db_path: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "HOST",
+        default_value = "127.0.0.1",
+        help = "Bind address host"
+    )]
+    host: IpAddr,
+
+    #[arg(long, value_name = "PORT", default_value_t = 7654, help = "Bind port")]
+    port: u16,
+
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Directory containing dashboard assets"
+    )]
+    assets: Option<PathBuf>,
+
+    #[arg(long, help = "Disable mutating/admin endpoints")]
+    read_only: bool,
+
+    #[arg(long, help = "Open the dashboard in the default browser")]
+    open_browser: bool,
+
+    #[arg(
+        long = "allow-origin",
+        value_name = "ORIGIN",
+        action = ArgAction::Append,
+        help = "Additional CORS origin to allow (repeatable)"
+    )]
+    allow_origins: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -202,6 +276,12 @@ enum Command {
 
     #[command(about = "Export nodes/edges to CSV files")]
     Export(ExportCmd),
+
+    #[command(about = "Serve the experimental web dashboard")]
+    Dashboard(DashboardCmd),
+
+    #[command(about = "Populate demo nodes/edges (Ada, Grace, Alan)")]
+    SeedDemo(SeedDemoCmd),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -260,14 +340,15 @@ impl From<VerifyLevelArg> for VerifyLevel {
     }
 }
 
-fn main() {
-    if let Err(err) = run() {
+#[tokio::main]
+async fn main() {
+    if let Err(err) = run().await {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+async fn run() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let open_opts = build_open_options(&cli.open);
 
@@ -316,6 +397,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                 result.nodes_exported, result.edges_exported
             );
         }
+        Command::SeedDemo(cmd) => {
+            run_seed_demo(&cmd, &open_opts)?;
+        }
+        Command::Dashboard(cmd) => {
+            let dashboard_opts = build_dashboard_options(cmd, open_opts);
+            if let Err(err) = dashboard::serve(dashboard_opts).await {
+                eprintln!("dashboard server terminated: {err}");
+                return Err(Box::new(err));
+            }
+        }
     }
 
     Ok(())
@@ -340,6 +431,65 @@ fn build_open_options(args: &OpenArgs) -> AdminOpenOptions {
     opts
 }
 
+fn build_dashboard_options(
+    cmd: DashboardCmd,
+    open_opts: AdminOpenOptions,
+) -> DashboardServeOptions {
+    DashboardServeOptions {
+        db_path: cmd.db_path,
+        open_opts,
+        host: cmd.host,
+        port: cmd.port,
+        assets_dir: cmd.assets,
+        read_only: cmd.read_only,
+        open_browser: cmd.open_browser,
+        allow_origins: cmd.allow_origins,
+    }
+}
+
+fn run_seed_demo(cmd: &SeedDemoCmd, open_opts: &AdminOpenOptions) -> Result<(), Box<dyn Error>> {
+    let mut db_opts = DatabaseOptions::default();
+    db_opts.create_if_missing = cmd.create;
+    db_opts.pager = open_opts.pager.clone();
+    db_opts.distinct_neighbors_default = open_opts.distinct_neighbors_default;
+    let db = ffi::Database::open(&cmd.db_path, db_opts)?;
+    db.seed_demo()?;
+    let check_spec = serde_json::json!({
+        "$schemaVersion": 1,
+        "matches": [
+            { "var": "follower", "label": "User" },
+            { "var": "followee", "label": "User" }
+        ],
+        "edges": [
+            {
+                "from": "follower",
+                "to": "followee",
+                "edge_type": "FOLLOWS",
+                "direction": "out"
+            }
+        ],
+        "projections": [
+            { "kind": "var", "var": "follower" },
+            { "kind": "var", "var": "followee" }
+        ]
+    });
+    let response = db.execute_json(&check_spec)?;
+    let rows = response
+        .get("rows")
+        .and_then(|value| value.as_array())
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+    println!(
+        "Demo data inserted into {} ({} relationship rows)",
+        cmd.db_path.display(),
+        rows
+    );
+    drop(db);
+    checkpoint(&cmd.db_path, open_opts, CheckpointMode::Force)?;
+    println!("Checkpoint completed to persist seeded data.");
+    Ok(())
+}
+
 fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
     let nodes_path = cmd
         .nodes
@@ -357,6 +507,7 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
         label_column: cmd.node_label_column.clone(),
         static_labels: parse_labels_list(&cmd.node_labels),
         prop_columns: parse_prop_option(&cmd.node_props),
+        prop_types: parse_prop_types(&cmd.node_prop_types)?,
     };
 
     let edge_cfg = if let Some(path) = &cmd.edges {
@@ -369,6 +520,7 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
             prop_columns: parse_prop_option(&cmd.edge_props),
             trusted_endpoints: cmd.trusted_endpoints,
             exists_cache_capacity: cmd.edge_exists_cache,
+            prop_types: parse_prop_types(&cmd.edge_prop_types)?,
         })
     } else {
         None
@@ -377,6 +529,8 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
     Ok(ImportConfig {
         db_path: cmd.db_path.clone(),
         create_if_missing: cmd.create,
+        disable_indexes: cmd.disable_indexes,
+        build_indexes: cmd.build_indexes,
         nodes: Some(node_cfg),
         edges: edge_cfg,
     })
@@ -399,6 +553,60 @@ fn build_export_config(cmd: &ExportCmd) -> Result<ExportConfig, CliError> {
 
 fn parse_prop_option(raw: &Option<String>) -> Option<Vec<String>> {
     raw.as_ref().map(|value| split_list(value, ','))
+}
+
+fn parse_prop_types(raw: &Option<String>) -> Result<HashMap<String, PropertyType>, CliError> {
+    let mut map = HashMap::new();
+    let Some(spec) = raw.as_ref() else {
+        return Ok(map);
+    };
+    for entry in spec.split(',') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (name_raw, ty_raw) = trimmed.split_once(':').ok_or_else(|| {
+            CliError::Message(format!(
+                "invalid property type mapping '{}', expected name:type",
+                trimmed
+            ))
+        })?;
+        let name = name_raw.trim();
+        if name.is_empty() {
+            return Err(CliError::Message(
+                "property type mapping requires a column name".into(),
+            ));
+        }
+        let prop_type = parse_property_type_token(ty_raw)?;
+        map.insert(name.to_ascii_lowercase(), prop_type);
+    }
+    Ok(map)
+}
+
+fn parse_property_type_token(token: &str) -> Result<PropertyType, CliError> {
+    let lowered = token.trim().to_ascii_lowercase();
+    let ty = match lowered.as_str() {
+        "" => {
+            return Err(CliError::Message(
+                "property type mapping requires a type name".into(),
+            ))
+        }
+        "auto" => PropertyType::Auto,
+        "string" | "str" => PropertyType::String,
+        "bool" | "boolean" => PropertyType::Bool,
+        "int" | "integer" => PropertyType::Int,
+        "float" | "double" => PropertyType::Float,
+        "date" => PropertyType::Date,
+        "datetime" | "timestamp" => PropertyType::DateTime,
+        "bytes" => PropertyType::Bytes,
+        other => {
+            return Err(CliError::Message(format!(
+                "unsupported property type '{}'",
+                other
+            )))
+        }
+    };
+    Ok(ty)
 }
 
 fn parse_props_list(raw: &Option<String>) -> Vec<String> {

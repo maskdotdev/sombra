@@ -1,6 +1,6 @@
 [package]
 name = "sombra-py-native"
-version = "0.0.0"
+version = "0.3.7"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -8,7 +8,7 @@ publish = false
 [lib]
 name = "sombra_py_native"
 crate-type = ["cdylib"]
-path = "sombra_py/_native.rs"
+path = "sombra/_native.rs"
 
 [dependencies]
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38", "serde"] }

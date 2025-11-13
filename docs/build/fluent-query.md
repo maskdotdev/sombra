@@ -110,7 +110,7 @@ console.log(request_id, withMeta.length);
 **Python**
 
 ```python
-result = (
+rows = (
     db.query()
     .match({"var": "a", "label": "User"})
     .where("FOLLOWS", {"var": "b", "label": "User"})
@@ -120,10 +120,19 @@ result = (
     .execute()
 )
 
-rows = result.rows()
 print(rows[0]["a"]["_id"], rows[0]["b"]["props"]["name"])
 
-Python’s `execute()` returns a lightweight `QueryResult` helper; call `result.rows()` for the row list and `result.request_id()` if you need the correlation id.
+# Pass with_meta=True for the envelope (rows + request_id + features):
+payload = (
+    db.query()
+    .nodes("User")
+    .request_id("demo")
+    .select("name")
+    .execute(with_meta=True)
+)
+print(payload.request_id(), len(payload.rows()))
+
+Python’s `.execute()` now returns the row list by default; use `.execute(with_meta=True)` when you need the full `QueryResult` helper (`rows()`, `request_id()`, `features()`, …).
 ```
 
 ### 1.2 Scalars & predicate AST
@@ -285,7 +294,7 @@ interface NodeScope<S, L extends keyof S & string> {
 
 Operator helpers exported from `@sombra/query` (`and`, `or`, `eq`, `between`, etc.) return opaque `Expr` objects lacking label context. `.where()`/`.select()` stamp them with the active var name and validate each key/value pair against `cfg.schema` before serializing to the canonical predicate tree.
 
-### Python (`bindings/python/sombra_py/query.py`)
+### Python (`bindings/python/sombra/query.py`)
 
 - `_PredicateBuilder` mirrors Node surface: `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `between`, `in_`, `exists`, `is_null`, `is_not_null`, `and_`, `or_`, `not_`.
 - Raises `ValueError`/`TypeError` immediately on invalid combinations (including empty/heterogeneous/nested `in_` lists).
@@ -493,7 +502,7 @@ Analyzer/planner attach these estimates to predicate leaves and propagate descen
 - `src/query/logical.rs`, `planner.rs`, `physical.rs`, `executor/*`: predicate-aware operators, `Union`/`Intersect`.
 - `src/ffi/mod.rs`: new `QuerySpec`, serde, validation, error plumbing.
 - `bindings/node/main.js` & `main.d.ts`: builder surface + typings.
-- `bindings/python/sombra_py/query.py`: builder parity + type hints.
+- `bindings/python/sombra/query.py`: builder parity + type hints.
 - Docs (`docs/build/stage_8.md`, language READMEs) updated with new API examples.
 
 ---

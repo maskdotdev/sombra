@@ -1,27 +1,20 @@
+import path from 'node:path'
+
 import { and, Database, between, eq, inList, not } from '..'
+import { DemoNode, isDemoNode } from './shared'
 
-type DemoNode = {
-  _id: number
-  props: {
-    name?: string
-    [key: string]: unknown
+const DEFAULT_DB_PATH = './fluent-query.db'
+
+function invokedDirectly(scriptBase: string): boolean {
+  const entry = process.argv[1]
+  if (!entry) {
+    return false
   }
+  return path.basename(entry).startsWith(scriptBase)
 }
 
-function isDemoNode(value: unknown): value is DemoNode {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    '_id' in value &&
-    typeof (value as { _id?: unknown })._id === 'number' &&
-    'props' in value &&
-    typeof (value as { props?: unknown }).props === 'object'
-  )
-}
-
-async function main() {
-  const dbPath = process.argv[2] ?? './fluent-query.db'
-  const db = Database.open(dbPath)
+export async function runFluentQueryExample(dbPath: string = DEFAULT_DB_PATH): Promise<void> {
+  const db = Database.open(dbPath, { autocheckpointMs: 0 })
   db.seedDemo()
 
   const scalarRows = await db
@@ -68,7 +61,9 @@ async function main() {
   console.log(`request id for previous query: ${requestId}`)
 }
 
-main().catch((err) => {
-  console.error(err)
-  process.exit(1)
-})
+if (invokedDirectly('fluent_query')) {
+  runFluentQueryExample(process.argv[2] ?? DEFAULT_DB_PATH).catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })
+}

@@ -1,30 +1,33 @@
 # 📄 STAGE 9 — CLI, Import/Export, Admin, Benches, Fuzz
 
-**Crates:**
+**Monolithic crate components:**
 
-* `sombra-cli` (binary + REPL)
-* `sombra-admin` (library: verify, stats, vacuum, checkpoint)
-* `sombra-bench` (criterion micro/macro benchmarks)
-* `sombra-fuzz` (libFuzzer/honggfuzz targets)
-* uses: `sombra-core`, `sombra-storage`, `sombra-index`, `sombra-concurrency`, `sombra-wal`, `sombra-btree`, `sombra-vstore`
+* `src/bin/cli.rs` — installs as the `sombra` CLI, wiring admin + import/export subcommands.
+* `sombra::admin` (`src/admin/*`) — stats, checkpoint, vacuum, verify building blocks.
+* `sombra::cli::import_export` — CSV import/export pipeline shared by the CLI and scripts.
+* `src/bin/fast_bench.rs` / `src/bin/compare_bench.rs` — criterion + micro/macro bench entry points.
+* `fuzz/` (managed via `cargo fuzz`, added in this stage) — libFuzzer/honggfuzz targets for WAL/B-tree/VStore.
+* Core modules: `src/storage`, `src/query`, `src/primitives`, `src/types`, shared across every binary.
 
 **Outcome:** a production‑usable command‑line tool; import/export pipelines; administrative operations; repeatable benchmarks; long‑running fuzzers.
+
+> ℹ️ **Architecture note:** Stage 9 now targets the single `sombra` crate. Instead of adding sibling crates, every deliverable lands in the modules/binaries listed above.
 
 ---
 
 ## Phased Plan
 
 1. **Admin foundations**
-   * Finish `sombra-admin::{stats, checkpoint, vacuum_into, verify}` plus data structures needed by later stages.
-   * Add smoke tests that exercise the admin APIs directly before wiring them into the CLI.
+   * Finish `sombra::admin::{stats, checkpoint, vacuum_into, verify}` plus the supporting data structures.
+   * Add smoke tests that exercise those modules directly before wiring them into the CLI.
 2. **CLI + import/export**
-   * Implement `sombra-cli` parsing, REPL shell, and subcommands that wrap the admin calls.
-   * Build the CSV import/export pipeline (ID mapping, schema coercions, index toggles) and land sample fixtures.
+   * Round out `src/bin/cli.rs` parsing, subcommands, and the (deferred) REPL shell so every admin call is exposed.
+   * Build the CSV import/export pipeline (ID mapping, schema coercions, index toggles) inside `sombra::cli::import_export` and land sample fixtures.
 3. **Benchmarks & perf artifacts**
-   * Expand `sombra-bench` to cover the micro/macro workloads, and add scripts to snapshot JSON/CSV + environment metadata into `bench-results/DATE/...`.
+   * Expand the `fast_bench`/`compare_bench` bins to cover the micro/macro workloads, and add scripts to snapshot JSON/CSV + environment metadata into `bench-results/DATE/...`.
    * Run LDBC SNB (SF=0.1) import + query mix to establish baseline numbers the acceptance criteria requires.
 4. **Fuzzing, docs, acceptance**
-   * Add the libFuzzer/honggfuzz targets in `sombra-fuzz`, seed corpora, and automate short/overnight runs.
+   * Add libFuzzer/honggfuzz targets under `fuzz/` (via `cargo fuzz`), seed corpora, and automate short/overnight runs.
    * Ship the Stage 9 documentation set (`file_format.md`, `abi_c.md`, `cli.md`, `benchmarks.md`, `fuzzing.md`), then close out with the end-to-end import→verify→benchmark→vacuum→verify scenario.
 
 ---
@@ -48,7 +51,7 @@
 
 ## 1) CLI overview
 
-**Binary:** `sombra` (installed from `sombra-cli`)
+**Binary:** `sombra` (built from `src/bin/cli.rs`)
 **Modes:** *one‑shot command* (MVP) and *(deferred)* interactive REPL. The REPL spec remains for post-MVP follow-up; MVP explicitly ships without it.
 
 ### 1.1 One‑shot commands
@@ -145,7 +148,7 @@ sombra import DB \
 
 ### 3.1 PRAGMA stats
 
-Library (`sombra-admin`) returns a struct; CLI prints as table or JSON.
+The `sombra::admin::stats` helper returns a struct; the CLI prints it as text or JSON.
 
 **Stats include:**
 
@@ -206,7 +209,7 @@ sombra verify DB --level {fast|full}
 
 ## 4) Benchmarks
 
-**Framework:** `criterion` in `sombra-bench`.
+**Framework:** `criterion` via the `fast_bench` / `compare_bench` bins.
 **Datasets:** synthetic + **LDBC SNB (SF=0.1)** small.
 
 ### 4.1 Microbenchmarks
@@ -231,7 +234,7 @@ sombra verify DB --level {fast|full}
 
 ## 5) Fuzzing
 
-**Crate:** `sombra-fuzz` with **cargo‑fuzz** (libFuzzer) + optional honggfuzz.
+**Harnesses:** `fuzz/` directory managed by **cargo‑fuzz** (libFuzzer) with optional honggfuzz shims.
 
 ### 5.1 Targets
 
@@ -252,7 +255,7 @@ sombra verify DB --level {fast|full}
 ## 6) Docs to ship (Stage 9)
 
 * `docs/file_format.md`: meta page, page header, B+ tree layout, WAL frames, overflow pages, adjacency/index keys, checksums.
-* `docs/abi_c.md`: C ABI (`sombra-ffi`): opaque handles, function signatures, error codes.
+* `docs/abi_c.md`: C ABI (`sombra::ffi`): opaque handles, function signatures, error codes.
 * `docs/cli.md`: commands, flags, examples, import schema mapping.
 * `docs/benchmarks.md`: how to run, datasets, interpreting results.
 * `docs/fuzzing.md`: running fuzzers, adding corpora, triaging crashes.
@@ -272,8 +275,8 @@ sombra verify DB --level {fast|full}
 
 ## 8) Step‑by‑Step Checklist (coding agent)
 
-* [ ] Implement `sombra-admin::{stats, checkpoint, vacuum_into, verify}`.
-* [ ] Implement `sombra-cli` parsing & REPL; wire commands to admin library.
+* [ ] Implement `sombra::admin::{stats, checkpoint, vacuum_into, verify}`.
+* [ ] Finalize `src/bin/cli.rs` parsing & (deferred) REPL; wire commands to the admin module.
 * [ ] Implement CSV import/export with schema mapping and type coercions.
 * [ ] Build criterion benches + scripts to save JSON/CSV results with env metadata.
 * [ ] Add fuzz targets; seed corpora; CI fuzz smoke (short); nightly long run.

@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { Database, eq } from '..'
+import { runFluentQueryExample } from '../examples/fluent_query'
+import { reopenAndLogExample } from '../examples/reopen'
 
 function tempPath(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sombra-node-'))
@@ -214,4 +216,12 @@ test('runtime schema validation rejects unknown properties', (t) => {
     () => db.query().match('User').select([{ var: 'n0', prop: 'bogus' }]),
     { message: /Unknown property 'bogus'/ },
   )
+})
+
+test('reopen example loads nodes and edges from an existing database', async (t) => {
+  const dbPath = tempPath()
+  await runFluentQueryExample(dbPath)
+  const summary = await reopenAndLogExample(dbPath)
+  t.true(summary.nodes.length > 0)
+  t.true(summary.edges.length > 0)
 })

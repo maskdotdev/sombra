@@ -82,6 +82,12 @@ pub struct Graph {
     inline_prop_value: usize,
     #[cfg(feature = "degree-cache")]
     degree_cache_enabled: bool,
+    nodes_root: AtomicU64,
+    edges_root: AtomicU64,
+    adj_fwd_root: AtomicU64,
+    adj_rev_root: AtomicU64,
+    #[cfg(feature = "degree-cache")]
+    degree_root: AtomicU64,
     next_node_id: AtomicU64,
     next_edge_id: AtomicU64,
     idx_cache_hits: AtomicU64,
@@ -90,6 +96,16 @@ pub struct Graph {
     metrics: Arc<dyn super::metrics::StorageMetrics>,
     distinct_neighbors_default: bool,
     row_hash_header: bool,
+}
+
+#[derive(Copy, Clone)]
+enum RootKind {
+    Nodes,
+    Edges,
+    AdjFwd,
+    AdjRev,
+    #[cfg(feature = "degree-cache")]
+    Degree,
 }
 
 /// Basic statistics for a (label, property) pair.
@@ -271,6 +287,15 @@ impl Graph {
         let idx_cache_hits = AtomicU64::new(0);
         let idx_cache_misses = AtomicU64::new(0);
         let row_hash_header = opts.row_hash_header;
+        let nodes_root_id = nodes.root_page().0;
+        let edges_root_id = edges.root_page().0;
+        let adj_fwd_root_id = adj_fwd.root_page().0;
+        let adj_rev_root_id = adj_rev.root_page().0;
+        #[cfg(feature = "degree-cache")]
+        let degree_root_id = degree_tree
+            .as_ref()
+            .map(|tree| tree.root_page().0)
+            .unwrap_or(0);
 
         Ok(Self {
             store,
@@ -287,6 +312,12 @@ impl Graph {
             inline_prop_value,
             #[cfg(feature = "degree-cache")]
             degree_cache_enabled,
+            nodes_root: AtomicU64::new(nodes_root_id),
+            edges_root: AtomicU64::new(edges_root_id),
+            adj_fwd_root: AtomicU64::new(adj_fwd_root_id),
+            adj_rev_root: AtomicU64::new(adj_rev_root_id),
+            #[cfg(feature = "degree-cache")]
+            degree_root: AtomicU64::new(degree_root_id),
             next_node_id,
             next_edge_id,
             idx_cache_hits,
@@ -345,8 +376,12 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        self.persist_tree_root(tx, RootKind::Nodes)?;
         if let Err(err) = self.indexes.insert_node_labels(tx, node_id, &labels) {
             let _ = self.nodes.delete(tx, &node_id.0);
+            if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
+                return Err(root_err);
+            }
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
@@ -356,6 +391,9 @@ impl Graph {
         if let Err(err) = self.insert_indexed_props(tx, node_id, &labels, &prop_owned) {
             let _ = self.indexes.remove_node_labels(tx, node_id, &labels);
             let _ = self.nodes.delete(tx, &node_id.0);
+            if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
+                return Err(root_err);
+            }
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
@@ -380,6 +418,7 @@ impl Graph {
             Ok(())
         })?;
         self.indexes.create_label_index(tx, label, nodes)?;
+        self.sync_index_roots(tx)?;
         self.bump_ddl_epoch(tx)
     }
 
@@ -389,6 +428,7 @@ impl Graph {
             return Ok(());
         }
         self.indexes.drop_label_index(tx, label)?;
+        self.sync_index_roots(tx)?;
         self.bump_ddl_epoch(tx)
     }
 
@@ -425,6 +465,7 @@ impl Graph {
             other => other,
         });
         self.indexes.create_property_index(tx, def, &entries)?;
+        self.sync_index_roots(tx)?;
         self.bump_ddl_epoch(tx)
     }
 
@@ -442,6 +483,7 @@ impl Graph {
             return Ok(());
         };
         self.indexes.drop_property_index(tx, def)?;
+        self.sync_index_roots(tx)?;
         self.bump_ddl_epoch(tx)
     }
 
@@ -463,6 +505,28 @@ impl Graph {
     pub fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
         let read = self.store.begin_read()?;
         self.indexes.get_property_index(&read, label, prop)
+    }
+
+    #[cfg(test)]
+    pub fn debug_collect_property_index(
+        &self,
+        tx: &ReadGuard,
+        label: LabelId,
+        prop: PropId,
+    ) -> Result<Vec<(Vec<u8>, NodeId)>> {
+        use std::ops::Bound;
+        let def = self
+            .indexes
+            .get_property_index(tx, label, prop)?
+            .ok_or(SombraError::Invalid("property index not found"))?;
+        self.indexes
+            .scan_property_range(tx, &def, Bound::Unbounded, Bound::Unbounded)
+    }
+
+    /// Returns all property index definitions currently registered.
+    pub fn all_property_indexes(&self) -> Result<Vec<IndexDef>> {
+        let read = self.store.begin_read()?;
+        self.indexes.all_property_indexes(&read)
     }
 
     /// Scans for nodes matching an exact property value using an index.
@@ -570,13 +634,26 @@ impl Graph {
         Ok(instrument_posting_stream(stream))
     }
 
-    /// Returns a label scan iterator for nodes with the given label.
+    /// Returns a label scan iterator; this prefers real indexes.
     pub fn label_scan<'a>(
         &'a self,
         tx: &'a ReadGuard,
         label: LabelId,
     ) -> Result<Option<LabelScan<'a>>> {
         self.indexes.label_scan(tx, label)
+    }
+
+    /// Returns a label scan iterator and falls back to a full scan when no index exists.
+    pub fn label_scan_stream<'a>(
+        &'a self,
+        tx: &'a ReadGuard,
+        label: LabelId,
+    ) -> Result<Box<dyn PostingStream + 'a>> {
+        if let Some(scan) = self.indexes.label_scan(tx, label)? {
+            return Ok(Box::new(scan));
+        }
+        let fallback = self.build_fallback_label_scan(tx, label)?;
+        Ok(Box::new(fallback))
     }
 
     /// Retrieves node data by ID.
@@ -619,6 +696,39 @@ impl Graph {
         Ok(rows)
     }
 
+    fn build_fallback_label_scan(
+        &self,
+        tx: &ReadGuard,
+        label: LabelId,
+    ) -> Result<FallbackLabelScan> {
+        let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
+        let mut nodes = Vec::new();
+        while let Some((key, bytes)) = cursor.next()? {
+            let row = node::decode(&bytes)?;
+            if row.labels.binary_search(&label).is_ok() {
+                nodes.push(NodeId(key));
+            }
+        }
+        Ok(FallbackLabelScan { nodes, pos: 0 })
+    }
+
+    /// Samples up to `limit` nodes from the B-Tree and returns their label lists.
+    pub fn sample_node_labels(&self, tx: &ReadGuard, limit: usize) -> Result<Vec<Vec<LabelId>>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
+        let mut labels = Vec::new();
+        while let Some((_key, bytes)) = cursor.next()? {
+            let row = node::decode(&bytes)?;
+            labels.push(row.labels);
+            if labels.len() >= limit {
+                break;
+            }
+        }
+        Ok(labels)
+    }
+
     /// Deletes a node from the graph with the given options.
     pub fn delete_node(
         &self,
@@ -659,6 +769,7 @@ impl Graph {
         if !removed {
             return Err(SombraError::Corruption("node missing during delete"));
         }
+        self.persist_tree_root(tx, RootKind::Nodes)?;
         self.metrics.node_deleted();
         Ok(())
     }
@@ -722,6 +833,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
             return Err(err);
         }
+        self.persist_tree_root(tx, RootKind::Nodes)?;
         self.update_indexed_props_for_node(tx, id, &labels, &delta.old_map, &delta.new_map)?;
         self.free_node_props(tx, storage)
     }
@@ -774,8 +886,12 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        self.persist_tree_root(tx, RootKind::Edges)?;
         if let Err(err) = self.insert_adjacencies(tx, &[(spec.src, spec.dst, spec.ty, edge_id)]) {
             let _ = self.edges.delete(tx, &edge_id.0);
+            if let Err(root_err) = self.persist_tree_root(tx, RootKind::Edges) {
+                return Err(root_err);
+            }
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
@@ -898,6 +1014,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
             return Err(err);
         }
+        self.persist_tree_root(tx, RootKind::Edges)?;
         self.free_edge_props(tx, storage)
     }
 
@@ -957,6 +1074,7 @@ impl Graph {
         if !removed {
             return Err(SombraError::Corruption("edge missing during delete"));
         }
+        self.persist_tree_root(tx, RootKind::Edges)?;
         self.free_edge_props(tx, row.props)
     }
 
@@ -1011,15 +1129,17 @@ impl Graph {
             refs.sort_unstable_by(|a, b| a.cmp(b));
             let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
             self.adj_fwd.put_many(tx, iter)?;
+            self.persist_tree_root(tx, RootKind::AdjFwd)?;
         }
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(_, rev)| rev).collect();
             refs.sort_unstable_by(|a, b| a.cmp(b));
             let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
             if let Err(err) = self.adj_rev.put_many(tx, iter) {
-                self.rollback_adjacency_batch(tx, &keys);
+                self.rollback_adjacency_batch(tx, &keys)?;
                 return Err(err);
             }
+            self.persist_tree_root(tx, RootKind::AdjRev)?;
         }
         #[cfg(feature = "degree-cache")]
         if self.degree_cache_enabled {
@@ -1029,7 +1149,7 @@ impl Graph {
                 *deltas.entry((*dst, DegreeDir::In, *ty)).or_default() += 1;
             }
             if let Err(err) = self.apply_degree_batch(tx, &deltas) {
-                self.rollback_adjacency_batch(tx, &keys);
+                self.rollback_adjacency_batch(tx, &keys)?;
                 return Err(err);
             }
         }
@@ -1054,6 +1174,8 @@ impl Graph {
         if !removed_rev {
             return Err(SombraError::Corruption("missing reverse adjacency entry"));
         }
+        self.persist_tree_root(tx, RootKind::AdjFwd)?;
+        self.persist_tree_root(tx, RootKind::AdjRev)?;
         #[cfg(feature = "degree-cache")]
         if self.degree_cache_enabled {
             self.bump_degree(tx, src, DegreeDir::Out, ty, -1)?;
@@ -1432,6 +1554,7 @@ impl Graph {
         } else {
             tree.put(tx, &key, &new_val)?;
         }
+        self.persist_tree_root(tx, RootKind::Degree)?;
         Ok(())
     }
 }
@@ -1931,11 +2054,18 @@ impl Graph {
         Ok(())
     }
 
-    fn rollback_adjacency_batch(&self, tx: &mut WriteGuard<'_>, keys: &[(Vec<u8>, Vec<u8>)]) {
+    fn rollback_adjacency_batch(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        keys: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
         for (fwd, rev) in keys {
             let _ = self.adj_fwd.delete(tx, fwd);
             let _ = self.adj_rev.delete(tx, rev);
         }
+        self.persist_tree_root(tx, RootKind::AdjFwd)?;
+        self.persist_tree_root(tx, RootKind::AdjRev)?;
+        Ok(())
     }
 
     fn update_indexed_props_for_node(
@@ -2038,6 +2168,81 @@ impl Graph {
     fn bump_ddl_epoch(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
         self.catalog_epoch.bump_in_txn(tx)?;
         self.invalidate_txn_cache(tx);
+        Ok(())
+    }
+
+    fn sync_index_roots(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        let roots = self.indexes.roots();
+        tx.update_meta(|meta| {
+            meta.storage_index_catalog_root = roots.catalog;
+            meta.storage_label_index_root = roots.label;
+            meta.storage_prop_chunk_root = roots.prop_chunk;
+            meta.storage_prop_btree_root = roots.prop_btree;
+        })
+    }
+
+    fn persist_tree_root(&self, tx: &mut WriteGuard<'_>, kind: RootKind) -> Result<()> {
+        match kind {
+            RootKind::Nodes => self.persist_root_impl(
+                tx,
+                &self.nodes_root,
+                self.nodes.root_page(),
+                |meta, root| {
+                    meta.storage_nodes_root = root;
+                },
+            ),
+            RootKind::Edges => self.persist_root_impl(
+                tx,
+                &self.edges_root,
+                self.edges.root_page(),
+                |meta, root| {
+                    meta.storage_edges_root = root;
+                },
+            ),
+            RootKind::AdjFwd => self.persist_root_impl(
+                tx,
+                &self.adj_fwd_root,
+                self.adj_fwd.root_page(),
+                |meta, root| {
+                    meta.storage_adj_fwd_root = root;
+                },
+            ),
+            RootKind::AdjRev => self.persist_root_impl(
+                tx,
+                &self.adj_rev_root,
+                self.adj_rev.root_page(),
+                |meta, root| {
+                    meta.storage_adj_rev_root = root;
+                },
+            ),
+            #[cfg(feature = "degree-cache")]
+            RootKind::Degree => {
+                if let Some(tree) = &self.degree {
+                    self.persist_root_impl(tx, &self.degree_root, tree.root_page(), |meta, root| {
+                        meta.storage_degree_root = root;
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn persist_root_impl<F>(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        cached: &AtomicU64,
+        page_id: PageId,
+        update: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut crate::primitives::pager::Meta, PageId),
+    {
+        if cached.load(AtomicOrdering::SeqCst) == page_id.0 {
+            return Ok(());
+        }
+        tx.update_meta(|meta| update(meta, page_id))?;
+        cached.store(page_id.0, AtomicOrdering::SeqCst);
         Ok(())
     }
 
@@ -2161,5 +2366,25 @@ impl Graph {
     /// Returns the current catalog epoch used for DDL invalidation.
     pub fn catalog_epoch(&self) -> u64 {
         self.catalog_epoch.current().0
+    }
+}
+
+struct FallbackLabelScan {
+    nodes: Vec<NodeId>,
+    pos: usize,
+}
+
+impl PostingStream for FallbackLabelScan {
+    fn next_batch(&mut self, out: &mut Vec<NodeId>, max: usize) -> Result<bool> {
+        if max == 0 {
+            return Ok(self.pos >= self.nodes.len());
+        }
+        let mut produced = 0;
+        while self.pos < self.nodes.len() && produced < max {
+            out.push(self.nodes[self.pos]);
+            self.pos += 1;
+            produced += 1;
+        }
+        Ok(self.pos >= self.nodes.len())
     }
 }

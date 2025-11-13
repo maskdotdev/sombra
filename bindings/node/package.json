@@ -1,12 +1,12 @@
 {
   "name": "sombradb",
-  "version": "1.0.0",
-  "description": "Template project for writing node package with napi-rs",
+  "version": "0.5.4",
+  "description": "A high-performance graph database with ACID transactions",
   "main": "main.js",
   "types": "main.d.ts",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/napi-rs/package-template.git"
+    "url": "https://github.com/maskdotdev/sombra-db.git"
   },
   "license": "MIT",
   "browser": "browser.js",

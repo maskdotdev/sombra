@@ -71,6 +71,11 @@ impl IndexStore {
         &self.catalog
     }
 
+    /// Returns every property index definition in the catalog.
+    pub fn all_property_indexes(&self, tx: &ReadGuard) -> Result<Vec<IndexDef>> {
+        self.catalog.iter_all(tx)
+    }
+
     /// Checks if a label index exists for the given label.
     pub fn has_label_index(&self, label: LabelId) -> Result<bool> {
         self.label_index.is_indexed_read(label)

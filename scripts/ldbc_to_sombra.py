@@ -63,8 +63,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _iter_csv_rows(directory: pathlib.Path) -> Iterator[Dict[str, str]]:
-    pattern = str(directory / "*.csv")
-    for path in sorted(glob.glob(pattern)):
+    pattern = str(directory / "**" / "*.csv")
+    for path in sorted(glob.glob(pattern, recursive=True)):
         with open(path, newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh, delimiter="|")
             for row in reader:

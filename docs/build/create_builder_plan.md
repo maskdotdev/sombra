@@ -54,7 +54,7 @@ Create a fluent `db.create()` API that lets developers stage nodes/edges with in
 - [ ] **Validation**: ensure labels arrays, alias format, props plain objects; throw helpful errors before hitting FFI.
 - [ ] **Examples/tests**: extend `bindings/node/__test__/index.spec.ts` to cover both provided patterns + result shape.
 
-### Python (`bindings/python/sombra_py/query.py`)
+### Python (`bindings/python/sombra/query.py`)
 - [ ] **Mirror API**:
   - `db.create()` returning `CreateBuilder`.
   - Fluent `.node(...)`, `.edge(...)`, `.execute()` returning dict `{ "nodes": [...], "edges": [...], "aliases": {...} }`.

@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sombra_py import Database
-from sombra_py.query import _literal_value, eq
+from sombra import Database
+from sombra.query import _literal_value, eq
 
 
 def temp_db_path() -> str:
@@ -17,13 +17,28 @@ def test_execute_query_returns_rows() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    result = db.query().nodes("User").where(eq("name", "Ada")).execute()
-    rows = result.rows()
+    rows = db.query().nodes("User").where(eq("name", "Ada")).execute()
     assert len(rows) == 1
     record = rows[0]["n0"]
     assert isinstance(record, dict)
     assert record["_id"] > 0
     assert isinstance(record["props"], dict)
+
+
+def test_execute_with_meta_returns_envelope() -> None:
+    db = Database.open(temp_db_path())
+    db.seed_demo()
+
+    payload = (
+        db.query()
+        .nodes("User")
+        .request_id("req-py-meta")
+        .select("name")
+        .execute(with_meta=True)
+    )
+    rows = payload.rows()
+    assert len(rows) >= 1
+    assert payload.request_id() == "req-py-meta"
 
 
 def test_stream_iterates_results() -> None:
@@ -136,8 +151,7 @@ def test_property_projections_return_scalars() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
 
-    result = db.query().nodes("User").select("name").execute()
-    rows = result.rows()
+    rows = db.query().nodes("User").select("name").execute()
     assert len(rows) > 0
     assert isinstance(rows[0]["name"], str)
 
