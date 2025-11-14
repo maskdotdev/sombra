@@ -6,7 +6,9 @@
 //! bindings can submit JSON-friendly query specifications without reimplementing
 //! the core logic.
 
-use crate::primitives::pager::{PageStore, Pager, PagerOptions, Synchronous, WriteGuard};
+use crate::primitives::pager::{
+    PageStore, Pager, PagerOptions, ReadGuard, Synchronous, WriteGuard,
+};
 use crate::query::{
     analyze::{self, MAX_BYTES_LITERAL, MAX_IN_VALUES},
     ast::{
@@ -21,9 +23,9 @@ use crate::query::{
 };
 use crate::storage::catalog::{Dict, DictOptions};
 use crate::storage::{
-    DeleteNodeOpts, EdgeSpec as StorageEdgeSpec, Graph, GraphOptions, IndexDef, IndexKind,
-    NodeSpec as StorageNodeSpec, PropEntry, PropPatch, PropPatchOp, PropValue, PropValueOwned,
-    TypeTag,
+    BfsOptions, DeleteNodeOpts, Dir, EdgeData, EdgeSpec as StorageEdgeSpec, ExpandOpts, Graph,
+    GraphOptions, IndexDef, IndexKind, NodeData, NodeSpec as StorageNodeSpec, PropEntry, PropPatch,
+    PropPatchOp, PropValue, PropValueOwned, TypeTag,
 };
 use crate::types::{EdgeId, LabelId, NodeId, PropId, SombraError, StrId, TypeId};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -102,6 +104,56 @@ pub struct ProfileSnapshot {
     pub query_filter_ns: u64,
     /// Number of filter operations.
     pub query_filter_count: u64,
+}
+
+/// Neighbor entry returned by traversal helpers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeighborInfo {
+    /// Neighboring node identifier.
+    pub node_id: u64,
+    /// Edge identifier connecting to the neighbor.
+    pub edge_id: u64,
+    /// Type identifier of the connecting edge.
+    pub type_id: u32,
+}
+
+/// Visit entry returned by breadth-first traversal helpers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BfsVisitInfo {
+    /// Node identifier reached during traversal.
+    pub node_id: u64,
+    /// Depth (number of hops) from the origin node.
+    pub depth: u32,
+}
+
+/// Materialized node payload returned by direct lookups.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeRecord {
+    /// Node identifier.
+    pub id: u64,
+    /// Human-readable labels attached to the node.
+    pub labels: Vec<String>,
+    /// Node properties as a JSON map.
+    pub properties: Map<String, Value>,
+}
+
+/// Materialized edge payload returned by direct lookups.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeRecord {
+    /// Edge identifier.
+    pub id: u64,
+    /// Source node identifier.
+    pub src: u64,
+    /// Destination node identifier.
+    pub dst: u64,
+    /// Edge type name.
+    pub ty: String,
+    /// Edge properties.
+    pub properties: Map<String, Value>,
 }
 
 #[derive(Default)]
@@ -566,6 +618,122 @@ impl Database {
             .map_err(|err| FfiError::Message(format!("failed to encode create result: {err}")))
     }
 
+    /// Fetches a node by ID and returns its properties and labels.
+    pub fn get_node_record(&self, node_id: u64) -> Result<Option<NodeRecord>> {
+        let read = self.pager.begin_read()?;
+        let data = self.graph.get_node(&read, NodeId(node_id))?;
+        let result = match data {
+            Some(node) => Some(self.materialize_node(&read, NodeId(node_id), node)?),
+            None => None,
+        };
+        Ok(result)
+    }
+
+    /// Fetches an edge by ID and returns its metadata.
+    pub fn get_edge_record(&self, edge_id: u64) -> Result<Option<EdgeRecord>> {
+        let read = self.pager.begin_read()?;
+        let data = self.graph.get_edge(&read, EdgeId(edge_id))?;
+        let result = match data {
+            Some(edge) => Some(self.materialize_edge(&read, EdgeId(edge_id), edge)?),
+            None => None,
+        };
+        Ok(result)
+    }
+
+    /// Counts the number of nodes with the provided label.
+    pub fn count_nodes_with_label(&self, label: &str) -> Result<u64> {
+        let label_id = self.lookup_label(label)?;
+        let read = self.pager.begin_read()?;
+        self.graph
+            .count_nodes_with_label(&read, label_id)
+            .map_err(FfiError::from)
+    }
+
+    /// Counts the number of edges with the provided type.
+    pub fn count_edges_with_type(&self, ty: &str) -> Result<u64> {
+        let ty_id = self.lookup_edge_type(ty)?;
+        let read = self.pager.begin_read()?;
+        self.graph
+            .count_edges_with_type(&read, ty_id)
+            .map_err(FfiError::from)
+    }
+
+    /// Returns all node identifiers that carry the provided label.
+    pub fn node_ids_with_label(&self, label: &str) -> Result<Vec<u64>> {
+        let label_id = self.lookup_label(label)?;
+        let read = self.pager.begin_read()?;
+        let nodes = self
+            .graph
+            .nodes_with_label(&read, label_id)
+            .map_err(FfiError::from)?;
+        Ok(nodes.into_iter().map(|id| id.0).collect())
+    }
+
+    /// Returns neighbors for the provided node using low-level traversal settings.
+    pub fn neighbors_with_options(
+        &self,
+        node_id: u64,
+        direction: Dir,
+        edge_type: Option<&str>,
+        distinct: bool,
+    ) -> Result<Vec<NeighborInfo>> {
+        let ty = match edge_type {
+            Some(name) => Some(self.lookup_edge_type(name)?),
+            None => None,
+        };
+        let read = self.pager.begin_read()?;
+        let cursor = self.graph.neighbors(
+            &read,
+            NodeId(node_id),
+            direction,
+            ty,
+            ExpandOpts {
+                distinct_nodes: distinct,
+            },
+        )?;
+        drop(read);
+        let mut out = Vec::with_capacity(cursor.len());
+        for entry in cursor {
+            out.push(NeighborInfo {
+                node_id: entry.neighbor.0,
+                edge_id: entry.edge.0,
+                type_id: entry.ty.0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Executes a breadth-first traversal starting at `start_id`.
+    pub fn bfs_traversal(
+        &self,
+        start_id: u64,
+        direction: Dir,
+        max_depth: u32,
+        edge_types: Option<&[String]>,
+        max_results: Option<usize>,
+    ) -> Result<Vec<BfsVisitInfo>> {
+        let edge_filters = match edge_types {
+            Some(names) if !names.is_empty() => Some(self.lookup_edge_types(names)?),
+            _ => None,
+        };
+        let read = self.pager.begin_read()?;
+        let options = BfsOptions {
+            max_depth,
+            direction,
+            edge_types: edge_filters,
+            max_results,
+        };
+        let visits = self.graph.bfs(&read, NodeId(start_id), &options)?;
+        drop(read);
+        Ok(visits
+            .into_iter()
+            .map(|visit| BfsVisitInfo {
+                node_id: visit.node.0,
+                depth: visit.depth,
+            })
+            .collect())
+    }
+
     /// Handles database pragmas (configuration settings).
     ///
     /// Supported pragmas:
@@ -929,6 +1097,74 @@ impl Database {
     fn resolve_type(&self, write: &mut WriteGuard<'_>, name: &str) -> Result<TypeId> {
         let id = self.dict.intern(write, name)?;
         Ok(TypeId(id.0))
+    }
+
+    fn lookup_edge_type(&self, name: &str) -> Result<TypeId> {
+        match self.dict.lookup(name).map_err(FfiError::from)? {
+            Some(id) => Ok(TypeId(id.0)),
+            None => Err(FfiError::Message(format!("unknown edge type '{name}'"))),
+        }
+    }
+
+    fn lookup_edge_types(&self, names: &[String]) -> Result<Vec<TypeId>> {
+        let mut ids = Vec::with_capacity(names.len());
+        for name in names {
+            ids.push(self.lookup_edge_type(name)?);
+        }
+        Ok(ids)
+    }
+
+    fn lookup_label(&self, name: &str) -> Result<LabelId> {
+        match self.dict.lookup(name).map_err(FfiError::from)? {
+            Some(id) => Ok(LabelId(id.0)),
+            None => Err(FfiError::Message(format!("unknown label '{name}'"))),
+        }
+    }
+
+    fn materialize_node(&self, read: &ReadGuard, id: NodeId, node: NodeData) -> Result<NodeRecord> {
+        let mut labels = Vec::with_capacity(node.labels.len());
+        for label in node.labels {
+            let name = self
+                .dict
+                .resolve(read, StrId(label.0))
+                .map_err(FfiError::from)?;
+            labels.push(name);
+        }
+        let mut props = Map::new();
+        for (prop, value) in node.props {
+            let name = self
+                .dict
+                .resolve(read, StrId(prop.0))
+                .map_err(FfiError::from)?;
+            props.insert(name, prop_value_owned_to_json(&value)?);
+        }
+        Ok(NodeRecord {
+            id: id.0,
+            labels,
+            properties: props,
+        })
+    }
+
+    fn materialize_edge(&self, read: &ReadGuard, id: EdgeId, edge: EdgeData) -> Result<EdgeRecord> {
+        let ty_name = self
+            .dict
+            .resolve(read, StrId(edge.ty.0))
+            .map_err(FfiError::from)?;
+        let mut props = Map::new();
+        for (prop, value) in edge.props {
+            let name = self
+                .dict
+                .resolve(read, StrId(prop.0))
+                .map_err(FfiError::from)?;
+            props.insert(name, prop_value_owned_to_json(&value)?);
+        }
+        Ok(EdgeRecord {
+            id: id.0,
+            src: edge.src.0,
+            dst: edge.dst.0,
+            ty: ty_name,
+            properties: props,
+        })
     }
 
     fn ensure_label_index(&self, write: &mut WriteGuard<'_>, label: LabelId) -> Result<()> {
@@ -2084,6 +2320,21 @@ fn prop_value_ref(value: &PropValueOwned) -> PropValue<'_> {
         PropValueOwned::Date(v) => PropValue::Date(*v),
         PropValueOwned::DateTime(v) => PropValue::DateTime(*v),
     }
+}
+
+fn prop_value_owned_to_json(value: &PropValueOwned) -> Result<Value> {
+    Ok(match value {
+        PropValueOwned::Null => Value::Null,
+        PropValueOwned::Bool(v) => Value::Bool(*v),
+        PropValueOwned::Int(v) => Value::Number((*v).into()),
+        PropValueOwned::Float(v) => serde_json::Number::from_f64(*v)
+            .map(Value::Number)
+            .ok_or_else(|| FfiError::Message("float value not representable in JSON".into()))?,
+        PropValueOwned::Str(v) => Value::String(v.clone()),
+        PropValueOwned::Bytes(v) => Value::String(BASE64.encode(v)),
+        PropValueOwned::Date(v) => Value::Number((*v).into()),
+        PropValueOwned::DateTime(v) => Value::Number((*v).into()),
+    })
 }
 
 fn explain_payload(

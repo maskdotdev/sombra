@@ -12,6 +12,7 @@ use serde_json::Value;
 use sombra::{
     ffi::{Database, DatabaseOptions, FfiError, QueryStream},
     primitives::pager::{PagerOptions, Synchronous},
+    storage::Dir,
 };
 
 #[derive(Debug)]
@@ -51,6 +52,20 @@ pub struct DatabaseHandle {
 #[pyclass(module = "sombra._native", unsendable)]
 pub struct StreamHandle {
     inner: QueryStream,
+}
+
+#[derive(Default)]
+struct ParsedNeighborOptions {
+    direction: Dir,
+    edge_type: Option<String>,
+    distinct: bool,
+}
+
+#[derive(Default)]
+struct ParsedBfsOptions {
+    direction: Dir,
+    edge_types: Option<Vec<String>>,
+    max_results: Option<usize>,
 }
 
 fn parse_connect_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<PyConnectOptions> {
@@ -194,6 +209,127 @@ fn database_cancel_request(handle: &DatabaseHandle, request_id: &str) -> PyResul
 }
 
 #[pyfunction]
+fn database_get_node(
+    py: Python<'_>,
+    handle: &DatabaseHandle,
+    node_id: u64,
+) -> PyResult<Option<PyObject>> {
+    let record = handle
+        .inner
+        .get_node_record(node_id)
+        .map_err(to_py_err)?;
+    match record {
+        Some(node) => {
+            let value = serde_json::to_value(node)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+            value_to_py(py, value).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+#[pyfunction]
+fn database_get_edge(
+    py: Python<'_>,
+    handle: &DatabaseHandle,
+    edge_id: u64,
+) -> PyResult<Option<PyObject>> {
+    let record = handle
+        .inner
+        .get_edge_record(edge_id)
+        .map_err(to_py_err)?;
+    match record {
+        Some(edge) => {
+            let value = serde_json::to_value(edge)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+            value_to_py(py, value).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+#[pyfunction]
+fn database_count_nodes_with_label(handle: &DatabaseHandle, label: &str) -> PyResult<u64> {
+    handle
+        .inner
+        .count_nodes_with_label(label)
+        .map_err(to_py_err)
+}
+
+#[pyfunction]
+fn database_count_edges_with_type(handle: &DatabaseHandle, ty: &str) -> PyResult<u64> {
+    handle
+        .inner
+        .count_edges_with_type(ty)
+        .map_err(to_py_err)
+}
+
+#[pyfunction]
+fn database_list_nodes_with_label(handle: &DatabaseHandle, label: &str) -> PyResult<Vec<u64>> {
+    handle
+        .inner
+        .node_ids_with_label(label)
+        .map_err(to_py_err)
+}
+
+#[pyfunction]
+fn database_neighbors(
+    py: Python<'_>,
+    handle: &DatabaseHandle,
+    node_id: u64,
+    options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let parsed = parse_neighbor_options(options)?;
+    let neighbors = handle
+        .inner
+        .neighbors_with_options(
+            node_id,
+            parsed.direction,
+            parsed.edge_type.as_deref(),
+            parsed.distinct,
+        )
+        .map_err(to_py_err)?;
+    let list = PyList::empty_bound(py);
+    for entry in neighbors {
+        let row = PyDict::new_bound(py);
+        row.set_item("node_id", entry.node_id)?;
+        row.set_item("edge_id", entry.edge_id)?;
+        row.set_item("type_id", entry.type_id)?;
+        list.append(row)?;
+    }
+    Ok(list.into_py(py))
+}
+
+#[pyfunction]
+fn database_bfs_traversal(
+    py: Python<'_>,
+    handle: &DatabaseHandle,
+    start_id: u64,
+    max_depth: u32,
+    options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let parsed = parse_bfs_options(options)?;
+    let visits = handle
+        .inner
+        .bfs_traversal(
+            start_id,
+            parsed.direction,
+            max_depth,
+            parsed.edge_types.as_deref(),
+            parsed.max_results,
+        )
+        .map_err(to_py_err)?;
+    let list = PyList::empty_bound(py);
+    for visit in visits {
+        let row = PyDict::new_bound(py);
+        row.set_item("node_id", visit.node_id)?;
+        row.set_item("depth", visit.depth)?;
+        list.append(row)?;
+    }
+    Ok(list.into_py(py))
+}
+
+#[pyfunction]
 fn database_pragma_get(py: Python<'_>, handle: &DatabaseHandle, name: &str) -> PyResult<PyObject> {
     let result = handle.inner.pragma(name, None).map_err(to_py_err)?;
     value_to_py(py, result)
@@ -243,6 +379,13 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(database_pragma_get, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_pragma_set, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_cancel_request, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_get_node, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_get_edge, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_count_nodes_with_label, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_count_edges_with_type, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_list_nodes_with_label, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_neighbors, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_bfs_traversal, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(stream_next, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_seed_demo, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(version, m)?)?;
@@ -253,6 +396,86 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn to_py_err(err: FfiError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
+}
+
+fn parse_direction(value: Option<&str>) -> PyResult<Dir> {
+    match value.unwrap_or("out") {
+        "out" => Ok(Dir::Out),
+        "in" => Ok(Dir::In),
+        "both" => Ok(Dir::Both),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid direction '{other}', expected 'out', 'in', or 'both'"
+        ))),
+    }
+}
+
+fn parse_neighbor_options(
+    options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<ParsedNeighborOptions> {
+    let mut parsed = ParsedNeighborOptions::default();
+    parsed.direction = Dir::Out;
+    parsed.distinct = true;
+    if let Some(dict) = options {
+        if let Some(value) = dict.get_item("direction")? {
+            let dir = value.extract::<String>()?;
+            parsed.direction = parse_direction(Some(&dir))?;
+        }
+        if let Some(value) = dict.get_item("edge_type")? {
+            let ty = value.extract::<String>()?;
+            if ty.trim().is_empty() {
+                return Err(PyRuntimeError::new_err("edge_type must be a non-empty string"));
+            }
+            parsed.edge_type = Some(ty);
+        } else if let Some(value) = dict.get_item("edgeType")? {
+            let ty = value.extract::<String>()?;
+            if ty.trim().is_empty() {
+                return Err(PyRuntimeError::new_err("edgeType must be a non-empty string"));
+            }
+            parsed.edge_type = Some(ty);
+        }
+        if let Some(value) = dict.get_item("distinct")? {
+            parsed.distinct = value.extract::<bool>()?;
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_bfs_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<ParsedBfsOptions> {
+    let mut parsed = ParsedBfsOptions::default();
+    parsed.direction = Dir::Out;
+    if let Some(dict) = options {
+        if let Some(value) = dict.get_item("direction")? {
+            let dir = value.extract::<String>()?;
+            parsed.direction = parse_direction(Some(&dir))?;
+        }
+        if let Some(value) = dict.get_item("edge_types")? {
+            let list = value.extract::<Vec<String>>()?;
+            for ty in &list {
+                if ty.trim().is_empty() {
+                    return Err(PyRuntimeError::new_err(
+                        "edge_types entries must be non-empty strings",
+                    ));
+                }
+            }
+            parsed.edge_types = Some(list);
+        } else if let Some(value) = dict.get_item("edgeTypes")? {
+            let list = value.extract::<Vec<String>>()?;
+            for ty in &list {
+                if ty.trim().is_empty() {
+                    return Err(PyRuntimeError::new_err(
+                        "edgeTypes entries must be non-empty strings",
+                    ));
+                }
+            }
+            parsed.edge_types = Some(list);
+        }
+        if let Some(value) = dict.get_item("max_results")? {
+            parsed.max_results = Some(value.extract::<usize>()?);
+        } else if let Some(value) = dict.get_item("maxResults")? {
+            parsed.max_results = Some(value.extract::<usize>()?);
+        }
+    }
+    Ok(parsed)
 }
 
 fn parse_synchronous(value: &str) -> PyResult<Synchronous> {

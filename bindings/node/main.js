@@ -1493,6 +1493,80 @@ class Database {
     return native.databaseCancelRequest(this._handle, requestId)
   }
 
+  getNodeRecord(nodeId) {
+    const id = assertNodeId(nodeId, 'getNodeRecord')
+    const record = native.databaseGetNode(this._handle, id)
+    return record ?? null
+  }
+
+  getEdgeRecord(edgeId) {
+    const id = assertEdgeId(edgeId, 'getEdgeRecord')
+    const record = native.databaseGetEdge(this._handle, id)
+    return record ?? null
+  }
+
+  countNodesWithLabel(label) {
+    const normalized = assertLabel(label, 'countNodesWithLabel')
+    return native.databaseCountNodesWithLabel(this._handle, normalized)
+  }
+
+  countEdgesWithType(edgeType) {
+    const normalized = assertEdgeType(edgeType, 'countEdgesWithType')
+    return native.databaseCountEdgesWithType(this._handle, normalized)
+  }
+
+  listNodesWithLabel(label) {
+    const normalized = assertLabel(label, 'listNodesWithLabel')
+    return native.databaseListNodesWithLabel(this._handle, normalized)
+  }
+
+  neighbors(nodeId, options) {
+    const id = assertNodeId(nodeId, 'neighbors')
+    if (options !== undefined && (options === null || typeof options !== 'object')) {
+      throw new TypeError('neighbors() options must be an object when provided')
+    }
+    return native.databaseNeighbors(this._handle, id, options ?? undefined)
+  }
+
+  getOutgoingNeighbors(nodeId, edgeType, distinct = true) {
+    if (typeof distinct !== 'boolean') {
+      throw new TypeError('distinct must be a boolean')
+    }
+    const opts = { direction: 'out', distinct }
+    if (edgeType !== undefined && edgeType !== null) {
+      if (typeof edgeType !== 'string' || edgeType.trim() === '') {
+        throw new TypeError('edgeType must be a non-empty string when provided')
+      }
+      opts.edgeType = edgeType
+    }
+    return this.neighbors(nodeId, opts).map((neighbor) => neighbor.nodeId)
+  }
+
+  getIncomingNeighbors(nodeId, edgeType, distinct = true) {
+    if (typeof distinct !== 'boolean') {
+      throw new TypeError('distinct must be a boolean')
+    }
+    const opts = { direction: 'in', distinct }
+    if (edgeType !== undefined && edgeType !== null) {
+      if (typeof edgeType !== 'string' || edgeType.trim() === '') {
+        throw new TypeError('edgeType must be a non-empty string when provided')
+      }
+      opts.edgeType = edgeType
+    }
+    return this.neighbors(nodeId, opts).map((neighbor) => neighbor.nodeId)
+  }
+
+  bfsTraversal(nodeId, maxDepth, options) {
+    const id = assertNodeId(nodeId, 'bfsTraversal')
+    if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+      throw new TypeError('bfsTraversal requires a non-negative integer maxDepth')
+    }
+    if (options !== undefined && (options === null || typeof options !== 'object')) {
+      throw new TypeError('bfsTraversal options must be an object when provided')
+    }
+    return native.databaseBfsTraversal(this._handle, id, maxDepth, options ?? undefined)
+  }
+
   _execute(spec) {
     return native.databaseExecute(this._handle, spec)
   }
@@ -1532,4 +1606,32 @@ module.exports = {
   exists: existsExpr,
   isNull: isNullExpr,
   isNotNull: isNotNullExpr,
+}
+
+function assertNodeId(nodeId, ctx) {
+  if (typeof nodeId !== 'number' || !Number.isInteger(nodeId) || nodeId < 0) {
+    throw new TypeError(`${ctx} requires a non-negative integer node id`)
+  }
+  return nodeId
+}
+
+function assertEdgeId(edgeId, ctx) {
+  if (typeof edgeId !== 'number' || !Number.isInteger(edgeId) || edgeId < 0) {
+    throw new TypeError(`${ctx} requires a non-negative integer edge id`)
+  }
+  return edgeId
+}
+
+function assertLabel(label, ctx) {
+  if (typeof label !== 'string' || label.trim() === '') {
+    throw new TypeError(`${ctx} requires a non-empty label string`)
+  }
+  return label
+}
+
+function assertEdgeType(edgeType, ctx) {
+  if (typeof edgeType !== 'string' || edgeType.trim() === '') {
+    throw new TypeError(`${ctx} requires a non-empty edge type string`)
+  }
+  return edgeType
 }

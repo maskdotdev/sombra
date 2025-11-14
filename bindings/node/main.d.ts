@@ -13,6 +13,29 @@ export interface ConnectOptions {
 
 export type Direction = 'out' | 'in' | 'both'
 
+export interface NeighborQueryOptions {
+  direction?: Direction
+  edgeType?: string
+  distinct?: boolean
+}
+
+export interface NeighborEntry {
+  nodeId: number
+  edgeId: number
+  typeId: number
+}
+
+export interface BfsTraversalOptions {
+  direction?: Direction
+  edgeTypes?: string[]
+  maxResults?: number
+}
+
+export interface BfsVisit {
+  nodeId: number
+  depth: number
+}
+
 export type LiteralValue = string | number | boolean | null
 export type ScalarValue = LiteralValue | Uint8Array | Buffer | Date
 
@@ -323,6 +346,15 @@ export class Database<S extends NodeSchema = DefaultSchema> {
   deleteNode(id: number, cascade?: boolean): this
   createEdge(src: number, dst: number, ty: string, props?: PropsInput): number | null
   deleteEdge(id: number): this
+  getNodeRecord(nodeId: number): Record<string, any> | null
+  getEdgeRecord(edgeId: number): Record<string, any> | null
+  countNodesWithLabel(label: string): number
+  countEdgesWithType(ty: string): number
+  listNodesWithLabel(label: string): number[]
+  neighbors(nodeId: number, options?: NeighborQueryOptions): NeighborEntry[]
+  getOutgoingNeighbors(nodeId: number, edgeType?: string, distinct?: boolean): number[]
+  getIncomingNeighbors(nodeId: number, edgeType?: string, distinct?: boolean): number[]
+  bfsTraversal(nodeId: number, maxDepth: number, options?: BfsTraversalOptions): BfsVisit[]
 }
 
 export function openDatabase<S extends NodeSchema = DefaultSchema>(path: string, options?: ConnectOptions | null): Database<S>

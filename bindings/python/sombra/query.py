@@ -929,6 +929,54 @@ class Database:
             raise ValueError("cancel_request requires a non-empty request id string")
         return _native.database_cancel_request(self._handle, request_id)
 
+    def neighbors(
+        self,
+        node_id: int,
+        *,
+        direction: str = "out",
+        edge_type: Optional[str] = None,
+        distinct: bool = True,
+    ) -> List[Dict[str, int]]:
+        if not isinstance(node_id, int) or node_id < 0:
+            raise ValueError("neighbors() requires a non-negative node id")
+        if direction not in ("out", "in", "both"):
+            raise ValueError("direction must be 'out', 'in', or 'both'")
+        options: Dict[str, Any] = {"direction": direction, "distinct": bool(distinct)}
+        if edge_type is not None:
+            if not isinstance(edge_type, str) or not edge_type.strip():
+                raise ValueError("edge_type must be a non-empty string when provided")
+            options["edge_type"] = edge_type
+        return _native.database_neighbors(self._handle, int(node_id), options)
+
+    def bfs_traversal(
+        self,
+        node_id: int,
+        max_depth: int,
+        *,
+        direction: str = "out",
+        edge_types: Optional[Sequence[str]] = None,
+        max_results: Optional[int] = None,
+    ) -> List[Dict[str, int]]:
+        if not isinstance(node_id, int) or node_id < 0:
+            raise ValueError("bfs_traversal() requires a non-negative node id")
+        if not isinstance(max_depth, int) or max_depth < 0:
+            raise ValueError("bfs_traversal() requires a non-negative integer max_depth")
+        if direction not in ("out", "in", "both"):
+            raise ValueError("direction must be 'out', 'in', or 'both'")
+        options: Dict[str, Any] = {"direction": direction}
+        if edge_types is not None:
+            values: List[str] = []
+            for ty in edge_types:
+                if not isinstance(ty, str) or not ty.strip():
+                    raise ValueError("edge_types entries must be non-empty strings")
+                values.append(ty)
+            options["edge_types"] = values
+        if max_results is not None:
+            if not isinstance(max_results, int) or max_results <= 0:
+                raise ValueError("max_results must be a positive integer when provided")
+            options["max_results"] = max_results
+        return _native.database_bfs_traversal(self._handle, int(node_id), int(max_depth), options)
+
     def with_schema(self, schema: Optional[Mapping[str, Mapping[str, Any]]]) -> "Database":
         self._schema = _normalize_runtime_schema(schema)
         return self

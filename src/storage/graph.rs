@@ -1,7 +1,7 @@
 use std::cmp::{Ordering as CmpOrdering, Ordering};
 #[cfg(feature = "degree-cache")]
 use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
@@ -96,6 +96,39 @@ pub struct Graph {
     metrics: Arc<dyn super::metrics::StorageMetrics>,
     distinct_neighbors_default: bool,
     row_hash_header: bool,
+}
+
+/// Options for breadth-first traversal over the graph.
+#[derive(Clone, Debug)]
+pub struct BfsOptions {
+    /// Maximum depth (inclusive) to explore starting from the origin node.
+    pub max_depth: u32,
+    /// Direction to follow for edge expansions.
+    pub direction: Dir,
+    /// Optional subset of edge types to consider (matches all when `None`).
+    pub edge_types: Option<Vec<TypeId>>,
+    /// Optional cap on the number of visited nodes returned (including the origin).
+    pub max_results: Option<usize>,
+}
+
+impl Default for BfsOptions {
+    fn default() -> Self {
+        Self {
+            max_depth: 1,
+            direction: Dir::Out,
+            edge_types: None,
+            max_results: None,
+        }
+    }
+}
+
+/// Node visit captured during a breadth-first traversal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BfsVisit {
+    /// Identifier of the visited node.
+    pub node: NodeId,
+    /// Depth (distance in hops) from the origin node.
+    pub depth: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -713,6 +746,44 @@ impl Graph {
         Ok(FallbackLabelScan { nodes, pos: 0 })
     }
 
+    /// Counts how many nodes exist with the specified label.
+    pub fn count_nodes_with_label(&self, tx: &ReadGuard, label: LabelId) -> Result<u64> {
+        let mut stream = self.label_scan_stream(tx, label)?;
+        const BATCH: usize = 256;
+        let mut buf = Vec::with_capacity(BATCH);
+        let mut count = 0u64;
+        loop {
+            buf.clear();
+            let has_more = stream.next_batch(&mut buf, BATCH)?;
+            count += buf.len() as u64;
+            if !has_more {
+                break;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Returns all node identifiers that carry the provided label.
+    pub fn nodes_with_label(&self, tx: &ReadGuard, label: LabelId) -> Result<Vec<NodeId>> {
+        let mut stream = self.label_scan_stream(tx, label)?;
+        let mut nodes = Vec::new();
+        collect_all(&mut *stream, &mut nodes)?;
+        Ok(nodes)
+    }
+
+    /// Counts the number of edges that have the provided type.
+    pub fn count_edges_with_type(&self, tx: &ReadGuard, ty: TypeId) -> Result<u64> {
+        let mut cursor = self.edges.range(tx, Bound::Unbounded, Bound::Unbounded)?;
+        let mut count = 0u64;
+        while let Some((_key, bytes)) = cursor.next()? {
+            let row = edge::decode(&bytes)?;
+            if row.ty == ty {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Samples up to `limit` nodes from the B-Tree and returns their label lists.
     pub fn sample_node_labels(&self, tx: &ReadGuard, limit: usize) -> Result<Vec<Vec<LabelId>>> {
         if limit == 0 {
@@ -1042,6 +1113,57 @@ impl Graph {
         Ok(NeighborCursor::new(neighbors))
     }
 
+    /// Performs a breadth-first traversal from `start`, returning visited nodes up to `max_depth`.
+    pub fn bfs(&self, tx: &ReadGuard, start: NodeId, opts: &BfsOptions) -> Result<Vec<BfsVisit>> {
+        if !self.node_exists(tx, start)? {
+            return Err(SombraError::NotFound);
+        }
+        let mut queue: VecDeque<(NodeId, u32)> = VecDeque::new();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut visits: Vec<BfsVisit> = Vec::new();
+        queue.push_back((start, 0));
+        seen.insert(start);
+        let type_filters = opts.edge_types.as_deref();
+        while let Some((node, depth)) = queue.pop_front() {
+            visits.push(BfsVisit { node, depth });
+            if let Some(limit) = opts.max_results {
+                if visits.len() >= limit {
+                    break;
+                }
+            }
+            if depth >= opts.max_depth {
+                continue;
+            }
+            match type_filters {
+                Some(types) if !types.is_empty() => {
+                    for ty in types {
+                        self.enqueue_bfs_neighbors(
+                            tx,
+                            node,
+                            opts.direction,
+                            Some(*ty),
+                            depth + 1,
+                            &mut seen,
+                            &mut queue,
+                        )?;
+                    }
+                }
+                _ => {
+                    self.enqueue_bfs_neighbors(
+                        tx,
+                        node,
+                        opts.direction,
+                        None,
+                        depth + 1,
+                        &mut seen,
+                        &mut queue,
+                    )?;
+                }
+            }
+        }
+        Ok(visits)
+    }
+
     /// Computes the degree (number of edges) for a node in a given direction.
     pub fn degree(&self, tx: &ReadGuard, id: NodeId, dir: Dir, ty: Option<TypeId>) -> Result<u64> {
         let result = match dir {
@@ -1288,6 +1410,33 @@ impl Graph {
                     edge,
                     ty,
                 });
+            }
+        }
+        Ok(())
+    }
+
+    fn enqueue_bfs_neighbors(
+        &self,
+        tx: &ReadGuard,
+        node: NodeId,
+        dir: Dir,
+        ty_filter: Option<TypeId>,
+        next_depth: u32,
+        seen: &mut HashSet<NodeId>,
+        queue: &mut VecDeque<(NodeId, u32)>,
+    ) -> Result<()> {
+        let mut cursor = self.neighbors(
+            tx,
+            node,
+            dir,
+            ty_filter,
+            ExpandOpts {
+                distinct_nodes: false,
+            },
+        )?;
+        while let Some(neighbor) = cursor.next() {
+            if seen.insert(neighbor.neighbor) {
+                queue.push_back((neighbor.neighbor, next_depth));
             }
         }
         Ok(())

@@ -20,6 +20,8 @@ export interface ConnectOptions {
   autocheckpointMs?: number
 }
 
+export declare function databaseCancelRequest(handle: DatabaseHandle, requestId: string): NapiResult<boolean>
+
 export declare function databaseCreate(handle: DatabaseHandle, spec: any): NapiResult<any>
 
 export declare function databaseExecute(handle: DatabaseHandle, spec: any): NapiResult<any>
@@ -37,5 +39,51 @@ export declare function databasePragmaSet(handle: DatabaseHandle, name: string, 
 export declare function databaseSeedDemo(handle: DatabaseHandle): NapiResult<undefined>
 
 export declare function databaseStream(handle: DatabaseHandle, spec: any): NapiResult<StreamHandle>
+
+export declare function databaseGetNode(handle: DatabaseHandle, nodeId: number): NapiResult<any | undefined | null>
+
+export declare function databaseGetEdge(handle: DatabaseHandle, edgeId: number): NapiResult<any | undefined | null>
+
+export declare function databaseCountNodesWithLabel(handle: DatabaseHandle, label: string): NapiResult<number>
+
+export declare function databaseCountEdgesWithType(handle: DatabaseHandle, ty: string): NapiResult<number>
+
+export declare function databaseListNodesWithLabel(handle: DatabaseHandle, label: string): NapiResult<number[]>
+
+export interface NeighborOptions {
+  direction?: string
+  edgeType?: string
+  distinct?: boolean
+}
+
+export interface NeighborRecord {
+  nodeId: number
+  edgeId: number
+  typeId: number
+}
+
+export interface BfsTraversalOptions {
+  direction?: string
+  edgeTypes?: string[]
+  maxResults?: number
+}
+
+export interface BfsVisitRecord {
+  nodeId: number
+  depth: number
+}
+
+export declare function databaseNeighbors(
+  handle: DatabaseHandle,
+  nodeId: number,
+  options?: NeighborOptions | undefined | null,
+): NapiResult<NeighborRecord[]>
+
+export declare function databaseBfsTraversal(
+  handle: DatabaseHandle,
+  startId: number,
+  maxDepth: number,
+  options?: BfsTraversalOptions | undefined | null,
+): NapiResult<BfsVisitRecord[]>
 
 export declare function openDatabase(path: string, options?: ConnectOptions | undefined | null): NapiResult<DatabaseHandle>
