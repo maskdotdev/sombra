@@ -119,6 +119,47 @@ await db.query().nodes('User').where(eq('name', 'Trillian')).select('name').exec
 
 Every projection, predicate, and mutation now benefits from compile-time checks.
 
+## Higher-level typed API (experimental)
+
+When you want a batteries-included experience that models nodes, edges, and traversal helpers
+directly, use the `sombradb/typed` entry point. It layers a `SombraDB<MyGraphSchema>` facade on
+top of the existing `Database` but enforces your schema everywhere—CRUD helpers, neighbor lookups,
+analytics counters, and the traversal builder all carry precise TypeScript types.
+
+```ts
+import { SombraDB } from 'sombradb/typed'
+
+interface Graph extends GraphSchema {
+  nodes: {
+    Person: { name: string; age: number }
+    Company: { name: string; employees: number }
+  }
+  edges: {
+    WORKS_AT: { from: 'Person'; to: 'Company'; properties: { role: string } }
+  }
+}
+
+const schema: Graph = {
+  nodes: {
+    Person: { properties: { name: '', age: 0 } },
+    Company: { properties: { name: '', employees: 0 } },
+  },
+  edges: {
+    WORKS_AT: { from: 'Person', to: 'Company', properties: { role: '' } },
+  },
+}
+
+const db = new SombraDB<Graph>('typed.db', { schema })
+const ada = db.addNode('Person', { name: 'Ada', age: 36 })
+const sombra = db.addNode('Company', { name: 'Sombra', employees: 12 })
+db.addEdge(ada, sombra, 'WORKS_AT', { role: 'Researcher' })
+
+console.log(db.countNodesWithLabel('Person')) // strongly typed labels
+console.log(db.countEdgesWithType('WORKS_AT'))
+```
+
+See `examples/typed.ts` for a complete walk through featuring analytics, traversal, and the fluent query builder built on top of the new traversal primitives.
+
 ## Examples and scripts
 
 - `examples/crud.js` – end-to-end walkthrough of opening the DB, seeding data, and exercising CRUD helpers.

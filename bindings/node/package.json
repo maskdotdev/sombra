@@ -1,6 +1,6 @@
 {
   "name": "sombradb",
-  "version": "0.5.4",
+  "version": "0.6.1",
   "description": "A high-performance graph database with ACID transactions",
   "main": "main.js",
   "types": "main.d.ts",
@@ -23,7 +23,9 @@
     "index.d.ts",
     "main.js",
     "main.d.ts",
-    "browser.js"
+    "browser.js",
+    "typed.js",
+    "typed.d.ts"
   ],
   "napi": {
     "binaryName": "sombradb",
@@ -107,5 +109,11 @@
     "singleQuote": true,
     "arrowParens": "always"
   },
-  "packageManager": "bun@1.3.0"
+  "packageManager": "bun@1.3.0",
+  "optionalDependencies": {
+    "sombradb-win32-x64-msvc": "0.6.1",
+    "sombradb-darwin-x64": "0.6.1",
+    "sombradb-linux-x64-gnu": "0.6.1",
+    "sombradb-darwin-arm64": "0.6.1"
+  }
 }
