@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{page, BTree, BTreeOptions};
+use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, PropId, Result, SombraError,
@@ -17,7 +18,7 @@ const SEGMENT_PRIMARY: u32 = 0;
 pub struct ChunkedIndex {
     store: Arc<dyn PageStore>,
     root: Cell<PageId>,
-    tree: RefCell<Option<BTree<Vec<u8>, Vec<u8>>>>,
+    tree: RefCell<Option<BTree<Vec<u8>, VersionedValue<Vec<u8>>>>>,
 }
 
 impl ChunkedIndex {
@@ -40,12 +41,13 @@ impl ChunkedIndex {
         let tree = tree_ref.as_ref().expect("chunked index tree initialised");
         let key = Self::make_key(prefix, SEGMENT_PRIMARY);
         let mut segment = match tree.get_with_write(tx, &key)? {
-            Some(bytes) => Segment::decode(&bytes)?,
+            Some(bytes) => Segment::decode(&bytes.value)?,
             None => Segment::new(),
         };
         segment.insert(node);
         let encoded = segment.encode();
-        tree.put(tx, &key, &encoded)
+        let value = self.versioned_bytes(tx, encoded);
+        tree.put(tx, &key, &value)
     }
 
     pub fn remove(&self, tx: &mut WriteGuard<'_>, prefix: &[u8], node: NodeId) -> Result<()> {
@@ -59,7 +61,7 @@ impl ChunkedIndex {
         let Some(bytes) = tree.get_with_write(tx, &key)? else {
             return Err(SombraError::Corruption("chunked postings segment missing"));
         };
-        let mut segment = Segment::decode(&bytes)?;
+        let mut segment = Segment::decode(&bytes.value)?;
         if !segment.remove(node) {
             return Err(SombraError::Corruption("chunked postings entry missing"));
         }
@@ -69,7 +71,8 @@ impl ChunkedIndex {
             Ok(())
         } else {
             let encoded = segment.encode();
-            tree.put(tx, &key, &encoded)
+            let value = self.versioned_bytes(tx, encoded);
+            tree.put(tx, &key, &value)
         }
     }
 
@@ -91,7 +94,7 @@ impl ChunkedIndex {
             std::ops::Bound::Included(upper),
         )?;
         while let Some((_, bytes)) = cursor.next()? {
-            let segment = Segment::decode(&bytes)?;
+            let segment = Segment::decode(&bytes.value)?;
             out.extend(segment.nodes.iter().copied());
         }
         out.sort_by_key(|node| node.0);
@@ -137,7 +140,7 @@ impl ChunkedIndex {
             }
             let value_len = key.len() - 4;
             let value_key = key[8..value_len].to_vec();
-            let segment = Segment::decode(&bytes)?;
+            let segment = Segment::decode(&bytes.value)?;
             let entry = grouped.entry(value_key).or_default();
             entry.extend(segment.nodes.iter().copied());
         }
@@ -241,7 +244,7 @@ impl ChunkedIndex {
         Ok(())
     }
 
-    fn borrow_tree(&self) -> Result<Ref<'_, BTree<Vec<u8>, Vec<u8>>>> {
+    fn borrow_tree(&self) -> Result<Ref<'_, BTree<Vec<u8>, VersionedValue<Vec<u8>>>>> {
         self.ensure_tree_read()?;
         Ok(Ref::map(self.tree.borrow(), |opt| {
             opt.as_ref().expect("chunked index tree initialised")
@@ -280,6 +283,11 @@ impl ChunkedIndex {
             }
         }
         Ok(keys)
+    }
+
+    fn versioned_bytes(&self, tx: &mut WriteGuard<'_>, data: Vec<u8>) -> VersionedValue<Vec<u8>> {
+        let commit = tx.reserve_commit_id().0;
+        VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), data)
     }
 
     fn init_root_page(&self, tx: &mut WriteGuard<'_>) -> Result<PageId> {
@@ -407,12 +415,12 @@ impl<'a> ChunkedPostingStream<'a> {
         while self.key_pos < self.keys.len() {
             let key = &self.keys[self.key_pos];
             self.key_pos += 1;
-            let bytes = {
+            let value = {
                 let tree = self.index.borrow_tree()?;
                 let result = tree.get(self.guard, key)?;
                 result
             };
-            let bytes = match bytes {
+            let value = match value {
                 Some(bytes) => bytes,
                 None => {
                     return Err(SombraError::Corruption(
@@ -420,7 +428,7 @@ impl<'a> ChunkedPostingStream<'a> {
                     ))
                 }
             };
-            let nodes = Segment::decode(&bytes)?.into_nodes();
+            let nodes = Segment::decode(&value.value)?.into_nodes();
             if nodes.is_empty() {
                 continue;
             }

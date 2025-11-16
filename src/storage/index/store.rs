@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::PutItem;
+use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{LabelId, NodeId, PageId, PropId, Result, SombraError};
 
 use super::btree_postings::{BTreePostings, Unit};
@@ -212,8 +213,9 @@ impl IndexStore {
             keys.push(BTreePostings::make_key(&prefix, *node));
         }
         keys.sort();
-        let unit = Unit;
-        let iter = keys.iter().map(|key| PutItem { key, value: &unit });
+        let commit = tx.reserve_commit_id().0;
+        let value = VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), Unit);
+        let iter = keys.iter().map(|key| PutItem { key, value: &value });
         self.btree.put_many(tx, iter)
     }
 

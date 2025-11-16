@@ -7,6 +7,7 @@ use crate::storage::btree::{
     page::{self, BTreePageKind},
     BTree, BTreeOptions, Cursor, PutItem, ValCodec,
 };
+use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, Result, SombraError,
@@ -38,7 +39,7 @@ const GLOBAL_SENTINEL_LABEL: LabelId = LabelId(u32::MAX);
 
 pub struct LabelIndex {
     store: Arc<dyn PageStore>,
-    tree: BTree<Vec<u8>, EmptyValue>,
+    tree: BTree<Vec<u8>, VersionedValue<EmptyValue>>,
     indexed_labels: RwLock<HashSet<LabelId>>,
 }
 
@@ -62,7 +63,8 @@ impl LabelIndex {
                 .get_with_write(&mut write, &sentinel_key)?
                 .is_none()
             {
-                index.tree.put(&mut write, &sentinel_key, &EmptyValue)?;
+                let value = index.versioned_empty_value(&mut write);
+                index.tree.put(&mut write, &sentinel_key, &value)?;
             }
             store.commit(write)?;
         }
@@ -135,7 +137,8 @@ impl LabelIndex {
         existing_nodes.dedup_by_key(|node| node.0);
 
         let sentinel_key = encode_key(label, LABEL_SENTINEL_NODE);
-        self.tree.put(tx, &sentinel_key, &EmptyValue)?;
+        let empty_value = self.versioned_empty_value(tx);
+        self.tree.put(tx, &sentinel_key, &empty_value)?;
         let filtered: Vec<_> = existing_nodes
             .into_iter()
             .filter(|node| *node != LABEL_SENTINEL_NODE)
@@ -145,8 +148,10 @@ impl LabelIndex {
             for node in &filtered {
                 key_bufs.push(encode_key(label, *node));
             }
-            let empty = EmptyValue;
-            let iter = key_bufs.iter().map(|key| PutItem { key, value: &empty });
+            let iter = key_bufs.iter().map(|key| PutItem {
+                key,
+                value: &empty_value,
+            });
             self.tree.put_many(tx, iter)?;
         }
         self.indexed_labels.write().insert(label);
@@ -189,7 +194,8 @@ impl LabelIndex {
             return Ok(());
         }
         let key = encode_key(label, node);
-        self.tree.put(tx, &key, &EmptyValue)
+        let value = self.versioned_empty_value(tx);
+        self.tree.put(tx, &key, &value)
     }
 
     pub fn remove_node(&self, tx: &mut WriteGuard<'_>, label: LabelId, node: NodeId) -> Result<()> {
@@ -259,13 +265,13 @@ impl LabelIndex {
 /// Iterator for scanning nodes with a specific label.
 pub struct LabelScan<'a> {
     target_label: LabelId,
-    cursor: Cursor<'a, Vec<u8>, EmptyValue>,
+    cursor: Cursor<'a, Vec<u8>, VersionedValue<EmptyValue>>,
 }
 
 impl<'a> LabelScan<'a> {
     /// Retrieves the next node ID matching the target label, if available.
     pub fn next(&mut self) -> Result<Option<NodeId>> {
-        while let Some((key, _)) = self.cursor.next()? {
+        while let Some((key, _value)) = self.cursor.next()? {
             let (label, node) = decode_key(&key)?;
             if label != self.target_label {
                 continue;
@@ -276,6 +282,13 @@ impl<'a> LabelScan<'a> {
             return Ok(Some(node));
         }
         Ok(None)
+    }
+}
+
+impl LabelIndex {
+    fn versioned_empty_value(&self, tx: &mut WriteGuard<'_>) -> VersionedValue<EmptyValue> {
+        let commit = tx.reserve_commit_id().0;
+        VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), EmptyValue)
     }
 }
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{page, BTree, BTreeOptions, PutItem, ValCodec};
+use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, PropId, Result, SombraError,
@@ -14,7 +15,7 @@ use super::types::{EmptyPostingStream, PostingStream};
 pub struct BTreePostings {
     store: Arc<dyn PageStore>,
     root: Cell<PageId>,
-    tree: RefCell<Option<BTree<Vec<u8>, Unit>>>,
+    tree: RefCell<Option<BTree<Vec<u8>, VersionedValue<Unit>>>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -49,12 +50,13 @@ impl BTreePostings {
         let tree_ref = self.tree.borrow();
         let tree = tree_ref.as_ref().expect("btree postings initialised");
         let key = Self::make_key(prefix, node);
-        tree.put(tx, &key, &Unit)
+        let value = self.versioned_unit(tx);
+        tree.put(tx, &key, &value)
     }
 
     pub fn put_many<'a, I>(&self, tx: &mut WriteGuard<'_>, items: I) -> Result<()>
     where
-        I: IntoIterator<Item = PutItem<'a, Vec<u8>, Unit>>,
+        I: IntoIterator<Item = PutItem<'a, Vec<u8>, VersionedValue<Unit>>>,
     {
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
@@ -98,7 +100,7 @@ impl BTreePostings {
             std::ops::Bound::Included(upper),
         )?;
         let mut out = Vec::new();
-        while let Some((key, _)) = cursor.next()? {
+        while let Some((key, _value)) = cursor.next()? {
             let node = Self::parse_node_id(&key)?;
             out.push(node);
         }
@@ -123,7 +125,7 @@ impl BTreePostings {
         let upper = make_btree_upper_bound(label, prop, end);
         let mut cursor = tree.range(tx, lower, upper)?;
         let mut out = Vec::new();
-        while let Some((key, _)) = cursor.next()? {
+        while let Some((key, _value)) = cursor.next()? {
             if key.len() < 8 {
                 return Err(SombraError::Corruption("btree postings key too short"));
             }
@@ -234,7 +236,7 @@ impl BTreePostings {
         Ok(())
     }
 
-    fn borrow_tree(&self) -> Result<Ref<'_, BTree<Vec<u8>, Unit>>> {
+    fn borrow_tree(&self) -> Result<Ref<'_, BTree<Vec<u8>, VersionedValue<Unit>>>> {
         self.ensure_tree_read()?;
         Ok(Ref::map(self.tree.borrow(), |opt| {
             opt.as_ref().expect("btree postings initialised")
@@ -316,6 +318,13 @@ impl BTreePostings {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&key[key.len() - 8..]);
         Ok(NodeId(u64::from_be_bytes(bytes)))
+    }
+}
+
+impl BTreePostings {
+    fn versioned_unit(&self, tx: &mut WriteGuard<'_>) -> VersionedValue<Unit> {
+        let commit = tx.reserve_commit_id().0;
+        VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), Unit)
     }
 }
 

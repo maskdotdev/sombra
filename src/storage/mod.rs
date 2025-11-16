@@ -32,6 +32,7 @@ mod adjacency;
 mod edge;
 mod graph;
 mod metrics;
+mod mvcc;
 mod node;
 mod options;
 mod patch;
@@ -61,6 +62,9 @@ pub use graph::{
 
 /// Index definitions and label scan operations.
 pub use index::{IndexDef, IndexKind, LabelScan, TypeTag};
+pub use mvcc::{
+    flags as mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+};
 
 /// Metrics and profiling.
 pub use metrics::{default_metrics, CounterMetrics, NoopMetrics, StorageMetrics};

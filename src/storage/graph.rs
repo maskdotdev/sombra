@@ -26,9 +26,10 @@ use super::edge::{
     self, EncodeOpts as EdgeEncodeOpts, PropPayload as EdgePropPayload,
     PropStorage as EdgePropStorage,
 };
+use super::mvcc::{CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use super::node::{
     self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
-    PropStorage as NodePropStorage,
+    PropStorage as NodePropStorage, VersionedNodeRow,
 };
 use super::options::GraphOptions;
 use super::patch::{PropPatch, PropPatchOp};
@@ -71,8 +72,8 @@ pub struct Graph {
     store: Arc<dyn PageStore>,
     nodes: BTree<u64, Vec<u8>>,
     edges: BTree<u64, Vec<u8>>,
-    adj_fwd: BTree<Vec<u8>, UnitValue>,
-    adj_rev: BTree<Vec<u8>, UnitValue>,
+    adj_fwd: BTree<Vec<u8>, VersionedValue<UnitValue>>,
+    adj_rev: BTree<Vec<u8>, VersionedValue<UnitValue>>,
     #[cfg(feature = "degree-cache")]
     degree: Option<BTree<Vec<u8>, u64>>,
     vstore: VStore,
@@ -383,17 +384,22 @@ impl Graph {
         };
         let root = self.nodes.root_page();
         debug_assert!(root.0 != 0, "nodes root page not initialized");
-        let row_bytes =
-            match node::encode(&labels, payload, NodeEncodeOpts::new(self.row_hash_header)) {
-                Ok(encoded) => encoded.bytes,
-                Err(err) => {
-                    if let Some(vref) = map_vref.take() {
-                        let _ = self.vstore.free(tx, vref);
-                    }
-                    props::free_vrefs(&self.vstore, tx, &spill_vrefs);
-                    return Err(err);
+        let version = self.tx_version_header(tx);
+        let row_bytes = match node::encode(
+            &labels,
+            payload,
+            NodeEncodeOpts::new(self.row_hash_header),
+            version,
+        ) {
+            Ok(encoded) => encoded.bytes,
+            Err(err) => {
+                if let Some(vref) = map_vref.take() {
+                    let _ = self.vstore.free(tx, vref);
                 }
-            };
+                props::free_vrefs(&self.vstore, tx, &spill_vrefs);
+                return Err(err);
+            }
+        };
         let id_raw = self.next_node_id.fetch_add(1, AtomicOrdering::SeqCst);
         let node_id = NodeId(id_raw);
         let next_id = node_id.0.saturating_add(1);
@@ -444,7 +450,7 @@ impl Graph {
         }
         let mut nodes = Vec::new();
         self.nodes.for_each_with_write(tx, |id_raw, bytes| {
-            let row = node::decode(&bytes)?;
+            let VersionedNodeRow { row, .. } = node::decode(&bytes)?;
             if row.labels.binary_search(&label).is_ok() {
                 nodes.push(NodeId(id_raw));
             }
@@ -480,7 +486,7 @@ impl Graph {
         }
         let mut entries: Vec<(Vec<u8>, NodeId)> = Vec::new();
         self.nodes.for_each_with_write(tx, |id_raw, bytes| {
-            let row = node::decode(&bytes)?;
+            let VersionedNodeRow { row, .. } = node::decode(&bytes)?;
             if row.labels.binary_search(&def.label).is_err() {
                 return Ok(());
             }
@@ -695,7 +701,12 @@ impl Graph {
         let Some(bytes) = self.nodes.get(tx, &id.0)? else {
             return Ok(None);
         };
-        let row = node::decode(&bytes)?;
+        let versioned = node::decode(&bytes)?;
+        let snapshot = Self::reader_snapshot_commit(tx);
+        if !Self::version_visible(&versioned.header, snapshot) {
+            return Ok(None);
+        }
+        let row = versioned.row;
         let prop_bytes = match row.props {
             NodePropStorage::Inline(bytes) => bytes,
             NodePropStorage::VRef(vref) => self.vstore.read(tx, vref)?,
@@ -712,8 +723,13 @@ impl Graph {
     pub fn scan_all_nodes(&self, tx: &ReadGuard) -> Result<Vec<(NodeId, NodeData)>> {
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut rows = Vec::new();
+        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
-            let row = node::decode(&bytes)?;
+            let versioned = node::decode(&bytes)?;
+            if !Self::version_visible(&versioned.header, snapshot) {
+                continue;
+            }
+            let row = versioned.row;
             let prop_bytes = match row.props {
                 NodePropStorage::Inline(bytes) => bytes,
                 NodePropStorage::VRef(vref) => self.vstore.read(tx, vref)?,
@@ -737,8 +753,13 @@ impl Graph {
     ) -> Result<FallbackLabelScan> {
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut nodes = Vec::new();
+        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
-            let row = node::decode(&bytes)?;
+            let versioned = node::decode(&bytes)?;
+            if !Self::version_visible(&versioned.header, snapshot) {
+                continue;
+            }
+            let row = versioned.row;
             if row.labels.binary_search(&label).is_ok() {
                 nodes.push(NodeId(key));
             }
@@ -775,8 +796,13 @@ impl Graph {
     pub fn count_edges_with_type(&self, tx: &ReadGuard, ty: TypeId) -> Result<u64> {
         let mut cursor = self.edges.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut count = 0u64;
+        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((_key, bytes)) = cursor.next()? {
-            let row = edge::decode(&bytes)?;
+            let versioned = edge::decode(&bytes)?;
+            if !Self::version_visible(&versioned.header, snapshot) {
+                continue;
+            }
+            let row = versioned.row;
             if row.ty == ty {
                 count += 1;
             }
@@ -791,9 +817,13 @@ impl Graph {
         }
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut labels = Vec::new();
+        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((_key, bytes)) = cursor.next()? {
-            let row = node::decode(&bytes)?;
-            labels.push(row.labels);
+            let versioned = node::decode(&bytes)?;
+            if !Self::version_visible(&versioned.header, snapshot) {
+                continue;
+            }
+            labels.push(versioned.row.labels);
             if labels.len() >= limit {
                 break;
             }
@@ -811,7 +841,11 @@ impl Graph {
         let Some(bytes) = self.nodes.get_with_write(tx, &id.0)? else {
             return Err(SombraError::NotFound);
         };
-        let row = node::decode(&bytes)?;
+        let versioned = node::decode(&bytes)?;
+        if versioned.header.is_tombstone() {
+            return Err(SombraError::NotFound);
+        }
+        let row = versioned.row;
         let read = self.store.begin_read()?;
         let incident = self.collect_incident_edges(&read, id)?;
         drop(read);
@@ -859,11 +893,15 @@ impl Graph {
         let Some(existing_bytes) = self.nodes.get_with_write(tx, &id.0)? else {
             return Err(SombraError::NotFound);
         };
+        let versioned = node::decode(&existing_bytes)?;
+        if versioned.header.is_tombstone() {
+            return Err(SombraError::NotFound);
+        }
         let node::NodeRow {
             labels,
             props: storage,
             row_hash,
-        } = node::decode(&existing_bytes)?;
+        } = versioned.row;
         let prop_bytes = self.read_node_prop_bytes_with_write(tx, &storage)?;
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
             return Ok(());
@@ -876,17 +914,22 @@ impl Graph {
             map_vref = Some(vref);
             NodePropPayload::VRef(vref)
         };
-        let encoded_row =
-            match node::encode(&labels, payload, NodeEncodeOpts::new(self.row_hash_header)) {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    if let Some(vref) = map_vref.take() {
-                        let _ = self.vstore.free(tx, vref);
-                    }
-                    props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
-                    return Err(err);
+        let version = self.tx_version_header(tx);
+        let encoded_row = match node::encode(
+            &labels,
+            payload,
+            NodeEncodeOpts::new(self.row_hash_header),
+            version,
+        ) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                if let Some(vref) = map_vref.take() {
+                    let _ = self.vstore.free(tx, vref);
                 }
-            };
+                props::free_vrefs(&self.vstore, tx, &delta.encoded.spill_vrefs);
+                return Err(err);
+            }
+        };
         if self.row_hash_header {
             if let (Some(old_hash), Some(new_hash)) = (row_hash, encoded_row.row_hash) {
                 if old_hash == new_hash {
@@ -927,12 +970,14 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
+        let version = self.tx_version_header(tx);
         let row_bytes = match edge::encode(
             spec.src,
             spec.dst,
             spec.ty,
             payload,
             EdgeEncodeOpts::new(self.row_hash_header),
+            version,
         ) {
             Ok(encoded) => encoded.bytes,
             Err(err) => {
@@ -979,7 +1024,12 @@ impl Graph {
         let Some(bytes) = self.edges.get(tx, &id.0)? else {
             return Ok(None);
         };
-        let row = edge::decode(&bytes)?;
+        let versioned = edge::decode(&bytes)?;
+        let snapshot = Self::reader_snapshot_commit(tx);
+        if !Self::version_visible(&versioned.header, snapshot) {
+            return Ok(None);
+        }
+        let row = versioned.row;
         let prop_bytes = match row.props {
             EdgePropStorage::Inline(bytes) => bytes,
             EdgePropStorage::VRef(vref) => self.vstore.read(tx, vref)?,
@@ -998,8 +1048,13 @@ impl Graph {
     pub fn scan_all_edges(&self, tx: &ReadGuard) -> Result<Vec<(EdgeId, EdgeData)>> {
         let mut cursor = self.edges.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut rows = Vec::new();
+        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
-            let row = edge::decode(&bytes)?;
+            let versioned = edge::decode(&bytes)?;
+            if !Self::version_visible(&versioned.header, snapshot) {
+                continue;
+            }
+            let row = versioned.row;
             let prop_bytes = match row.props {
                 EdgePropStorage::Inline(bytes) => bytes,
                 EdgePropStorage::VRef(vref) => self.vstore.read(tx, vref)?,
@@ -1031,13 +1086,17 @@ impl Graph {
         let Some(existing_bytes) = self.edges.get_with_write(tx, &id.0)? else {
             return Err(SombraError::NotFound);
         };
+        let versioned = edge::decode(&existing_bytes)?;
+        if versioned.header.is_tombstone() {
+            return Err(SombraError::NotFound);
+        }
         let edge::EdgeRow {
             src,
             dst,
             ty,
             props: storage,
             row_hash: old_row_hash,
-        } = edge::decode(&existing_bytes)?;
+        } = versioned.row;
         let prop_bytes = self.read_edge_prop_bytes_with_write(tx, &storage)?;
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
             return Ok(());
@@ -1050,12 +1109,14 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
+        let version = self.tx_version_header(tx);
         let encoded_row = match edge::encode(
             src,
             dst,
             ty,
             payload,
             EdgeEncodeOpts::new(self.row_hash_header),
+            version,
         ) {
             Ok(encoded) => encoded,
             Err(err) => {
@@ -1191,7 +1252,11 @@ impl Graph {
         let Some(bytes) = self.edges.get_with_write(tx, &id.0)? else {
             return Err(SombraError::NotFound);
         };
-        let row = edge::decode(&bytes)?;
+        let versioned = edge::decode(&bytes)?;
+        if versioned.header.is_tombstone() {
+            return Err(SombraError::NotFound);
+        }
+        let row = versioned.row;
         self.remove_adjacency(tx, row.src, row.dst, row.ty, id)?;
         let removed = self.edges.delete(tx, &id.0)?;
         if !removed {
@@ -1199,6 +1264,22 @@ impl Graph {
         }
         self.persist_tree_root(tx, RootKind::Edges)?;
         self.free_edge_props(tx, row.props)
+    }
+
+    #[inline]
+    fn tx_version_header(&self, tx: &mut WriteGuard<'_>) -> VersionHeader {
+        let commit_lsn = tx.reserve_commit_id();
+        VersionHeader::new(commit_lsn.0, COMMIT_MAX, 0, 0)
+    }
+
+    #[inline]
+    fn reader_snapshot_commit(tx: &ReadGuard) -> CommitId {
+        tx.snapshot_lsn().0
+    }
+
+    #[inline]
+    fn version_visible(header: &VersionHeader, snapshot: CommitId) -> bool {
+        header.visible_at(snapshot) && !header.is_tombstone()
     }
 
     fn encode_property_map(
@@ -1246,18 +1327,27 @@ impl Graph {
             let rev_key = adjacency::encode_rev_key(*dst, *ty, *src, *edge);
             keys.push((fwd_key, rev_key));
         }
-        let unit = UnitValue;
+        let version_header = self.tx_version_header(tx);
+        let versioned_unit = VersionedValue::new(version_header, UnitValue);
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(fwd, _)| fwd).collect();
             refs.sort_unstable_by(|a, b| a.cmp(b));
-            let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
+            let value_ref = &versioned_unit;
+            let iter = refs.into_iter().map(|key| PutItem {
+                key,
+                value: value_ref,
+            });
             self.adj_fwd.put_many(tx, iter)?;
             self.persist_tree_root(tx, RootKind::AdjFwd)?;
         }
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(_, rev)| rev).collect();
             refs.sort_unstable_by(|a, b| a.cmp(b));
-            let iter = refs.into_iter().map(|key| PutItem { key, value: &unit });
+            let value_ref = &versioned_unit;
+            let iter = refs.into_iter().map(|key| PutItem {
+                key,
+                value: value_ref,
+            });
             if let Err(err) = self.adj_rev.put_many(tx, iter) {
                 self.rollback_adjacency_batch(tx, &keys)?;
                 return Err(err);
@@ -1850,7 +1940,10 @@ fn open_u64_vec_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<u
     BTree::open_or_create(store, opts)
 }
 
-fn open_unit_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Vec<u8>, UnitValue>> {
+fn open_unit_tree(
+    store: &Arc<dyn PageStore>,
+    root: PageId,
+) -> Result<BTree<Vec<u8>, VersionedValue<UnitValue>>> {
     let mut opts = BTreeOptions::default();
     opts.root_page = (root.0 != 0).then_some(root);
     BTree::open_or_create(store, opts)
