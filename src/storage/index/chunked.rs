@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{page, BTree, BTreeOptions};
-use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
+use crate::storage::{mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, PropId, Result, SombraError,
@@ -93,7 +93,13 @@ impl ChunkedIndex {
             std::ops::Bound::Included(lower),
             std::ops::Bound::Included(upper),
         )?;
+        let snapshot = snapshot_commit(tx);
         while let Some((_, bytes)) = cursor.next()? {
+            if !bytes.header.visible_at(snapshot)
+                || (bytes.header.flags & mvcc_flags::TOMBSTONE) != 0
+            {
+                continue;
+            }
             let segment = Segment::decode(&bytes.value)?;
             out.extend(segment.nodes.iter().copied());
         }
@@ -122,7 +128,13 @@ impl ChunkedIndex {
 
         let mut cursor = tree.range(tx, lower, upper)?;
         let mut grouped: BTreeMap<Vec<u8>, Vec<NodeId>> = BTreeMap::new();
+        let snapshot = snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
+            if !bytes.header.visible_at(snapshot)
+                || (bytes.header.flags & mvcc_flags::TOMBSTONE) != 0
+            {
+                continue;
+            }
             if key.len() < 12 {
                 return Err(SombraError::Corruption("chunked postings key too short"));
             }
@@ -186,8 +198,9 @@ impl ChunkedIndex {
         }
         let lower = make_chunk_lower_bound(label, prop, start);
         let upper = make_chunk_upper_bound(label, prop, end);
-        let keys = self.collect_stream_keys(tx, label, prop, lower, upper)?;
-        let stream = ChunkedPostingStream::new(self, tx, keys);
+        let snapshot = snapshot_commit(tx);
+        let keys = self.collect_stream_keys(tx, label, prop, lower, upper, snapshot)?;
+        let stream = ChunkedPostingStream::new(self, tx, keys, snapshot);
         Ok(Box::new(stream))
     }
 
@@ -258,12 +271,18 @@ impl ChunkedIndex {
         prop: PropId,
         lower: Bound<Vec<u8>>,
         upper: Bound<Vec<u8>>,
+        snapshot: CommitId,
     ) -> Result<Vec<Vec<u8>>> {
         let mut keys = Vec::new();
         {
             let tree = self.borrow_tree()?;
             let mut cursor = tree.range(tx, lower, upper)?;
-            while let Some((key, _)) = cursor.next()? {
+            while let Some((key, value)) = cursor.next()? {
+                if !value.header.visible_at(snapshot)
+                    || (value.header.flags & mvcc_flags::TOMBSTONE) != 0
+                {
+                    continue;
+                }
                 if key.len() < 12 {
                     return Err(SombraError::Corruption("chunked postings key too short"));
                 }
@@ -348,6 +367,10 @@ fn next_prefix(label: LabelId, prop: PropId) -> Option<Vec<u8>> {
     }
 }
 
+fn snapshot_commit(tx: &ReadGuard) -> CommitId {
+    tx.snapshot_lsn().0
+}
+
 fn make_chunk_lower_bound(label: LabelId, prop: PropId, bound: Bound<Vec<u8>>) -> Bound<Vec<u8>> {
     match bound {
         Bound::Unbounded => Bound::Included(base_prefix(label, prop)),
@@ -392,10 +415,16 @@ struct ChunkedPostingStream<'a> {
     buf_pos: usize,
     last: Option<NodeId>,
     done: bool,
+    snapshot: CommitId,
 }
 
 impl<'a> ChunkedPostingStream<'a> {
-    fn new(index: &'a ChunkedIndex, guard: &'a ReadGuard, keys: Vec<Vec<u8>>) -> Self {
+    fn new(
+        index: &'a ChunkedIndex,
+        guard: &'a ReadGuard,
+        keys: Vec<Vec<u8>>,
+        snapshot: CommitId,
+    ) -> Self {
         Self {
             index,
             guard,
@@ -405,6 +434,7 @@ impl<'a> ChunkedPostingStream<'a> {
             buf_pos: 0,
             last: None,
             done: false,
+            snapshot,
         }
     }
 
@@ -428,6 +458,11 @@ impl<'a> ChunkedPostingStream<'a> {
                     ))
                 }
             };
+            if !value.header.visible_at(self.snapshot)
+                || (value.header.flags & mvcc_flags::TOMBSTONE) != 0
+            {
+                continue;
+            }
             let nodes = Segment::decode(&value.value)?.into_nodes();
             if nodes.is_empty() {
                 continue;

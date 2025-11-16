@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{page, BTree, BTreeOptions, PutItem, ValCodec};
-use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
+use crate::storage::{mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, PropId, Result, SombraError,
@@ -50,7 +50,7 @@ impl BTreePostings {
         let tree_ref = self.tree.borrow();
         let tree = tree_ref.as_ref().expect("btree postings initialised");
         let key = Self::make_key(prefix, node);
-        let value = self.versioned_unit(tx);
+        let value = self.versioned_unit(tx, false);
         tree.put(tx, &key, &value)
     }
 
@@ -74,13 +74,13 @@ impl BTreePostings {
         let tree_ref = self.tree.borrow();
         let tree = tree_ref.as_ref().expect("btree postings initialised");
         let key = Self::make_key(prefix, node);
-        let removed = tree.delete(tx, &key)?;
-        if !removed {
+        if tree.get_with_write(tx, &key)?.is_none() {
             return Err(SombraError::Corruption(
                 "btree postings entry missing during remove",
             ));
         }
-        Ok(())
+        let tombstone = self.versioned_unit(tx, true);
+        tree.put(tx, &key, &tombstone)
     }
 
     pub fn scan_eq(&self, tx: &ReadGuard, prefix: &[u8]) -> Result<Vec<NodeId>> {
@@ -94,13 +94,19 @@ impl BTreePostings {
         lower.extend_from_slice(&0u64.to_be_bytes());
         let mut upper = prefix.to_vec();
         upper.extend_from_slice(&u64::MAX.to_be_bytes());
+        let snapshot = snapshot_commit(tx);
         let mut cursor = tree.range(
             tx,
             std::ops::Bound::Included(lower),
             std::ops::Bound::Included(upper),
         )?;
         let mut out = Vec::new();
-        while let Some((key, _value)) = cursor.next()? {
+        while let Some((key, value)) = cursor.next()? {
+            if !value.header.visible_at(snapshot)
+                || (value.header.flags & mvcc_flags::TOMBSTONE) != 0
+            {
+                continue;
+            }
             let node = Self::parse_node_id(&key)?;
             out.push(node);
         }
@@ -123,9 +129,15 @@ impl BTreePostings {
         let tree = tree_ref.as_ref().expect("btree postings initialised");
         let lower = make_btree_lower_bound(label, prop, start);
         let upper = make_btree_upper_bound(label, prop, end);
+        let snapshot = snapshot_commit(tx);
         let mut cursor = tree.range(tx, lower, upper)?;
         let mut out = Vec::new();
-        while let Some((key, _value)) = cursor.next()? {
+        while let Some((key, value)) = cursor.next()? {
+            if !value.header.visible_at(snapshot)
+                || (value.header.flags & mvcc_flags::TOMBSTONE) != 0
+            {
+                continue;
+            }
             if key.len() < 8 {
                 return Err(SombraError::Corruption("btree postings key too short"));
             }
@@ -178,7 +190,8 @@ impl BTreePostings {
         }
         let lower = make_btree_lower_bound(label, prop, start);
         let upper = make_btree_upper_bound(label, prop, end);
-        let keys = self.collect_stream_keys(tx, label, prop, lower, upper)?;
+        let snapshot = snapshot_commit(tx);
+        let keys = self.collect_stream_keys(tx, label, prop, lower, upper, snapshot)?;
         let stream = BTreePostingStream::new(self, tx, keys);
         Ok(Box::new(stream))
     }
@@ -250,12 +263,18 @@ impl BTreePostings {
         prop: PropId,
         lower: Bound<Vec<u8>>,
         upper: Bound<Vec<u8>>,
+        snapshot: CommitId,
     ) -> Result<Vec<Vec<u8>>> {
         let mut keys = Vec::new();
         {
             let tree = self.borrow_tree()?;
             let mut cursor = tree.range(tx, lower, upper)?;
-            while let Some((key, _)) = cursor.next()? {
+            while let Some((key, value)) = cursor.next()? {
+                if !value.header.visible_at(snapshot)
+                    || (value.header.flags & mvcc_flags::TOMBSTONE) != 0
+                {
+                    continue;
+                }
                 if key.len() < 8 {
                     return Err(SombraError::Corruption("btree postings key too short"));
                 }
@@ -322,9 +341,12 @@ impl BTreePostings {
 }
 
 impl BTreePostings {
-    fn versioned_unit(&self, tx: &mut WriteGuard<'_>) -> VersionedValue<Unit> {
-        let commit = tx.reserve_commit_id().0;
-        VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), Unit)
+    fn versioned_unit(&self, tx: &mut WriteGuard<'_>, tombstone: bool) -> VersionedValue<Unit> {
+        let mut header = VersionHeader::new(tx.reserve_commit_id().0, COMMIT_MAX, 0, 0);
+        if tombstone {
+            header.flags |= mvcc_flags::TOMBSTONE;
+        }
+        VersionedValue::new(header, Unit)
     }
 }
 
@@ -441,4 +463,8 @@ fn make_btree_upper_bound(label: LabelId, prop: PropId, bound: Bound<Vec<u8>>) -
             Bound::Excluded(key)
         }
     }
+}
+
+fn snapshot_commit(tx: &ReadGuard) -> CommitId {
+    tx.snapshot_lsn().0
 }

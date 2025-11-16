@@ -7,7 +7,7 @@ use crate::storage::btree::{
     page::{self, BTreePageKind},
     BTree, BTreeOptions, Cursor, PutItem, ValCodec,
 };
-use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
+use crate::storage::{mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
     LabelId, NodeId, PageId, Result, SombraError,
@@ -63,7 +63,7 @@ impl LabelIndex {
                 .get_with_write(&mut write, &sentinel_key)?
                 .is_none()
             {
-                let value = index.versioned_empty_value(&mut write);
+                let value = index.versioned_empty_value(&mut write, false);
                 index.tree.put(&mut write, &sentinel_key, &value)?;
             }
             store.commit(write)?;
@@ -77,8 +77,13 @@ impl LabelIndex {
         }
         let read = self.store.begin_read()?;
         let key = encode_key(label, LABEL_SENTINEL_NODE);
+        let snapshot = snapshot_commit(&read);
         let present = match self.tree.get(&read, &key) {
-            Ok(value) => value.is_some(),
+            Ok(Some(value)) => {
+                value.header.visible_at(snapshot)
+                    && (value.header.flags & mvcc_flags::TOMBSTONE) == 0
+            }
+            Ok(None) => false,
             Err(SombraError::Corruption(msg))
                 if msg == "unknown btree page kind" || msg == "invalid page magic" =>
             {
@@ -102,7 +107,8 @@ impl LabelIndex {
         self.ensure_root_initialized(tx)?;
         let key = encode_key(label, LABEL_SENTINEL_NODE);
         let present = match self.tree.get_with_write(tx, &key) {
-            Ok(value) => value.is_some(),
+            Ok(Some(value)) => value.header.flags & mvcc_flags::TOMBSTONE == 0,
+            Ok(None) => false,
             Err(SombraError::Corruption(msg))
                 if msg == "unknown btree page kind" || msg == "invalid page magic" =>
             {
@@ -137,7 +143,7 @@ impl LabelIndex {
         existing_nodes.dedup_by_key(|node| node.0);
 
         let sentinel_key = encode_key(label, LABEL_SENTINEL_NODE);
-        let empty_value = self.versioned_empty_value(tx);
+        let empty_value = self.versioned_empty_value(tx, false);
         self.tree.put(tx, &sentinel_key, &empty_value)?;
         let filtered: Vec<_> = existing_nodes
             .into_iter()
@@ -194,7 +200,7 @@ impl LabelIndex {
             return Ok(());
         }
         let key = encode_key(label, node);
-        let value = self.versioned_empty_value(tx);
+        let value = self.versioned_empty_value(tx, false);
         self.tree.put(tx, &key, &value)
     }
 
@@ -204,24 +210,25 @@ impl LabelIndex {
             return Ok(());
         }
         let key = encode_key(label, node);
-        let removed = self.tree.delete(tx, &key)?;
-        if removed {
-            Ok(())
-        } else {
-            Err(SombraError::Corruption(
+        if self.tree.get_with_write(tx, &key)?.is_none() {
+            return Err(SombraError::Corruption(
                 "label index entry missing during removal",
-            ))
+            ));
         }
+        let tombstone = self.versioned_empty_value(tx, true);
+        self.tree.put(tx, &key, &tombstone)
     }
 
     pub fn scan<'a>(&'a self, tx: &'a ReadGuard, label: LabelId) -> Result<LabelScan<'a>> {
         let (lower, upper) = label_bounds(label);
+        let snapshot = snapshot_commit(tx);
         let cursor = self
             .tree
             .range(tx, Bound::Included(lower), Bound::Included(upper))?;
         Ok(LabelScan {
             target_label: label,
             cursor,
+            snapshot,
         })
     }
 
@@ -266,12 +273,18 @@ impl LabelIndex {
 pub struct LabelScan<'a> {
     target_label: LabelId,
     cursor: Cursor<'a, Vec<u8>, VersionedValue<EmptyValue>>,
+    snapshot: CommitId,
 }
 
 impl<'a> LabelScan<'a> {
     /// Retrieves the next node ID matching the target label, if available.
     pub fn next(&mut self) -> Result<Option<NodeId>> {
-        while let Some((key, _value)) = self.cursor.next()? {
+        while let Some((key, value)) = self.cursor.next()? {
+            if !value.header.visible_at(self.snapshot)
+                || (value.header.flags & mvcc_flags::TOMBSTONE) != 0
+            {
+                continue;
+            }
             let (label, node) = decode_key(&key)?;
             if label != self.target_label {
                 continue;
@@ -286,10 +299,21 @@ impl<'a> LabelScan<'a> {
 }
 
 impl LabelIndex {
-    fn versioned_empty_value(&self, tx: &mut WriteGuard<'_>) -> VersionedValue<EmptyValue> {
-        let commit = tx.reserve_commit_id().0;
-        VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), EmptyValue)
+    fn versioned_empty_value(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        tombstone: bool,
+    ) -> VersionedValue<EmptyValue> {
+        let mut header = VersionHeader::new(tx.reserve_commit_id().0, COMMIT_MAX, 0, 0);
+        if tombstone {
+            header.flags |= mvcc_flags::TOMBSTONE;
+        }
+        VersionedValue::new(header, EmptyValue)
     }
+}
+
+fn snapshot_commit(tx: &ReadGuard) -> CommitId {
+    tx.snapshot_lsn().0
 }
 
 impl<'a> PostingStream for LabelScan<'a> {

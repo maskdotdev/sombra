@@ -27,6 +27,7 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
+use super::mvcc_flags;
 use super::node::{
     self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
     PropStorage as NodePropStorage, VersionedNodeRow,
@@ -1272,6 +1273,18 @@ impl Graph {
         VersionHeader::new(commit_lsn.0, COMMIT_MAX, 0, 0)
     }
 
+    fn adjacency_value(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        tombstone: bool,
+    ) -> VersionedValue<UnitValue> {
+        let mut header = self.tx_version_header(tx);
+        if tombstone {
+            header.flags |= mvcc_flags::TOMBSTONE;
+        }
+        VersionedValue::new(header, UnitValue)
+    }
+
     #[inline]
     fn reader_snapshot_commit(tx: &ReadGuard) -> CommitId {
         tx.snapshot_lsn().0
@@ -1327,8 +1340,7 @@ impl Graph {
             let rev_key = adjacency::encode_rev_key(*dst, *ty, *src, *edge);
             keys.push((fwd_key, rev_key));
         }
-        let version_header = self.tx_version_header(tx);
-        let versioned_unit = VersionedValue::new(version_header, UnitValue);
+        let versioned_unit = self.adjacency_value(tx, false);
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(fwd, _)| fwd).collect();
             refs.sort_unstable_by(|a, b| a.cmp(b));
@@ -1379,14 +1391,20 @@ impl Graph {
     ) -> Result<()> {
         let fwd_key = adjacency::encode_fwd_key(src, ty, dst, edge);
         let rev_key = adjacency::encode_rev_key(dst, ty, src, edge);
-        let removed_fwd = self.adj_fwd.delete(tx, &fwd_key)?;
-        if !removed_fwd {
-            return Err(SombraError::Corruption("missing forward adjacency entry"));
-        }
-        let removed_rev = self.adj_rev.delete(tx, &rev_key)?;
-        if !removed_rev {
-            return Err(SombraError::Corruption("missing reverse adjacency entry"));
-        }
+        let versioned_tombstone = self.adjacency_value(tx, true);
+        let mut ensure_existing =
+            |tree: &BTree<Vec<u8>, VersionedValue<UnitValue>>, key: &Vec<u8>| -> Result<()> {
+                if tree.get_with_write(tx, key)?.is_none() {
+                    return Err(SombraError::Corruption(
+                        "adjacency entry missing during delete",
+                    ));
+                }
+                Ok(())
+            };
+        ensure_existing(&self.adj_fwd, &fwd_key)?;
+        ensure_existing(&self.adj_rev, &rev_key)?;
+        self.adj_fwd.put(tx, &fwd_key, &versioned_tombstone)?;
+        self.adj_rev.put(tx, &rev_key, &versioned_tombstone)?;
         self.persist_tree_root(tx, RootKind::AdjFwd)?;
         self.persist_tree_root(tx, RootKind::AdjRev)?;
         #[cfg(feature = "degree-cache")]
@@ -1417,8 +1435,12 @@ impl Graph {
         } else {
             &self.adj_rev
         };
+        let snapshot = Self::reader_snapshot_commit(read);
         let mut cursor = tree.range(read, Bound::Included(lo), Bound::Included(hi))?;
-        while let Some((key, _)) = cursor.next()? {
+        while let Some((key, value)) = cursor.next()? {
+            if !Self::version_visible(&value.header, snapshot) {
+                continue;
+            }
             let decoded = if forward {
                 adjacency::decode_fwd_key(&key)
             } else {
@@ -1449,9 +1471,13 @@ impl Graph {
         } else {
             &self.adj_rev
         };
+        let snapshot = Self::reader_snapshot_commit(tx);
         let mut cursor = tree.range(tx, Bound::Included(lo), Bound::Included(hi))?;
         let mut seen = seen;
-        while let Some((key, _)) = cursor.next()? {
+        while let Some((key, value)) = cursor.next()? {
+            if !Self::version_visible(&value.header, snapshot) {
+                continue;
+            }
             if forward {
                 let (src, ty, dst, edge) = adjacency::decode_fwd_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
@@ -2208,7 +2234,11 @@ impl Graph {
     ) -> Result<Vec<(NodeId, TypeId, NodeId, EdgeId)>> {
         let mut cursor = self.adj_fwd.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut entries = Vec::new();
-        while let Some((key, _)) = cursor.next()? {
+        let snapshot = Self::reader_snapshot_commit(tx);
+        while let Some((key, value)) = cursor.next()? {
+            if !Self::version_visible(&value.header, snapshot) {
+                continue;
+            }
             let decoded =
                 adjacency::decode_fwd_key(&key).ok_or(SombraError::Corruption("adj key decode"))?;
             entries.push(decoded);
@@ -2223,7 +2253,11 @@ impl Graph {
     ) -> Result<Vec<(NodeId, TypeId, NodeId, EdgeId)>> {
         let mut cursor = self.adj_rev.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut entries = Vec::new();
-        while let Some((key, _)) = cursor.next()? {
+        let snapshot = Self::reader_snapshot_commit(tx);
+        while let Some((key, value)) = cursor.next()? {
+            if !Self::version_visible(&value.header, snapshot) {
+                continue;
+            }
             let decoded =
                 adjacency::decode_rev_key(&key).ok_or(SombraError::Corruption("adj key decode"))?;
             entries.push(decoded);
@@ -2517,7 +2551,11 @@ impl Graph {
         let mut actual: HashMap<(NodeId, adjacency::DegreeDir, TypeId), u64> = HashMap::new();
         {
             let mut cursor = self.adj_fwd.range(tx, Bound::Unbounded, Bound::Unbounded)?;
-            while let Some((key, _)) = cursor.next()? {
+            let snapshot = Self::reader_snapshot_commit(tx);
+            while let Some((key, value)) = cursor.next()? {
+                if !Self::version_visible(&value.header, snapshot) {
+                    continue;
+                }
                 let (src, ty, _, _) = adjacency::decode_fwd_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
                 *actual
@@ -2527,7 +2565,11 @@ impl Graph {
         }
         {
             let mut cursor = self.adj_rev.range(tx, Bound::Unbounded, Bound::Unbounded)?;
-            while let Some((key, _)) = cursor.next()? {
+            let snapshot = Self::reader_snapshot_commit(tx);
+            while let Some((key, value)) = cursor.next()? {
+                if !Self::version_visible(&value.header, snapshot) {
+                    continue;
+                }
                 let (dst, ty, _, _) = adjacency::decode_rev_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
                 *actual
