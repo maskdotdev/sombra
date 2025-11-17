@@ -741,11 +741,9 @@ impl Graph {
         let Some(bytes) = self.nodes.get(tx, &id.0)? else {
             return Ok(None);
         };
-        let versioned = node::decode(&bytes)?;
-        let snapshot = Self::reader_snapshot_commit(tx);
-        if !Self::version_visible(&versioned.header, snapshot) {
+        let Some(versioned) = self.visible_node_from_bytes(tx, id, &bytes)? else {
             return Ok(None);
-        }
+        };
         let row = versioned.row;
         let prop_bytes = match row.props {
             NodePropStorage::Inline(bytes) => bytes,
@@ -763,12 +761,10 @@ impl Graph {
     pub fn scan_all_nodes(&self, tx: &ReadGuard) -> Result<Vec<(NodeId, NodeData)>> {
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut rows = Vec::new();
-        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
-            let versioned = node::decode(&bytes)?;
-            if !Self::version_visible(&versioned.header, snapshot) {
+            let Some(versioned) = self.visible_node_from_bytes(tx, NodeId(key), &bytes)? else {
                 continue;
-            }
+            };
             let row = versioned.row;
             let prop_bytes = match row.props {
                 NodePropStorage::Inline(bytes) => bytes,
@@ -793,12 +789,10 @@ impl Graph {
     ) -> Result<FallbackLabelScan> {
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut nodes = Vec::new();
-        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
-            let versioned = node::decode(&bytes)?;
-            if !Self::version_visible(&versioned.header, snapshot) {
+            let Some(versioned) = self.visible_node_from_bytes(tx, NodeId(key), &bytes)? else {
                 continue;
-            }
+            };
             let row = versioned.row;
             if row.labels.binary_search(&label).is_ok() {
                 nodes.push(NodeId(key));
@@ -816,7 +810,11 @@ impl Graph {
         loop {
             buf.clear();
             let has_more = stream.next_batch(&mut buf, BATCH)?;
-            count += buf.len() as u64;
+            for node in &buf {
+                if self.node_has_label(tx, *node, label)? {
+                    count = count.saturating_add(1);
+                }
+            }
             if !has_more {
                 break;
             }
@@ -827,8 +825,21 @@ impl Graph {
     /// Returns all node identifiers that carry the provided label.
     pub fn nodes_with_label(&self, tx: &ReadGuard, label: LabelId) -> Result<Vec<NodeId>> {
         let mut stream = self.label_scan_stream(tx, label)?;
+        const BATCH: usize = 256;
+        let mut buf = Vec::with_capacity(BATCH);
         let mut nodes = Vec::new();
-        collect_all(&mut *stream, &mut nodes)?;
+        loop {
+            buf.clear();
+            let has_more = stream.next_batch(&mut buf, BATCH)?;
+            for node in &buf {
+                if self.node_has_label(tx, *node, label)? {
+                    nodes.push(*node);
+                }
+            }
+            if !has_more {
+                break;
+            }
+        }
         Ok(nodes)
     }
 
@@ -836,12 +847,10 @@ impl Graph {
     pub fn count_edges_with_type(&self, tx: &ReadGuard, ty: TypeId) -> Result<u64> {
         let mut cursor = self.edges.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut count = 0u64;
-        let snapshot = Self::reader_snapshot_commit(tx);
-        while let Some((_key, bytes)) = cursor.next()? {
-            let versioned = edge::decode(&bytes)?;
-            if !Self::version_visible(&versioned.header, snapshot) {
+        while let Some((key, bytes)) = cursor.next()? {
+            let Some(versioned) = self.visible_edge_from_bytes(tx, EdgeId(key), &bytes)? else {
                 continue;
-            }
+            };
             let row = versioned.row;
             if row.ty == ty {
                 count += 1;
@@ -857,13 +866,10 @@ impl Graph {
         }
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut labels = Vec::new();
-        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((_key, bytes)) = cursor.next()? {
-            let versioned = node::decode(&bytes)?;
-            if !Self::version_visible(&versioned.header, snapshot) {
-                continue;
+            if let Some(versioned) = self.visible_node_from_bytes(tx, NodeId(_key), &bytes)? {
+                labels.push(versioned.row.labels);
             }
-            labels.push(versioned.row.labels);
             if labels.len() >= limit {
                 break;
             }
@@ -1094,11 +1100,9 @@ impl Graph {
         let Some(bytes) = self.edges.get(tx, &id.0)? else {
             return Ok(None);
         };
-        let versioned = edge::decode(&bytes)?;
-        let snapshot = Self::reader_snapshot_commit(tx);
-        if !Self::version_visible(&versioned.header, snapshot) {
+        let Some(versioned) = self.visible_edge_from_bytes(tx, id, &bytes)? else {
             return Ok(None);
-        }
+        };
         let row = versioned.row;
         let prop_bytes = match row.props {
             EdgePropStorage::Inline(bytes) => bytes,
@@ -1118,12 +1122,10 @@ impl Graph {
     pub fn scan_all_edges(&self, tx: &ReadGuard) -> Result<Vec<(EdgeId, EdgeData)>> {
         let mut cursor = self.edges.range(tx, Bound::Unbounded, Bound::Unbounded)?;
         let mut rows = Vec::new();
-        let snapshot = Self::reader_snapshot_commit(tx);
         while let Some((key, bytes)) = cursor.next()? {
-            let versioned = edge::decode(&bytes)?;
-            if !Self::version_visible(&versioned.header, snapshot) {
+            let Some(versioned) = self.visible_edge_from_bytes(tx, EdgeId(key), &bytes)? else {
                 continue;
-            }
+            };
             let row = versioned.row;
             let prop_bytes = match row.props {
                 EdgePropStorage::Inline(bytes) => bytes,
@@ -1396,32 +1398,96 @@ impl Graph {
         header.visible_at(snapshot) && !header.is_tombstone()
     }
 
-    fn visible_node_version<'a>(
+    fn visible_node_from_bytes(
         &self,
         tx: &ReadGuard,
-        bytes: &'a [u8],
+        id: NodeId,
+        bytes: &[u8],
     ) -> Result<Option<node::VersionedNodeRow>> {
-        let mut current = node::decode(bytes)?;
         let snapshot = Self::reader_snapshot_commit(tx);
+        let current = node::decode(bytes)?;
         if Self::version_visible(&current.header, snapshot) {
-            return Ok(Some(current));
+            return if current.header.is_tombstone() {
+                Ok(None)
+            } else {
+                Ok(Some(current))
+            };
         }
         let mut ptr = current.prev_ptr;
-        while let Some(entry) = self.version_log.lock().get(ptr) {
-            if entry.space != VersionSpace::Node {
-                break;
-            }
-            if entry.id != current.row.labels.first().map(|_| 0).unwrap_or(0) {
+        let log = self.version_log.lock();
+        while let Some(entry) = log.get(ptr) {
+            if entry.space != VersionSpace::Node || entry.id != id.0 {
                 ptr = entry.prev_ptr;
                 continue;
             }
             let decoded = node::decode(&entry.bytes)?;
             if Self::version_visible(&decoded.header, snapshot) {
-                return Ok(Some(decoded));
+                return if decoded.header.is_tombstone() {
+                    Ok(None)
+                } else {
+                    Ok(Some(decoded))
+                };
             }
             ptr = decoded.prev_ptr;
         }
         Ok(None)
+    }
+
+    fn visible_edge_from_bytes(
+        &self,
+        tx: &ReadGuard,
+        id: EdgeId,
+        bytes: &[u8],
+    ) -> Result<Option<edge::VersionedEdgeRow>> {
+        let snapshot = Self::reader_snapshot_commit(tx);
+        let current = edge::decode(bytes)?;
+        if Self::version_visible(&current.header, snapshot) {
+            return if current.header.is_tombstone() {
+                Ok(None)
+            } else {
+                Ok(Some(current))
+            };
+        }
+        let mut ptr = current.prev_ptr;
+        let log = self.version_log.lock();
+        while let Some(entry) = log.get(ptr) {
+            if entry.space != VersionSpace::Edge || entry.id != id.0 {
+                ptr = entry.prev_ptr;
+                continue;
+            }
+            let decoded = edge::decode(&entry.bytes)?;
+            if Self::version_visible(&decoded.header, snapshot) {
+                return if decoded.header.is_tombstone() {
+                    Ok(None)
+                } else {
+                    Ok(Some(decoded))
+                };
+            }
+            ptr = decoded.prev_ptr;
+        }
+        Ok(None)
+    }
+
+    fn visible_node(&self, tx: &ReadGuard, id: NodeId) -> Result<Option<node::VersionedNodeRow>> {
+        let Some(bytes) = self.nodes.get(tx, &id.0)? else {
+            return Ok(None);
+        };
+        self.visible_node_from_bytes(tx, id, &bytes)
+    }
+
+    fn visible_edge(&self, tx: &ReadGuard, id: EdgeId) -> Result<Option<edge::VersionedEdgeRow>> {
+        let Some(bytes) = self.edges.get(tx, &id.0)? else {
+            return Ok(None);
+        };
+        self.visible_edge_from_bytes(tx, id, &bytes)
+    }
+
+    fn node_has_label(&self, tx: &ReadGuard, id: NodeId, label: LabelId) -> Result<bool> {
+        if let Some(versioned) = self.visible_node(tx, id)? {
+            Ok(versioned.row.labels.binary_search(&label).is_ok())
+        } else {
+            Ok(false)
+        }
     }
 
     fn encode_property_map(
@@ -1576,7 +1642,11 @@ impl Graph {
                 adjacency::decode_rev_key(&key)
             }
             .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
-            edges.insert(decoded.3);
+            let edge_id = decoded.3;
+            if self.visible_edge(read, edge_id)?.is_none() {
+                continue;
+            }
+            edges.insert(edge_id);
         }
         Ok(())
     }
@@ -1621,6 +1691,9 @@ impl Graph {
                         continue;
                     }
                 }
+                if self.visible_edge(tx, edge)?.is_none() {
+                    continue;
+                }
                 if let Some(set) = seen.as_deref_mut() {
                     if !set.insert(dst) {
                         continue;
@@ -1644,6 +1717,9 @@ impl Graph {
                     if ty != filter {
                         continue;
                     }
+                }
+                if self.visible_edge(tx, edge)?.is_none() {
+                    continue;
                 }
                 if let Some(set) = seen.as_deref_mut() {
                     if !set.insert(src) {
