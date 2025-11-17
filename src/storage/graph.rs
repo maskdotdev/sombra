@@ -1396,6 +1396,34 @@ impl Graph {
         header.visible_at(snapshot) && !header.is_tombstone()
     }
 
+    fn visible_node_version<'a>(
+        &self,
+        tx: &ReadGuard,
+        bytes: &'a [u8],
+    ) -> Result<Option<node::VersionedNodeRow>> {
+        let mut current = node::decode(bytes)?;
+        let snapshot = Self::reader_snapshot_commit(tx);
+        if Self::version_visible(&current.header, snapshot) {
+            return Ok(Some(current));
+        }
+        let mut ptr = current.prev_ptr;
+        while let Some(entry) = self.version_log.lock().get(ptr) {
+            if entry.space != VersionSpace::Node {
+                break;
+            }
+            if entry.id != current.row.labels.first().map(|_| 0).unwrap_or(0) {
+                ptr = entry.prev_ptr;
+                continue;
+            }
+            let decoded = node::decode(&entry.bytes)?;
+            if Self::version_visible(&decoded.header, snapshot) {
+                return Ok(Some(decoded));
+            }
+            ptr = decoded.prev_ptr;
+        }
+        Ok(None)
+    }
+
     fn encode_property_map(
         &self,
         tx: &mut WriteGuard<'_>,
