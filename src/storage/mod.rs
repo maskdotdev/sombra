@@ -63,7 +63,8 @@ pub use graph::{
 /// Index definitions and label scan operations.
 pub use index::{IndexDef, IndexKind, LabelScan, TypeTag};
 pub use mvcc::{
-    flags as mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+    flags as mvcc_flags, CommitId, CommitStatus, CommitTable, VersionHeader, VersionedValue,
+    COMMIT_MAX, VERSION_HEADER_LEN,
 };
 
 /// Metrics and profiling.

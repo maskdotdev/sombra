@@ -1,5 +1,6 @@
 use crate::storage::btree::ValCodec;
 use crate::types::{Result, SombraError};
+use std::collections::VecDeque;
 
 /// Opaque identifier assigned to every committed write transaction.
 ///
@@ -168,5 +169,125 @@ mod tests {
     fn visible_at_infinite_end() {
         let header = VersionHeader::new(3, COMMIT_MAX, 0, 12);
         assert!(header.visible_at(100));
+    }
+}
+
+/// Lifecycle state for a commit tracked by [`CommitTable`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitStatus {
+    /// Commit ID has been handed out but not finished.
+    Pending,
+    /// Commit finished and is safe for readers to observe.
+    Committed,
+}
+
+#[derive(Clone, Debug)]
+struct CommitEntry {
+    id: CommitId,
+    status: CommitStatus,
+}
+
+/// In-memory commit table backed by WAL redo in future stages.
+///
+/// The pager hands out monotonically increasing IDs via [`reserve`], storage records
+/// visibility transitions with [`mark_committed`], and checkpoints/vacuum reclaim
+/// entries via [`release_committed`].  Once MVCC metadata is persisted, this table
+/// becomes the authoritative map from commit IDs to visibility states.
+#[derive(Clone, Debug)]
+pub struct CommitTable {
+    released_up_to: CommitId,
+    entries: VecDeque<CommitEntry>,
+}
+
+impl CommitTable {
+    /// Creates a new table beginning after the provided `start_id`.
+    pub fn new(start_id: CommitId) -> Self {
+        Self {
+            released_up_to: start_id,
+            entries: VecDeque::new(),
+        }
+    }
+
+    /// Registers a reserved commit ID, marking it pending.
+    pub fn reserve(&mut self, id: CommitId) -> Result<()> {
+        if id == COMMIT_MAX {
+            return Err(SombraError::Invalid("commit id zero reserved"));
+        }
+        if id <= self.released_up_to {
+            return Err(SombraError::Invalid("commit id already released"));
+        }
+        if let Some(last) = self.entries.back() {
+            if id <= last.id {
+                return Err(SombraError::Invalid("commit id must increase"));
+            }
+        }
+        self.entries.push_back(CommitEntry {
+            id,
+            status: CommitStatus::Pending,
+        });
+        Ok(())
+    }
+
+    /// Marks a previously reserved commit as committed.
+    pub fn mark_committed(&mut self, id: CommitId) -> Result<()> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| SombraError::Invalid("unknown commit id"))?;
+        if entry.status == CommitStatus::Committed {
+            return Err(SombraError::Invalid("commit already finalized"));
+        }
+        entry.status = CommitStatus::Committed;
+        Ok(())
+    }
+
+    /// Releases committed entries up to (and including) `upto_id`.
+    ///
+    /// Callers should advance this after checkpoints or GC reclaim version chains.
+    pub fn release_committed(&mut self, upto_id: CommitId) {
+        while let Some(front) = self.entries.front() {
+            if front.id > upto_id || front.status != CommitStatus::Committed {
+                break;
+            }
+            self.released_up_to = front.id;
+            self.entries.pop_front();
+        }
+    }
+
+    /// Returns the smallest commit ID that must remain visible to readers.
+    pub fn oldest_visible(&self) -> CommitId {
+        self.entries
+            .front()
+            .map(|entry| entry.id)
+            .unwrap_or(self.released_up_to)
+    }
+}
+
+#[cfg(test)]
+mod commit_table_tests {
+    use super::*;
+
+    #[test]
+    fn reserve_and_commit_flow() {
+        let mut table = CommitTable::new(0);
+        table.reserve(1).unwrap();
+        table.reserve(2).unwrap();
+        assert_eq!(table.oldest_visible(), 1);
+        table.mark_committed(1).unwrap();
+        table.release_committed(1);
+        assert_eq!(table.oldest_visible(), 2);
+        table.mark_committed(2).unwrap();
+        table.release_committed(2);
+        assert_eq!(table.oldest_visible(), 2);
+    }
+
+    #[test]
+    fn reject_unknown_ids() {
+        let mut table = CommitTable::new(10);
+        assert!(table.reserve(5).is_err());
+        table.reserve(11).unwrap();
+        assert!(table.reserve(11).is_err());
+        assert!(table.mark_committed(5).is_err());
     }
 }
