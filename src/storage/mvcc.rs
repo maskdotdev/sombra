@@ -13,6 +13,45 @@ pub const COMMIT_MAX: CommitId = 0;
 
 /// Length of the encoded [`VersionHeader`] in bytes.
 pub const VERSION_HEADER_LEN: usize = 20;
+/// Length of the encoded [`VersionPtr`] value in bytes.
+pub const VERSION_PTR_LEN: usize = 8;
+
+/// Pointer into the version log; zero means "null".
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct VersionPtr(u64);
+
+impl VersionPtr {
+    /// Returns a null pointer that references no historical version.
+    pub const fn null() -> Self {
+        Self(0)
+    }
+
+    /// Returns `true` when the pointer references no entry.
+    pub const fn is_null(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Encodes the pointer into big-endian bytes.
+    pub fn to_bytes(self) -> [u8; VERSION_PTR_LEN] {
+        self.0.to_be_bytes()
+    }
+
+    /// Decodes a pointer from a big-endian byte slice.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < VERSION_PTR_LEN {
+            return Err(SombraError::Corruption("version pointer truncated"));
+        }
+        let mut buf = [0u8; VERSION_PTR_LEN];
+        buf.copy_from_slice(&bytes[..VERSION_PTR_LEN]);
+        Ok(Self(u64::from_be_bytes(buf)))
+    }
+}
+
+impl Default for VersionPtr {
+    fn default() -> Self {
+        Self::null()
+    }
+}
 
 /// MVCC record flags.
 pub mod flags {
@@ -289,5 +328,60 @@ mod commit_table_tests {
         table.reserve(11).unwrap();
         assert!(table.reserve(11).is_err());
         assert!(table.mark_committed(5).is_err());
+    }
+}
+
+/// Logical collection owning a version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VersionSpace {
+    /// Node row stored in the primary node tree.
+    Node,
+    /// Edge row stored in the edge tree.
+    Edge,
+}
+
+/// Historical version held outside the primary B-tree.
+#[derive(Clone, Debug)]
+pub struct VersionLogEntry {
+    /// Collection the version belongs to.
+    pub space: VersionSpace,
+    /// Logical identifier (e.g., node or edge id).
+    pub id: u64,
+    /// MVCC metadata describing the version.
+    pub header: VersionHeader,
+    /// Pointer to the next older version.
+    pub prev_ptr: VersionPtr,
+    /// Encoded record bytes (header + ptr + payload).
+    pub bytes: Vec<u8>,
+}
+
+/// Append-only log of historical versions.
+#[derive(Clone, Debug, Default)]
+pub struct VersionLog {
+    entries: Vec<VersionLogEntry>,
+}
+
+impl VersionLog {
+    /// Creates a new, empty log.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Appends an entry and returns the pointer referencing it.
+    pub fn append(&mut self, entry: VersionLogEntry) -> VersionPtr {
+        let idx = self.entries.len() as u64 + 1;
+        self.entries.push(entry);
+        VersionPtr(idx)
+    }
+
+    /// Returns the entry referenced by `ptr`, if any.
+    pub fn get(&self, ptr: VersionPtr) -> Option<&VersionLogEntry> {
+        if ptr.is_null() {
+            return None;
+        }
+        let idx = (ptr.0.saturating_sub(1)) as usize;
+        self.entries.get(idx)
     }
 }

@@ -27,7 +27,10 @@ use super::edge::{
     self, EncodeOpts as EdgeEncodeOpts, PropPayload as EdgePropPayload,
     PropStorage as EdgePropStorage,
 };
-use super::mvcc::{CommitId, CommitTable, VersionHeader, VersionedValue, COMMIT_MAX};
+use super::mvcc::{
+    CommitId, CommitTable, VersionHeader, VersionLog, VersionLogEntry, VersionPtr, VersionSpace,
+    VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+};
 use super::mvcc_flags;
 use super::node::{
     self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
@@ -73,6 +76,7 @@ impl ValCodec for UnitValue {
 pub struct Graph {
     store: Arc<dyn PageStore>,
     commit_table: Option<Arc<Mutex<CommitTable>>>,
+    version_log: Mutex<VersionLog>,
     nodes: BTree<u64, Vec<u8>>,
     edges: BTree<u64, Vec<u8>>,
     adj_fwd: BTree<Vec<u8>, VersionedValue<UnitValue>>,
@@ -163,6 +167,29 @@ pub struct PropStats {
 }
 
 impl Graph {
+    fn overwrite_encoded_header(bytes: &mut [u8], header: &VersionHeader) {
+        let encoded = header.encode();
+        bytes[..VERSION_HEADER_LEN].copy_from_slice(&encoded);
+    }
+
+    fn log_version_entry(
+        &self,
+        space: VersionSpace,
+        id: u64,
+        header: VersionHeader,
+        prev_ptr: VersionPtr,
+        bytes: Vec<u8>,
+    ) -> VersionPtr {
+        let mut log = self.version_log.lock();
+        log.append(VersionLogEntry {
+            space,
+            id,
+            header,
+            prev_ptr,
+            bytes,
+        })
+    }
+
     /// Returns the commit table when the underlying pager provides one.
     pub fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
         self.commit_table.as_ref().map(Arc::clone)
@@ -344,6 +371,7 @@ impl Graph {
         Ok(Self {
             store,
             commit_table,
+            version_log: Mutex::new(VersionLog::new()),
             nodes,
             edges,
             adj_fwd,
@@ -395,12 +423,13 @@ impl Graph {
         };
         let root = self.nodes.root_page();
         debug_assert!(root.0 != 0, "nodes root page not initialized");
-        let version = self.tx_version_header(tx);
+        let (_commit_id, version) = self.tx_version_header(tx);
         let row_bytes = match node::encode(
             &labels,
             payload,
             NodeEncodeOpts::new(self.row_hash_header),
             version,
+            VersionPtr::null(),
         ) {
             Ok(encoded) => encoded.bytes,
             Err(err) => {
@@ -882,10 +911,27 @@ impl Graph {
         self.remove_indexed_props(tx, id, &row.labels, &prop_map)?;
         self.indexes.remove_node_labels(tx, id, &row.labels)?;
         self.free_node_props(tx, row.props)?;
-        let removed = self.nodes.delete(tx, &id.0)?;
-        if !removed {
-            return Err(SombraError::Corruption("node missing during delete"));
-        }
+        let (commit_id, mut tombstone_header) = self.tx_version_header(tx);
+        let mut old_header = versioned.header;
+        old_header.end = commit_id;
+        let mut log_bytes = bytes.clone();
+        Self::overwrite_encoded_header(&mut log_bytes, &old_header);
+        let prev_ptr = self.log_version_entry(
+            VersionSpace::Node,
+            id.0,
+            old_header,
+            versioned.prev_ptr,
+            log_bytes,
+        );
+        tombstone_header.flags |= mvcc_flags::TOMBSTONE;
+        let encoded = node::encode(
+            &[],
+            node::PropPayload::Inline(&[]),
+            NodeEncodeOpts::new(false),
+            tombstone_header,
+            prev_ptr,
+        )?;
+        self.nodes.put(tx, &id.0, &encoded.bytes)?;
         self.persist_tree_root(tx, RootKind::Nodes)?;
         self.metrics.node_deleted();
         Ok(())
@@ -917,6 +963,7 @@ impl Graph {
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
             return Ok(());
         };
+        let (commit_id, new_header) = self.tx_version_header(tx);
         let mut map_vref: Option<VRef> = None;
         let payload = if delta.encoded.bytes.len() <= self.inline_prop_blob {
             NodePropPayload::Inline(&delta.encoded.bytes)
@@ -925,12 +972,23 @@ impl Graph {
             map_vref = Some(vref);
             NodePropPayload::VRef(vref)
         };
-        let version = self.tx_version_header(tx);
+        let mut old_header = versioned.header;
+        old_header.end = commit_id;
+        let mut log_bytes = existing_bytes.clone();
+        Self::overwrite_encoded_header(&mut log_bytes, &old_header);
+        let prev_ptr = self.log_version_entry(
+            VersionSpace::Node,
+            id.0,
+            old_header,
+            versioned.prev_ptr,
+            log_bytes,
+        );
         let encoded_row = match node::encode(
             &labels,
             payload,
             NodeEncodeOpts::new(self.row_hash_header),
-            version,
+            new_header,
+            prev_ptr,
         ) {
             Ok(encoded) => encoded,
             Err(err) => {
@@ -981,7 +1039,7 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let version = self.tx_version_header(tx);
+        let (_commit_id, version) = self.tx_version_header(tx);
         let row_bytes = match edge::encode(
             spec.src,
             spec.dst,
@@ -989,6 +1047,7 @@ impl Graph {
             payload,
             EdgeEncodeOpts::new(self.row_hash_header),
             version,
+            VersionPtr::null(),
         ) {
             Ok(encoded) => encoded.bytes,
             Err(err) => {
@@ -1112,6 +1171,7 @@ impl Graph {
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
             return Ok(());
         };
+        let (commit_id, new_header) = self.tx_version_header(tx);
         let mut map_vref: Option<VRef> = None;
         let payload = if delta.encoded.bytes.len() <= self.inline_prop_blob {
             EdgePropPayload::Inline(&delta.encoded.bytes)
@@ -1120,14 +1180,25 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let version = self.tx_version_header(tx);
+        let mut old_header = versioned.header;
+        old_header.end = commit_id;
+        let mut log_bytes = existing_bytes.clone();
+        Self::overwrite_encoded_header(&mut log_bytes, &old_header);
+        let prev_ptr = self.log_version_entry(
+            VersionSpace::Edge,
+            id.0,
+            old_header,
+            versioned.prev_ptr,
+            log_bytes,
+        );
         let encoded_row = match edge::encode(
             src,
             dst,
             ty,
             payload,
             EdgeEncodeOpts::new(self.row_hash_header),
-            version,
+            new_header,
+            prev_ptr,
         ) {
             Ok(encoded) => encoded,
             Err(err) => {
@@ -1269,18 +1340,38 @@ impl Graph {
         }
         let row = versioned.row;
         self.remove_adjacency(tx, row.src, row.dst, row.ty, id)?;
-        let removed = self.edges.delete(tx, &id.0)?;
-        if !removed {
-            return Err(SombraError::Corruption("edge missing during delete"));
-        }
+        let (commit_id, mut tombstone_header) = self.tx_version_header(tx);
+        let mut old_header = versioned.header;
+        old_header.end = commit_id;
+        let mut log_bytes = bytes.clone();
+        Self::overwrite_encoded_header(&mut log_bytes, &old_header);
+        let prev_ptr = self.log_version_entry(
+            VersionSpace::Edge,
+            id.0,
+            old_header,
+            versioned.prev_ptr,
+            log_bytes,
+        );
+        tombstone_header.flags |= mvcc_flags::TOMBSTONE;
+        let encoded = edge::encode(
+            row.src,
+            row.dst,
+            row.ty,
+            EdgePropPayload::Inline(&[]),
+            EdgeEncodeOpts::new(false),
+            tombstone_header,
+            prev_ptr,
+        )?;
+        self.edges.put(tx, &id.0, &encoded.bytes)?;
         self.persist_tree_root(tx, RootKind::Edges)?;
         self.free_edge_props(tx, row.props)
     }
 
     #[inline]
-    fn tx_version_header(&self, tx: &mut WriteGuard<'_>) -> VersionHeader {
+    fn tx_version_header(&self, tx: &mut WriteGuard<'_>) -> (CommitId, VersionHeader) {
         let commit_lsn = tx.reserve_commit_id();
-        VersionHeader::new(commit_lsn.0, COMMIT_MAX, 0, 0)
+        let commit_id = commit_lsn.0;
+        (commit_id, VersionHeader::new(commit_id, COMMIT_MAX, 0, 0))
     }
 
     fn adjacency_value(
@@ -1288,7 +1379,7 @@ impl Graph {
         tx: &mut WriteGuard<'_>,
         tombstone: bool,
     ) -> VersionedValue<UnitValue> {
-        let mut header = self.tx_version_header(tx);
+        let (_commit_id, mut header) = self.tx_version_header(tx);
         if tombstone {
             header.flags |= mvcc_flags::TOMBSTONE;
         }

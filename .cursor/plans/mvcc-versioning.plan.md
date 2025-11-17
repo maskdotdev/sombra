@@ -6,8 +6,8 @@ Implement head-in-primary + side-chain MVCC storage, tombstone heads, and on-the
 
 ## Tasks
 
-- [ ] Add `VersionPtr`/version-log schema and integrate with WAL/IO.
-- [ ] Extend node/edge payload encoders to store `VersionHeader + prev_ptr + payload`.
+- [x] Add `VersionPtr`/version-log schema and integrate with WAL/IO.
+- [x] Extend node/edge payload encoders to store `VersionHeader + prev_ptr + payload`.
 - [ ] Update graph write paths (insert/update/delete) to append old heads to the version log and install new heads/tombstones using commit IDs.
 - [ ] Update adjacency and secondary index writers to stay insert-only (no delete) and ensure uniqueness checks consult MVCC metadata.
 - [ ] Implement `visible_version(snapshot_ts)` helper and switch graph/index readers to filter using `begin_ts/end_ts`, skipping tombstones.
