@@ -276,15 +276,15 @@ impl Wal {
     ///
     /// The frame payload must match the configured page size. This method does not
     /// sync to disk; call `sync()` to ensure durability.
-    pub fn append_frame(&self, frame: WalFrame<'_>) -> Result<()> {
+    pub fn append_frame(&self, frame: WalFrame<'_>) -> Result<Vec<u64>> {
         let frames = [frame];
         self.append_frame_batch(&frames)
     }
 
     /// Appends a batch of frames, coalescing writes when possible.
-    pub fn append_frame_batch(&self, frames: &[WalFrame<'_>]) -> Result<()> {
+    pub fn append_frame_batch(&self, frames: &[WalFrame<'_>]) -> Result<Vec<u64>> {
         if frames.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut state = self.state.lock();
         for frame in frames {
@@ -300,6 +300,7 @@ impl Wal {
             self.io.write_at(0, &state.header.encode())?;
         }
         let frame_size = FRAME_HEADER_LEN + self.page_size;
+        let mut offsets = Vec::with_capacity(frames.len());
         let mut index = 0usize;
         while index < frames.len() {
             let remaining = frames.len() - index;
@@ -326,6 +327,7 @@ impl Wal {
                 slices.push(IoSlice::new(frame.payload));
             }
             let chunk_bytes = chunk.len() * frame_size;
+            let chunk_start = state.append_offset;
             self.io.writev_at(state.append_offset, &slices)?;
             state.append_offset += chunk_bytes as u64;
             state.stats.frames_appended += chunk.len() as u64;
@@ -333,9 +335,12 @@ impl Wal {
             state.stats.coalesced_writes += 1;
             record_wal_coalesced_writes(1);
             record_wal_io_group_sample(chunk.len() as u64);
+            for frame_idx in 0..chunk.len() {
+                offsets.push(chunk_start + (frame_idx * frame_size) as u64);
+            }
             index = slice_end;
         }
-        Ok(())
+        Ok(offsets)
     }
 
     /// Syncs all pending writes to persistent storage.
@@ -483,7 +488,7 @@ impl WalCommitTicket {
     /// Blocks until the associated commit operation completes.
     ///
     /// Returns an error if the commit failed.
-    pub fn wait(self) -> Result<()> {
+    pub fn wait(self) -> Result<Vec<u64>> {
         self.request.wait()
     }
 }
@@ -539,10 +544,10 @@ impl WalCommitter {
     }
 
     /// Enqueues a commit request and blocks until it completes.
-    pub fn commit(&self, frames: Vec<WalFrameOwned>, sync_mode: WalSyncMode) -> Result<()> {
+    pub fn commit(&self, frames: Vec<WalFrameOwned>, sync_mode: WalSyncMode) -> Result<Vec<u64>> {
         match self.enqueue(frames, sync_mode) {
             Some(ticket) => ticket.wait(),
-            None => Ok(()),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -593,16 +598,13 @@ impl WalCommitter {
                 batch_commits = batch.len(),
                 total_frames, "wal.committer.worker_batch_ready"
             );
-            if let Err(err) = Self::apply_batch(&wal, &batch) {
+            if let Err(err) = Self::apply_batch(&wal, &mut batch) {
                 Self::fail_batch(&batch, &err);
                 Self::fail_pending(&state, &err);
                 let mut guard = state.lock();
                 guard.pending.clear();
                 guard.worker_running = false;
                 break;
-            }
-            for req in batch.drain(..) {
-                req.finish(Ok(()));
             }
         }
     }
@@ -637,15 +639,16 @@ impl WalCommitter {
         }
     }
 
-    fn apply_batch(wal: &Wal, batch: &[Arc<CommitRequest>]) -> Result<()> {
+    fn apply_batch(wal: &Wal, batch: &mut Vec<Arc<CommitRequest>>) -> Result<()> {
         let total_frames: usize = batch.iter().map(|req| req.frames.len()).sum();
         debug!(
             batch_commits = batch.len(),
             total_frames, "wal.committer.apply_batch.start"
         );
+        let mut offsets_all = Vec::new();
         if total_frames > 0 {
             let mut flat: Vec<WalFrame<'_>> = Vec::with_capacity(total_frames);
-            for req in batch {
+            for req in batch.iter() {
                 for frame in &req.frames {
                     flat.push(WalFrame {
                         lsn: frame.lsn,
@@ -654,7 +657,7 @@ impl WalCommitter {
                     });
                 }
             }
-            wal.append_frame_batch(&flat)?;
+            offsets_all = wal.append_frame_batch(&flat)?;
             debug!(
                 frames = flat.len(),
                 "wal.committer.apply_batch.appended_frames"
@@ -667,6 +670,18 @@ impl WalCommitter {
             debug!("wal.committer.apply_batch.sync_start");
             wal.sync()?;
             debug!("wal.committer.apply_batch.sync_complete");
+        }
+        let mut offset_index = 0usize;
+        for req in batch.drain(..) {
+            let frame_count = req.frames.len();
+            let mut per_req_offsets = Vec::with_capacity(frame_count);
+            for _ in 0..frame_count {
+                if let Some(offset) = offsets_all.get(offset_index) {
+                    per_req_offsets.push(*offset);
+                }
+                offset_index += 1;
+            }
+            req.finish(Ok(per_req_offsets));
         }
         Ok(())
     }
@@ -694,7 +709,7 @@ struct CommitState {
 struct CommitRequest {
     frames: Vec<WalFrameOwned>,
     sync_mode: WalSyncMode,
-    result: Mutex<Option<Result<()>>>,
+    result: Mutex<Option<Result<Vec<u64>>>>,
     cv: Condvar,
 }
 
@@ -708,7 +723,7 @@ impl CommitRequest {
         }
     }
 
-    fn finish(&self, outcome: Result<()>) {
+    fn finish(&self, outcome: Result<Vec<u64>>) {
         let mut result = self.result.lock();
         if result.is_none() {
             *result = Some(outcome);
@@ -716,7 +731,7 @@ impl CommitRequest {
         }
     }
 
-    fn wait(&self) -> Result<()> {
+    fn wait(&self) -> Result<Vec<u64>> {
         let mut guard = self.result.lock();
         loop {
             if let Some(result) = guard.take() {
@@ -850,13 +865,13 @@ mod tests {
         let io = StdFileIo::open(&path)?;
         let wal = Wal::open(Arc::new(io), WalOptions::new(4096, 42, Lsn(1)))?;
         let payload_a = vec![1u8; 4096];
-        wal.append_frame(WalFrame {
+        let _ = wal.append_frame(WalFrame {
             lsn: Lsn(1),
             page_id: PageId(1),
             payload: &payload_a,
         })?;
         let payload_b = vec![2u8; 4096];
-        wal.append_frame(WalFrame {
+        let _ = wal.append_frame(WalFrame {
             lsn: Lsn(2),
             page_id: PageId(2),
             payload: &payload_b,
@@ -883,7 +898,7 @@ mod tests {
         let io = StdFileIo::open(&path)?;
         let wal = Wal::open(Arc::new(io.clone()), WalOptions::new(4096, 777, Lsn(5)))?;
         let payload = vec![3u8; 4096];
-        wal.append_frame(WalFrame {
+        let _ = wal.append_frame(WalFrame {
             lsn: Lsn(5),
             page_id: PageId(7),
             payload: &payload,
@@ -919,7 +934,7 @@ mod tests {
             page_id: PageId(3),
             payload,
         };
-        committer.commit(vec![frame], WalSyncMode::Immediate)?;
+        let _ = committer.commit(vec![frame], WalSyncMode::Immediate)?;
         assert_eq!(wal.stats().frames_appended, 1);
         assert_eq!(wal.stats().coalesced_writes, 1);
         assert_eq!(wal.stats().syncs, 1);
@@ -937,7 +952,7 @@ mod tests {
         let io = StdFileIo::open(&path)?;
         let wal = Arc::new(Wal::open(Arc::new(io), WalOptions::new(4096, 111, Lsn(1)))?);
         let committer = WalCommitter::new(Arc::clone(&wal), WalCommitConfig::default());
-        committer.commit(Vec::new(), WalSyncMode::Immediate)?;
+        let _ = committer.commit(Vec::new(), WalSyncMode::Immediate)?;
         assert_eq!(wal.stats().syncs, 1);
         Ok(())
     }
@@ -955,7 +970,7 @@ mod tests {
             max_batch_wait: Duration::from_millis(0),
         });
         let payload = vec![9u8; 4096];
-        committer.commit(
+        let _ = committer.commit(
             vec![WalFrameOwned {
                 lsn: Lsn(1),
                 page_id: PageId(1),

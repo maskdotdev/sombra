@@ -25,7 +25,7 @@ use crate::primitives::{
 };
 use crate::storage::{
     profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
-    record_pager_wal_frames, CommitTable, StorageProfileKind,
+    record_pager_wal_frames, CommitReader, CommitTable, CommitId, StorageProfileKind,
 };
 use crate::types::{
     page::{self, PageHeader, PAGE_HDR_LEN},
@@ -123,6 +123,64 @@ impl PageImageLease {
 struct OverlayEntry {
     lsn: Lsn,
     data: Arc<[u8]>,
+}
+
+struct VersionChainEntry {
+    lsn: Lsn,
+    wal_offset: Option<u64>,
+    data: Arc<[u8]>,
+}
+
+struct ReaderMetrics {
+    active: AtomicU64,
+    begin_total: AtomicU64,
+    end_total: AtomicU64,
+}
+
+impl ReaderMetrics {
+    fn new() -> Self {
+        Self {
+            active: AtomicU64::new(0),
+            begin_total: AtomicU64::new(0),
+            end_total: AtomicU64::new(0),
+        }
+    }
+
+    fn on_begin(&self) {
+        self.active.fetch_add(1, AtomicOrdering::Relaxed);
+        self.begin_total.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn on_end(&self) {
+        self.active.fetch_sub(1, AtomicOrdering::Relaxed);
+        self.end_total.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.active.load(AtomicOrdering::Relaxed),
+            self.begin_total.load(AtomicOrdering::Relaxed),
+            self.end_total.load(AtomicOrdering::Relaxed),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct ReaderMetricsHandle {
+    metrics: Arc<ReaderMetrics>,
+}
+
+impl ReaderMetricsHandle {
+    fn new(metrics: Arc<ReaderMetrics>) -> Self {
+        metrics.on_begin();
+        Self { metrics }
+    }
+}
+
+impl Drop for ReaderMetricsHandle {
+    fn drop(&mut self) {
+        self.metrics.on_end();
+    }
 }
 
 impl Default for PagerOptions {
@@ -266,6 +324,20 @@ pub struct PagerStats {
     pub evictions: u64,
     /// Number of dirty pages written back.
     pub dirty_writebacks: u64,
+    /// Total number of MVCC page versions retained.
+    pub mvcc_page_versions_total: u64,
+    /// Number of pages currently tracking historical versions.
+    pub mvcc_pages_with_versions: u64,
+    /// Total active read guards.
+    pub mvcc_readers_active: u64,
+    /// Total reader begin events since start.
+    pub mvcc_reader_begin_total: u64,
+    /// Total reader end events since start.
+    pub mvcc_reader_end_total: u64,
+    /// Oldest snapshot commit across active readers.
+    pub mvcc_reader_oldest_snapshot: CommitId,
+    /// Newest snapshot commit across active readers.
+    pub mvcc_reader_newest_snapshot: CommitId,
 }
 
 /// Trait for page-oriented storage with transactional support.
@@ -365,6 +437,9 @@ pub struct ReadGuard {
     _lock: LockReaderGuard,
     snapshot_lsn: Lsn,
     consistency: ReadConsistency,
+    commit_table: Arc<Mutex<CommitTable>>,
+    commit_reader: CommitReader,
+    _metrics: ReaderMetricsHandle,
 }
 
 /// Guard for a write transaction, tracking modifications and state for rollback.
@@ -417,6 +492,13 @@ impl ReadGuard {
     /// Indicates which consistency mode was requested.
     pub fn consistency(&self) -> ReadConsistency {
         self.consistency
+    }
+}
+
+impl Drop for ReadGuard {
+    fn drop(&mut self) {
+        let mut table = self.commit_table.lock();
+        table.release_reader(self.commit_reader);
     }
 }
 
@@ -648,6 +730,10 @@ pub struct Pager {
     latest_visible_lsn: AtomicU64,
     commit_table: Arc<Mutex<CommitTable>>,
     overlays: Mutex<HashMap<PageId, VecDeque<OverlayEntry>>>,
+    version_chains: Mutex<HashMap<PageId, VecDeque<VersionChainEntry>>>,
+    mvcc_version_count: AtomicU64,
+    mvcc_version_pages: AtomicU64,
+    reader_metrics: Arc<ReaderMetrics>,
 }
 
 impl Pager {
@@ -760,6 +846,10 @@ impl Pager {
             latest_visible_lsn: AtomicU64::new(meta.last_checkpoint_lsn.0),
             commit_table,
             overlays: Mutex::new(HashMap::new()),
+            version_chains: Mutex::new(HashMap::new()),
+            mvcc_version_count: AtomicU64::new(0),
+            mvcc_version_pages: AtomicU64::new(0),
+            reader_metrics: Arc::new(ReaderMetrics::new()),
         };
         pager.load_freelist()?;
         Ok(pager)
@@ -840,8 +930,22 @@ impl Pager {
 
     /// Returns a snapshot of current pager statistics.
     pub fn stats(&self) -> PagerStats {
+        let (active, begin_total, end_total) = self.reader_metrics.snapshot();
+        let oldest_snapshot = {
+            let table = self.commit_table.lock();
+            table.oldest_visible()
+        };
+        let newest_snapshot = self.latest_committed_lsn().0;
         let state = self.inner.lock();
-        state.stats.clone()
+        let mut stats = state.stats.clone();
+        stats.mvcc_page_versions_total = self.mvcc_version_count.load(AtomicOrdering::Relaxed);
+        stats.mvcc_pages_with_versions = self.mvcc_version_pages.load(AtomicOrdering::Relaxed);
+        stats.mvcc_readers_active = active;
+        stats.mvcc_reader_begin_total = begin_total;
+        stats.mvcc_reader_end_total = end_total;
+        stats.mvcc_reader_oldest_snapshot = oldest_snapshot;
+        stats.mvcc_reader_newest_snapshot = newest_snapshot;
+        stats
     }
 
     fn lookup_or_load_frame(
@@ -1570,6 +1674,16 @@ impl Pager {
             dirty_pages = dirty_page_count,
             "pager.commit_txn.frames_built"
         );
+        let version_targets: Vec<Option<(PageId, Lsn)>> = wal_frames
+            .iter()
+            .map(|frame| {
+                if frame.page_id.0 == 0 {
+                    None
+                } else {
+                    Some((frame.page_id, frame.lsn))
+                }
+            })
+            .collect();
         self.cache_overlays(&wal_frames);
         drop(inner);
         let wal_frame_count = wal_frames.len() as u64;
@@ -1603,7 +1717,10 @@ impl Pager {
                 frames = wal_frames.len(),
                 "pager.commit_txn.borrowed_flush_start"
             );
-            self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
+            let offsets = self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
+            if !offsets.is_empty() {
+                self.attach_version_offsets(&version_targets, &offsets);
+            }
             pager_test_log!(
                 "[pager.commit] flush complete lsn={} frames={}",
                 lsn.0,
@@ -1663,7 +1780,7 @@ impl Pager {
             has_ticket = ticket.is_some(),
             "pager.commit_txn.writer_lock_released"
         );
-        let commit_result = match ticket {
+        let (commit_result, offsets) = match ticket {
             Some(waiter) => {
                 pager_test_log!("[pager.commit] waiting on WAL ticket lsn={}", lsn.0);
                 debug!(lsn = lsn.0, "pager.commit_txn.waiting_on_ticket");
@@ -1675,12 +1792,15 @@ impl Pager {
                     pager_test_log!("[pager.commit] ticket done lsn={}", lsn.0);
                     debug!(lsn = lsn.0, "pager.commit_txn.ticket_done");
                 }
-                result
+                match result {
+                    Ok(offsets) => (Ok(()), offsets),
+                    Err(err) => (Err(err), Vec::new()),
+                }
             }
             None => {
                 pager_test_log!("[pager.commit] no ticket needed lsn={}", lsn.0);
                 debug!(lsn = lsn.0, "pager.commit_txn.no_ticket_needed");
-                Ok(())
+                (Ok(()), Vec::new())
             }
         };
         if let Err(err) = commit_result {
@@ -1689,6 +1809,9 @@ impl Pager {
         }
         if matches!(synchronous, Synchronous::Normal) {
             self.schedule_normal_sync()?;
+        }
+        if !offsets.is_empty() {
+            self.attach_version_offsets(&version_targets, &offsets);
         }
         self.finalize_commit(lsn)?;
         self.record_committed_lsn(lsn);
@@ -1704,9 +1827,9 @@ impl Pager {
         &self,
         frames: &[PendingWalFrame],
         sync_mode: WalSyncMode,
-    ) -> Result<()> {
+    ) -> Result<Vec<u64>> {
         if frames.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut refs: Vec<WalFrame<'_>> = Vec::with_capacity(frames.len());
         for frame in frames {
@@ -1716,11 +1839,11 @@ impl Pager {
                 payload: frame.payload.as_slice(),
             });
         }
-        self.wal.append_frame_batch(&refs)?;
+        let offsets = self.wal.append_frame_batch(&refs)?;
         if matches!(sync_mode, WalSyncMode::Immediate) {
             self.wal.sync()?;
         }
-        Ok(())
+        Ok(offsets)
     }
 
     fn run_checkpoint(&self, mode: CheckpointMode) -> Result<()> {
@@ -1866,6 +1989,7 @@ impl Pager {
         inner.meta_dirty = false;
         self.release_commits_up_to(inner.meta.last_checkpoint_lsn);
         self.prune_overlays(inner.meta.last_checkpoint_lsn);
+        self.prune_version_chains(inner.meta.last_checkpoint_lsn);
         *self.last_autocheckpoint.lock() = Some(Instant::now());
         pager_test_log!(
             "[pager.checkpoint] complete applied_frames={} new_last_lsn={}",
@@ -2022,6 +2146,7 @@ impl Pager {
             return;
         }
         let mut overlays = self.overlays.lock();
+        let mut chains = self.version_chains.lock();
         for frame in frames {
             if frame.page_id.0 == 0 {
                 continue;
@@ -2032,8 +2157,57 @@ impl Pager {
                 .or_insert_with(VecDeque::new)
                 .push_back(OverlayEntry {
                     lsn: frame.lsn,
-                    data,
+                    data: Arc::clone(&data),
                 });
+            self.insert_version_chain_locked(&mut chains, frame.page_id, frame.lsn, None, data);
+        }
+    }
+
+fn insert_version_chain_locked(
+        &self,
+        chains: &mut HashMap<PageId, VecDeque<VersionChainEntry>>,
+        page_id: PageId,
+        lsn: Lsn,
+        wal_offset: Option<u64>,
+        data: Arc<[u8]>,
+    ) {
+        let chain = chains.entry(page_id).or_insert_with(VecDeque::new);
+        let was_empty = chain.is_empty();
+        if let Some(last) = chain.back() {
+            if last.lsn.0 > lsn.0 {
+                // Ignore out-of-order versions.
+                return;
+            }
+            if last.lsn.0 == lsn.0 {
+                chain.pop_back();
+                self.mvcc_version_count
+                    .fetch_sub(1, AtomicOrdering::Relaxed);
+            }
+        }
+        if was_empty {
+            self.mvcc_version_pages
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        chain.push_back(VersionChainEntry {
+            lsn,
+            wal_offset,
+            data,
+        });
+        self.mvcc_version_count
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn attach_version_offsets(&self, targets: &[Option<(PageId, Lsn)>], offsets: &[u64]) {
+        let mut chains = self.version_chains.lock();
+        for (meta, offset) in targets.iter().zip(offsets.iter()) {
+            let Some((page_id, lsn)) = meta else {
+                continue;
+            };
+            if let Some(entries) = chains.get_mut(page_id) {
+                if let Some(entry) = entries.iter_mut().rev().find(|entry| entry.lsn == *lsn) {
+                    entry.wal_offset = Some(*offset);
+                }
+            }
         }
     }
 
@@ -2041,6 +2215,17 @@ impl Pager {
         let overlays = self.overlays.lock();
         overlays.get(&page_id).and_then(|queue| {
             queue
+                .iter()
+                .rev()
+                .find(|entry| entry.lsn.0 <= snapshot_lsn.0)
+                .map(|entry| Arc::clone(&entry.data))
+        })
+    }
+
+    fn version_page_for_snapshot(&self, page_id: PageId, snapshot_lsn: Lsn) -> Option<Arc<[u8]>> {
+        let chains = self.version_chains.lock();
+        chains.get(&page_id).and_then(|entries| {
+            entries
                 .iter()
                 .rev()
                 .find(|entry| entry.lsn.0 <= snapshot_lsn.0)
@@ -2062,17 +2247,50 @@ impl Pager {
         });
     }
 
+    fn prune_version_chains(&self, upto: Lsn) {
+        let mut chains = self.version_chains.lock();
+        let mut removed_entries = 0u64;
+        let mut removed_pages = 0u64;
+        chains.retain(|_, entries| {
+            while let Some(front) = entries.front() {
+                if front.lsn.0 <= upto.0 {
+                    entries.pop_front();
+                    removed_entries += 1;
+                } else {
+                    break;
+                }
+            }
+            if entries.is_empty() {
+                removed_pages += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if removed_entries > 0 {
+            self.mvcc_version_count
+                .fetch_sub(removed_entries, AtomicOrdering::Relaxed);
+        }
+        if removed_pages > 0 {
+            self.mvcc_version_pages
+                .fetch_sub(removed_pages, AtomicOrdering::Relaxed);
+        }
+    }
+
     fn overlay_page_for_snapshot(
         &self,
         page_id: PageId,
         checkpoint_lsn: Lsn,
         snapshot_lsn: Lsn,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<Arc<[u8]>>> {
         if snapshot_lsn.0 <= checkpoint_lsn.0 {
             return Ok(None);
         }
+        if let Some(chain) = self.version_page_for_snapshot(page_id, snapshot_lsn) {
+            return Ok(Some(chain));
+        }
         if let Some(overlay) = self.overlay_from_cache(page_id, snapshot_lsn) {
-            return Ok(Some(overlay.to_vec()));
+            return Ok(Some(overlay));
         }
         let mut iter = self.wal.iter()?;
         let mut overlay: Option<Vec<u8>> = None;
@@ -2084,7 +2302,7 @@ impl Pager {
                 overlay = Some(frame.payload);
             }
         }
-        Ok(overlay)
+        Ok(overlay.map(|data| Arc::<[u8]>::from(data)))
     }
 
     fn begin_read_consistency(&self, consistency: ReadConsistency) -> Result<ReadGuard> {
@@ -2096,10 +2314,24 @@ impl Pager {
             }
             ReadConsistency::LatestCommitted => self.latest_committed_lsn(),
         };
+        let commit_reader = {
+            let mut table = self.commit_table.lock();
+            match table.register_reader(snapshot_lsn.0) {
+                Ok(reader) => reader,
+                Err(err) => {
+                    drop(lock);
+                    return Err(err);
+                }
+            }
+        };
+        let metrics_handle = ReaderMetricsHandle::new(Arc::clone(&self.reader_metrics));
         Ok(ReadGuard {
             _lock: lock,
             snapshot_lsn,
             consistency,
+            commit_table: Arc::clone(&self.commit_table),
+            commit_reader,
+            _metrics: metrics_handle,
         })
     }
 
@@ -2212,7 +2444,7 @@ impl PageStore for Pager {
             if let Some(overlay) =
                 self.overlay_page_for_snapshot(id, last_checkpoint_lsn, snapshot_lsn)?
             {
-                buf.copy_from_slice(&overlay);
+                return Ok(PageRef { id, data: overlay });
             }
         }
         Ok(PageRef {
@@ -2463,6 +2695,55 @@ mod tests {
             b"NEW1",
             "reader should observe new data after checkpoint"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn latest_committed_read_includes_wal_overlay() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("latest_committed_overlay.db");
+        let options = PagerOptions {
+            page_size: 4096,
+            cache_pages: 8,
+            prefetch_on_miss: false,
+            synchronous: Synchronous::Full,
+            autocheckpoint_pages: usize::MAX,
+            autocheckpoint_ms: None,
+            ..PagerOptions::default()
+        };
+        let pager = Pager::create(&path, options)?;
+        let page = {
+            let mut write = pager.begin_write()?;
+            let page = write.allocate_page()?;
+            write_test_payload(&pager, &mut write, page)?;
+            pager.commit(write)?;
+            page
+        };
+        pager.checkpoint(CheckpointMode::Force)?;
+
+        // Apply new data and commit without checkpointing.
+        {
+            let mut write = pager.begin_write()?;
+            {
+                let mut frame = write.page_mut(page)?;
+                frame.data_mut()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4].copy_from_slice(b"WAL1");
+            }
+            pager.commit(write)?;
+        }
+
+        // Checkpoint-scoped read should still see the checkpoint image.
+        let checkpoint_read = pager.begin_read()?;
+        let checkpoint_page = pager.get_page(&checkpoint_read, page)?;
+        assert_eq!(
+            &checkpoint_page.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4],
+            b"DATA"
+        );
+        drop(checkpoint_read);
+
+        // Latest-committed reader must observe the WAL overlay.
+        let latest_read = pager.begin_latest_committed_read()?;
+        let latest_page = pager.get_page(&latest_read, page)?;
+        assert_eq!(&latest_page.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4], b"WAL1");
         Ok(())
     }
 
