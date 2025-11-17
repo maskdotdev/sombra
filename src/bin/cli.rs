@@ -3,10 +3,13 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::io;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell as CompletionShell;
 use sombra::{
     admin::{
         checkpoint, stats, vacuum_into, verify, AdminOpenOptions, CheckpointMode, PagerOptions,
@@ -20,6 +23,14 @@ use sombra::{
     ffi::{self, DatabaseOptions},
     primitives::pager::Synchronous,
 };
+
+#[path = "cli/config.rs"]
+mod config;
+#[path = "cli/ui.rs"]
+mod ui;
+
+use config::{CliConfig, Profile, ProfileUpdate};
+use ui::{Theme as UiTheme, Ui};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -35,11 +46,55 @@ struct Cli {
     #[arg(
         long,
         global = true,
+        value_name = "FILE",
+        env = "SOMBRA_CONFIG",
+        help = "Path to CLI config file (defaults to ~/.config/sombra/cli.toml)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        global = true,
+        value_name = "DB",
+        env = "SOMBRA_DATABASE",
+        help = "Default database path for commands that take a --db argument"
+    )]
+    database: Option<PathBuf>,
+
+    #[arg(
+        long,
+        global = true,
+        value_name = "PROFILE",
+        env = "SOMBRA_PROFILE",
+        help = "Profile name to load pager/cache/database defaults from"
+    )]
+    profile: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
         value_enum,
         default_value_t = OutputFormat::Text,
         help = "Output format for structured responses"
     )]
     format: OutputFormat,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ThemeArg::Auto,
+        help = "Color theme for text output"
+    )]
+    theme: ThemeArg,
+
+    #[arg(
+        long,
+        global = true,
+        action = ArgAction::SetTrue,
+        help = "Reduce decorative output and color usage"
+    )]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -68,11 +123,19 @@ struct OpenArgs {
 
 #[derive(Args, Debug)]
 struct ImportCmd {
-    #[arg(value_name = "DB")]
-    db_path: PathBuf,
+    #[arg(
+        value_name = "DB",
+        help = "Database path (defaults to --database or config)"
+    )]
+    db_path: Option<PathBuf>,
 
-    #[arg(long, value_name = "FILE", help = "CSV file containing nodes")]
-    nodes: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "CSV file containing nodes",
+        required = true
+    )]
+    nodes: PathBuf,
 
     #[arg(long, value_name = "FILE", help = "CSV file containing edges")]
     edges: Option<PathBuf>,
@@ -106,10 +169,18 @@ struct ImportCmd {
     #[arg(long, default_value = "dst", help = "Edge destination column name")]
     edge_dst_column: String,
 
-    #[arg(long, help = "Column containing edge types")]
+    #[arg(
+        long,
+        help = "Column containing edge types",
+        conflicts_with = "edge_type"
+    )]
     edge_type_column: Option<String>,
 
-    #[arg(long, help = "Constant edge type if no column is provided")]
+    #[arg(
+        long,
+        help = "Constant edge type if no column is provided",
+        conflicts_with = "edge_type_column"
+    )]
     edge_type: Option<String>,
 
     #[arg(
@@ -151,9 +222,20 @@ struct ImportCmd {
 }
 
 #[derive(Args, Debug)]
+#[command(
+    group(
+        ArgGroup::new("targets")
+            .required(true)
+            .multiple(true)
+            .args(["nodes", "edges"])
+    )
+)]
 struct ExportCmd {
-    #[arg(value_name = "DB")]
-    db_path: PathBuf,
+    #[arg(
+        value_name = "DB",
+        help = "Database path (defaults to --database or config)"
+    )]
+    db_path: Option<PathBuf>,
 
     #[arg(long, value_name = "FILE", help = "Output CSV for nodes")]
     nodes: Option<PathBuf>,
@@ -178,17 +260,57 @@ struct ExportCmd {
 
 #[derive(Args, Debug)]
 struct SeedDemoCmd {
-    #[arg(value_name = "DB")]
-    db_path: PathBuf,
+    #[arg(
+        value_name = "DB",
+        help = "Database path (defaults to --database or config)"
+    )]
+    db_path: Option<PathBuf>,
 
     #[arg(long, help = "Create the database if it does not exist")]
     create: bool,
 }
 
 #[derive(Args, Debug)]
+struct InitCmd {
+    #[arg(
+        value_name = "DB",
+        help = "Database path (defaults to --database or config)"
+    )]
+    db_path: Option<PathBuf>,
+
+    #[arg(long, action = ArgAction::SetTrue, help = "Open the dashboard after init")]
+    open_dashboard: bool,
+
+    #[arg(long, action = ArgAction::SetTrue, help = "Skip seeding demo data")]
+    skip_demo: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorCmd {
+    #[arg(
+        value_name = "DB",
+        help = "Database path (defaults to --database or config)"
+    )]
+    db_path: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = VerifyLevelArg::Fast)]
+    verify_level: VerifyLevelArg,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Emit JSON report instead of formatted text"
+    )]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
 struct DashboardCmd {
-    #[arg(value_name = "DB")]
-    db_path: PathBuf,
+    #[arg(
+        value_name = "DB",
+        help = "Database path (defaults to --database or config)"
+    )]
+    db_path: Option<PathBuf>,
 
     #[arg(
         long,
@@ -224,17 +346,90 @@ struct DashboardCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum ProfileCommand {
+    #[command(about = "List configured profiles")]
+    List,
+    #[command(about = "Create or update a profile")]
+    Save(ProfileSaveCmd),
+    #[command(about = "Show details for a single profile")]
+    Show(ProfileNameArg),
+    #[command(about = "Delete a profile")]
+    Delete(ProfileNameArg),
+}
+
+#[derive(Args, Debug)]
+struct ProfileNameArg {
+    #[arg(value_name = "NAME")]
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct ProfileSaveCmd {
+    #[arg(value_name = "NAME")]
+    name: String,
+
+    #[arg(
+        long,
+        value_name = "DB",
+        help = "Default database path for this profile"
+    )]
+    database: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "Pager page size override for this profile"
+    )]
+    page_size: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "PAGES",
+        help = "Pager cache size override for this profile"
+    )]
+    cache_pages: Option<usize>,
+
+    #[arg(long, value_enum, help = "Pager synchronous mode for this profile")]
+    synchronous: Option<SynchronousArg>,
+
+    #[arg(
+        long = "distinct-neighbors-default",
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_distinct_neighbors_default",
+        help = "Enable distinct-neighbors by default in this profile"
+    )]
+    distinct_neighbors_default: bool,
+
+    #[arg(
+        long = "no-distinct-neighbors-default",
+        action = ArgAction::SetTrue,
+        conflicts_with = "distinct_neighbors_default",
+        help = "Disable distinct-neighbors by default in this profile"
+    )]
+    no_distinct_neighbors_default: bool,
+
+    #[arg(long, action = ArgAction::SetTrue, help = "Mark this profile as the default")]
+    set_default: bool,
+}
+
+#[derive(Subcommand, Debug)]
 enum Command {
     #[command(about = "Print pager/storage statistics")]
     Stats {
-        #[arg(value_name = "DB")]
-        db_path: PathBuf,
+        #[arg(
+            value_name = "DB",
+            help = "Database path (defaults to --database or config)"
+        )]
+        db_path: Option<PathBuf>,
     },
 
     #[command(about = "Force a checkpoint on the database")]
     Checkpoint {
-        #[arg(value_name = "DB")]
-        db_path: PathBuf,
+        #[arg(
+            value_name = "DB",
+            help = "Database path (defaults to --database or config)"
+        )]
+        db_path: Option<PathBuf>,
 
         #[arg(
             long,
@@ -247,8 +442,11 @@ enum Command {
 
     #[command(about = "Copy the database into a compacted file")]
     Vacuum {
-        #[arg(value_name = "DB")]
-        db_path: PathBuf,
+        #[arg(
+            value_name = "DB",
+            help = "Database path (defaults to --database or config)"
+        )]
+        db_path: Option<PathBuf>,
 
         #[arg(long = "into", value_name = "PATH", required = true)]
         into: PathBuf,
@@ -259,8 +457,11 @@ enum Command {
 
     #[command(about = "Verify on-disk structures")]
     Verify {
-        #[arg(value_name = "DB")]
-        db_path: PathBuf,
+        #[arg(
+            value_name = "DB",
+            help = "Database path (defaults to --database or config)"
+        )]
+        db_path: Option<PathBuf>,
 
         #[arg(
             long,
@@ -282,6 +483,21 @@ enum Command {
 
     #[command(about = "Populate demo nodes/edges (Ada, Grace, Alan)")]
     SeedDemo(SeedDemoCmd),
+
+    #[command(about = "Initialize a new database with demo data and optional dashboard assets")]
+    Init(InitCmd),
+
+    #[command(about = "Run diagnostics (verify + stats + filesystem) on a database")]
+    Doctor(DoctorCmd),
+
+    #[command(about = "Generate shell completions (bash, zsh, fish, etc.)")]
+    Completions {
+        #[arg(value_enum, help = "Target shell to generate completions for")]
+        shell: CompletionShell,
+    },
+
+    #[command(about = "Manage CLI profiles", subcommand)]
+    Profile(ProfileCommand),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -291,6 +507,25 @@ enum OutputFormat {
 }
 
 impl OutputFormat {}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ThemeArg {
+    Auto,
+    Light,
+    Dark,
+    Plain,
+}
+
+impl From<ThemeArg> for UiTheme {
+    fn from(theme: ThemeArg) -> Self {
+        match theme {
+            ThemeArg::Auto => UiTheme::Auto,
+            ThemeArg::Light => UiTheme::Light,
+            ThemeArg::Dark => UiTheme::Dark,
+            ThemeArg::Plain => UiTheme::Plain,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum SynchronousArg {
@@ -350,71 +585,243 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let open_opts = build_open_options(&cli.open);
+    let mut config = CliConfig::load(cli.config.clone())?;
+    let profile_name = cli
+        .profile
+        .clone()
+        .or_else(|| config.default_profile_name().map(|name| name.to_string()));
+    let profile = if let Some(ref name) = profile_name {
+        Some(
+            config
+                .profile(name)
+                .cloned()
+                .ok_or_else(|| format!("profile '{name}' not found"))?,
+        )
+    } else {
+        None
+    };
+    let default_db = cli
+        .database
+        .clone()
+        .or_else(|| profile.as_ref().and_then(|p| p.database.clone()))
+        .or_else(|| config.default_db_path().cloned());
+    let ui = Ui::new(cli.theme.into(), cli.quiet);
+    let open_opts = build_open_options(&cli.open, profile.as_ref());
 
     match cli.command {
         Command::Stats { db_path } => {
+            let db_path = resolve_db_path(db_path, default_db.as_ref(), "stats")?;
             let report = stats(&db_path, &open_opts)?;
-            emit(&cli.format, &report, |fmt| print_stats_text(fmt, &report))?;
+            emit(cli.format, &ui, &report, print_stats_text)?;
         }
         Command::Checkpoint { db_path, mode } => {
+            let db_path = resolve_db_path(db_path, default_db.as_ref(), "checkpoint")?;
             let report = checkpoint(&db_path, &open_opts, mode.into())?;
-            emit(&cli.format, &report, |fmt| {
-                print_checkpoint_text(fmt, &report)
-            })?;
+            emit(cli.format, &ui, &report, print_checkpoint_text)?;
         }
         Command::Vacuum {
             db_path,
             into,
             analyze,
         } => {
+            let db_path = resolve_db_path(db_path, default_db.as_ref(), "vacuum")?;
+            let task = ui.task("Vacuuming database");
             let vacuum_opts = VacuumOptions { analyze };
             let report = vacuum_into(&db_path, into, &open_opts, &vacuum_opts)?;
-            emit(&cli.format, &report, |fmt| print_vacuum_text(fmt, &report))?;
+            let elapsed = task.finish();
+            emit(cli.format, &ui, &report, print_vacuum_text)?;
+            ui.info(&format!(
+                "Vacuum completed in {}",
+                format_duration_pretty(elapsed)
+            ));
         }
         Command::Verify { db_path, level } => {
+            let db_path = resolve_db_path(db_path, default_db.as_ref(), "verify")?;
+            let task = ui.task("Verifying on-disk structures");
             let report = verify(&db_path, &open_opts, level.into())?;
-            emit(&cli.format, &report, |fmt| print_verify_text(fmt, &report))?;
+            let elapsed = task.finish();
+            emit(cli.format, &ui, &report, print_verify_text)?;
+            ui.info(&format!(
+                "Verify finished in {}",
+                format_duration_pretty(elapsed)
+            ));
             if !report.success {
                 std::process::exit(2);
             }
         }
         Command::Import(cmd) => {
+            let db_path = resolve_db_path(cmd.db_path.clone(), default_db.as_ref(), "import")?;
             let mut opts = open_opts.clone();
             opts.create_if_missing = cmd.create;
-            let import_cfg = build_import_config(&cmd)?;
+            let import_cfg = build_import_config(&cmd, db_path)?;
+            let task = ui.task("Importing data");
             let result = run_import(&import_cfg, &opts).map_err(into_boxed_error)?;
-            println!(
-                "Imported {} nodes and {} edges",
-                result.nodes_imported, result.edges_imported
-            );
+            let elapsed = task.finish();
+            ui.success(&format!(
+                "Imported {} nodes and {} edges in {}",
+                format_count(result.nodes_imported as u64),
+                format_count(result.edges_imported as u64),
+                format_duration_pretty(elapsed)
+            ));
         }
         Command::Export(cmd) => {
-            let export_cfg = build_export_config(&cmd)?;
+            let db_path = resolve_db_path(cmd.db_path.clone(), default_db.as_ref(), "export")?;
+            let export_cfg = build_export_config(&cmd, db_path)?;
+            let task = ui.task("Exporting CSV data");
             let result = run_export(&export_cfg, &open_opts).map_err(into_boxed_error)?;
-            println!(
-                "Exported {} nodes and {} edges",
-                result.nodes_exported, result.edges_exported
-            );
+            let elapsed = task.finish();
+            ui.success(&format!(
+                "Exported {} nodes and {} edges in {}",
+                format_count(result.nodes_exported as u64),
+                format_count(result.edges_exported as u64),
+                format_duration_pretty(elapsed)
+            ));
         }
         Command::SeedDemo(cmd) => {
-            run_seed_demo(&cmd, &open_opts)?;
+            let db_path = resolve_db_path(cmd.db_path.clone(), default_db.as_ref(), "seed-demo")?;
+            run_seed_demo(&cmd, db_path, &open_opts, &ui)?;
+        }
+        Command::Init(cmd) => {
+            let db_path = resolve_db_path(cmd.db_path.clone(), default_db.as_ref(), "init")?;
+            run_init(&cmd, db_path, &open_opts, &ui)?;
+        }
+        Command::Doctor(cmd) => {
+            let db_path = resolve_db_path(cmd.db_path.clone(), default_db.as_ref(), "doctor")?;
+            run_doctor(&cmd, db_path, &open_opts, &ui)?;
         }
         Command::Dashboard(cmd) => {
-            let dashboard_opts = build_dashboard_options(cmd, open_opts);
+            let db_path = resolve_db_path(cmd.db_path.clone(), default_db.as_ref(), "dashboard")?;
+            let dashboard_opts = build_dashboard_options(cmd, db_path, open_opts);
             if let Err(err) = dashboard::serve(dashboard_opts).await {
                 eprintln!("dashboard server terminated: {err}");
                 return Err(Box::new(err));
             }
+        }
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "sombra", &mut io::stdout());
+        }
+        Command::Profile(ProfileCommand::List) => {
+            let mut entries = config.profiles().cloned().collect::<Vec<_>>();
+            if entries.is_empty() {
+                ui.info("No profiles configured. Use `sombra profile save <name>` to create one.");
+            } else {
+                entries.sort_by(|a, b| a.name.cmp(&b.name));
+                let default = config.default_profile_name();
+                for profile in entries {
+                    let title = if Some(profile.name.as_str()) == default {
+                        format!("Profile '{}' (default)", profile.name)
+                    } else {
+                        format!("Profile '{}'", profile.name)
+                    };
+                    let rows = [
+                        (
+                            "database",
+                            profile
+                                .database
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                        (
+                            "page_size",
+                            profile
+                                .page_size
+                                .map(|v| format_bytes(v.into()))
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                        (
+                            "cache_pages",
+                            profile
+                                .cache_pages
+                                .map(|v| format_count(v as u64))
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                        (
+                            "synchronous",
+                            profile
+                                .synchronous
+                                .map(|mode| format!("{mode:?}"))
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                        (
+                            "distinct_neighbors_default",
+                            profile
+                                .distinct_neighbors_default
+                                .map(|v| format_bool(v))
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                    ];
+                    ui.section(&title, rows);
+                    ui.spacer();
+                }
+            }
+        }
+        Command::Profile(ProfileCommand::Save(cmd)) => {
+            let distinct_pref = if cmd.distinct_neighbors_default {
+                Some(true)
+            } else if cmd.no_distinct_neighbors_default {
+                Some(false)
+            } else {
+                None
+            };
+            let mut update = ProfileUpdate::default();
+            update.database = cmd.database.clone();
+            update.page_size = cmd.page_size;
+            update.cache_pages = cmd.cache_pages;
+            update.synchronous = cmd.synchronous;
+            update.distinct_neighbors_default = distinct_pref;
+            config.upsert_profile(&cmd.name, update)?;
+            if cmd.set_default {
+                config.set_default_profile(Some(&cmd.name))?;
+            }
+            let path = config.persist()?;
+            ui.success(&format!(
+                "Profile '{}' saved to {}",
+                cmd.name,
+                path.display()
+            ));
         }
     }
 
     Ok(())
 }
 
-fn build_open_options(args: &OpenArgs) -> AdminOpenOptions {
+fn resolve_db_path(
+    provided: Option<PathBuf>,
+    fallback: Option<&PathBuf>,
+    command: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(path) = provided {
+        return Ok(path);
+    }
+    if let Some(global) = fallback {
+        return Ok(global.clone());
+    }
+    Err(format!(
+        "command '{command}' requires a database path. Provide <DB>, use --database, set SOMBRA_DATABASE, or configure cli.toml"
+    )
+    .into())
+}
+
+fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOptions {
     let mut opts = AdminOpenOptions::default();
     let mut pager_opts = PagerOptions::default();
+
+    if let Some(profile) = profile {
+        if let Some(page_size) = profile.page_size {
+            pager_opts.page_size = page_size;
+        }
+        if let Some(cache_pages) = profile.cache_pages {
+            pager_opts.cache_pages = cache_pages;
+        }
+        if let Some(mode) = profile.synchronous {
+            pager_opts.synchronous = mode.into();
+        }
+        if let Some(distinct) = profile.distinct_neighbors_default {
+            opts.distinct_neighbors_default = distinct;
+        }
+    }
 
     if let Some(page_size) = args.page_size {
         pager_opts.page_size = page_size;
@@ -427,16 +834,19 @@ fn build_open_options(args: &OpenArgs) -> AdminOpenOptions {
     }
 
     opts.pager = pager_opts;
-    opts.distinct_neighbors_default = args.distinct_neighbors_default;
+    if args.distinct_neighbors_default {
+        opts.distinct_neighbors_default = true;
+    }
     opts
 }
 
 fn build_dashboard_options(
     cmd: DashboardCmd,
+    db_path: PathBuf,
     open_opts: AdminOpenOptions,
 ) -> DashboardServeOptions {
     DashboardServeOptions {
-        db_path: cmd.db_path,
+        db_path,
         open_opts,
         host: cmd.host,
         port: cmd.port,
@@ -447,12 +857,18 @@ fn build_dashboard_options(
     }
 }
 
-fn run_seed_demo(cmd: &SeedDemoCmd, open_opts: &AdminOpenOptions) -> Result<(), Box<dyn Error>> {
+fn run_seed_demo(
+    cmd: &SeedDemoCmd,
+    db_path: PathBuf,
+    open_opts: &AdminOpenOptions,
+    ui: &Ui,
+) -> Result<(), Box<dyn Error>> {
+    let task = ui.task("Seeding demo data");
     let mut db_opts = DatabaseOptions::default();
     db_opts.create_if_missing = cmd.create;
     db_opts.pager = open_opts.pager.clone();
     db_opts.distinct_neighbors_default = open_opts.distinct_neighbors_default;
-    let db = ffi::Database::open(&cmd.db_path, db_opts)?;
+    let db = ffi::Database::open(&db_path, db_opts)?;
     db.seed_demo()?;
     let check_spec = serde_json::json!({
         "$schemaVersion": 1,
@@ -479,30 +895,22 @@ fn run_seed_demo(cmd: &SeedDemoCmd, open_opts: &AdminOpenOptions) -> Result<(), 
         .and_then(|value| value.as_array())
         .map(|rows| rows.len())
         .unwrap_or(0);
-    println!(
-        "Demo data inserted into {} ({} relationship rows)",
-        cmd.db_path.display(),
-        rows
-    );
     drop(db);
-    checkpoint(&cmd.db_path, open_opts, CheckpointMode::Force)?;
-    println!("Checkpoint completed to persist seeded data.");
+    checkpoint(&db_path, open_opts, CheckpointMode::Force)?;
+    let elapsed = task.finish();
+    ui.success(&format!(
+        "Demo data inserted into {} ({} relationship rows) in {}",
+        db_path.display(),
+        format_count(rows as u64),
+        format_duration_pretty(elapsed)
+    ));
+    ui.info("Checkpoint completed to persist seeded data.");
     Ok(())
 }
 
-fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
-    let nodes_path = cmd
-        .nodes
-        .clone()
-        .ok_or_else(|| CliError::Message("--nodes is required".into()))?;
-    if cmd.edge_type.is_some() && cmd.edge_type_column.is_some() {
-        return Err(CliError::Message(
-            "use either --edge-type or --edge-type-column, not both".into(),
-        ));
-    }
-
+fn build_import_config(cmd: &ImportCmd, db_path: PathBuf) -> Result<ImportConfig, CliError> {
     let node_cfg = NodeImportConfig {
-        path: nodes_path,
+        path: cmd.nodes.clone(),
         id_column: cmd.node_id_column.clone(),
         label_column: cmd.node_label_column.clone(),
         static_labels: parse_labels_list(&cmd.node_labels),
@@ -527,7 +935,7 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
     };
 
     Ok(ImportConfig {
-        db_path: cmd.db_path.clone(),
+        db_path,
         create_if_missing: cmd.create,
         disable_indexes: cmd.disable_indexes,
         build_indexes: cmd.build_indexes,
@@ -536,14 +944,9 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
     })
 }
 
-fn build_export_config(cmd: &ExportCmd) -> Result<ExportConfig, CliError> {
-    if cmd.nodes.is_none() && cmd.edges.is_none() {
-        return Err(CliError::Message(
-            "export requires --nodes and/or --edges paths".into(),
-        ));
-    }
+fn build_export_config(cmd: &ExportCmd, db_path: PathBuf) -> Result<ExportConfig, CliError> {
     Ok(ExportConfig {
-        db_path: cmd.db_path.clone(),
+        db_path,
         nodes_out: cmd.nodes.clone(),
         edges_out: cmd.edges.clone(),
         node_props: parse_props_list(&cmd.node_props),
@@ -634,99 +1037,327 @@ fn into_boxed_error(err: CliError) -> Box<dyn Error> {
     Box::new(err)
 }
 
-fn emit<T, F>(format: &OutputFormat, value: &T, printer: F) -> Result<(), Box<dyn Error>>
+fn emit<T, F>(format: OutputFormat, ui: &Ui, value: &T, printer: F) -> Result<(), Box<dyn Error>>
 where
     T: serde::Serialize,
-    F: Fn(OutputFormat),
+    F: Fn(&Ui, &T),
 {
     match format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(value)?;
             println!("{json}");
         }
-        OutputFormat::Text => printer(OutputFormat::Text),
+        OutputFormat::Text => printer(ui, value),
     }
     Ok(())
 }
 
-fn print_stats_text(_: OutputFormat, report: &sombra::admin::StatsReport) {
-    println!("Pager:");
-    println!(
-        "  page_size={} cache_pages={} hits={} misses={} evictions={} dirty_writebacks={}",
-        report.pager.page_size,
-        report.pager.cache_pages,
-        report.pager.hits,
-        report.pager.misses,
-        report.pager.evictions,
-        report.pager.dirty_writebacks
+fn print_stats_text(ui: &Ui, report: &sombra::admin::StatsReport) {
+    ui.section(
+        "Pager",
+        [
+            ("page_size", format_bytes(u64::from(report.pager.page_size))),
+            ("cache_pages", format_count(report.pager.cache_pages as u64)),
+            ("hits", format_count(report.pager.hits)),
+            ("misses", format_count(report.pager.misses)),
+            ("evictions", format_count(report.pager.evictions)),
+            (
+                "dirty_writebacks",
+                format_count(report.pager.dirty_writebacks),
+            ),
+            (
+                "last_checkpoint_lsn",
+                format_count(report.pager.last_checkpoint_lsn),
+            ),
+        ],
     );
-    println!("  last_checkpoint_lsn={}", report.pager.last_checkpoint_lsn);
-    println!();
-    println!(
-        "WAL: exists={} size={} path={}",
-        report.wal.exists, report.wal.size_bytes, report.wal.path
+    ui.spacer();
+    ui.section(
+        "WAL",
+        [
+            ("exists", format_bool(report.wal.exists)),
+            ("size", format_bytes(report.wal.size_bytes)),
+            ("path", report.wal.path.clone()),
+            (
+                "last_checkpoint_lsn",
+                format_count(report.wal.last_checkpoint_lsn),
+            ),
+        ],
     );
-    println!();
-    println!(
-        "Storage: next_node_id={} next_edge_id={} inline_blob={} inline_value={} flags=0x{:08x}",
-        report.storage.next_node_id,
-        report.storage.next_edge_id,
-        report.storage.inline_prop_blob,
-        report.storage.inline_prop_value,
-        report.storage.storage_flags
+    ui.spacer();
+    ui.section(
+        "Storage",
+        [
+            ("next_node_id", format_count(report.storage.next_node_id)),
+            ("next_edge_id", format_count(report.storage.next_edge_id)),
+            (
+                "estimated_nodes",
+                format_count(report.storage.estimated_node_count),
+            ),
+            (
+                "estimated_edges",
+                format_count(report.storage.estimated_edge_count),
+            ),
+            (
+                "inline_prop_blob",
+                format_bytes(u64::from(report.storage.inline_prop_blob)),
+            ),
+            (
+                "inline_prop_value",
+                format_bytes(u64::from(report.storage.inline_prop_value)),
+            ),
+            (
+                "storage_flags",
+                format!("0x{:08x}", report.storage.storage_flags),
+            ),
+            (
+                "distinct_neighbors_default",
+                format_bool(report.storage.distinct_neighbors_default),
+            ),
+        ],
     );
-    println!(
-        "          est_nodes={} est_edges={} distinct_neighbors_default={}",
-        report.storage.estimated_node_count,
-        report.storage.estimated_edge_count,
-        report.storage.distinct_neighbors_default
-    );
-    println!();
-    println!(
-        "Filesystem: db_size={} wal_size={} db_path={} wal_path={}",
-        report.filesystem.db_size_bytes,
-        report.filesystem.wal_size_bytes,
-        report.filesystem.db_path,
-        report.filesystem.wal_path
+    ui.spacer();
+    ui.section(
+        "Filesystem",
+        [
+            ("db_path", report.filesystem.db_path.clone()),
+            ("db_size", format_bytes(report.filesystem.db_size_bytes)),
+            ("wal_path", report.filesystem.wal_path.clone()),
+            ("wal_size", format_bytes(report.filesystem.wal_size_bytes)),
+        ],
     );
 }
 
-fn print_checkpoint_text(_: OutputFormat, report: &sombra::admin::CheckpointReport) {
-    println!(
-        "Checkpoint ({}) completed in {:.2} ms at LSN {}",
-        report.mode, report.duration_ms, report.last_checkpoint_lsn
+fn print_checkpoint_text(ui: &Ui, report: &sombra::admin::CheckpointReport) {
+    ui.section(
+        "Checkpoint",
+        [
+            ("mode", format!("{:?}", report.mode)),
+            ("duration", format_duration_ms(report.duration_ms)),
+            (
+                "last_checkpoint_lsn",
+                format_count(report.last_checkpoint_lsn),
+            ),
+        ],
     );
 }
 
-fn print_vacuum_text(_: OutputFormat, report: &sombra::admin::VacuumReport) {
-    println!(
-        "Vacuum finished in {:.2} ms (copied {} bytes, checkpoint_lsn={}, analyze_performed={})",
-        report.duration_ms, report.copied_bytes, report.checkpoint_lsn, report.analyze_performed
+fn print_vacuum_text(ui: &Ui, report: &sombra::admin::VacuumReport) {
+    ui.section(
+        "Vacuum",
+        [
+            ("duration", format_duration_ms(report.duration_ms)),
+            ("copied", format_bytes(report.copied_bytes)),
+            ("checkpoint_lsn", format_count(report.checkpoint_lsn)),
+            ("analyze", format_bool(report.analyze_performed)),
+        ],
     );
     if let Some(summary) = &report.analyze_summary {
-        println!("Analyze summary (labels):");
-        for stat in &summary.label_counts {
+        ui.spacer();
+        let rows = summary.label_counts.iter().map(|stat| {
             let name = stat
                 .label_name
                 .as_deref()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("Label#{}", stat.label_id));
-            println!("  {} (id={}): nodes={}", name, stat.label_id, stat.nodes);
-        }
+            format!(
+                "{} (id={}): {} nodes",
+                name,
+                stat.label_id,
+                format_count(stat.nodes as u64)
+            )
+        });
+        ui.list("Analyze summary", rows.collect::<Vec<_>>());
     }
 }
 
-fn print_verify_text(_: OutputFormat, report: &sombra::admin::VerifyReport) {
-    println!(
-        "Verify ({:?}) => success={} nodes_found={} edges_found={} adjacency_entries={} adjacency_nodes={}",
-        report.level,
-        report.success,
-        report.counts.nodes_found,
-        report.counts.edges_found,
-        report.counts.adjacency_entries,
-        report.counts.adjacency_nodes_touched,
+fn print_verify_text(ui: &Ui, report: &sombra::admin::VerifyReport) {
+    ui.section(
+        "Verify",
+        [
+            ("level", format!("{:?}", report.level)),
+            ("success", format_bool(report.success)),
+            ("nodes_found", format_count(report.counts.nodes_found)),
+            ("edges_found", format_count(report.counts.edges_found)),
+            (
+                "adjacency_entries",
+                format_count(report.counts.adjacency_entries),
+            ),
+            (
+                "adjacency_nodes",
+                format_count(report.counts.adjacency_nodes_touched),
+            ),
+        ],
     );
-    for finding in &report.findings {
-        println!("- {:?}: {}", finding.severity, finding.message);
+    if report.findings.is_empty() && report.success {
+        ui.success("All on-disk structures validated cleanly.");
+    } else if !report.findings.is_empty() {
+        ui.spacer();
+        let messages = report
+            .findings
+            .iter()
+            .map(|finding| format!("{:?}: {}", finding.severity, finding.message))
+            .collect::<Vec<_>>();
+        ui.list("Findings", messages);
     }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_duration_ms(ms: f64) -> String {
+    if ms >= 1000.0 {
+        format!("{:.2}s", ms / 1000.0)
+    } else {
+        format!("{:.0}ms", ms)
+    }
+}
+
+fn format_bool(flag: bool) -> String {
+    if flag {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    }
+}
+
+fn format_count(value: u64) -> String {
+    let s = value.to_string();
+    let bytes = s.as_bytes();
+    let mut formatted = String::with_capacity(bytes.len() + bytes.len() / 3);
+    for (idx, ch) in bytes.iter().rev().enumerate() {
+        if idx != 0 && idx % 3 == 0 {
+            formatted.push('_');
+        }
+        formatted.push(*ch as char);
+    }
+    formatted.chars().rev().collect()
+}
+
+fn format_duration_pretty(duration: Duration) -> String {
+    if duration.as_secs() >= 1 {
+        format!("{:.2}s", duration.as_secs_f64())
+    } else {
+        format!("{:.0}ms", duration.as_secs_f64() * 1_000.0)
+    }
+}
+fn run_init(
+    cmd: &InitCmd,
+    db_path: PathBuf,
+    open_opts: &AdminOpenOptions,
+    ui: &Ui,
+) -> Result<(), Box<dyn Error>> {
+    if !cmd.skip_demo {
+        let seed_cmd = SeedDemoCmd {
+            db_path: Some(db_path.clone()),
+            create: true,
+        };
+        run_seed_demo(&seed_cmd, db_path.clone(), open_opts, ui)?;
+    } else if !db_path.exists() {
+        ui.warn("Database file does not exist; use --skip-demo only after creating the DB.");
+        return Ok(());
+    } else {
+        ui.info("Skipping demo seed; using existing database contents.");
+    }
+
+    if cmd.open_dashboard {
+        let dash_cmd = DashboardCmd {
+            db_path: Some(db_path.clone()),
+            host: "127.0.0.1".parse().unwrap(),
+            port: 7654,
+            assets: None,
+            read_only: false,
+            open_browser: true,
+            allow_origins: vec![],
+        };
+        let dash_opts = build_dashboard_options(dash_cmd, db_path.clone(), open_opts.clone());
+        tokio::spawn(async move {
+            if let Err(err) = dashboard::serve(dash_opts).await {
+                eprintln!("dashboard server terminated: {err}");
+            }
+        });
+        ui.info("Dashboard launching in background (CTRL+C to stop).");
+    }
+
+    ui.success(&format!(
+        "Initialization complete. Database ready at {}",
+        db_path.display()
+    ));
+    Ok(())
+}
+
+fn run_doctor(
+    cmd: &DoctorCmd,
+    db_path: PathBuf,
+    open_opts: &AdminOpenOptions,
+    ui: &Ui,
+) -> Result<(), Box<dyn Error>> {
+    let task = ui.task("Collecting stats and running verify");
+    let stats_report = stats(&db_path, open_opts)?;
+    let verify_report = verify(&db_path, open_opts, cmd.verify_level.into())?;
+    let fs_meta = std::fs::metadata(&db_path)?;
+    let wal_meta = stats_report.filesystem.wal_size_bytes;
+    let elapsed = task.finish();
+
+    if cmd.json {
+        #[derive(serde::Serialize)]
+        struct DoctorReport<'a> {
+            stats: &'a sombra::admin::StatsReport,
+            verify: &'a sombra::admin::VerifyReport,
+            db_size_bytes: u64,
+            wal_size_bytes: u64,
+        }
+        let report = DoctorReport {
+            stats: &stats_report,
+            verify: &verify_report,
+            db_size_bytes: fs_meta.len(),
+            wal_size_bytes: wal_meta,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        ui.section(
+            "Database",
+            [
+                ("path", db_path.display().to_string()),
+                ("size", format_bytes(fs_meta.len())),
+                ("wal_size", format_bytes(wal_meta)),
+                (
+                    "page_size",
+                    format_bytes(stats_report.pager.page_size.into()),
+                ),
+                (
+                    "cache_pages",
+                    format_count(stats_report.pager.cache_pages as u64),
+                ),
+            ],
+        );
+        ui.spacer();
+        print_verify_text(ui, &verify_report);
+        if !verify_report.success {
+            ui.warn("Doctor detected issues during verify; address findings above.");
+        } else {
+            ui.success(&format!(
+                "Doctor check passed in {}.",
+                format_duration_pretty(elapsed)
+            ));
+        }
+    }
+
+    if !verify_report.success {
+        std::process::exit(2);
+    }
+
+    Ok(())
 }
