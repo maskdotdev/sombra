@@ -1,8 +1,7 @@
 use crate::types::{LabelId, Result, SombraError, VRef};
-
-use super::mvcc::{
-    flags, VersionHeader, VersionPtr, COMMIT_MAX, VERSION_HEADER_LEN, VERSION_PTR_LEN,
-};
+use super::mvcc::{flags, VersionHeader, VersionPtr, VERSION_HEADER_LEN, VERSION_PTR_LEN};
+#[cfg(test)]
+use super::mvcc::COMMIT_MAX;
 
 use super::rowhash::row_hash64;
 
@@ -248,6 +247,8 @@ fn u32_from_be(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
 
     #[test]
     fn encode_decode_without_hash_roundtrip() -> Result<()> {
@@ -315,5 +316,76 @@ mod tests {
             encoded.bytes.len() - VERSION_HEADER_LEN - VERSION_PTR_LEN
         );
         Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_versioned_node_roundtrip(
+            label_values in vec(0u32..200, 0..16),
+            inline_bytes in vec(any::<u8>(), 0..512),
+            append_hash in any::<bool>(),
+            use_vref in any::<bool>(),
+            (start_page, n_pages, len, checksum) in (any::<u64>(), 1u32..32, 1u32..4096, any::<u32>()),
+            begin in any::<u64>(),
+            lifetime in 0u32..2048,
+            prev_raw in any::<u64>(),
+            tombstone in any::<bool>(),
+            pending in any::<bool>(),
+        ) {
+            let labels: Vec<LabelId> = label_values.into_iter().map(LabelId).collect();
+            let end = if lifetime == 0 {
+                COMMIT_MAX
+            } else {
+                begin.saturating_add(lifetime as u64 + 1)
+            };
+            let mut base_flags = 0;
+            if tombstone {
+                base_flags |= flags::TOMBSTONE;
+            }
+            if pending {
+                base_flags |= flags::PENDING;
+            }
+            let version = VersionHeader::new(begin, end, base_flags, 0);
+            let prev_ptr = VersionPtr::from_raw(prev_raw);
+            let vref = VRef {
+                start_page: crate::types::PageId(start_page),
+                n_pages,
+                len,
+                checksum,
+            };
+            let payload = if use_vref {
+                PropPayload::VRef(vref)
+            } else {
+                PropPayload::Inline(&inline_bytes)
+            };
+
+            let encoded = encode(
+                &labels,
+                payload,
+                EncodeOpts::new(append_hash),
+                version,
+                prev_ptr,
+            ).expect("encode succeeds");
+            let decoded = decode(&encoded.bytes).expect("decode succeeds");
+
+            prop_assert_eq!(decoded.header, encoded.header);
+            prop_assert_eq!(decoded.prev_ptr, prev_ptr);
+            prop_assert_eq!(decoded.row.labels, labels);
+
+            match (use_vref, decoded.row.props) {
+                (false, PropStorage::Inline(bytes)) => prop_assert_eq!(bytes, inline_bytes),
+                (true, PropStorage::VRef(observed)) => {
+                    prop_assert_eq!(observed.start_page, vref.start_page);
+                    prop_assert_eq!(observed.n_pages, vref.n_pages);
+                    prop_assert_eq!(observed.len, vref.len);
+                    prop_assert_eq!(observed.checksum, vref.checksum);
+                }
+                (false, PropStorage::VRef(_)) => prop_assert!(false, "expected inline props"),
+                (true, PropStorage::Inline(_)) => prop_assert!(false, "expected vref props"),
+            }
+
+            prop_assert_eq!(decoded.row.row_hash, encoded.row_hash);
+            prop_assert_eq!(decoded.row.row_hash.is_some(), append_hash);
+        }
     }
 }
