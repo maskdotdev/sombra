@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use lru::LruCache;
+use parking_lot::Mutex;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
@@ -26,7 +27,7 @@ use super::edge::{
     self, EncodeOpts as EdgeEncodeOpts, PropPayload as EdgePropPayload,
     PropStorage as EdgePropStorage,
 };
-use super::mvcc::{CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
+use super::mvcc::{CommitId, CommitTable, VersionHeader, VersionedValue, COMMIT_MAX};
 use super::mvcc_flags;
 use super::node::{
     self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
@@ -71,6 +72,7 @@ impl ValCodec for UnitValue {
 #[allow(dead_code)]
 pub struct Graph {
     store: Arc<dyn PageStore>,
+    commit_table: Option<Arc<Mutex<CommitTable>>>,
     nodes: BTree<u64, Vec<u8>>,
     edges: BTree<u64, Vec<u8>>,
     adj_fwd: BTree<Vec<u8>, VersionedValue<UnitValue>>,
@@ -161,6 +163,11 @@ pub struct PropStats {
 }
 
 impl Graph {
+    /// Returns the commit table when the underlying pager provides one.
+    pub fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
+        self.commit_table.as_ref().map(Arc::clone)
+    }
+
     /// Opens a graph storage instance with the specified configuration options.
     pub fn open(opts: GraphOptions) -> Result<Self> {
         let store = Arc::clone(&opts.store);
@@ -332,8 +339,11 @@ impl Graph {
             .map(|tree| tree.root_page().0)
             .unwrap_or(0);
 
+        let commit_table = store.commit_table();
+
         Ok(Self {
             store,
+            commit_table,
             nodes,
             edges,
             adj_fwd,
@@ -529,7 +539,7 @@ impl Graph {
 
     /// Checks if a property index exists for the given label and property.
     pub fn has_property_index(&self, label: LabelId, prop: PropId) -> Result<bool> {
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         Ok(self
             .indexes
             .get_property_index(&read, label, prop)?
@@ -543,7 +553,7 @@ impl Graph {
 
     /// Retrieves the property index definition for a given label and property.
     pub fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         self.indexes.get_property_index(&read, label, prop)
     }
 
@@ -566,7 +576,7 @@ impl Graph {
 
     /// Returns all property index definitions currently registered.
     pub fn all_property_indexes(&self) -> Result<Vec<IndexDef>> {
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         self.indexes.all_property_indexes(&read)
     }
 
@@ -847,7 +857,7 @@ impl Graph {
             return Err(SombraError::NotFound);
         }
         let row = versioned.row;
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let incident = self.collect_incident_edges(&read, id)?;
         drop(read);
 
@@ -1739,7 +1749,7 @@ impl Graph {
         match storage {
             NodePropStorage::Inline(bytes) => Ok(bytes.clone()),
             NodePropStorage::VRef(vref) => {
-                let read = self.store.begin_read()?;
+                let read = self.store.begin_latest_committed_read()?;
                 self.vstore.read(&read, *vref)
             }
         }
@@ -1769,7 +1779,7 @@ impl Graph {
 
     fn materialize_props_owned(&self, bytes: &[u8]) -> Result<Vec<(PropId, PropValueOwned)>> {
         let raw = props::decode_raw(bytes)?;
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let props = props::materialize_props(&raw, &self.vstore, &read)?;
         Ok(props)
     }
@@ -2617,7 +2627,7 @@ impl Graph {
     }
     /// Computes light-weight property statistics for a label/property pair.
     pub fn property_stats(&self, label: LabelId, prop: PropId) -> Result<Option<PropStats>> {
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let Some(mut scan) = self.indexes.label_scan(&read, label)? else {
             return Ok(None);
         };

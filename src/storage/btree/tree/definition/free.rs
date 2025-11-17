@@ -23,7 +23,7 @@ fn init_leaf_root(
 }
 
 fn meta_salt(store: &Arc<dyn PageStore>) -> Result<u64> {
-    let read = store.begin_read()?;
+    let read = store.begin_latest_committed_read()?;
     let meta = store.get_page(&read, PageId(0))?;
     let header = PageHeader::decode(&meta.data()[..PAGE_HDR_LEN])?;
     Ok(header.salt)

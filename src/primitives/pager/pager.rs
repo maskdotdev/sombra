@@ -1,10 +1,10 @@
 use std::any::{Any, TypeId};
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ use crate::primitives::{
 };
 use crate::storage::{
     profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
-    record_pager_wal_frames, StorageProfileKind,
+    record_pager_wal_frames, CommitTable, StorageProfileKind,
 };
 use crate::types::{
     page::{self, PageHeader, PAGE_HDR_LEN},
@@ -120,6 +120,11 @@ impl PageImageLease {
     }
 }
 
+struct OverlayEntry {
+    lsn: Lsn,
+    data: Arc<[u8]>,
+}
+
 impl Default for PagerOptions {
     /// Creates default pager options with sensible values.
     fn default() -> Self {
@@ -179,6 +184,15 @@ pub enum CheckpointMode {
     Force,
     /// Attempt checkpoint without blocking if lock unavailable.
     BestEffort,
+}
+
+/// Desired read snapshot semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadConsistency {
+    /// Only observe data durable in the last checkpoint.
+    Checkpoint,
+    /// Observe the latest committed pages, replaying WAL if needed.
+    LatestCommitted,
 }
 
 fn wal_path(path: &Path) -> PathBuf {
@@ -265,6 +279,10 @@ pub trait PageStore: Send + Sync {
     fn get_page_with_write(&self, guard: &mut WriteGuard<'_>, id: PageId) -> Result<PageRef>;
     /// Begins a read transaction.
     fn begin_read(&self) -> Result<ReadGuard>;
+    /// Begins a read transaction targeting the latest committed snapshot.
+    fn begin_latest_committed_read(&self) -> Result<ReadGuard> {
+        self.begin_read()
+    }
     /// Begins a write transaction.
     fn begin_write(&self) -> Result<WriteGuard<'_>>;
     /// Commits a write transaction, returning the LSN.
@@ -284,6 +302,11 @@ pub trait PageStore: Send + Sync {
     /// Returns whether checksum verification is enabled.
     fn checksum_verification_enabled(&self) -> bool {
         true
+    }
+
+    /// Returns the pager commit table when available.
+    fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
+        None
     }
 }
 
@@ -341,6 +364,7 @@ impl<'a> Drop for PageMut<'a> {
 pub struct ReadGuard {
     _lock: LockReaderGuard,
     snapshot_lsn: Lsn,
+    consistency: ReadConsistency,
 }
 
 /// Guard for a write transaction, tracking modifications and state for rollback.
@@ -357,6 +381,7 @@ pub struct WriteGuard<'a> {
     pending_free_snapshot: Vec<PageId>,
     meta_dirty_snapshot: bool,
     committed: bool,
+    commit_lsn: Option<Lsn>,
     extensions: TxnExtensions,
 }
 
@@ -388,6 +413,11 @@ impl ReadGuard {
     pub fn snapshot_lsn(&self) -> Lsn {
         self.snapshot_lsn
     }
+
+    /// Indicates which consistency mode was requested.
+    pub fn consistency(&self) -> ReadConsistency {
+        self.consistency
+    }
 }
 
 impl<'a> WriteGuard<'a> {
@@ -413,6 +443,25 @@ impl<'a> WriteGuard<'a> {
     /// until the desired page count is reached.
     pub fn allocate_extent(&mut self, len: u32) -> Result<Extent> {
         self.pager.allocate_extent_in_txn(self, len)
+    }
+
+    /// Reserves the commit LSN that will be used when this transaction commits.
+    ///
+    /// Subsequent calls return the same LSN. Reserving early may leave gaps in
+    /// the LSN sequence if the transaction aborts, which is acceptable.
+    pub fn reserve_commit_id(&mut self) -> Lsn {
+        if let Some(lsn) = self.commit_lsn {
+            return lsn;
+        }
+        let mut inner = self.pager.inner.lock();
+        let lsn = inner.next_lsn;
+        inner.next_lsn = Lsn(lsn.0.saturating_add(1));
+        drop(inner);
+        self.pager
+            .register_pending_commit(lsn)
+            .expect("commit table reserve");
+        self.commit_lsn = Some(lsn);
+        lsn
     }
 
     /// Updates the metadata within this write transaction using a closure.
@@ -596,6 +645,9 @@ pub struct Pager {
     last_autocheckpoint: Mutex<Option<Instant>>,
     wal_sync_state: Arc<Mutex<WalSyncState>>,
     checksum_verify_on_read: AtomicBool,
+    latest_visible_lsn: AtomicU64,
+    commit_table: Arc<Mutex<CommitTable>>,
+    overlays: Mutex<HashMap<PageId, VecDeque<OverlayEntry>>>,
 }
 
 impl Pager {
@@ -693,6 +745,7 @@ impl Pager {
         let inner = PagerInner::new(meta.clone(), cache_pages, page_size, next_lsn);
         let wal_commit_config = Self::wal_commit_config_from_options(&options);
         let wal_committer = WalCommitter::new(Arc::clone(&wal), wal_commit_config);
+        let commit_table = Arc::new(Mutex::new(CommitTable::new(meta.last_checkpoint_lsn.0)));
         let pager = Self {
             db_io,
             wal,
@@ -704,6 +757,9 @@ impl Pager {
             last_autocheckpoint: Mutex::new(None),
             wal_sync_state: Arc::new(Mutex::new(WalSyncState::new())),
             checksum_verify_on_read: AtomicBool::new(true),
+            latest_visible_lsn: AtomicU64::new(meta.last_checkpoint_lsn.0),
+            commit_table,
+            overlays: Mutex::new(HashMap::new()),
         };
         pager.load_freelist()?;
         Ok(pager)
@@ -1430,19 +1486,30 @@ impl Pager {
     fn commit_txn(&self, mut guard: WriteGuard<'_>) -> Result<Lsn> {
         let _scope = profile_scope(StorageProfileKind::PagerCommit);
         let mut inner = self.inner.lock();
+        let (lsn, newly_reserved) = match guard.commit_lsn {
+            Some(lsn) => (lsn, false),
+            None => {
+                let lsn = inner.next_lsn;
+                inner.next_lsn = Lsn(lsn.0.saturating_add(1));
+                guard.commit_lsn = Some(lsn);
+                (lsn, true)
+            }
+        };
+        if newly_reserved {
+            self.register_pending_commit(lsn)?;
+        }
         pager_test_log!(
             "[pager.commit] start lsn={} dirty_pages={} meta_dirty={}",
-            inner.next_lsn.0,
+            lsn.0,
             guard.dirty_pages.len(),
             inner.meta_dirty
         );
         debug!(
-            lsn = inner.next_lsn.0,
+            lsn = lsn.0,
             dirty_pages = guard.dirty_pages.len(),
             meta_dirty = inner.meta_dirty,
             "pager.commit_txn.start"
         );
-        let lsn = inner.next_lsn;
         let mut dirty_pages: Vec<PageId> = guard.dirty_pages.iter().copied().collect();
         if inner.meta_dirty && !dirty_pages.iter().any(|p| p.0 == 0) {
             dirty_pages.push(PageId(0));
@@ -1486,7 +1553,6 @@ impl Pager {
             inner.stats.dirty_writebacks += 1;
             borrowed_bytes = borrowed_bytes.saturating_add(self.page_size as u64);
         }
-        inner.next_lsn = Lsn(lsn.0 + 1);
         let borrowed_frames = wal_frames
             .iter()
             .filter(|frame| frame.payload.is_borrowed())
@@ -1504,6 +1570,7 @@ impl Pager {
             dirty_pages = dirty_page_count,
             "pager.commit_txn.frames_built"
         );
+        self.cache_overlays(&wal_frames);
         drop(inner);
         let wal_frame_count = wal_frames.len() as u64;
         if wal_frame_count > 0 {
@@ -1556,6 +1623,8 @@ impl Pager {
             if matches!(synchronous, Synchronous::Normal) {
                 self.schedule_normal_sync()?;
             }
+            self.finalize_commit(lsn)?;
+            self.record_committed_lsn(lsn);
             guard.committed = true;
             drop(guard);
             pager_test_log!("[pager.commit] borrowed path done lsn={}", lsn.0);
@@ -1621,6 +1690,8 @@ impl Pager {
         if matches!(synchronous, Synchronous::Normal) {
             self.schedule_normal_sync()?;
         }
+        self.finalize_commit(lsn)?;
+        self.record_committed_lsn(lsn);
         guard.committed = true;
         drop(guard);
         pager_test_log!("[pager.commit] commit complete lsn={}", lsn.0);
@@ -1793,6 +1864,8 @@ impl Pager {
         self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
         inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
         inner.meta_dirty = false;
+        self.release_commits_up_to(inner.meta.last_checkpoint_lsn);
+        self.prune_overlays(inner.meta.last_checkpoint_lsn);
         *self.last_autocheckpoint.lock() = Some(Instant::now());
         pager_test_log!(
             "[pager.checkpoint] complete applied_frames={} new_last_lsn={}",
@@ -1919,6 +1992,127 @@ impl Pager {
         Ok(())
     }
 
+    fn record_committed_lsn(&self, lsn: Lsn) {
+        self.latest_visible_lsn
+            .fetch_max(lsn.0, AtomicOrdering::Release);
+    }
+
+    /// Returns the most recent LSN whose commit finished.
+    pub fn latest_committed_lsn(&self) -> Lsn {
+        Lsn(self.latest_visible_lsn.load(AtomicOrdering::Acquire))
+    }
+
+    fn register_pending_commit(&self, lsn: Lsn) -> Result<()> {
+        let mut table = self.commit_table.lock();
+        table.reserve(lsn.0)
+    }
+
+    fn finalize_commit(&self, lsn: Lsn) -> Result<()> {
+        let mut table = self.commit_table.lock();
+        table.mark_committed(lsn.0)
+    }
+
+    fn release_commits_up_to(&self, lsn: Lsn) {
+        let mut table = self.commit_table.lock();
+        table.release_committed(lsn.0);
+    }
+
+    fn cache_overlays(&self, frames: &[PendingWalFrame]) {
+        if frames.is_empty() {
+            return;
+        }
+        let mut overlays = self.overlays.lock();
+        for frame in frames {
+            if frame.page_id.0 == 0 {
+                continue;
+            }
+            let data = Arc::<[u8]>::from(frame.payload.as_slice());
+            overlays
+                .entry(frame.page_id)
+                .or_insert_with(VecDeque::new)
+                .push_back(OverlayEntry {
+                    lsn: frame.lsn,
+                    data,
+                });
+        }
+    }
+
+    fn overlay_from_cache(&self, page_id: PageId, snapshot_lsn: Lsn) -> Option<Arc<[u8]>> {
+        let overlays = self.overlays.lock();
+        overlays.get(&page_id).and_then(|queue| {
+            queue
+                .iter()
+                .rev()
+                .find(|entry| entry.lsn.0 <= snapshot_lsn.0)
+                .map(|entry| Arc::clone(&entry.data))
+        })
+    }
+
+    fn prune_overlays(&self, upto: Lsn) {
+        let mut overlays = self.overlays.lock();
+        overlays.retain(|_, queue| {
+            while let Some(front) = queue.front() {
+                if front.lsn.0 <= upto.0 {
+                    queue.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !queue.is_empty()
+        });
+    }
+
+    fn overlay_page_for_snapshot(
+        &self,
+        page_id: PageId,
+        checkpoint_lsn: Lsn,
+        snapshot_lsn: Lsn,
+    ) -> Result<Option<Vec<u8>>> {
+        if snapshot_lsn.0 <= checkpoint_lsn.0 {
+            return Ok(None);
+        }
+        if let Some(overlay) = self.overlay_from_cache(page_id, snapshot_lsn) {
+            return Ok(Some(overlay.to_vec()));
+        }
+        let mut iter = self.wal.iter()?;
+        let mut overlay: Option<Vec<u8>> = None;
+        while let Some(frame) = iter.next_frame()? {
+            if frame.lsn.0 <= checkpoint_lsn.0 || frame.lsn.0 > snapshot_lsn.0 {
+                continue;
+            }
+            if frame.page_id == page_id {
+                overlay = Some(frame.payload);
+            }
+        }
+        Ok(overlay)
+    }
+
+    fn begin_read_consistency(&self, consistency: ReadConsistency) -> Result<ReadGuard> {
+        let lock = self.locks.acquire_reader()?;
+        let snapshot_lsn = match consistency {
+            ReadConsistency::Checkpoint => {
+                let inner = self.inner.lock();
+                inner.meta.last_checkpoint_lsn
+            }
+            ReadConsistency::LatestCommitted => self.latest_committed_lsn(),
+        };
+        Ok(ReadGuard {
+            _lock: lock,
+            snapshot_lsn,
+            consistency,
+        })
+    }
+
+    /// Begins a read transaction targeting the latest committed snapshot.
+    pub fn begin_latest_committed_read(&self) -> Result<ReadGuard> {
+        self.begin_read_consistency(ReadConsistency::LatestCommitted)
+    }
+
+    /// Begins a read transaction restricted to checkpoint durability.
+    pub fn begin_checkpoint_read(&self) -> Result<ReadGuard> {
+        self.begin_read_consistency(ReadConsistency::Checkpoint)
+    }
+
     /// Returns the current metadata.
     pub fn meta(&self) -> Result<Meta> {
         let inner = self.inner.lock();
@@ -1934,25 +2128,22 @@ impl PageStore for Pager {
     fn get_page(&self, guard: &ReadGuard, id: PageId) -> Result<PageRef> {
         let mut cached: Option<Arc<[u8]>> = None;
         let mut refresh_idx: Option<usize> = None;
+        let snapshot_lsn = guard.snapshot_lsn;
         let (salt, page_size, last_checkpoint_lsn) = {
             let mut inner = self.inner.lock();
             if let Some(&idx) = inner.page_table.get(&id) {
-                let frame_flags = {
-                    let frame = &inner.frames[idx];
-                    (
-                        !frame.newly_allocated
-                            && (frame.dirty || frame.pending_checkpoint)
-                            && guard.snapshot_lsn == inner.meta.last_checkpoint_lsn,
-                        frame.needs_refresh,
-                    )
-                };
-                let needs_snapshot = frame_flags.0;
-                let needs_refresh = frame_flags.1;
-                if needs_snapshot {
+                let frame = &inner.frames[idx];
+                let has_uncommitted = frame.dirty && !frame.newly_allocated;
+                let needs_refresh = frame.needs_refresh;
+                let snapshot_is_checkpoint = snapshot_lsn == inner.meta.last_checkpoint_lsn;
+                let pending_checkpoint = frame.pending_checkpoint;
+                if has_uncommitted {
                     inner.stats.misses += 1;
                 } else if needs_refresh {
                     inner.stats.misses += 1;
                     refresh_idx = Some(idx);
+                } else if pending_checkpoint && snapshot_is_checkpoint {
+                    inner.stats.misses += 1;
                 } else {
                     inner.stats.hits += 1;
                     let buf = inner.frames[idx].buf.read();
@@ -1970,15 +2161,11 @@ impl PageStore for Pager {
             )
         };
         if let Some(data) = cached {
-            debug_assert_eq!(
-                guard.snapshot_lsn, last_checkpoint_lsn,
-                "snapshot advanced while reader active"
-            );
             return Ok(PageRef { id, data });
         }
-        debug_assert_eq!(
-            guard.snapshot_lsn, last_checkpoint_lsn,
-            "snapshot advanced while reader active"
+        debug_assert!(
+            snapshot_lsn.0 >= last_checkpoint_lsn.0,
+            "snapshot regressed while reader active"
         );
         let mut buf = vec![0u8; self.page_size];
         let verify_crc = self.checksum_verify_on_read.load(AtomicOrdering::Relaxed);
@@ -2021,6 +2208,13 @@ impl PageStore for Pager {
                 }
             }
         }
+        if snapshot_lsn.0 > last_checkpoint_lsn.0 {
+            if let Some(overlay) =
+                self.overlay_page_for_snapshot(id, last_checkpoint_lsn, snapshot_lsn)?
+            {
+                buf.copy_from_slice(&overlay);
+            }
+        }
         Ok(PageRef {
             id,
             data: Arc::from(buf),
@@ -2045,15 +2239,11 @@ impl PageStore for Pager {
     }
 
     fn begin_read(&self) -> Result<ReadGuard> {
-        let lock = self.locks.acquire_reader()?;
-        let snapshot_lsn = {
-            let inner = self.inner.lock();
-            inner.meta.last_checkpoint_lsn
-        };
-        Ok(ReadGuard {
-            _lock: lock,
-            snapshot_lsn,
-        })
+        self.begin_read_consistency(ReadConsistency::Checkpoint)
+    }
+
+    fn begin_latest_committed_read(&self) -> Result<ReadGuard> {
+        self.begin_read_consistency(ReadConsistency::LatestCommitted)
     }
 
     fn begin_write(&self) -> Result<WriteGuard<'_>> {
@@ -2072,6 +2262,7 @@ impl PageStore for Pager {
             pending_free_snapshot: inner.pending_free.clone(),
             meta_dirty_snapshot: inner.meta_dirty,
             committed: false,
+            commit_lsn: None,
             extensions: TxnExtensions::default(),
         };
         drop(inner);
@@ -2103,6 +2294,10 @@ impl PageStore for Pager {
 
     fn checksum_verification_enabled(&self) -> bool {
         self.checksum_verify_on_read.load(AtomicOrdering::Relaxed)
+    }
+
+    fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
+        Some(Arc::clone(&self.commit_table))
     }
 }
 

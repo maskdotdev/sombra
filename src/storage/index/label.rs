@@ -75,7 +75,7 @@ impl LabelIndex {
         if self.indexed_labels.read().contains(&label) {
             return Ok(true);
         }
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let key = encode_key(label, LABEL_SENTINEL_NODE);
         let snapshot = snapshot_commit(&read);
         let present = match self.tree.get(&read, &key) {
@@ -170,7 +170,7 @@ impl LabelIndex {
             return Ok(());
         }
         let (lower, upper) = label_bounds(label);
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let mut cursor = self.tree.range(
             &read,
             Bound::Included(lower.clone()),
@@ -237,7 +237,7 @@ impl LabelIndex {
         if root.0 == 0 {
             return Ok(());
         }
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let page_ref = self.store.get_page(&read, root)?;
         let data = page_ref.data();
         if data.len() < PAGE_HDR_LEN {

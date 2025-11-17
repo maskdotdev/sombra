@@ -304,7 +304,7 @@ impl Dict {
     /// * `Err(_)` - An error occurred during the lookup.
     pub fn lookup(&self, s: &str) -> Result<Option<StrId>> {
         let key = encode_string_key(s);
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         let raw = self.s2i.get(&read, &key)?;
         drop(read);
         if let Some(id) = raw {
@@ -393,7 +393,7 @@ impl Dict {
 
     /// Resolves a string identifier using a fresh read guard.
     pub fn resolve_str(&self, id: StrId) -> Result<String> {
-        let read = self.store.begin_read()?;
+        let read = self.store.begin_latest_committed_read()?;
         self.resolve(&read, id)
     }
 
