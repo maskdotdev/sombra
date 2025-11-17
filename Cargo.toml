@@ -62,6 +62,10 @@ path = "tests/integration/storage_stress.rs"
 name = "vstore"
 path = "tests/integration/vstore.rs"
 
+[[test]]
+name = "wal_crash_replay"
+path = "tests/integration/wal_crash_replay.rs"
+
 [features]
 default = ["bundled-dashboard"]
 bundled-dashboard = ["include_dir", "mime_guess"]
