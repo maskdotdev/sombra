@@ -66,6 +66,10 @@ path = "tests/integration/vstore.rs"
 name = "wal_crash_replay"
 path = "tests/integration/wal_crash_replay.rs"
 
+[[test]]
+name = "vacuum_worker"
+path = "tests/integration/vacuum_worker.rs"
+
 [features]
 default = ["bundled-dashboard"]
 bundled-dashboard = ["include_dir", "mime_guess"]

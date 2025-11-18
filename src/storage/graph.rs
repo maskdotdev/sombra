@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::cmp::{Ordering as CmpOrdering, Ordering};
 #[cfg(feature = "degree-cache")]
 use std::collections::HashMap;
@@ -5,15 +6,18 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::thread::{self, ThreadId};
+use std::time::{Duration, Instant, SystemTime};
 
 use lru::LruCache;
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
+use crate::primitives::pager::{
+    AutockptContext, BackgroundMaintainer, PageStore, ReadGuard, WriteGuard,
+};
 use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
 use crate::storage::index::{
     collect_all, CatalogEpoch, DdlEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef,
@@ -110,9 +114,28 @@ pub struct Graph {
     distinct_neighbors_default: bool,
     row_hash_header: bool,
     vacuum_cfg: VacuumCfg,
-    vacuum_worker: StdMutex<Option<VacuumWorker>>,
-    last_vacuum_stats: StdMutex<Option<GraphVacuumStats>>,
+    vacuum_sched: VacuumSched,
     version_log_bytes: AtomicU64,
+}
+
+struct VacuumSched {
+    running: Cell<bool>,
+    next_deadline_ms: Cell<u128>,
+    last_stats: RefCell<Option<GraphVacuumStats>>,
+    owner_tid: ThreadId,
+    pending_trigger: Cell<Option<VacuumTrigger>>,
+}
+
+impl VacuumSched {
+    fn new() -> Self {
+        Self {
+            running: Cell::new(false),
+            next_deadline_ms: Cell::new(0),
+            last_stats: RefCell::new(None),
+            owner_tid: thread::current().id(),
+            pending_trigger: Cell::new(None),
+        }
+    }
 }
 
 trait VersionChainRecord {
@@ -190,14 +213,24 @@ pub struct AdjacencyVacuumStats {
 }
 
 /// Aggregate statistics for MVCC cleanup across storage components.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphVacuumStats {
     /// Timestamp when the run started.
-    pub run_started_at: Instant,
+    pub started_at: SystemTime,
+    /// Timestamp when the run completed.
+    pub finished_at: SystemTime,
     /// Horizon commit applied for the run.
     pub horizon_commit: CommitId,
-    /// Version-log entries pruned.
-    pub versions_pruned: u64,
+    /// Trigger for the run.
+    pub trigger: VacuumTrigger,
+    /// Number of version-log entries examined.
+    pub log_versions_examined: u64,
+    /// Number of version-log entries pruned.
+    pub log_versions_pruned: u64,
+    /// Number of orphaned log entries pruned.
+    pub orphan_log_versions_pruned: u64,
+    /// Number of tombstone heads purged.
+    pub heads_purged: u64,
     /// Forward adjacency entries pruned.
     pub adjacency_fwd_pruned: u64,
     /// Reverse adjacency entries pruned.
@@ -208,12 +241,12 @@ pub struct GraphVacuumStats {
     pub index_chunked_pruned: u64,
     /// B-tree postings pruned.
     pub index_btree_pruned: u64,
+    /// Estimated pages read during the pass.
+    pub pages_read: u64,
+    /// Estimated pages written during the pass.
+    pub pages_written: u64,
     /// Estimated bytes reclaimed.
     pub bytes_reclaimed: u64,
-    /// Duration in milliseconds.
-    pub run_millis: u64,
-    /// Trigger for the run.
-    pub trigger: VacuumTrigger,
 }
 
 /// Reason a vacuum pass ran.
@@ -234,6 +267,8 @@ pub struct VacuumBudget {
     pub max_versions: Option<usize>,
     /// Maximum runtime allowed.
     pub max_duration: Duration,
+    /// Whether index cleanup should run as part of this pass.
+    pub index_cleanup: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -326,6 +361,10 @@ impl Graph {
         self.commit_table.as_ref().map(Arc::clone)
     }
 
+    fn version_log_bytes(&self) -> u64 {
+        self.version_log_bytes.load(AtomicOrdering::Relaxed)
+    }
+
     /// Returns the oldest reader commit currently pinned by any snapshot.
     pub fn oldest_reader_commit(&self) -> Option<CommitId> {
         let table = self.commit_table.as_ref()?;
@@ -369,19 +408,88 @@ impl Graph {
 
     /// Returns the most recent vacuum statistics.
     pub fn last_vacuum_stats(&self) -> Option<GraphVacuumStats> {
-        *self.last_vacuum_stats.lock().unwrap()
+        self.vacuum_sched.last_stats.borrow().clone()
     }
 
     /// Requests an immediate vacuum pass (primarily for tests).
     pub fn trigger_vacuum(&self) {
-        if let Some(worker) = self.vacuum_worker.lock().unwrap().as_ref() {
-            worker.notify_high_water(VacuumTrigger::Manual);
-        }
+        self.vacuum_sched
+            .pending_trigger
+            .set(Some(VacuumTrigger::Manual));
+        self.vacuum_sched.next_deadline_ms.set(0);
+        self.maybe_background_vacuum(VacuumTrigger::Manual);
     }
 
-    fn start_vacuum_worker(self: &Arc<Self>) {
-        let worker = VacuumWorker::spawn(Arc::clone(self));
-        *self.vacuum_worker.lock().unwrap() = Some(worker);
+    fn maybe_background_vacuum(&self, default_trigger: VacuumTrigger) {
+        debug_assert_eq!(
+            thread::current().id(),
+            self.vacuum_sched.owner_tid,
+            "vacuum invoked from unexpected thread"
+        );
+        if !self.vacuum_cfg.enabled {
+            return;
+        }
+        if self.vacuum_sched.running.get() {
+            return;
+        }
+        let now_ms = now_millis();
+        let next_deadline = self.vacuum_sched.next_deadline_ms.get();
+        let pending = self.vacuum_sched.pending_trigger.get();
+        let high_water_triggered = self.vacuum_cfg.log_high_water_bytes > 0
+            && self.version_log_bytes() >= self.vacuum_cfg.log_high_water_bytes;
+        if high_water_triggered && pending.is_none() {
+            self.vacuum_sched
+                .pending_trigger
+                .set(Some(VacuumTrigger::HighWater));
+        }
+        let pending_trigger = self.vacuum_sched.pending_trigger.get();
+        if pending_trigger.is_none()
+            && !high_water_triggered
+            && default_trigger != VacuumTrigger::Manual
+        {
+            if next_deadline != 0 && now_ms < next_deadline {
+                return;
+            }
+        }
+        if self.vacuum_sched.running.replace(true) {
+            return;
+        }
+        let trigger =
+            self.vacuum_sched
+                .pending_trigger
+                .replace(None)
+                .unwrap_or(if high_water_triggered {
+                    VacuumTrigger::HighWater
+                } else {
+                    default_trigger
+                });
+        let Some(horizon) = self.compute_vacuum_horizon() else {
+            self.vacuum_sched.running.set(false);
+            return;
+        };
+        let budget = VacuumBudget {
+            max_versions: if self.vacuum_cfg.max_pages_per_pass == 0 {
+                None
+            } else {
+                Some(self.vacuum_cfg.max_pages_per_pass)
+            },
+            max_duration: Duration::from_millis(self.vacuum_cfg.max_millis_per_pass.max(1)),
+            index_cleanup: self.vacuum_cfg.index_cleanup,
+        };
+        let result = self.vacuum_mvcc(horizon, None, trigger, Some(&budget));
+        match result {
+            Ok(stats) => {
+                self.record_vacuum_stats(stats);
+            }
+            Err(err) => {
+                warn!(error = %err, "graph.vacuum.failed");
+            }
+        }
+        let interval_ms = std::cmp::max(1, self.vacuum_cfg.interval.as_millis() as u128);
+        self.vacuum_sched
+            .next_deadline_ms
+            .set(now_ms.saturating_add(interval_ms));
+        self.vacuum_sched.running.set(false);
     }
 
     /// Runs MVCC cleanup across versions, adjacency, and indexes.
@@ -392,40 +500,36 @@ impl Graph {
         trigger: VacuumTrigger,
         budget: Option<&VacuumBudget>,
     ) -> Result<GraphVacuumStats> {
-        let start = Instant::now();
-        let bytes_before = self.version_log_bytes.load(AtomicOrdering::Relaxed);
+        let started_at = SystemTime::now();
+        let bytes_before = self.version_log_bytes();
         let version_limit = limit.or_else(|| budget.and_then(|b| b.max_versions));
         let version_stats = self.vacuum_version_log(horizon, version_limit)?;
         let mut adjacency_stats = AdjacencyVacuumStats::default();
         let mut index_stats = IndexVacuumStats::default();
-        if budget
-            .map(|b| start.elapsed() < b.max_duration)
-            .unwrap_or(true)
-        {
+        if budget.map(|b| b.index_cleanup).unwrap_or(true) {
             adjacency_stats = self.vacuum_adjacency(horizon)?;
-        }
-        if budget
-            .map(|b| start.elapsed() < b.max_duration)
-            .unwrap_or(true)
-        {
             index_stats = self.vacuum_indexes(horizon)?;
         }
-        let bytes_after = self.version_log_bytes.load(AtomicOrdering::Relaxed);
-        let stats = GraphVacuumStats {
-            run_started_at: start,
+        let finished_at = SystemTime::now();
+        let bytes_after = self.version_log_bytes();
+        Ok(GraphVacuumStats {
+            started_at,
+            finished_at,
             horizon_commit: horizon,
-            versions_pruned: version_stats.entries_pruned,
+            trigger,
+            log_versions_examined: version_stats.entries_pruned,
+            log_versions_pruned: version_stats.entries_pruned,
+            orphan_log_versions_pruned: version_stats.entries_pruned,
+            heads_purged: 0,
             adjacency_fwd_pruned: adjacency_stats.fwd_entries_pruned,
             adjacency_rev_pruned: adjacency_stats.rev_entries_pruned,
             index_label_pruned: index_stats.label_entries_pruned,
             index_chunked_pruned: index_stats.chunked_segments_pruned,
             index_btree_pruned: index_stats.btree_entries_pruned,
+            pages_read: 0,
+            pages_written: 0,
             bytes_reclaimed: bytes_before.saturating_sub(bytes_after),
-            run_millis: start.elapsed().as_millis().min(u64::MAX as u128) as u64,
-            trigger,
-        };
-        self.record_vacuum_stats(stats);
-        Ok(stats)
+        })
     }
 
     fn vacuum_version_log_with_write(
@@ -689,16 +793,20 @@ impl Graph {
             distinct_neighbors_default: opts.distinct_neighbors_default,
             row_hash_header,
             vacuum_cfg: opts.vacuum.clone(),
-            vacuum_worker: StdMutex::new(None),
-            last_vacuum_stats: StdMutex::new(None),
+            vacuum_sched: VacuumSched::new(),
             version_log_bytes: AtomicU64::new(0),
         });
         graph.recompute_version_log_bytes()?;
-        graph.maybe_signal_high_water();
-        if graph.vacuum_cfg.enabled {
-            Graph::start_vacuum_worker(&graph);
-        }
+        graph.register_vacuum_hook();
+        graph.vacuum_sched.next_deadline_ms.set(0);
         Ok(graph)
+    }
+
+    fn register_vacuum_hook(self: &Arc<Self>) {
+        let maint_graph: Arc<Graph> = Arc::clone(self);
+        let maint_trait: Arc<dyn BackgroundMaintainer> = maint_graph;
+        self.store
+            .register_background_maint(Arc::downgrade(&maint_trait));
     }
 
     /// Creates a new node in the graph with the given specification.
@@ -2453,21 +2561,27 @@ impl Graph {
     }
 
     fn maybe_signal_high_water(&self) {
-        if self.vacuum_cfg.log_high_water_bytes == 0 {
+        let threshold = self.vacuum_cfg.log_high_water_bytes;
+        if threshold == 0 {
             return;
         }
-        let current = self.version_log_bytes.load(AtomicOrdering::Relaxed);
-        if current < self.vacuum_cfg.log_high_water_bytes {
+        if self.version_log_bytes() < threshold {
             return;
         }
-        if let Some(worker) = self.vacuum_worker.lock().unwrap().as_ref() {
-            worker.notify_high_water(VacuumTrigger::HighWater);
+        if !matches!(
+            self.vacuum_sched.pending_trigger.get(),
+            Some(VacuumTrigger::Manual)
+        ) {
+            self.vacuum_sched
+                .pending_trigger
+                .set(Some(VacuumTrigger::HighWater));
         }
+        self.vacuum_sched.next_deadline_ms.set(0);
     }
 
     fn compute_vacuum_horizon(&self) -> Option<CommitId> {
         if let Some(table) = &self.commit_table {
-            let mut guard = table.lock();
+            let guard = table.lock();
             Some(guard.vacuum_horizon(self.vacuum_cfg.retention_window))
         } else {
             Some(COMMIT_MAX)
@@ -2488,37 +2602,42 @@ impl Graph {
     }
 
     fn record_vacuum_stats(&self, stats: GraphVacuumStats) {
-        *self.last_vacuum_stats.lock().unwrap() = Some(stats);
+        *self.vacuum_sched.last_stats.borrow_mut() = Some(stats.clone());
         self.log_vacuum_stats(&stats);
     }
 
     fn log_vacuum_stats(&self, stats: &GraphVacuumStats) {
-        if stats.versions_pruned > 0
+        let made_progress = stats.log_versions_pruned > 0
+            || stats.orphan_log_versions_pruned > 0
+            || stats.heads_purged > 0
             || stats.adjacency_fwd_pruned > 0
             || stats.adjacency_rev_pruned > 0
             || stats.index_label_pruned > 0
             || stats.index_chunked_pruned > 0
             || stats.index_btree_pruned > 0
-        {
+            || stats.bytes_reclaimed > 0;
+        if made_progress {
             info!(
                 horizon = stats.horizon_commit,
-                versions = stats.versions_pruned,
+                trigger = ?stats.trigger,
+                versions = stats.log_versions_pruned,
+                orphan_versions = stats.orphan_log_versions_pruned,
+                tombstone_heads = stats.heads_purged,
                 adj_fwd = stats.adjacency_fwd_pruned,
                 adj_rev = stats.adjacency_rev_pruned,
                 index_label = stats.index_label_pruned,
                 index_chunked = stats.index_chunked_pruned,
                 index_btree = stats.index_btree_pruned,
                 bytes_reclaimed = stats.bytes_reclaimed,
-                trigger = ?stats.trigger,
                 "graph.vacuum.completed"
             );
-        } else {
-            debug!(
-                horizon = stats.horizon_commit,
-                trigger = ?stats.trigger,
-                "graph.vacuum.noop"
-            );
+            return;
         }
+        debug!(
+            horizon = stats.horizon_commit,
+            trigger = ?stats.trigger,
+            "graph.vacuum.noop"
+        );
     }
 
     fn free_prop_values_from_bytes(&self, tx: &mut WriteGuard<'_>, bytes: &[u8]) -> Result<()> {
@@ -2635,11 +2754,21 @@ impl Graph {
     }
 }
 
+fn now_millis() -> u128 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 impl Drop for Graph {
-    fn drop(&mut self) {
-        if let Some(worker) = self.vacuum_worker.lock().unwrap().take() {
-            drop(worker);
-        }
+    fn drop(&mut self) {}
+}
+
+impl BackgroundMaintainer for Graph {
+    fn run_background_maint(&self, _ctx: &AutockptContext) {
+        self.maybe_background_vacuum(VacuumTrigger::Timer);
     }
 }
 
@@ -3611,92 +3740,94 @@ impl PostingStream for FallbackLabelScan {
     }
 }
 
-struct VacuumWorker {
-    handle: Option<std::thread::JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
-    state: Arc<(StdMutex<Option<VacuumTrigger>>, std::sync::Condvar)>,
-}
+#[cfg(test)]
+mod vacuum_background_tests {
+    use super::*;
+    use crate::primitives::pager::{PageStore, Pager, PagerOptions};
+    use crate::storage::GraphOptions;
+    use crate::types::{LabelId, PropId, Result};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::tempdir;
 
-impl VacuumWorker {
-    fn spawn(graph: Arc<Graph>) -> Self {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let state = Arc::new((StdMutex::new(None), std::sync::Condvar::new()));
-        let weak = Arc::downgrade(&graph);
-        let cfg = graph.vacuum_cfg.clone();
-        let shutdown_clone = shutdown.clone();
-        let state_clone = state.clone();
-        let handle = std::thread::Builder::new()
-            .name("graph-vacuum".into())
-            .spawn(move || loop {
-                let trigger = {
-                    let (lock, condvar) = &*state_clone;
-                    let mut guard = lock.lock().unwrap();
-                    if shutdown_clone.load(AtomicOrdering::Relaxed) {
-                        break;
-                    }
-                    let wait_result = condvar
-                        .wait_timeout(guard, cfg.interval)
-                        .expect("vacuum worker wait");
-                    guard = wait_result.0;
-                    let timed_out = wait_result.1.timed_out();
-                    let trig = guard.take();
-                    drop(guard);
-                    if shutdown_clone.load(AtomicOrdering::Relaxed) {
-                        break;
-                    }
-                    trig.unwrap_or(if timed_out {
-                        VacuumTrigger::Timer
-                    } else {
-                        VacuumTrigger::Manual
-                    })
-                };
-                if shutdown_clone.load(AtomicOrdering::Relaxed) {
-                    break;
-                }
-                if let Some(graph) = weak.upgrade() {
-                    let Some(horizon) = graph.compute_vacuum_horizon() else {
-                        continue;
-                    };
-                    let budget = VacuumBudget {
-                        max_versions: if cfg.max_segments_per_run == 0 {
-                            None
-                        } else {
-                            Some(cfg.max_segments_per_run as usize)
-                        },
-                        max_duration: Duration::from_millis(cfg.max_run_millis.max(1)),
-                    };
-                    let _ = graph.vacuum_mvcc(horizon, None, trigger, Some(&budget));
-                } else {
-                    break;
-                }
-            })
-            .expect("spawn graph vacuum worker");
-        Self {
-            handle: Some(handle),
-            shutdown,
-            state,
-        }
+    fn setup_graph(cfg: VacuumCfg) -> (tempfile::TempDir, Arc<Pager>, Arc<Graph>) {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("vacuum-bg.db");
+        let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+        let store: Arc<dyn PageStore> = pager.clone();
+        let graph = Graph::open(GraphOptions::new(store).vacuum(cfg)).unwrap();
+        (dir, pager, graph)
     }
 
-    fn notify_high_water(&self, trigger: VacuumTrigger) {
-        let (lock, condvar) = &*self.state;
-        let mut guard = lock.lock().unwrap();
-        *guard = Some(trigger);
-        condvar.notify_one();
+    fn create_and_delete_node(pager: &Pager, graph: &Graph) -> Result<()> {
+        let mut write = pager.begin_write()?;
+        let node = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[LabelId(1)],
+                props: &[PropEntry::new(PropId(1), PropValue::Int(1))],
+            },
+        )?;
+        pager.commit(write)?;
+        let mut write = pager.begin_write()?;
+        graph.delete_node(&mut write, node, DeleteNodeOpts::default())?;
+        pager.commit(write)?;
+        Ok(())
     }
-}
 
-impl Drop for VacuumWorker {
-    fn drop(&mut self) {
-        self.shutdown.store(true, AtomicOrdering::Relaxed);
-        {
-            let (lock, condvar) = &*self.state;
-            let mut guard = lock.lock().unwrap();
-            *guard = Some(VacuumTrigger::Manual);
-            condvar.notify_one();
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+    #[test]
+    fn reentrancy_guard_skips_when_running() -> Result<()> {
+        let cfg = VacuumCfg {
+            enabled: true,
+            interval: Duration::from_millis(50),
+            retention_window: Duration::from_millis(0),
+            log_high_water_bytes: u64::MAX,
+            max_pages_per_pass: 32,
+            max_millis_per_pass: 50,
+            index_cleanup: true,
+        };
+        let (_tmpdir, pager, graph) = setup_graph(cfg);
+        create_and_delete_node(&pager, &graph)?;
+        graph.vacuum_sched.last_stats.borrow_mut().take();
+        graph.vacuum_sched.running.set(true);
+        graph.trigger_vacuum();
+        assert!(graph.vacuum_sched.last_stats.borrow().is_none());
+        graph.vacuum_sched.running.set(false);
+        graph.trigger_vacuum();
+        assert!(graph.last_vacuum_stats().is_some());
+        drop(graph);
+        drop(pager);
+        Ok(())
+    }
+
+    #[test]
+    fn high_water_sets_pending_trigger() -> Result<()> {
+        let cfg = VacuumCfg {
+            enabled: false,
+            interval: Duration::from_secs(60),
+            retention_window: Duration::from_millis(0),
+            log_high_water_bytes: 1,
+            max_pages_per_pass: 16,
+            max_millis_per_pass: 10,
+            index_cleanup: true,
+        };
+        let (_tmpdir, pager, graph) = setup_graph(cfg);
+        let mut write = pager.begin_write()?;
+        graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[LabelId(2)],
+                props: &[PropEntry::new(PropId(2), PropValue::Int(2))],
+            },
+        )?;
+        pager.commit(write)?;
+        assert!(matches!(
+            graph.vacuum_sched.pending_trigger.get(),
+            Some(VacuumTrigger::HighWater)
+        ));
+        assert_eq!(graph.vacuum_sched.next_deadline_ms.get(), 0);
+        drop(graph);
+        drop(pager);
+        Ok(())
     }
 }

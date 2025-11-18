@@ -102,21 +102,24 @@ pub struct VacuumCfg {
     pub retention_window: Duration,
     /// Version-log size that triggers eager cleanup.
     pub log_high_water_bytes: u64,
-    /// Soft runtime budget per pass (milliseconds).
-    pub max_run_millis: u64,
     /// Maximum version-log entries to prune per pass.
-    pub max_segments_per_run: u32,
+    pub max_pages_per_pass: usize,
+    /// Soft runtime budget per pass (milliseconds).
+    pub max_millis_per_pass: u64,
+    /// Whether the pass should also clean secondary indexes.
+    pub index_cleanup: bool,
 }
 
 impl Default for VacuumCfg {
     fn default() -> Self {
         Self {
             enabled: true,
-            interval: Duration::from_secs(30),
+            interval: Duration::from_secs(5),
             retention_window: Duration::from_secs(60 * 60 * 24),
             log_high_water_bytes: 512 * 1024 * 1024,
-            max_run_millis: 50,
-            max_segments_per_run: 8,
+            max_pages_per_pass: 128,
+            max_millis_per_pass: 50,
+            index_cleanup: true,
         }
     }
 }
