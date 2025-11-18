@@ -63,7 +63,7 @@ impl LabelIndex {
                 .get_with_write(&mut write, &sentinel_key)?
                 .is_none()
             {
-                let value = index.versioned_empty_value(&mut write, false);
+                let value = index.versioned_empty_value(&mut write, false, None);
                 index.tree.put(&mut write, &sentinel_key, &value)?;
             }
             store.commit(write)?;
@@ -143,7 +143,7 @@ impl LabelIndex {
         existing_nodes.dedup_by_key(|node| node.0);
 
         let sentinel_key = encode_key(label, LABEL_SENTINEL_NODE);
-        let empty_value = self.versioned_empty_value(tx, false);
+        let empty_value = self.versioned_empty_value(tx, false, None);
         self.tree.put(tx, &sentinel_key, &empty_value)?;
         let filtered: Vec<_> = existing_nodes
             .into_iter()
@@ -194,17 +194,39 @@ impl LabelIndex {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn insert_node(&self, tx: &mut WriteGuard<'_>, label: LabelId, node: NodeId) -> Result<()> {
+        self.insert_node_with_commit(tx, label, node, None)
+    }
+
+    pub fn insert_node_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        label: LabelId,
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         self.ensure_root_initialized(tx)?;
         if !self.is_indexed_with_write(tx, label)? {
             return Ok(());
         }
         let key = encode_key(label, node);
-        let value = self.versioned_empty_value(tx, false);
+        let value = self.versioned_empty_value(tx, false, commit);
         self.tree.put(tx, &key, &value)
     }
 
+    #[allow(dead_code)]
     pub fn remove_node(&self, tx: &mut WriteGuard<'_>, label: LabelId, node: NodeId) -> Result<()> {
+        self.remove_node_with_commit(tx, label, node, None)
+    }
+
+    pub fn remove_node_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        label: LabelId,
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         self.ensure_root_initialized(tx)?;
         if !self.is_indexed_with_write(tx, label)? {
             return Ok(());
@@ -215,7 +237,7 @@ impl LabelIndex {
                 "label index entry missing during removal",
             ));
         }
-        let tombstone = self.versioned_empty_value(tx, true);
+        let tombstone = self.versioned_empty_value(tx, true, commit);
         self.tree.put(tx, &key, &tombstone)
     }
 
@@ -329,8 +351,10 @@ impl LabelIndex {
         &self,
         tx: &mut WriteGuard<'_>,
         tombstone: bool,
+        commit: Option<CommitId>,
     ) -> VersionedValue<EmptyValue> {
-        let mut header = VersionHeader::new(tx.reserve_commit_id().0, COMMIT_MAX, 0, 0);
+        let commit_id = commit.unwrap_or_else(|| tx.reserve_commit_id().0);
+        let mut header = VersionHeader::new(commit_id, COMMIT_MAX, 0, 0);
         if tombstone {
             header.flags |= mvcc_flags::TOMBSTONE;
         }

@@ -116,6 +116,7 @@ pub struct Graph {
     vacuum_cfg: VacuumCfg,
     vacuum_sched: VacuumSched,
     version_log_bytes: AtomicU64,
+    version_log_entries: AtomicU64,
 }
 
 struct VacuumSched {
@@ -223,6 +224,8 @@ pub struct GraphVacuumStats {
     pub horizon_commit: CommitId,
     /// Trigger for the run.
     pub trigger: VacuumTrigger,
+    /// Duration of the run in milliseconds.
+    pub run_millis: u64,
     /// Number of version-log entries examined.
     pub log_versions_examined: u64,
     /// Number of version-log entries pruned.
@@ -329,6 +332,9 @@ impl Graph {
         self.version_log.put(tx, &ptr_value, &encoded)?;
         self.version_log_bytes
             .fetch_add(encoded.len() as u64, AtomicOrdering::Relaxed);
+        self.version_log_entries
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        self.publish_version_log_usage_metrics();
         self.maybe_signal_high_water();
         self.persist_tree_root(tx, RootKind::VersionLog)?;
         let next_ptr = ptr_value
@@ -363,6 +369,15 @@ impl Graph {
 
     fn version_log_bytes(&self) -> u64 {
         self.version_log_bytes.load(AtomicOrdering::Relaxed)
+    }
+
+    fn version_log_entry_count(&self) -> u64 {
+        self.version_log_entries.load(AtomicOrdering::Relaxed)
+    }
+
+    fn publish_version_log_usage_metrics(&self) {
+        self.metrics
+            .version_log_usage(self.version_log_bytes(), self.version_log_entry_count());
     }
 
     /// Returns the oldest reader commit currently pinned by any snapshot.
@@ -512,11 +527,16 @@ impl Graph {
         }
         let finished_at = SystemTime::now();
         let bytes_after = self.version_log_bytes();
+        let run_millis = finished_at
+            .duration_since(started_at)
+            .map(|dur| dur.as_millis() as u64)
+            .unwrap_or(0);
         Ok(GraphVacuumStats {
             started_at,
             finished_at,
             horizon_commit: horizon,
             trigger,
+            run_millis,
             log_versions_examined: version_stats.entries_pruned,
             log_versions_pruned: version_stats.entries_pruned,
             orphan_log_versions_pruned: version_stats.entries_pruned,
@@ -569,6 +589,13 @@ impl Graph {
         if bytes_removed > 0 {
             self.version_log_bytes
                 .fetch_sub(bytes_removed, AtomicOrdering::Relaxed);
+        }
+        if !to_delete.is_empty() {
+            self.version_log_entries
+                .fetch_sub(to_delete.len() as u64, AtomicOrdering::Relaxed);
+        }
+        if bytes_removed > 0 || !to_delete.is_empty() {
+            self.publish_version_log_usage_metrics();
         }
         Ok(VersionVacuumStats {
             entries_pruned: to_delete.len() as u64,
@@ -795,6 +822,7 @@ impl Graph {
             vacuum_cfg: opts.vacuum.clone(),
             vacuum_sched: VacuumSched::new(),
             version_log_bytes: AtomicU64::new(0),
+            version_log_entries: AtomicU64::new(0),
         });
         graph.recompute_version_log_bytes()?;
         graph.register_vacuum_hook();
@@ -828,7 +856,7 @@ impl Graph {
         };
         let root = self.nodes.root_page();
         debug_assert!(root.0 != 0, "nodes root page not initialized");
-        let (_commit_id, version) = self.tx_pending_version_header(tx);
+        let (commit_id, version) = self.tx_pending_version_header(tx);
         let row_bytes = match node::encode(
             &labels,
             payload,
@@ -861,7 +889,10 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Nodes)?;
-        if let Err(err) = self.indexes.insert_node_labels(tx, node_id, &labels) {
+        if let Err(err) =
+            self.indexes
+                .insert_node_labels_with_commit(tx, node_id, &labels, Some(commit_id))
+        {
             let _ = self.nodes.delete(tx, &node_id.0);
             if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
                 return Err(root_err);
@@ -872,7 +903,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
-        if let Err(err) = self.insert_indexed_props(tx, node_id, &labels, &prop_owned) {
+        if let Err(err) = self.insert_indexed_props(tx, node_id, &labels, &prop_owned, commit_id) {
             let _ = self.indexes.remove_node_labels(tx, node_id, &labels);
             let _ = self.nodes.delete(tx, &node_id.0);
             if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
@@ -1314,6 +1345,9 @@ impl Graph {
             return Err(SombraError::NotFound);
         }
         let row = versioned.row;
+        let prop_bytes = self.read_node_prop_bytes_with_write(tx, &row.props)?;
+        let old_props_vec = self.materialize_props_owned_with_write(tx, &prop_bytes)?;
+        let old_props: BTreeMap<PropId, PropValueOwned> = old_props_vec.into_iter().collect();
         let read = self.store.begin_latest_committed_read()?;
         let incident = self.collect_incident_edges(&read, id)?;
         drop(read);
@@ -1333,8 +1367,18 @@ impl Graph {
             }
         }
 
-        self.indexes.remove_node_labels(tx, id, &row.labels)?;
         let (commit_id, mut tombstone_header) = self.tx_pending_version_header(tx);
+        self.indexes
+            .remove_node_labels_with_commit(tx, id, &row.labels, Some(commit_id))?;
+        let empty_props = BTreeMap::new();
+        self.update_indexed_props_for_node(
+            tx,
+            id,
+            &row.labels,
+            &old_props,
+            &empty_props,
+            commit_id,
+        )?;
         let mut old_header = versioned.header;
         old_header.end = commit_id;
         let mut log_bytes = bytes.clone();
@@ -1444,7 +1488,14 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Nodes)?;
-        self.update_indexed_props_for_node(tx, id, &labels, &delta.old_map, &delta.new_map)?;
+        self.update_indexed_props_for_node(
+            tx,
+            id,
+            &labels,
+            &delta.old_map,
+            &delta.new_map,
+            commit_id,
+        )?;
         self.finalize_node_head(tx, id)?;
         Ok(())
     }
@@ -1466,7 +1517,7 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let (_commit_id, version) = self.tx_pending_version_header(tx);
+        let (commit_id, version) = self.tx_pending_version_header(tx);
         let row_bytes = match edge::encode(
             spec.src,
             spec.dst,
@@ -1501,7 +1552,9 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Edges)?;
-        if let Err(err) = self.insert_adjacencies(tx, &[(spec.src, spec.dst, spec.ty, edge_id)]) {
+        if let Err(err) =
+            self.insert_adjacencies(tx, &[(spec.src, spec.dst, spec.ty, edge_id)], commit_id)
+        {
             let _ = self.edges.delete(tx, &edge_id.0);
             if let Err(root_err) = self.persist_tree_root(tx, RootKind::Edges) {
                 return Err(root_err);
@@ -1765,8 +1818,8 @@ impl Graph {
             return Err(SombraError::NotFound);
         }
         let row = versioned.row;
-        self.remove_adjacency(tx, row.src, row.dst, row.ty, id)?;
         let (commit_id, mut tombstone_header) = self.tx_pending_version_header(tx);
+        self.remove_adjacency(tx, row.src, row.dst, row.ty, id, commit_id)?;
         let mut old_header = versioned.header;
         old_header.end = commit_id;
         let mut log_bytes = bytes.clone();
@@ -1841,12 +1894,8 @@ impl Graph {
         (commit_id, header)
     }
 
-    fn adjacency_value(
-        &self,
-        tx: &mut WriteGuard<'_>,
-        tombstone: bool,
-    ) -> VersionedValue<UnitValue> {
-        let (_commit_id, mut header) = self.tx_version_header(tx);
+    fn adjacency_value_for_commit(commit: CommitId, tombstone: bool) -> VersionedValue<UnitValue> {
+        let mut header = VersionHeader::new(commit, COMMIT_MAX, 0, 0);
         if tombstone {
             header.flags |= mvcc_flags::TOMBSTONE;
         }
@@ -2123,6 +2172,7 @@ impl Graph {
         &self,
         tx: &mut WriteGuard<'_>,
         entries: &[(NodeId, NodeId, TypeId, EdgeId)],
+        commit: CommitId,
     ) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -2133,7 +2183,7 @@ impl Graph {
             let rev_key = adjacency::encode_rev_key(*dst, *ty, *src, *edge);
             keys.push((fwd_key, rev_key));
         }
-        let versioned_unit = self.adjacency_value(tx, false);
+        let versioned_unit = Self::adjacency_value_for_commit(commit, false);
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(fwd, _)| fwd).collect();
             refs.sort_unstable_by(|a, b| a.cmp(b));
@@ -2181,23 +2231,25 @@ impl Graph {
         dst: NodeId,
         ty: TypeId,
         edge: EdgeId,
+        commit: CommitId,
     ) -> Result<()> {
         let fwd_key = adjacency::encode_fwd_key(src, ty, dst, edge);
         let rev_key = adjacency::encode_rev_key(dst, ty, src, edge);
-        let versioned_tombstone = self.adjacency_value(tx, true);
-        let mut ensure_existing =
+        let mut retire_entry =
             |tree: &BTree<Vec<u8>, VersionedValue<UnitValue>>, key: &Vec<u8>| -> Result<()> {
-                if tree.get_with_write(tx, key)?.is_none() {
+                let Some(mut current) = tree.get_with_write(tx, key)? else {
                     return Err(SombraError::Corruption(
                         "adjacency entry missing during delete",
                     ));
+                };
+                if current.header.end != COMMIT_MAX {
+                    return Err(SombraError::Corruption("adjacency entry already retired"));
                 }
-                Ok(())
+                current.header.end = commit;
+                tree.put(tx, key, &current)
             };
-        ensure_existing(&self.adj_fwd, &fwd_key)?;
-        ensure_existing(&self.adj_rev, &rev_key)?;
-        self.adj_fwd.put(tx, &fwd_key, &versioned_tombstone)?;
-        self.adj_rev.put(tx, &rev_key, &versioned_tombstone)?;
+        retire_entry(&self.adj_fwd, &fwd_key)?;
+        retire_entry(&self.adj_rev, &rev_key)?;
         self.persist_tree_root(tx, RootKind::AdjFwd)?;
         self.persist_tree_root(tx, RootKind::AdjRev)?;
         #[cfg(feature = "degree-cache")]
@@ -2589,21 +2641,48 @@ impl Graph {
     }
 
     fn recompute_version_log_bytes(&self) -> Result<()> {
-        let mut total = 0u64;
+        let mut total_bytes = 0u64;
+        let mut total_entries = 0u64;
         let mut write = self.store.begin_write()?;
         self.version_log
             .for_each_with_write(&mut write, |_, bytes| {
-                total = total.saturating_add(bytes.len() as u64);
+                total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+                total_entries = total_entries.saturating_add(1);
                 Ok(())
             })?;
         drop(write);
-        self.version_log_bytes.store(total, AtomicOrdering::Relaxed);
+        self.version_log_bytes
+            .store(total_bytes, AtomicOrdering::Relaxed);
+        self.version_log_entries
+            .store(total_entries, AtomicOrdering::Relaxed);
+        self.publish_version_log_usage_metrics();
         Ok(())
     }
 
     fn record_vacuum_stats(&self, stats: GraphVacuumStats) {
+        self.publish_vacuum_metrics(&stats);
         *self.vacuum_sched.last_stats.borrow_mut() = Some(stats.clone());
         self.log_vacuum_stats(&stats);
+    }
+
+    fn publish_vacuum_metrics(&self, stats: &GraphVacuumStats) {
+        self.metrics
+            .vacuum_versions_pruned(stats.log_versions_pruned);
+        self.metrics
+            .vacuum_orphan_versions_pruned(stats.orphan_log_versions_pruned);
+        self.metrics
+            .vacuum_tombstone_heads_purged(stats.heads_purged);
+        self.metrics
+            .vacuum_adjacency_pruned(stats.adjacency_fwd_pruned, stats.adjacency_rev_pruned);
+        self.metrics.vacuum_index_entries_pruned(
+            stats.index_label_pruned,
+            stats.index_chunked_pruned,
+            stats.index_btree_pruned,
+        );
+        self.metrics.vacuum_bytes_reclaimed(stats.bytes_reclaimed);
+        self.metrics.vacuum_run_millis(stats.run_millis);
+        self.metrics.vacuum_horizon_commit(stats.horizon_commit);
+        self.publish_version_log_usage_metrics();
     }
 
     fn log_vacuum_stats(&self, stats: &GraphVacuumStats) {
@@ -2620,6 +2699,7 @@ impl Graph {
             info!(
                 horizon = stats.horizon_commit,
                 trigger = ?stats.trigger,
+                run_millis = stats.run_millis,
                 versions = stats.log_versions_pruned,
                 orphan_versions = stats.orphan_log_versions_pruned,
                 tombstone_heads = stats.heads_purged,
@@ -2636,6 +2716,7 @@ impl Graph {
         debug!(
             horizon = stats.horizon_commit,
             trigger = ?stats.trigger,
+            run_millis = stats.run_millis,
             "graph.vacuum.noop"
         );
     }
@@ -3349,13 +3430,20 @@ impl Graph {
         node: NodeId,
         labels: &[LabelId],
         props: &BTreeMap<PropId, PropValueOwned>,
+        commit: CommitId,
     ) -> Result<()> {
         for label in labels {
             let defs = self.index_defs_for_label(tx, *label)?;
             for def in defs.iter() {
                 if let Some(value) = props.get(&def.prop) {
                     let key = encode_value_key_owned(def.ty, value)?;
-                    self.indexes.insert_property_value(tx, &def, &key, node)?;
+                    self.indexes.insert_property_value_with_commit(
+                        tx,
+                        &def,
+                        &key,
+                        node,
+                        Some(commit),
+                    )?;
                 }
             }
         }
@@ -3411,19 +3499,36 @@ impl Graph {
         labels: &[LabelId],
         old_props: &BTreeMap<PropId, PropValueOwned>,
         new_props: &BTreeMap<PropId, PropValueOwned>,
+        commit: CommitId,
     ) -> Result<()> {
         for label in labels {
             let defs = self.index_defs_for_label(tx, *label)?;
             for def in defs.iter() {
                 let old = old_props.get(&def.prop);
                 let new = new_props.get(&def.prop);
-                if old == new {
-                    continue;
-                }
-                if let Some(value) = new {
-                    let key = encode_value_key_owned(def.ty, value)?;
-                    self.indexes.insert_property_value(tx, &def, &key, node)?;
-                }
+                match (old, new) {
+                    (_, Some(value)) => {
+                        let key = encode_value_key_owned(def.ty, value)?;
+                        self.indexes.insert_property_value_with_commit(
+                            tx,
+                            &def,
+                            &key,
+                            node,
+                            Some(commit),
+                        )?;
+                    }
+                    (Some(prev), None) => {
+                        let key = encode_value_key_owned(def.ty, prev)?;
+                        self.indexes.remove_property_value_with_commit(
+                            tx,
+                            &def,
+                            &key,
+                            node,
+                            Some(commit),
+                        )?;
+                    }
+                    _ => {}
+                };
             }
         }
         Ok(())

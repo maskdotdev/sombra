@@ -151,9 +151,21 @@ impl IndexStore {
         node: NodeId,
         labels: &[LabelId],
     ) -> Result<()> {
+        self.insert_node_labels_with_commit(tx, node, labels, None)
+    }
+
+    /// Inserts node labels using an existing commit ID.
+    pub fn insert_node_labels_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        labels: &[LabelId],
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         for label in labels {
             if self.label_index.is_indexed_with_write(tx, *label)? {
-                self.label_index.insert_node(tx, *label, node)?;
+                self.label_index
+                    .insert_node_with_commit(tx, *label, node, commit)?;
             }
         }
         Ok(())
@@ -166,9 +178,21 @@ impl IndexStore {
         node: NodeId,
         labels: &[LabelId],
     ) -> Result<()> {
+        self.remove_node_labels_with_commit(tx, node, labels, None)
+    }
+
+    /// Removes node labels using an existing commit ID.
+    pub fn remove_node_labels_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        labels: &[LabelId],
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         for label in labels {
             if self.label_index.is_indexed_with_write(tx, *label)? {
-                self.label_index.remove_node(tx, *label, node)?;
+                self.label_index
+                    .remove_node_with_commit(tx, *label, node, commit)?;
             }
         }
         Ok(())
@@ -275,14 +299,26 @@ impl IndexStore {
         value_key: &[u8],
         node: NodeId,
     ) -> Result<()> {
+        self.insert_property_value_with_commit(tx, def, value_key, node, None)
+    }
+
+    /// Inserts a property value into the index using the supplied commit ID.
+    pub fn insert_property_value_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        def: &IndexDef,
+        value_key: &[u8],
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         match def.kind {
             IndexKind::Chunked => {
                 let prefix = ChunkedIndex::make_prefix(def.label, def.prop, value_key);
-                self.chunked.put(tx, &prefix, node)
+                self.chunked.put_with_commit(tx, &prefix, node, commit)
             }
             IndexKind::BTree => {
                 let prefix = BTreePostings::make_prefix(def.label, def.prop, value_key);
-                self.btree.put(tx, &prefix, node)
+                self.btree.put_with_commit(tx, &prefix, node, commit)
             }
         }
     }
@@ -295,14 +331,26 @@ impl IndexStore {
         value_key: &[u8],
         node: NodeId,
     ) -> Result<()> {
+        self.remove_property_value_with_commit(tx, def, value_key, node, None)
+    }
+
+    /// Removes a property value from the index using the supplied commit ID.
+    pub fn remove_property_value_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        def: &IndexDef,
+        value_key: &[u8],
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         match def.kind {
             IndexKind::Chunked => {
                 let prefix = ChunkedIndex::make_prefix(def.label, def.prop, value_key);
-                self.chunked.remove(tx, &prefix, node)
+                self.chunked.remove_with_commit(tx, &prefix, node, commit)
             }
             IndexKind::BTree => {
                 let prefix = BTreePostings::make_prefix(def.label, def.prop, value_key);
-                self.btree.remove(tx, &prefix, node)
+                self.btree.remove_with_commit(tx, &prefix, node, commit)
             }
         }
     }

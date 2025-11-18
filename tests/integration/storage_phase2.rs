@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use sombra::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions};
 use sombra::storage::{
-    EdgeSpec, Graph, GraphOptions, NodeSpec, PropEntry, PropValue, PropValueOwned,
+    Dir, EdgeSpec, Graph, GraphOptions, NodeSpec, PropEntry, PropValue, PropValueOwned,
 };
 use sombra::types::{LabelId, PropId, Result, TypeId};
 use tempfile::tempdir;
@@ -119,5 +119,54 @@ fn edge_roundtrip() -> Result<()> {
     assert_eq!(edge.dst, dst);
     assert_eq!(edge.ty, TypeId(9));
     assert_eq!(edge.props.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn adjacency_delete_preserves_old_snapshot() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("adjacency_delete.db");
+    let (pager, graph) = setup_graph(&path)?;
+
+    let mut write = pager.begin_write()?;
+    let src = graph.create_node(
+        &mut write,
+        NodeSpec {
+            labels: &[LabelId(11)],
+            props: &[],
+        },
+    )?;
+    let dst = graph.create_node(
+        &mut write,
+        NodeSpec {
+            labels: &[LabelId(12)],
+            props: &[],
+        },
+    )?;
+    let edge_id = graph.create_edge(
+        &mut write,
+        EdgeSpec {
+            src,
+            dst,
+            ty: TypeId(42),
+            props: &[],
+        },
+    )?;
+    pager.commit(write)?;
+    pager.checkpoint(CheckpointMode::Force)?;
+
+    let read_before_delete = pager.begin_latest_committed_read()?;
+
+    let mut write = pager.begin_write()?;
+    graph.delete_edge(&mut write, edge_id)?;
+    pager.commit(write)?;
+
+    let degree_before = graph.degree(&read_before_delete, src, Dir::Out, None)?;
+    assert_eq!(degree_before, 1);
+    drop(read_before_delete);
+
+    let read_after = pager.begin_latest_committed_read()?;
+    let degree_after = graph.degree(&read_after, src, Dir::Out, None)?;
+    assert_eq!(degree_after, 0);
     Ok(())
 }

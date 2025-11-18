@@ -35,7 +35,18 @@ impl ChunkedIndex {
         self.root.get()
     }
 
+    #[allow(dead_code)]
     pub fn put(&self, tx: &mut WriteGuard<'_>, prefix: &[u8], node: NodeId) -> Result<()> {
+        self.put_with_commit(tx, prefix, node, None)
+    }
+
+    pub fn put_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        prefix: &[u8],
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
         let tree = tree_ref.as_ref().expect("chunked index tree initialised");
@@ -46,11 +57,22 @@ impl ChunkedIndex {
         };
         segment.insert(node);
         let encoded = segment.encode();
-        let value = self.versioned_bytes(tx, encoded);
+        let value = self.versioned_bytes(tx, encoded, commit);
         tree.put(tx, &key, &value)
     }
 
+    #[allow(dead_code)]
     pub fn remove(&self, tx: &mut WriteGuard<'_>, prefix: &[u8], node: NodeId) -> Result<()> {
+        self.remove_with_commit(tx, prefix, node, None)
+    }
+
+    pub fn remove_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        prefix: &[u8],
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         if self.root_page().0 == 0 {
             return Err(SombraError::Corruption("chunked postings segment missing"));
         }
@@ -71,7 +93,7 @@ impl ChunkedIndex {
             Ok(())
         } else {
             let encoded = segment.encode();
-            let value = self.versioned_bytes(tx, encoded);
+            let value = self.versioned_bytes(tx, encoded, commit);
             tree.put(tx, &key, &value)
         }
     }
@@ -314,9 +336,14 @@ impl ChunkedIndex {
         Ok(keys)
     }
 
-    fn versioned_bytes(&self, tx: &mut WriteGuard<'_>, data: Vec<u8>) -> VersionedValue<Vec<u8>> {
-        let commit = tx.reserve_commit_id().0;
-        VersionedValue::new(VersionHeader::new(commit, COMMIT_MAX, 0, 0), data)
+    fn versioned_bytes(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        data: Vec<u8>,
+        commit: Option<CommitId>,
+    ) -> VersionedValue<Vec<u8>> {
+        let commit_id = commit.unwrap_or_else(|| tx.reserve_commit_id().0);
+        VersionedValue::new(VersionHeader::new(commit_id, COMMIT_MAX, 0, 0), data)
     }
 
     fn init_root_page(&self, tx: &mut WriteGuard<'_>) -> Result<PageId> {

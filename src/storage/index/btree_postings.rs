@@ -45,12 +45,23 @@ impl BTreePostings {
         self.root.get()
     }
 
+    #[allow(dead_code)]
     pub fn put(&self, tx: &mut WriteGuard<'_>, prefix: &[u8], node: NodeId) -> Result<()> {
+        self.put_with_commit(tx, prefix, node, None)
+    }
+
+    pub fn put_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        prefix: &[u8],
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
         let tree = tree_ref.as_ref().expect("btree postings initialised");
         let key = Self::make_key(prefix, node);
-        let value = self.versioned_unit(tx, false);
+        let value = self.versioned_unit(tx, false, commit);
         tree.put(tx, &key, &value)
     }
 
@@ -64,7 +75,18 @@ impl BTreePostings {
         tree.put_many(tx, items)
     }
 
+    #[allow(dead_code)]
     pub fn remove(&self, tx: &mut WriteGuard<'_>, prefix: &[u8], node: NodeId) -> Result<()> {
+        self.remove_with_commit(tx, prefix, node, None)
+    }
+
+    pub fn remove_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        prefix: &[u8],
+        node: NodeId,
+        commit: Option<CommitId>,
+    ) -> Result<()> {
         if self.root_page().0 == 0 {
             return Err(SombraError::Corruption(
                 "btree postings entry missing during remove",
@@ -79,7 +101,7 @@ impl BTreePostings {
                 "btree postings entry missing during remove",
             ));
         }
-        let tombstone = self.versioned_unit(tx, true);
+        let tombstone = self.versioned_unit(tx, true, commit);
         tree.put(tx, &key, &tombstone)
     }
 
@@ -372,8 +394,14 @@ fn prune_versioned_tree<V: ValCodec>(
 }
 
 impl BTreePostings {
-    fn versioned_unit(&self, tx: &mut WriteGuard<'_>, tombstone: bool) -> VersionedValue<Unit> {
-        let mut header = VersionHeader::new(tx.reserve_commit_id().0, COMMIT_MAX, 0, 0);
+    fn versioned_unit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        tombstone: bool,
+        commit: Option<CommitId>,
+    ) -> VersionedValue<Unit> {
+        let commit_id = commit.unwrap_or_else(|| tx.reserve_commit_id().0);
+        let mut header = VersionHeader::new(commit_id, COMMIT_MAX, 0, 0);
         if tombstone {
             header.flags |= mvcc_flags::TOMBSTONE;
         }
