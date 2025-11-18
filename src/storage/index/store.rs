@@ -1,9 +1,10 @@
 use std::ops::Bound;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::btree::PutItem;
-use crate::storage::{VersionHeader, VersionedValue, COMMIT_MAX};
+use crate::storage::{CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{LabelId, NodeId, PageId, PropId, Result, SombraError};
 
 use super::btree_postings::{BTreePostings, Unit};
@@ -32,6 +33,7 @@ pub struct IndexStore {
     label_index: LabelIndex,
     chunked: ChunkedIndex,
     btree: BTreePostings,
+    oldest_reader_commit: AtomicU64,
 }
 
 impl IndexStore {
@@ -47,6 +49,7 @@ impl IndexStore {
             label_index,
             chunked,
             btree,
+            oldest_reader_commit: AtomicU64::new(0),
         };
         let roots = IndexRoots {
             catalog: catalog_root,
@@ -55,6 +58,16 @@ impl IndexStore {
             prop_btree: index_store.btree.root_page(),
         };
         Ok((index_store, roots))
+    }
+
+    /// Records the current oldest reader commit for downstream cleanup decisions.
+    pub fn set_oldest_reader_commit(&self, commit: CommitId) {
+        self.oldest_reader_commit.store(commit, Ordering::Relaxed);
+    }
+
+    /// Returns the oldest reader commit observed.
+    pub fn oldest_reader_commit(&self) -> CommitId {
+        self.oldest_reader_commit.load(Ordering::Relaxed)
     }
 
     /// Returns the current root pages for all index structures.

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageMut, PageStore, ReadGuard, WriteGuard};
+use crate::storage::CommitId;
 use crate::types::page::{PageHeader, PageKind, PAGE_HDR_LEN};
 use crate::types::{Checksum, Crc32Fast, PageId, Result, SombraError, VRef};
 #[cfg(debug_assertions)]
@@ -183,6 +184,7 @@ pub struct VStore {
     salt: u64,
     data_capacity: usize,
     metrics: Arc<VStoreMetrics>,
+    oldest_reader_commit: AtomicU64,
 }
 
 impl VStore {
@@ -205,6 +207,7 @@ impl VStore {
             salt: meta.salt,
             data_capacity,
             metrics: Arc::new(VStoreMetrics::default()),
+            oldest_reader_commit: AtomicU64::new(0),
         })
     }
 
@@ -216,6 +219,16 @@ impl VStore {
     /// Returns a snapshot of current VStore metrics.
     pub fn metrics_snapshot(&self) -> VStoreMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    /// Updates the oldest reader horizon tracked by the VStore.
+    pub fn set_oldest_reader_commit(&self, commit: CommitId) {
+        self.oldest_reader_commit.store(commit, Ordering::Relaxed);
+    }
+
+    /// Returns the oldest reader commit observed.
+    pub fn oldest_reader_commit(&self) -> CommitId {
+        self.oldest_reader_commit.load(Ordering::Relaxed)
     }
 
     /// Writes variable-length data and returns a reference to it.

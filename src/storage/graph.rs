@@ -7,6 +7,7 @@ use std::num::NonZeroUsize;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -28,13 +29,13 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{
-    CommitId, CommitTable, VersionHeader, VersionLog, VersionLogEntry, VersionPtr, VersionSpace,
+    CommitId, CommitTable, VersionHeader, VersionLogEntry, VersionPtr, VersionSpace,
     VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
 use super::node::{
     self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
-    PropStorage as NodePropStorage, VersionedNodeRow,
+    PropStorage as NodePropStorage,
 };
 use super::options::GraphOptions;
 use super::patch::{PropPatch, PropPatchOp};
@@ -42,8 +43,7 @@ use super::profile::{
     profile_timer as storage_profile_timer, profiling_enabled as storage_profiling_enabled,
     record_profile_timer as record_storage_profile_timer, StorageProfileKind,
 };
-use super::props;
-use super::props::RawPropValue;
+use super::props::{self, RawPropValue};
 use super::types::{
     DeleteMode, DeleteNodeOpts, EdgeData, EdgeSpec, NodeData, NodeSpec, PropEntry, PropValue,
     PropValueOwned,
@@ -55,6 +55,7 @@ pub const DEFAULT_INLINE_PROP_BLOB: u32 = 128;
 pub const DEFAULT_INLINE_PROP_VALUE: u32 = 48;
 /// Storage flag indicating that degree caching is enabled.
 pub const STORAGE_FLAG_DEGREE_CACHE: u32 = 0x01;
+const MVCC_METRICS_PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct UnitValue;
@@ -76,11 +77,11 @@ impl ValCodec for UnitValue {
 pub struct Graph {
     store: Arc<dyn PageStore>,
     commit_table: Option<Arc<Mutex<CommitTable>>>,
-    version_log: Mutex<VersionLog>,
     nodes: BTree<u64, Vec<u8>>,
     edges: BTree<u64, Vec<u8>>,
     adj_fwd: BTree<Vec<u8>, VersionedValue<UnitValue>>,
     adj_rev: BTree<Vec<u8>, VersionedValue<UnitValue>>,
+    version_log: BTree<u64, Vec<u8>>,
     #[cfg(feature = "degree-cache")]
     degree: Option<BTree<Vec<u8>, u64>>,
     vstore: VStore,
@@ -94,16 +95,44 @@ pub struct Graph {
     edges_root: AtomicU64,
     adj_fwd_root: AtomicU64,
     adj_rev_root: AtomicU64,
+    version_log_root: AtomicU64,
     #[cfg(feature = "degree-cache")]
     degree_root: AtomicU64,
     next_node_id: AtomicU64,
     next_edge_id: AtomicU64,
+    next_version_ptr: AtomicU64,
     idx_cache_hits: AtomicU64,
     idx_cache_misses: AtomicU64,
     storage_flags: u32,
     metrics: Arc<dyn super::metrics::StorageMetrics>,
+    mvcc_metrics_last: Mutex<Option<Instant>>,
     distinct_neighbors_default: bool,
     row_hash_header: bool,
+}
+
+trait VersionChainRecord {
+    fn header(&self) -> &VersionHeader;
+    fn prev_ptr(&self) -> VersionPtr;
+}
+
+impl VersionChainRecord for node::VersionedNodeRow {
+    fn header(&self) -> &VersionHeader {
+        &self.header
+    }
+
+    fn prev_ptr(&self) -> VersionPtr {
+        self.prev_ptr
+    }
+}
+
+impl VersionChainRecord for edge::VersionedEdgeRow {
+    fn header(&self) -> &VersionHeader {
+        &self.header
+    }
+
+    fn prev_ptr(&self) -> VersionPtr {
+        self.prev_ptr
+    }
 }
 
 /// Options for breadth-first traversal over the graph.
@@ -139,12 +168,20 @@ pub struct BfsVisit {
     pub depth: u32,
 }
 
+/// Statistics describing a version-log vacuum run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VersionVacuumStats {
+    /// Number of historical versions pruned from the log.
+    pub entries_pruned: u64,
+}
+
 #[derive(Copy, Clone)]
 enum RootKind {
     Nodes,
     Edges,
     AdjFwd,
     AdjRev,
+    VersionLog,
     #[cfg(feature = "degree-cache")]
     Degree,
 }
@@ -174,25 +211,108 @@ impl Graph {
 
     fn log_version_entry(
         &self,
+        tx: &mut WriteGuard<'_>,
         space: VersionSpace,
         id: u64,
         header: VersionHeader,
         prev_ptr: VersionPtr,
         bytes: Vec<u8>,
-    ) -> VersionPtr {
-        let mut log = self.version_log.lock();
-        log.append(VersionLogEntry {
+    ) -> Result<VersionPtr> {
+        let ptr_value = self.next_version_ptr.fetch_add(1, AtomicOrdering::SeqCst);
+        if ptr_value == 0 {
+            return Err(SombraError::Corruption("version log pointer overflowed"));
+        }
+        let entry = VersionLogEntry {
             space,
             id,
             header,
             prev_ptr,
             bytes,
-        })
+        };
+        let encoded = entry.encode()?;
+        self.version_log.put(tx, &ptr_value, &encoded)?;
+        self.persist_tree_root(tx, RootKind::VersionLog)?;
+        let next_ptr = ptr_value
+            .checked_add(1)
+            .ok_or(SombraError::Corruption("version log pointer overflowed"))?;
+        tx.update_meta(|meta| {
+            if meta.storage_next_version_ptr <= ptr_value {
+                meta.storage_next_version_ptr = next_ptr;
+            }
+        })?;
+        Ok(VersionPtr::from_raw(ptr_value))
+    }
+
+    fn load_version_entry(
+        &self,
+        tx: &ReadGuard,
+        ptr: VersionPtr,
+    ) -> Result<Option<VersionLogEntry>> {
+        if ptr.is_null() {
+            return Ok(None);
+        }
+        let Some(bytes) = self.version_log.get(tx, &ptr.raw())? else {
+            return Ok(None);
+        };
+        VersionLogEntry::decode(&bytes).map(Some)
     }
 
     /// Returns the commit table when the underlying pager provides one.
     pub fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
         self.commit_table.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the oldest reader commit currently pinned by any snapshot.
+    pub fn oldest_reader_commit(&self) -> Option<CommitId> {
+        let table = self.commit_table.as_ref()?;
+        let snapshot = table.lock().reader_snapshot(Instant::now());
+        snapshot.oldest_snapshot
+    }
+
+    /// Removes historical versions whose visibility ended at or before `horizon`.
+    ///
+    /// The optional `limit` bounds how many entries are deleted in a single invocation.
+    pub fn vacuum_version_log(
+        &self,
+        horizon: CommitId,
+        limit: Option<usize>,
+    ) -> Result<VersionVacuumStats> {
+        let mut write = self.store.begin_write()?;
+        let stats = self.vacuum_version_log_with_write(&mut write, horizon, limit)?;
+        self.store.commit(write)?;
+        Ok(stats)
+    }
+
+    fn vacuum_version_log_with_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        horizon: CommitId,
+        limit: Option<usize>,
+    ) -> Result<VersionVacuumStats> {
+        let max_prune = limit.unwrap_or(usize::MAX);
+        if max_prune == 0 {
+            return Ok(VersionVacuumStats::default());
+        }
+        let mut to_delete = Vec::new();
+        self.version_log.for_each_with_write(tx, |key, bytes| {
+            if to_delete.len() >= max_prune {
+                return Ok(());
+            }
+            let entry = VersionLogEntry::decode(&bytes)?;
+            if entry.header.end != COMMIT_MAX && entry.header.end <= horizon {
+                to_delete.push(key);
+            }
+            Ok(())
+        })?;
+        for key in &to_delete {
+            let _ = self.version_log.delete(tx, key)?;
+        }
+        if !to_delete.is_empty() {
+            self.persist_tree_root(tx, RootKind::VersionLog)?;
+        }
+        Ok(VersionVacuumStats {
+            entries_pruned: to_delete.len() as u64,
+        })
     }
 
     /// Opens a graph storage instance with the specified configuration options.
@@ -221,6 +341,7 @@ impl Graph {
         let edges = open_u64_vec_tree(&store, meta.storage_edges_root)?;
         let adj_fwd = open_unit_tree(&store, meta.storage_adj_fwd_root)?;
         let adj_rev = open_unit_tree(&store, meta.storage_adj_rev_root)?;
+        let version_log = open_u64_vec_tree(&store, meta.storage_version_log_root)?;
         let index_roots = IndexRoots {
             catalog: meta.storage_index_catalog_root,
             label: meta.storage_label_index_root,
@@ -250,6 +371,7 @@ impl Graph {
         let edges_root = edges.root_page();
         let adj_fwd_root = adj_fwd.root_page();
         let adj_rev_root = adj_rev.root_page();
+        let version_log_root = version_log.root_page();
         let index_catalog_root = index_roots_actual.catalog;
         let index_label_root = index_roots_actual.label;
         let index_prop_chunk_root = index_roots_actual.prop_chunk;
@@ -282,6 +404,7 @@ impl Graph {
             .map_err(|_| SombraError::Invalid("inline_prop_value exceeds u32::MAX"))?;
         let next_node_id_init = meta.storage_next_node_id.max(1);
         let next_edge_id_init = meta.storage_next_edge_id.max(1);
+        let next_version_ptr_init = meta.storage_next_version_ptr.max(1);
 
         let mut meta_update_needed = false;
         if storage_flags != meta.storage_flags {
@@ -291,6 +414,7 @@ impl Graph {
             || edges_root != meta.storage_edges_root
             || adj_fwd_root != meta.storage_adj_fwd_root
             || adj_rev_root != meta.storage_adj_rev_root
+            || version_log_root != meta.storage_version_log_root
             || index_catalog_root != meta.storage_index_catalog_root
             || index_label_root != meta.storage_label_index_root
             || index_prop_chunk_root != meta.storage_prop_chunk_root
@@ -305,6 +429,7 @@ impl Graph {
         }
         if meta.storage_next_node_id != next_node_id_init
             || meta.storage_next_edge_id != next_edge_id_init
+            || meta.storage_next_version_ptr != next_version_ptr_init
         {
             meta_update_needed = true;
         }
@@ -329,6 +454,7 @@ impl Graph {
                 meta.storage_edges_root = edges_root;
                 meta.storage_adj_fwd_root = adj_fwd_root;
                 meta.storage_adj_rev_root = adj_rev_root;
+                meta.storage_version_log_root = version_log_root;
                 meta.storage_index_catalog_root = index_catalog_root;
                 meta.storage_label_index_root = index_label_root;
                 meta.storage_prop_chunk_root = index_prop_chunk_root;
@@ -343,6 +469,7 @@ impl Graph {
                 }
                 meta.storage_next_node_id = next_node_id_init;
                 meta.storage_next_edge_id = next_edge_id_init;
+                meta.storage_next_version_ptr = next_version_ptr_init;
                 meta.storage_inline_prop_blob = inline_blob_meta;
                 meta.storage_inline_prop_value = inline_value_meta;
             })?;
@@ -360,6 +487,7 @@ impl Graph {
         let edges_root_id = edges.root_page().0;
         let adj_fwd_root_id = adj_fwd.root_page().0;
         let adj_rev_root_id = adj_rev.root_page().0;
+        let version_log_root_id = version_log.root_page().0;
         #[cfg(feature = "degree-cache")]
         let degree_root_id = degree_tree
             .as_ref()
@@ -371,11 +499,11 @@ impl Graph {
         Ok(Self {
             store,
             commit_table,
-            version_log: Mutex::new(VersionLog::new()),
             nodes,
             edges,
             adj_fwd,
             adj_rev,
+            version_log,
             #[cfg(feature = "degree-cache")]
             degree: degree_tree,
             vstore,
@@ -389,16 +517,19 @@ impl Graph {
             edges_root: AtomicU64::new(edges_root_id),
             adj_fwd_root: AtomicU64::new(adj_fwd_root_id),
             adj_rev_root: AtomicU64::new(adj_rev_root_id),
+            version_log_root: AtomicU64::new(version_log_root_id),
             #[cfg(feature = "degree-cache")]
             degree_root: AtomicU64::new(degree_root_id),
             next_node_id,
             next_edge_id,
+            next_version_ptr: AtomicU64::new(next_version_ptr_init),
             idx_cache_hits,
             idx_cache_misses,
             storage_flags,
             metrics: opts
                 .metrics
                 .unwrap_or_else(|| super::metrics::default_metrics()),
+            mvcc_metrics_last: Mutex::new(None),
             distinct_neighbors_default: opts.distinct_neighbors_default,
             row_hash_header,
         })
@@ -423,7 +554,7 @@ impl Graph {
         };
         let root = self.nodes.root_page();
         debug_assert!(root.0 != 0, "nodes root page not initialized");
-        let (_commit_id, version) = self.tx_version_header(tx);
+        let (_commit_id, version) = self.tx_pending_version_header(tx);
         let row_bytes = match node::encode(
             &labels,
             payload,
@@ -479,6 +610,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        self.finalize_node_head(tx, node_id)?;
         self.metrics.node_created();
         Ok(node_id)
     }
@@ -490,8 +622,11 @@ impl Graph {
         }
         let mut nodes = Vec::new();
         self.nodes.for_each_with_write(tx, |id_raw, bytes| {
-            let VersionedNodeRow { row, .. } = node::decode(&bytes)?;
-            if row.labels.binary_search(&label).is_ok() {
+            let versioned = node::decode(&bytes)?;
+            if versioned.header.is_tombstone() {
+                return Ok(());
+            }
+            if versioned.row.labels.binary_search(&label).is_ok() {
                 nodes.push(NodeId(id_raw));
             }
             Ok(())
@@ -526,11 +661,14 @@ impl Graph {
         }
         let mut entries: Vec<(Vec<u8>, NodeId)> = Vec::new();
         self.nodes.for_each_with_write(tx, |id_raw, bytes| {
-            let VersionedNodeRow { row, .. } = node::decode(&bytes)?;
-            if row.labels.binary_search(&def.label).is_err() {
+            let versioned = node::decode(&bytes)?;
+            if versioned.header.is_tombstone() {
                 return Ok(());
             }
-            let prop_bytes = self.read_node_prop_bytes(&row.props)?;
+            if versioned.row.labels.binary_search(&def.label).is_err() {
+                return Ok(());
+            }
+            let prop_bytes = self.read_node_prop_bytes(&versioned.row.props)?;
             let props = self.materialize_props_owned(&prop_bytes)?;
             let map: BTreeMap<PropId, PropValueOwned> = props.into_iter().collect();
             if let Some(value) = map.get(&def.prop) {
@@ -643,7 +781,8 @@ impl Graph {
         let stream_timer = storage_profile_timer();
         let stream = self.indexes.scan_property_eq_stream(tx, &def, &key)?;
         record_storage_profile_timer(StorageProfileKind::PropIndexStreamBuild, stream_timer);
-        Ok(instrument_posting_stream(stream))
+        let filtered = PropertyFilterStream::new_eq(self, tx, stream, label, prop, value.clone());
+        Ok(instrument_posting_stream(filtered))
     }
 
     /// Scans for nodes with property values in a range (inclusive bounds).
@@ -711,7 +850,16 @@ impl Graph {
             .indexes
             .scan_property_range_stream(tx, &def, start_key, end_key)?;
         record_storage_profile_timer(StorageProfileKind::PropIndexStreamBuild, stream_timer);
-        Ok(instrument_posting_stream(stream))
+        let filtered = PropertyFilterStream::new_range(
+            self,
+            tx,
+            stream,
+            label,
+            prop,
+            clone_owned_bound(start),
+            clone_owned_bound(end),
+        );
+        Ok(instrument_posting_stream(filtered))
     }
 
     /// Returns a label scan iterator; this prefers real indexes.
@@ -911,24 +1059,21 @@ impl Graph {
             }
         }
 
-        let prop_bytes = self.read_node_prop_bytes_with_write(tx, &row.props)?;
-        let prop_values = self.materialize_props_owned_with_write(tx, &prop_bytes)?;
-        let prop_map: BTreeMap<PropId, PropValueOwned> = prop_values.into_iter().collect();
-        self.remove_indexed_props(tx, id, &row.labels, &prop_map)?;
         self.indexes.remove_node_labels(tx, id, &row.labels)?;
         self.free_node_props(tx, row.props)?;
-        let (commit_id, mut tombstone_header) = self.tx_version_header(tx);
+        let (commit_id, mut tombstone_header) = self.tx_pending_version_header(tx);
         let mut old_header = versioned.header;
         old_header.end = commit_id;
         let mut log_bytes = bytes.clone();
         Self::overwrite_encoded_header(&mut log_bytes, &old_header);
         let prev_ptr = self.log_version_entry(
+            tx,
             VersionSpace::Node,
             id.0,
             old_header,
             versioned.prev_ptr,
             log_bytes,
-        );
+        )?;
         tombstone_header.flags |= mvcc_flags::TOMBSTONE;
         let encoded = node::encode(
             &[],
@@ -939,6 +1084,7 @@ impl Graph {
         )?;
         self.nodes.put(tx, &id.0, &encoded.bytes)?;
         self.persist_tree_root(tx, RootKind::Nodes)?;
+        self.finalize_node_head(tx, id)?;
         self.metrics.node_deleted();
         Ok(())
     }
@@ -969,7 +1115,7 @@ impl Graph {
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
             return Ok(());
         };
-        let (commit_id, new_header) = self.tx_version_header(tx);
+        let (commit_id, new_header) = self.tx_pending_version_header(tx);
         let mut map_vref: Option<VRef> = None;
         let payload = if delta.encoded.bytes.len() <= self.inline_prop_blob {
             NodePropPayload::Inline(&delta.encoded.bytes)
@@ -983,12 +1129,13 @@ impl Graph {
         let mut log_bytes = existing_bytes.clone();
         Self::overwrite_encoded_header(&mut log_bytes, &old_header);
         let prev_ptr = self.log_version_entry(
+            tx,
             VersionSpace::Node,
             id.0,
             old_header,
             versioned.prev_ptr,
             log_bytes,
-        );
+        )?;
         let encoded_row = match node::encode(
             &labels,
             payload,
@@ -1025,6 +1172,7 @@ impl Graph {
         }
         self.persist_tree_root(tx, RootKind::Nodes)?;
         self.update_indexed_props_for_node(tx, id, &labels, &delta.old_map, &delta.new_map)?;
+        self.finalize_node_head(tx, id)?;
         self.free_node_props(tx, storage)
     }
 
@@ -1045,7 +1193,7 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let (_commit_id, version) = self.tx_version_header(tx);
+        let (_commit_id, version) = self.tx_pending_version_header(tx);
         let row_bytes = match edge::encode(
             spec.src,
             spec.dst,
@@ -1091,6 +1239,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        self.finalize_edge_head(tx, edge_id)?;
         self.metrics.edge_created();
         Ok(edge_id)
     }
@@ -1173,7 +1322,7 @@ impl Graph {
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
             return Ok(());
         };
-        let (commit_id, new_header) = self.tx_version_header(tx);
+        let (commit_id, new_header) = self.tx_pending_version_header(tx);
         let mut map_vref: Option<VRef> = None;
         let payload = if delta.encoded.bytes.len() <= self.inline_prop_blob {
             EdgePropPayload::Inline(&delta.encoded.bytes)
@@ -1187,12 +1336,13 @@ impl Graph {
         let mut log_bytes = existing_bytes.clone();
         Self::overwrite_encoded_header(&mut log_bytes, &old_header);
         let prev_ptr = self.log_version_entry(
+            tx,
             VersionSpace::Edge,
             id.0,
             old_header,
             versioned.prev_ptr,
             log_bytes,
-        );
+        )?;
         let encoded_row = match edge::encode(
             src,
             dst,
@@ -1232,6 +1382,7 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Edges)?;
+        self.finalize_edge_head(tx, id)?;
         self.free_edge_props(tx, storage)
     }
 
@@ -1342,18 +1493,19 @@ impl Graph {
         }
         let row = versioned.row;
         self.remove_adjacency(tx, row.src, row.dst, row.ty, id)?;
-        let (commit_id, mut tombstone_header) = self.tx_version_header(tx);
+        let (commit_id, mut tombstone_header) = self.tx_pending_version_header(tx);
         let mut old_header = versioned.header;
         old_header.end = commit_id;
         let mut log_bytes = bytes.clone();
         Self::overwrite_encoded_header(&mut log_bytes, &old_header);
         let prev_ptr = self.log_version_entry(
+            tx,
             VersionSpace::Edge,
             id.0,
             old_header,
             versioned.prev_ptr,
             log_bytes,
-        );
+        )?;
         tombstone_header.flags |= mvcc_flags::TOMBSTONE;
         let encoded = edge::encode(
             row.src,
@@ -1366,14 +1518,54 @@ impl Graph {
         )?;
         self.edges.put(tx, &id.0, &encoded.bytes)?;
         self.persist_tree_root(tx, RootKind::Edges)?;
+        self.finalize_edge_head(tx, id)?;
         self.free_edge_props(tx, row.props)
+    }
+
+    fn maybe_publish_mvcc_metrics(&self) {
+        if self.commit_table.is_none() {
+            return;
+        }
+        let mut last = self.mvcc_metrics_last.lock();
+        let now = Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < MVCC_METRICS_PUBLISH_INTERVAL {
+                return;
+            }
+        }
+        *last = Some(now);
+        drop(last);
+        let stats = self.store.stats();
+        let oldest_reader_commit = stats.mvcc_reader_oldest_snapshot;
+        self.metrics.mvcc_page_versions(
+            stats.mvcc_page_versions_total,
+            stats.mvcc_pages_with_versions,
+        );
+        self.metrics.mvcc_reader_gauges(
+            stats.mvcc_readers_active,
+            stats.mvcc_reader_oldest_snapshot,
+            stats.mvcc_reader_newest_snapshot,
+            stats.mvcc_reader_max_age_ms,
+        );
+        self.metrics
+            .mvcc_reader_totals(stats.mvcc_reader_begin_total, stats.mvcc_reader_end_total);
+        self.indexes.set_oldest_reader_commit(oldest_reader_commit);
+        self.vstore.set_oldest_reader_commit(oldest_reader_commit);
     }
 
     #[inline]
     fn tx_version_header(&self, tx: &mut WriteGuard<'_>) -> (CommitId, VersionHeader) {
+        self.maybe_publish_mvcc_metrics();
         let commit_lsn = tx.reserve_commit_id();
         let commit_id = commit_lsn.0;
         (commit_id, VersionHeader::new(commit_id, COMMIT_MAX, 0, 0))
+    }
+
+    #[inline]
+    fn tx_pending_version_header(&self, tx: &mut WriteGuard<'_>) -> (CommitId, VersionHeader) {
+        let (commit_id, mut header) = self.tx_version_header(tx);
+        header.set_pending();
+        (commit_id, header)
     }
 
     fn adjacency_value(
@@ -1388,6 +1580,34 @@ impl Graph {
         VersionedValue::new(header, UnitValue)
     }
 
+    fn finalize_node_head(&self, tx: &mut WriteGuard<'_>, id: NodeId) -> Result<()> {
+        let Some(mut bytes) = self.nodes.get_with_write(tx, &id.0)? else {
+            return Err(SombraError::Corruption("node head missing during finalize"));
+        };
+        let mut header = VersionHeader::decode(&bytes[..VERSION_HEADER_LEN])?;
+        if !header.is_pending() {
+            return Ok(());
+        }
+        header.clear_pending();
+        Self::overwrite_encoded_header(&mut bytes, &header);
+        self.nodes.put(tx, &id.0, &bytes)?;
+        Ok(())
+    }
+
+    fn finalize_edge_head(&self, tx: &mut WriteGuard<'_>, id: EdgeId) -> Result<()> {
+        let Some(mut bytes) = self.edges.get_with_write(tx, &id.0)? else {
+            return Err(SombraError::Corruption("edge head missing during finalize"));
+        };
+        let mut header = VersionHeader::decode(&bytes[..VERSION_HEADER_LEN])?;
+        if !header.is_pending() {
+            return Ok(());
+        }
+        header.clear_pending();
+        Self::overwrite_encoded_header(&mut bytes, &header);
+        self.edges.put(tx, &id.0, &bytes)?;
+        Ok(())
+    }
+
     #[inline]
     fn reader_snapshot_commit(tx: &ReadGuard) -> CommitId {
         tx.snapshot_lsn().0
@@ -1395,7 +1615,42 @@ impl Graph {
 
     #[inline]
     fn version_visible(header: &VersionHeader, snapshot: CommitId) -> bool {
-        header.visible_at(snapshot) && !header.is_tombstone()
+        header.visible_at(snapshot) && !header.is_tombstone() && !header.is_pending()
+    }
+
+    fn visible_version<T, Decode>(
+        &self,
+        tx: &ReadGuard,
+        space: VersionSpace,
+        id: u64,
+        bytes: &[u8],
+        decode: Decode,
+    ) -> Result<Option<T>>
+    where
+        T: VersionChainRecord,
+        Decode: Fn(&[u8]) -> Result<T>,
+    {
+        let snapshot = Self::reader_snapshot_commit(tx);
+        let current = decode(bytes)?;
+        if Self::version_visible(<T as VersionChainRecord>::header(&current), snapshot) {
+            return Ok(Some(current));
+        }
+        let mut ptr = <T as VersionChainRecord>::prev_ptr(&current);
+        if ptr.is_null() {
+            return Ok(None);
+        }
+        while let Some(entry) = self.load_version_entry(tx, ptr)? {
+            if entry.space != space || entry.id != id {
+                ptr = entry.prev_ptr;
+                continue;
+            }
+            let decoded = decode(&entry.bytes)?;
+            if Self::version_visible(<T as VersionChainRecord>::header(&decoded), snapshot) {
+                return Ok(Some(decoded));
+            }
+            ptr = <T as VersionChainRecord>::prev_ptr(&decoded);
+        }
+        Ok(None)
     }
 
     fn visible_node_from_bytes(
@@ -1404,33 +1659,7 @@ impl Graph {
         id: NodeId,
         bytes: &[u8],
     ) -> Result<Option<node::VersionedNodeRow>> {
-        let snapshot = Self::reader_snapshot_commit(tx);
-        let current = node::decode(bytes)?;
-        if Self::version_visible(&current.header, snapshot) {
-            return if current.header.is_tombstone() {
-                Ok(None)
-            } else {
-                Ok(Some(current))
-            };
-        }
-        let mut ptr = current.prev_ptr;
-        let log = self.version_log.lock();
-        while let Some(entry) = log.get(ptr) {
-            if entry.space != VersionSpace::Node || entry.id != id.0 {
-                ptr = entry.prev_ptr;
-                continue;
-            }
-            let decoded = node::decode(&entry.bytes)?;
-            if Self::version_visible(&decoded.header, snapshot) {
-                return if decoded.header.is_tombstone() {
-                    Ok(None)
-                } else {
-                    Ok(Some(decoded))
-                };
-            }
-            ptr = decoded.prev_ptr;
-        }
-        Ok(None)
+        self.visible_version(tx, VersionSpace::Node, id.0, bytes, node::decode)
     }
 
     fn visible_edge_from_bytes(
@@ -1439,33 +1668,7 @@ impl Graph {
         id: EdgeId,
         bytes: &[u8],
     ) -> Result<Option<edge::VersionedEdgeRow>> {
-        let snapshot = Self::reader_snapshot_commit(tx);
-        let current = edge::decode(bytes)?;
-        if Self::version_visible(&current.header, snapshot) {
-            return if current.header.is_tombstone() {
-                Ok(None)
-            } else {
-                Ok(Some(current))
-            };
-        }
-        let mut ptr = current.prev_ptr;
-        let log = self.version_log.lock();
-        while let Some(entry) = log.get(ptr) {
-            if entry.space != VersionSpace::Edge || entry.id != id.0 {
-                ptr = entry.prev_ptr;
-                continue;
-            }
-            let decoded = edge::decode(&entry.bytes)?;
-            if Self::version_visible(&decoded.header, snapshot) {
-                return if decoded.header.is_tombstone() {
-                    Ok(None)
-                } else {
-                    Ok(Some(decoded))
-                };
-            }
-            ptr = decoded.prev_ptr;
-        }
-        Ok(None)
+        self.visible_version(tx, VersionSpace::Edge, id.0, bytes, edge::decode)
     }
 
     fn visible_node(&self, tx: &ReadGuard, id: NodeId) -> Result<Option<node::VersionedNodeRow>> {
@@ -1487,6 +1690,124 @@ impl Graph {
             Ok(versioned.row.labels.binary_search(&label).is_ok())
         } else {
             Ok(false)
+        }
+    }
+
+    fn materialize_raw_prop_value(
+        &self,
+        tx: &ReadGuard,
+        value: &RawPropValue,
+    ) -> Result<PropValueOwned> {
+        let owned = match value {
+            RawPropValue::Null => PropValueOwned::Null,
+            RawPropValue::Bool(v) => PropValueOwned::Bool(*v),
+            RawPropValue::Int(v) => PropValueOwned::Int(*v),
+            RawPropValue::Float(v) => PropValueOwned::Float(*v),
+            RawPropValue::StrInline(bytes) => {
+                let s = std::str::from_utf8(bytes)
+                    .map_err(|_| SombraError::Corruption("stored string not utf8"))?;
+                PropValueOwned::Str(s.to_owned())
+            }
+            RawPropValue::StrVRef(vref) => {
+                let bytes = self.vstore.read(tx, *vref)?;
+                let s = String::from_utf8(bytes)
+                    .map_err(|_| SombraError::Corruption("stored string not utf8"))?;
+                PropValueOwned::Str(s)
+            }
+            RawPropValue::BytesInline(bytes) => PropValueOwned::Bytes(bytes.clone()),
+            RawPropValue::BytesVRef(vref) => {
+                let bytes = self.vstore.read(tx, *vref)?;
+                PropValueOwned::Bytes(bytes)
+            }
+            RawPropValue::Date(v) => PropValueOwned::Date(*v),
+            RawPropValue::DateTime(v) => PropValueOwned::DateTime(*v),
+        };
+        Ok(owned)
+    }
+
+    fn node_property_value(
+        &self,
+        tx: &ReadGuard,
+        versioned: &node::VersionedNodeRow,
+        prop: PropId,
+    ) -> Result<Option<PropValueOwned>> {
+        let bytes = self.read_node_prop_bytes(&versioned.row.props)?;
+        let raw = props::decode_raw(&bytes)?;
+        for entry in raw {
+            if entry.prop == prop {
+                let owned = self.materialize_raw_prop_value(tx, &entry.value)?;
+                return Ok(Some(owned));
+            }
+        }
+        Ok(None)
+    }
+
+    fn node_matches_property_eq(
+        &self,
+        tx: &ReadGuard,
+        node: NodeId,
+        label: LabelId,
+        prop: PropId,
+        expected: &PropValueOwned,
+    ) -> Result<bool> {
+        let Some(versioned) = self.visible_node(tx, node)? else {
+            return Ok(false);
+        };
+        if versioned.row.labels.binary_search(&label).is_err() {
+            return Ok(false);
+        }
+        let Some(value) = self.node_property_value(tx, &versioned, prop)? else {
+            return Ok(false);
+        };
+        Ok(value == *expected)
+    }
+
+    fn node_matches_property_range(
+        &self,
+        tx: &ReadGuard,
+        node: NodeId,
+        label: LabelId,
+        prop: PropId,
+        start: &Bound<PropValueOwned>,
+        end: &Bound<PropValueOwned>,
+    ) -> Result<bool> {
+        let Some(versioned) = self.visible_node(tx, node)? else {
+            return Ok(false);
+        };
+        if versioned.row.labels.binary_search(&label).is_err() {
+            return Ok(false);
+        }
+        let Some(value) = self.node_property_value(tx, &versioned, prop)? else {
+            return Ok(false);
+        };
+        if !Self::bound_allows(&value, start, true)? {
+            return Ok(false);
+        }
+        if !Self::bound_allows(&value, end, false)? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn bound_allows(
+        value: &PropValueOwned,
+        bound: &Bound<PropValueOwned>,
+        is_lower: bool,
+    ) -> Result<bool> {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match bound {
+            Bound::Unbounded => Ok(true),
+            Bound::Included(b) => match compare_prop_values(value, b)? {
+                Less if is_lower => Ok(false),
+                Greater if !is_lower => Ok(false),
+                _ => Ok(true),
+            },
+            Bound::Excluded(b) => match compare_prop_values(value, b)? {
+                Less if is_lower => Ok(false),
+                Equal => Ok(!is_lower),
+                Greater if !is_lower => Ok(false),
+                _ => Ok(true),
+            },
         }
     }
 
@@ -1514,11 +1835,15 @@ impl Graph {
 
     /// Returns true if the node exists using a read guard.
     pub fn node_exists(&self, tx: &ReadGuard, node: NodeId) -> Result<bool> {
-        Ok(self.nodes.get(tx, &node.0)?.is_some())
+        Ok(self.visible_node(tx, node)?.is_some())
     }
 
     fn node_exists_with_write(&self, tx: &mut WriteGuard<'_>, node: NodeId) -> Result<bool> {
-        Ok(self.nodes.get_with_write(tx, &node.0)?.is_some())
+        let Some(bytes) = self.nodes.get_with_write(tx, &node.0)? else {
+            return Ok(false);
+        };
+        let versioned = node::decode(&bytes)?;
+        Ok(!versioned.header.is_tombstone() && !versioned.header.is_pending())
     }
 
     fn insert_adjacencies(
@@ -1882,7 +2207,11 @@ impl Graph {
         };
         let mut cursor = tree.range(tx, Bound::Included(lo), Bound::Included(hi))?;
         let mut count = 0u64;
-        while cursor.next()?.is_some() {
+        let snapshot = Self::reader_snapshot_commit(tx);
+        while let Some((_key, value)) = cursor.next()? {
+            if !Self::version_visible(&value.header, snapshot) {
+                continue;
+            }
             count = count.saturating_add(1);
         }
         Ok(count)
@@ -1894,7 +2223,11 @@ impl Graph {
             .adj_fwd
             .range(tx, Bound::Included(lo), Bound::Included(hi))?;
         let mut loops = 0u64;
-        while let Some((key, _)) = cursor.next()? {
+        let snapshot = Self::reader_snapshot_commit(tx);
+        while let Some((key, value)) = cursor.next()? {
+            if !Self::version_visible(&value.header, snapshot) {
+                continue;
+            }
             let (src, ty_val, dst, _edge) = adjacency::decode_fwd_key(&key)
                 .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
             debug_assert_eq!(src, node);
@@ -2060,6 +2393,8 @@ pub struct GraphWriterStats {
     pub exists_cache_misses: u64,
     /// Number of edges inserted using trusted endpoints.
     pub trusted_edges: u64,
+    /// Oldest reader commit observed when stats were captured.
+    pub oldest_reader_commit: CommitId,
 }
 
 /// Validator used by [`GraphWriter`] to confirm endpoints exist before trusting batches.
@@ -2106,7 +2441,11 @@ impl<'a> GraphWriter<'a> {
 
     /// Returns current statistics collected by the writer.
     pub fn stats(&self) -> GraphWriterStats {
-        self.stats
+        let mut stats = self.stats;
+        if let Some(oldest) = self.graph.oldest_reader_commit() {
+            stats.oldest_reader_commit = oldest;
+        }
+        stats
     }
 
     /// Validates a batch of edges before inserting them in trusted mode.
@@ -2377,6 +2716,14 @@ fn encode_range_bound(ty: TypeTag, bound: Bound<&PropValueOwned>) -> Result<Boun
     }
 }
 
+fn clone_owned_bound(bound: Bound<&PropValueOwned>) -> Bound<PropValueOwned> {
+    match bound {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(value) => Bound::Included(value.clone()),
+        Bound::Excluded(value) => Bound::Excluded(value.clone()),
+    }
+}
+
 fn collect_posting_stream(stream: &mut dyn PostingStream) -> Result<Vec<NodeId>> {
     let mut nodes = Vec::new();
     collect_all(stream, &mut nodes)?;
@@ -2405,6 +2752,123 @@ impl PostingStream for ProfilingPostingStream<'_> {
         let result = self.inner.next_batch(out, max);
         record_storage_profile_timer(StorageProfileKind::PropIndexStreamIter, iter_timer);
         result
+    }
+}
+
+enum PropertyPredicate {
+    Eq(PropValueOwned),
+    Range {
+        start: Bound<PropValueOwned>,
+        end: Bound<PropValueOwned>,
+    },
+}
+
+struct PropertyFilterStream<'a> {
+    graph: &'a Graph,
+    tx: &'a ReadGuard,
+    inner: Box<dyn PostingStream + 'a>,
+    label: LabelId,
+    prop: PropId,
+    predicate: PropertyPredicate,
+    pending: VecDeque<NodeId>,
+    scratch: Vec<NodeId>,
+    inner_exhausted: bool,
+}
+
+impl<'a> PropertyFilterStream<'a> {
+    fn new_eq(
+        graph: &'a Graph,
+        tx: &'a ReadGuard,
+        inner: Box<dyn PostingStream + 'a>,
+        label: LabelId,
+        prop: PropId,
+        value: PropValueOwned,
+    ) -> Box<dyn PostingStream + 'a> {
+        Box::new(Self {
+            graph,
+            tx,
+            inner,
+            label,
+            prop,
+            predicate: PropertyPredicate::Eq(value),
+            pending: VecDeque::new(),
+            scratch: Vec::new(),
+            inner_exhausted: false,
+        })
+    }
+
+    fn new_range(
+        graph: &'a Graph,
+        tx: &'a ReadGuard,
+        inner: Box<dyn PostingStream + 'a>,
+        label: LabelId,
+        prop: PropId,
+        start: Bound<PropValueOwned>,
+        end: Bound<PropValueOwned>,
+    ) -> Box<dyn PostingStream + 'a> {
+        Box::new(Self {
+            graph,
+            tx,
+            inner,
+            label,
+            prop,
+            predicate: PropertyPredicate::Range { start, end },
+            pending: VecDeque::new(),
+            scratch: Vec::new(),
+            inner_exhausted: false,
+        })
+    }
+
+    fn fill_pending(&mut self, max: usize) -> Result<()> {
+        self.scratch.clear();
+        let has_more = self.inner.next_batch(&mut self.scratch, max)?;
+        self.inner_exhausted = !has_more;
+        for node in &self.scratch {
+            if self.node_matches(*node)? {
+                self.pending.push_back(*node);
+            }
+        }
+        Ok(())
+    }
+
+    fn node_matches(&self, node: NodeId) -> Result<bool> {
+        match &self.predicate {
+            PropertyPredicate::Eq(expected) => self
+                .graph
+                .node_matches_property_eq(self.tx, node, self.label, self.prop, expected),
+            PropertyPredicate::Range { start, end } => self
+                .graph
+                .node_matches_property_range(self.tx, node, self.label, self.prop, start, end),
+        }
+    }
+}
+
+impl PostingStream for PropertyFilterStream<'_> {
+    fn next_batch(&mut self, out: &mut Vec<NodeId>, max: usize) -> Result<bool> {
+        if max == 0 {
+            if !self.pending.is_empty() {
+                return Ok(true);
+            }
+            if self.inner_exhausted {
+                return Ok(false);
+            }
+            self.fill_pending(0)?;
+            return Ok(!self.pending.is_empty() || !self.inner_exhausted);
+        }
+        while out.len() < max {
+            if let Some(node) = self.pending.pop_front() {
+                out.push(node);
+                continue;
+            }
+            if self.inner_exhausted {
+                break;
+            }
+            self.fill_pending(max)?;
+            if self.pending.is_empty() && self.inner_exhausted {
+                break;
+            }
+        }
+        Ok(!self.pending.is_empty() || !self.inner_exhausted)
     }
 }
 
@@ -2489,25 +2953,6 @@ impl Graph {
         Ok(())
     }
 
-    fn remove_indexed_props(
-        &self,
-        tx: &mut WriteGuard<'_>,
-        node: NodeId,
-        labels: &[LabelId],
-        props: &BTreeMap<PropId, PropValueOwned>,
-    ) -> Result<()> {
-        for label in labels {
-            let defs = self.index_defs_for_label(tx, *label)?;
-            for def in defs.iter() {
-                if let Some(value) = props.get(&def.prop) {
-                    let key = encode_value_key_owned(def.ty, value)?;
-                    self.indexes.remove_property_value(tx, &def, &key, node)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     #[cfg(feature = "degree-cache")]
     fn apply_degree_batch(
         &self,
@@ -2565,10 +3010,6 @@ impl Graph {
                 let new = new_props.get(&def.prop);
                 if old == new {
                     continue;
-                }
-                if let Some(value) = old {
-                    let key = encode_value_key_owned(def.ty, value)?;
-                    self.indexes.remove_property_value(tx, &def, &key, node)?;
                 }
                 if let Some(value) = new {
                     let key = encode_value_key_owned(def.ty, value)?;
@@ -2695,6 +3136,14 @@ impl Graph {
                 self.adj_rev.root_page(),
                 |meta, root| {
                     meta.storage_adj_rev_root = root;
+                },
+            ),
+            RootKind::VersionLog => self.persist_root_impl(
+                tx,
+                &self.version_log_root,
+                self.version_log.root_page(),
+                |meta, root| {
+                    meta.storage_version_log_root = root;
                 },
             ),
             #[cfg(feature = "degree-cache")]
