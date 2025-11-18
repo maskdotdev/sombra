@@ -3,14 +3,15 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::ffi::OsString;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use sombra::{
     admin::{
-        checkpoint, stats, vacuum_into, verify, AdminOpenOptions, CheckpointMode, PagerOptions,
-        VacuumOptions, VerifyLevel,
+        checkpoint, promote_vacuumed_copy, stats, vacuum_into, verify, AdminOpenOptions,
+        CheckpointMode, PagerOptions, VacuumOptions, VerifyLevel,
     },
     cli::import_export::{
         run_export, run_import, CliError, EdgeImportConfig, ExportConfig, ImportConfig,
@@ -18,8 +19,13 @@ use sombra::{
     },
     dashboard::{self, DashboardOptions as DashboardServeOptions},
     ffi::{self, DatabaseOptions},
-    primitives::pager::Synchronous,
+    primitives::pager::{Synchronous, MVCC_READER_WARN_THRESHOLD_MS},
 };
+
+#[path = "cli/ui.rs"]
+mod ui;
+
+use ui::{Theme as UiTheme, Ui};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,6 +46,23 @@ struct Cli {
         help = "Output format for structured responses"
     )]
     format: OutputFormat,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ThemeArg::Auto,
+        help = "Color theme for text output"
+    )]
+    theme: ThemeArg,
+
+    #[arg(
+        long,
+        global = true,
+        action = ArgAction::SetTrue,
+        help = "Reduce decorative output and color usage"
+    )]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -71,8 +94,13 @@ struct ImportCmd {
     #[arg(value_name = "DB")]
     db_path: PathBuf,
 
-    #[arg(long, value_name = "FILE", help = "CSV file containing nodes")]
-    nodes: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "CSV file containing nodes",
+        required = true
+    )]
+    nodes: PathBuf,
 
     #[arg(long, value_name = "FILE", help = "CSV file containing edges")]
     edges: Option<PathBuf>,
@@ -106,10 +134,18 @@ struct ImportCmd {
     #[arg(long, default_value = "dst", help = "Edge destination column name")]
     edge_dst_column: String,
 
-    #[arg(long, help = "Column containing edge types")]
+    #[arg(
+        long,
+        help = "Column containing edge types",
+        conflicts_with = "edge_type"
+    )]
     edge_type_column: Option<String>,
 
-    #[arg(long, help = "Constant edge type if no column is provided")]
+    #[arg(
+        long,
+        help = "Constant edge type if no column is provided",
+        conflicts_with = "edge_type_column"
+    )]
     edge_type: Option<String>,
 
     #[arg(
@@ -151,6 +187,14 @@ struct ImportCmd {
 }
 
 #[derive(Args, Debug)]
+#[command(
+    group(
+        ArgGroup::new("targets")
+            .required(true)
+            .multiple(true)
+            .args(["nodes", "edges"])
+    )
+)]
 struct ExportCmd {
     #[arg(value_name = "DB")]
     db_path: PathBuf,
@@ -250,8 +294,23 @@ enum Command {
         #[arg(value_name = "DB")]
         db_path: PathBuf,
 
-        #[arg(long = "into", value_name = "PATH", required = true)]
-        into: PathBuf,
+        #[arg(
+            long = "into",
+            value_name = "PATH",
+            help = "Write the compacted copy to PATH (implied when using --replace)"
+        )]
+        into: Option<PathBuf>,
+
+        #[arg(long, help = "Replace the source database with the compacted copy")]
+        replace: bool,
+
+        #[arg(
+            long,
+            value_name = "PATH",
+            requires = "replace",
+            help = "Path to store the original database when using --replace (defaults to <DB>.bak)"
+        )]
+        backup: Option<PathBuf>,
 
         #[arg(long, help = "Also run ANALYZE after vacuum (deferred)")]
         analyze: bool,
@@ -291,6 +350,25 @@ enum OutputFormat {
 }
 
 impl OutputFormat {}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ThemeArg {
+    Auto,
+    Light,
+    Dark,
+    Plain,
+}
+
+impl From<ThemeArg> for UiTheme {
+    fn from(theme: ThemeArg) -> Self {
+        match theme {
+            ThemeArg::Auto => UiTheme::Auto,
+            ThemeArg::Light => UiTheme::Light,
+            ThemeArg::Dark => UiTheme::Dark,
+            ThemeArg::Plain => UiTheme::Plain,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum SynchronousArg {
@@ -350,31 +428,54 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+    let ui = Ui::new(cli.theme.into(), cli.quiet);
     let open_opts = build_open_options(&cli.open);
 
     match cli.command {
         Command::Stats { db_path } => {
             let report = stats(&db_path, &open_opts)?;
-            emit(&cli.format, &report, |fmt| print_stats_text(fmt, &report))?;
+            emit(&cli.format, &ui, &report, print_stats_text)?;
         }
         Command::Checkpoint { db_path, mode } => {
             let report = checkpoint(&db_path, &open_opts, mode.into())?;
-            emit(&cli.format, &report, |fmt| {
-                print_checkpoint_text(fmt, &report)
-            })?;
+            emit(&cli.format, &ui, &report, print_checkpoint_text)?;
         }
         Command::Vacuum {
             db_path,
             into,
+            replace,
+            backup,
             analyze,
         } => {
+            let into_path = match (into, replace) {
+                (Some(path), _) => path,
+                (None, true) => default_vacuum_destination(&db_path),
+                (None, false) => {
+                    return Err(into_boxed_error(CliError::Message(
+                        "--into <PATH> is required unless --replace is provided".into(),
+                    )))
+                }
+            };
+
             let vacuum_opts = VacuumOptions { analyze };
-            let report = vacuum_into(&db_path, into, &open_opts, &vacuum_opts)?;
-            emit(&cli.format, &report, |fmt| print_vacuum_text(fmt, &report))?;
+            let report = vacuum_into(&db_path, &into_path, &open_opts, &vacuum_opts)?;
+            let promotion = if replace {
+                let backup_path = backup.unwrap_or_else(|| default_backup_path(&db_path));
+                promote_vacuumed_copy(&db_path, &into_path, Some(&backup_path))?;
+                Some(VacuumPromotionOutput {
+                    db_path: db_path.display().to_string(),
+                    staging_path: into_path.display().to_string(),
+                    backup_path: Some(backup_path.display().to_string()),
+                })
+            } else {
+                None
+            };
+            let output = VacuumCommandOutput { report, promotion };
+            emit(&cli.format, &ui, &output, print_vacuum_text)?;
         }
         Command::Verify { db_path, level } => {
             let report = verify(&db_path, &open_opts, level.into())?;
-            emit(&cli.format, &report, |fmt| print_verify_text(fmt, &report))?;
+            emit(&cli.format, &ui, &report, print_verify_text)?;
             if !report.success {
                 std::process::exit(2);
             }
@@ -383,19 +484,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let mut opts = open_opts.clone();
             opts.create_if_missing = cmd.create;
             let import_cfg = build_import_config(&cmd)?;
+            let progress = ui.task("Importing data");
             let result = run_import(&import_cfg, &opts).map_err(into_boxed_error)?;
-            println!(
+            progress.finish();
+            ui.success(&format!(
                 "Imported {} nodes and {} edges",
-                result.nodes_imported, result.edges_imported
-            );
+                format_count(result.nodes_imported as u64),
+                format_count(result.edges_imported as u64)
+            ));
         }
         Command::Export(cmd) => {
             let export_cfg = build_export_config(&cmd)?;
+            let progress = ui.task("Exporting CSV data");
             let result = run_export(&export_cfg, &open_opts).map_err(into_boxed_error)?;
-            println!(
+            progress.finish();
+            ui.success(&format!(
                 "Exported {} nodes and {} edges",
-                result.nodes_exported, result.edges_exported
-            );
+                format_count(result.nodes_exported as u64),
+                format_count(result.edges_exported as u64)
+            ));
         }
         Command::SeedDemo(cmd) => {
             run_seed_demo(&cmd, &open_opts)?;
@@ -491,18 +598,8 @@ fn run_seed_demo(cmd: &SeedDemoCmd, open_opts: &AdminOpenOptions) -> Result<(), 
 }
 
 fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
-    let nodes_path = cmd
-        .nodes
-        .clone()
-        .ok_or_else(|| CliError::Message("--nodes is required".into()))?;
-    if cmd.edge_type.is_some() && cmd.edge_type_column.is_some() {
-        return Err(CliError::Message(
-            "use either --edge-type or --edge-type-column, not both".into(),
-        ));
-    }
-
     let node_cfg = NodeImportConfig {
-        path: nodes_path,
+        path: cmd.nodes.clone(),
         id_column: cmd.node_id_column.clone(),
         label_column: cmd.node_label_column.clone(),
         static_labels: parse_labels_list(&cmd.node_labels),
@@ -537,11 +634,6 @@ fn build_import_config(cmd: &ImportCmd) -> Result<ImportConfig, CliError> {
 }
 
 fn build_export_config(cmd: &ExportCmd) -> Result<ExportConfig, CliError> {
-    if cmd.nodes.is_none() && cmd.edges.is_none() {
-        return Err(CliError::Message(
-            "export requires --nodes and/or --edges paths".into(),
-        ));
-    }
     Ok(ExportConfig {
         db_path: cmd.db_path.clone(),
         nodes_out: cmd.nodes.clone(),
@@ -630,79 +722,275 @@ fn split_list(input: &str, delim: char) -> Vec<String> {
         .collect()
 }
 
+fn default_vacuum_destination(path: &Path) -> PathBuf {
+    append_path_suffix(path, ".vacuum")
+}
+
+fn default_backup_path(path: &Path) -> PathBuf {
+    append_path_suffix(path, ".bak")
+}
+
+fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("sombra"));
+    name.push(suffix);
+    let mut output = path.to_path_buf();
+    output.set_file_name(name);
+    output
+}
+
 fn into_boxed_error(err: CliError) -> Box<dyn Error> {
     Box::new(err)
 }
 
-fn emit<T, F>(format: &OutputFormat, value: &T, printer: F) -> Result<(), Box<dyn Error>>
+fn format_count(value: u64) -> String {
+    value.to_string()
+}
+
+fn format_duration_ms(value: u64) -> String {
+    if value >= 1_000 {
+        let seconds = value / 1_000;
+        let millis = value % 1_000;
+        format!("{seconds}.{millis:03}s")
+    } else {
+        format!("{value} ms")
+    }
+}
+
+fn emit<T, F>(format: &OutputFormat, ui: &Ui, value: &T, printer: F) -> Result<(), Box<dyn Error>>
 where
     T: serde::Serialize,
-    F: Fn(OutputFormat),
+    F: Fn(&Ui, OutputFormat, &T),
 {
     match format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(value)?;
             println!("{json}");
         }
-        OutputFormat::Text => printer(OutputFormat::Text),
+        OutputFormat::Text => printer(ui, OutputFormat::Text, value),
     }
     Ok(())
 }
 
-fn print_stats_text(_: OutputFormat, report: &sombra::admin::StatsReport) {
-    println!("Pager:");
-    println!(
-        "  page_size={} cache_pages={} hits={} misses={} evictions={} dirty_writebacks={}",
-        report.pager.page_size,
-        report.pager.cache_pages,
-        report.pager.hits,
-        report.pager.misses,
-        report.pager.evictions,
-        report.pager.dirty_writebacks
+#[derive(serde::Serialize)]
+struct VacuumCommandOutput {
+    #[serde(flatten)]
+    report: sombra::admin::VacuumReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotion: Option<VacuumPromotionOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct VacuumPromotionOutput {
+    db_path: String,
+    staging_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_path: Option<String>,
+}
+
+fn print_stats_text(_: &Ui, _: OutputFormat, report: &sombra::admin::StatsReport) {
+    const LABEL_WIDTH: usize = 26;
+
+    let cache_capacity_bytes =
+        (report.pager.cache_pages as u64).saturating_mul(report.pager.page_size as u64);
+
+    print_section(
+        "Pager",
+        LABEL_WIDTH,
+        vec![
+            ("page_size", format_bytes(report.pager.page_size.into())),
+            (
+                "cache_pages",
+                format_count(report.pager.cache_pages as u64) + " pages",
+            ),
+            ("cache_capacity", format_bytes(cache_capacity_bytes)),
+            ("cache_hits", format_count(report.pager.hits)),
+            ("cache_misses", format_count(report.pager.misses)),
+            ("cache_evictions", format_count(report.pager.evictions)),
+            (
+                "dirty_writebacks",
+                format_count(report.pager.dirty_writebacks),
+            ),
+            (
+                "last_checkpoint_lsn",
+                format_count(report.pager.last_checkpoint_lsn),
+            ),
+            (
+                "mvcc_page_versions_total",
+                format_count(report.pager.mvcc_page_versions_total),
+            ),
+            (
+                "mvcc_pages_with_versions",
+                format_count(report.pager.mvcc_pages_with_versions),
+            ),
+            (
+                "mvcc_readers_active",
+                format_count(report.pager.mvcc_readers_active),
+            ),
+            (
+                "mvcc_reader_begin_total",
+                format_count(report.pager.mvcc_reader_begin_total),
+            ),
+            (
+                "mvcc_reader_end_total",
+                format_count(report.pager.mvcc_reader_end_total),
+            ),
+            (
+                "mvcc_reader_oldest_commit",
+                format_count(report.pager.mvcc_reader_oldest_snapshot),
+            ),
+            (
+                "mvcc_reader_newest_commit",
+                format_count(report.pager.mvcc_reader_newest_snapshot),
+            ),
+            (
+                "mvcc_reader_max_age",
+                format_duration_ms(report.pager.mvcc_reader_max_age_ms),
+            ),
+        ],
     );
-    println!("  last_checkpoint_lsn={}", report.pager.last_checkpoint_lsn);
-    println!();
-    println!(
-        "WAL: exists={} size={} path={}",
-        report.wal.exists, report.wal.size_bytes, report.wal.path
+    if report.pager.mvcc_readers_active > 0
+        && report.pager.mvcc_reader_max_age_ms >= MVCC_READER_WARN_THRESHOLD_MS
+    {
+        println!(
+            "WARNING: slow MVCC readers detected (max_age={})",
+            format_duration_ms(report.pager.mvcc_reader_max_age_ms)
+        );
+    }
+
+    print_section(
+        "WAL",
+        LABEL_WIDTH,
+        vec![
+            ("path", report.wal.path.clone()),
+            ("exists", format_bool(report.wal.exists)),
+            ("size", format_bytes(report.wal.size_bytes)),
+            (
+                "last_checkpoint_lsn",
+                format_count(report.wal.last_checkpoint_lsn),
+            ),
+        ],
     );
-    println!();
-    println!(
-        "Storage: next_node_id={} next_edge_id={} inline_blob={} inline_value={} flags=0x{:08x}",
-        report.storage.next_node_id,
-        report.storage.next_edge_id,
-        report.storage.inline_prop_blob,
-        report.storage.inline_prop_value,
-        report.storage.storage_flags
+
+    print_section(
+        "Storage",
+        LABEL_WIDTH,
+        vec![
+            ("next_node_id", format_count(report.storage.next_node_id)),
+            ("next_edge_id", format_count(report.storage.next_edge_id)),
+            (
+                "estimated_nodes",
+                format_count(report.storage.estimated_node_count),
+            ),
+            (
+                "estimated_edges",
+                format_count(report.storage.estimated_edge_count),
+            ),
+            (
+                "inline_blob",
+                format_bytes(report.storage.inline_prop_blob.into()),
+            ),
+            (
+                "inline_value",
+                format_bytes(report.storage.inline_prop_value.into()),
+            ),
+            (
+                "storage_flags",
+                format!("0x{:08x}", report.storage.storage_flags),
+            ),
+            (
+                "distinct_neighbors_default",
+                format_bool(report.storage.distinct_neighbors_default),
+            ),
+        ],
     );
-    println!(
-        "          est_nodes={} est_edges={} distinct_neighbors_default={}",
-        report.storage.estimated_node_count,
-        report.storage.estimated_edge_count,
-        report.storage.distinct_neighbors_default
-    );
-    println!();
-    println!(
-        "Filesystem: db_size={} wal_size={} db_path={} wal_path={}",
-        report.filesystem.db_size_bytes,
-        report.filesystem.wal_size_bytes,
-        report.filesystem.db_path,
-        report.filesystem.wal_path
+
+    print_section(
+        "Filesystem",
+        LABEL_WIDTH,
+        vec![
+            ("db_path", report.filesystem.db_path.clone()),
+            ("db_size", format_bytes(report.filesystem.db_size_bytes)),
+            ("wal_path", report.filesystem.wal_path.clone()),
+            ("wal_size", format_bytes(report.filesystem.wal_size_bytes)),
+        ],
     );
 }
 
-fn print_checkpoint_text(_: OutputFormat, report: &sombra::admin::CheckpointReport) {
+fn print_section(title: &str, label_width: usize, rows: Vec<(&'static str, String)>) {
+    println!("{title}");
+    for (label, value) in rows {
+        println!("  {:<width$} {}", label, value, width = label_width);
+    }
+    println!();
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {} ({bytes} B)", UNITS[unit])
+    }
+}
+
+fn format_bool(value: bool) -> String {
+    if value {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    }
+}
+
+fn print_checkpoint_text(_: &Ui, _: OutputFormat, report: &sombra::admin::CheckpointReport) {
     println!(
         "Checkpoint ({}) completed in {:.2} ms at LSN {}",
         report.mode, report.duration_ms, report.last_checkpoint_lsn
     );
+    println!(
+        "  mvcc_readers_active={} oldest_reader_commit={} max_reader_age={}",
+        report.mvcc_readers_active,
+        report.mvcc_reader_oldest_snapshot,
+        format_duration_ms(report.mvcc_reader_max_age_ms)
+    );
+    if let Some(warning) = &report.mvcc_warning {
+        println!("  WARNING: {warning}");
+    }
 }
 
-fn print_vacuum_text(_: OutputFormat, report: &sombra::admin::VacuumReport) {
+fn print_vacuum_text(_: &Ui, _: OutputFormat, output: &VacuumCommandOutput) {
+    let report = &output.report;
     println!(
-        "Vacuum finished in {:.2} ms (copied {} bytes, checkpoint_lsn={}, analyze_performed={})",
-        report.duration_ms, report.copied_bytes, report.checkpoint_lsn, report.analyze_performed
+        "Vacuum finished in {:.2} ms (copied {} bytes, checkpoint_lsn={}, analyze_performed={}, version_log_pruned={})",
+        report.duration_ms,
+        report.copied_bytes,
+        report.checkpoint_lsn,
+        report.analyze_performed,
+        report.version_log_pruned
     );
+    if let Some(active) = report.mvcc_readers_active {
+        let oldest = report.mvcc_reader_oldest_snapshot.unwrap_or(0);
+        let max_age = report.mvcc_reader_max_age_ms.unwrap_or(0);
+        println!(
+            "  mvcc_readers_active={} oldest_reader_commit={} max_reader_age={}",
+            active,
+            oldest,
+            format_duration_ms(max_age)
+        );
+    }
+    if let Some(warning) = &report.mvcc_warning {
+        println!("  WARNING: {warning}");
+    }
     if let Some(summary) = &report.analyze_summary {
         println!("Analyze summary (labels):");
         for stat in &summary.label_counts {
@@ -714,9 +1002,22 @@ fn print_vacuum_text(_: OutputFormat, report: &sombra::admin::VacuumReport) {
             println!("  {} (id={}): nodes={}", name, stat.label_id, stat.nodes);
         }
     }
+    if let Some(promotion) = &output.promotion {
+        if let Some(backup) = &promotion.backup_path {
+            println!(
+                "  replaced {} with compacted copy {} (backup at {})",
+                promotion.db_path, promotion.staging_path, backup
+            );
+        } else {
+            println!(
+                "  replaced {} with compacted copy {}",
+                promotion.db_path, promotion.staging_path
+            );
+        }
+    }
 }
 
-fn print_verify_text(_: OutputFormat, report: &sombra::admin::VerifyReport) {
+fn print_verify_text(_: &Ui, _: OutputFormat, report: &sombra::admin::VerifyReport) {
     println!(
         "Verify ({:?}) => success={} nodes_found={} edges_found={} adjacency_entries={} adjacency_nodes={}",
         report.level,

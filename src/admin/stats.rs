@@ -43,6 +43,22 @@ pub struct PagerStatsSection {
     pub dirty_writebacks: u64,
     /// Log sequence number of the last checkpoint.
     pub last_checkpoint_lsn: u64,
+    /// Total MVCC page versions retained in memory.
+    pub mvcc_page_versions_total: u64,
+    /// Number of pages currently tracking historical versions.
+    pub mvcc_pages_with_versions: u64,
+    /// Active mvcc readers.
+    pub mvcc_readers_active: u64,
+    /// Total reader begin events observed.
+    pub mvcc_reader_begin_total: u64,
+    /// Total reader end events observed.
+    pub mvcc_reader_end_total: u64,
+    /// Oldest reader snapshot commit ID.
+    pub mvcc_reader_oldest_snapshot: u64,
+    /// Newest reader snapshot commit ID.
+    pub mvcc_reader_newest_snapshot: u64,
+    /// Maximum reader age in milliseconds.
+    pub mvcc_reader_max_age_ms: u64,
 }
 
 /// Write-ahead log (WAL) statistics.
@@ -138,6 +154,14 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
         evictions: pager_counters.evictions,
         dirty_writebacks: pager_counters.dirty_writebacks,
         last_checkpoint_lsn: meta.last_checkpoint_lsn.0,
+        mvcc_page_versions_total: pager_counters.mvcc_page_versions_total,
+        mvcc_pages_with_versions: pager_counters.mvcc_pages_with_versions,
+        mvcc_readers_active: pager_counters.mvcc_readers_active,
+        mvcc_reader_begin_total: pager_counters.mvcc_reader_begin_total,
+        mvcc_reader_end_total: pager_counters.mvcc_reader_end_total,
+        mvcc_reader_oldest_snapshot: pager_counters.mvcc_reader_oldest_snapshot,
+        mvcc_reader_newest_snapshot: pager_counters.mvcc_reader_newest_snapshot,
+        mvcc_reader_max_age_ms: pager_counters.mvcc_reader_max_age_ms,
     };
 
     let wal_section = WalStatsSection {

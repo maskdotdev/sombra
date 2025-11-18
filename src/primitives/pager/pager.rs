@@ -25,13 +25,14 @@ use crate::primitives::{
 };
 use crate::storage::{
     profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
-    record_pager_wal_frames, CommitReader, CommitTable, CommitId, StorageProfileKind,
+    record_pager_wal_frames, CommitId, CommitReader, CommitTable, ReaderSnapshot,
+    StorageProfileKind,
 };
 use crate::types::{
     page::{self, PageHeader, PAGE_HDR_LEN},
     page_crc32, Lsn, PageId, Result, SombraError,
 };
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 #[cfg(test)]
 macro_rules! pager_test_log {
@@ -313,6 +314,9 @@ fn recover_database(
     Ok(Lsn(meta.last_checkpoint_lsn.0 + 1))
 }
 
+/// Reader age threshold (ms) that triggers MVCC lag warnings.
+pub const MVCC_READER_WARN_THRESHOLD_MS: u64 = 600_000;
+
 /// Statistics tracking pager operations.
 #[derive(Default, Clone, Debug)]
 pub struct PagerStats {
@@ -338,6 +342,8 @@ pub struct PagerStats {
     pub mvcc_reader_oldest_snapshot: CommitId,
     /// Newest snapshot commit across active readers.
     pub mvcc_reader_newest_snapshot: CommitId,
+    /// Maximum observed reader age in milliseconds.
+    pub mvcc_reader_max_age_ms: u64,
 }
 
 /// Trait for page-oriented storage with transactional support.
@@ -365,6 +371,8 @@ pub trait PageStore: Send + Sync {
     fn last_checkpoint_lsn(&self) -> Lsn;
     /// Returns the current metadata.
     fn meta(&self) -> Result<Meta>;
+    /// Returns a snapshot of pager statistics.
+    fn stats(&self) -> PagerStats;
 
     /// Enables or disables checksum verification on page reads.
     fn set_checksum_verification(&self, enabled: bool) {
@@ -930,22 +938,44 @@ impl Pager {
 
     /// Returns a snapshot of current pager statistics.
     pub fn stats(&self) -> PagerStats {
-        let (active, begin_total, end_total) = self.reader_metrics.snapshot();
-        let oldest_snapshot = {
+        let (active_total, begin_total, end_total) = self.reader_metrics.snapshot();
+        let now = Instant::now();
+        let reader_snapshot = {
             let table = self.commit_table.lock();
-            table.oldest_visible()
+            table.reader_snapshot(now)
         };
         let newest_snapshot = self.latest_committed_lsn().0;
+        self.maybe_warn_slow_readers(newest_snapshot, &reader_snapshot);
         let state = self.inner.lock();
         let mut stats = state.stats.clone();
         stats.mvcc_page_versions_total = self.mvcc_version_count.load(AtomicOrdering::Relaxed);
         stats.mvcc_pages_with_versions = self.mvcc_version_pages.load(AtomicOrdering::Relaxed);
-        stats.mvcc_readers_active = active;
+        stats.mvcc_readers_active = reader_snapshot.active.max(active_total);
         stats.mvcc_reader_begin_total = begin_total;
         stats.mvcc_reader_end_total = end_total;
-        stats.mvcc_reader_oldest_snapshot = oldest_snapshot;
-        stats.mvcc_reader_newest_snapshot = newest_snapshot;
+        stats.mvcc_reader_oldest_snapshot =
+            reader_snapshot.oldest_snapshot.unwrap_or(newest_snapshot);
+        stats.mvcc_reader_newest_snapshot =
+            reader_snapshot.newest_snapshot.unwrap_or(newest_snapshot);
+        stats.mvcc_reader_max_age_ms = reader_snapshot.max_age_ms;
         stats
+    }
+
+    fn maybe_warn_slow_readers(&self, newest_snapshot: CommitId, snapshot: &ReaderSnapshot) {
+        if snapshot.active == 0 || snapshot.max_age_ms < MVCC_READER_WARN_THRESHOLD_MS {
+            return;
+        }
+        warn!(
+            reader_count = snapshot.active,
+            max_age_ms = snapshot.max_age_ms,
+            threshold_ms = MVCC_READER_WARN_THRESHOLD_MS,
+            oldest_snapshot = snapshot
+                .oldest_snapshot
+                .unwrap_or(newest_snapshot),
+            latest_committed = newest_snapshot,
+            slow_readers = ?snapshot.slow_readers,
+            "pager.mvcc.reader_lag"
+        );
     }
 
     fn lookup_or_load_frame(
@@ -1881,6 +1911,10 @@ impl Pager {
                         mode = ?mode,
                         "pager.run_checkpoint.best_effort_guard_unavailable"
                     );
+                    info!(
+                        mode = ?mode,
+                        "pager.checkpoint.skip_guard_unavailable"
+                    );
                     return Ok(());
                 }
             },
@@ -1901,6 +1935,10 @@ impl Pager {
 
     fn perform_checkpoint(&self) -> Result<()> {
         pager_test_log!("[pager.checkpoint] perform begin");
+        let reader_snapshot = {
+            let table = self.commit_table.lock();
+            table.reader_snapshot(Instant::now())
+        };
         let mut inner = self.inner.lock();
         pager_test_log!(
             "[pager.checkpoint] meta before checkpoint last_lsn={}",
@@ -1924,11 +1962,25 @@ impl Pager {
             last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
             "pager.perform_checkpoint.frames_collected"
         );
+        info!(
+            pending_frames = frames.len(),
+            last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
+            reader_count = reader_snapshot.active,
+            reader_oldest_commit = reader_snapshot
+                .oldest_snapshot
+                .unwrap_or(inner.meta.last_checkpoint_lsn.0),
+            reader_max_age_ms = reader_snapshot.max_age_ms,
+            "pager.checkpoint.plan"
+        );
         if frames.is_empty() {
             self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
             inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
             pager_test_log!("[pager.checkpoint] no frames; reset wal");
             debug!("pager.perform_checkpoint.no_frames");
+            info!(
+                last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
+                "pager.checkpoint.skip_no_frames"
+            );
             return Ok(());
         }
         for (idx, frame) in frames.iter().enumerate() {
@@ -2000,6 +2052,13 @@ impl Pager {
             applied_frames = frames.len(),
             new_last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
             "pager.perform_checkpoint.applied"
+        );
+        info!(
+            applied_frames = frames.len(),
+            new_last_checkpoint_lsn = inner.meta.last_checkpoint_lsn.0,
+            reader_count = reader_snapshot.active,
+            reader_max_age_ms = reader_snapshot.max_age_ms,
+            "pager.checkpoint.applied"
         );
         Ok(())
     }
@@ -2163,7 +2222,7 @@ impl Pager {
         }
     }
 
-fn insert_version_chain_locked(
+    fn insert_version_chain_locked(
         &self,
         chains: &mut HashMap<PageId, VecDeque<VersionChainEntry>>,
         page_id: PageId,
@@ -2316,7 +2375,7 @@ fn insert_version_chain_locked(
         };
         let commit_reader = {
             let mut table = self.commit_table.lock();
-            match table.register_reader(snapshot_lsn.0) {
+            match table.register_reader(snapshot_lsn.0, Instant::now(), thread::current().id()) {
                 Ok(reader) => reader,
                 Err(err) => {
                     drop(lock);
@@ -2517,6 +2576,10 @@ impl PageStore for Pager {
     fn meta(&self) -> Result<Meta> {
         let inner = self.inner.lock();
         Ok(inner.meta.clone())
+    }
+
+    fn stats(&self) -> PagerStats {
+        Pager::stats(self)
     }
 
     fn set_checksum_verification(&self, enabled: bool) {

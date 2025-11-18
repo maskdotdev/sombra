@@ -1,3 +1,4 @@
+use super::mvcc::CommitId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -31,6 +32,22 @@ pub trait StorageMetrics: Send + Sync {
     /// * `direction` - The direction of the query: "out", "in", or "both".
     /// * `cached` - Whether the result was served from cache (`true`) or computed (`false`).
     fn degree_query(&self, direction: &'static str, cached: bool);
+
+    /// Records MVCC reader gauge statistics.
+    fn mvcc_reader_gauges(
+        &self,
+        _active: u64,
+        _oldest_commit: CommitId,
+        _newest_commit: CommitId,
+        _max_age_ms: u64,
+    ) {
+    }
+
+    /// Records MVCC reader lifecycle totals.
+    fn mvcc_reader_totals(&self, _begin_total: u64, _end_total: u64) {}
+
+    /// Records MVCC page version statistics.
+    fn mvcc_page_versions(&self, _total_versions: u64, _pages_with_versions: u64) {}
 }
 
 /// A no-op implementation of [`StorageMetrics`] that discards all recorded metrics.
@@ -88,6 +105,30 @@ pub struct CounterMetrics {
 
     /// Number of degree queries that required computation.
     pub degree_cache_misses: AtomicU64,
+
+    /// Active MVCC readers.
+    pub mvcc_reader_active: AtomicU64,
+
+    /// Oldest MVCC reader commit.
+    pub mvcc_reader_oldest_commit: AtomicU64,
+
+    /// Newest MVCC reader commit.
+    pub mvcc_reader_newest_commit: AtomicU64,
+
+    /// Maximum reader age observed in milliseconds.
+    pub mvcc_reader_max_age_ms: AtomicU64,
+
+    /// Total MVCC reader begin events.
+    pub mvcc_reader_begin_total: AtomicU64,
+
+    /// Total MVCC reader end events.
+    pub mvcc_reader_end_total: AtomicU64,
+
+    /// Total MVCC page versions retained.
+    pub mvcc_page_versions_total: AtomicU64,
+
+    /// Pages currently holding historical versions.
+    pub mvcc_pages_with_versions: AtomicU64,
 }
 
 impl StorageMetrics for CounterMetrics {
@@ -137,6 +178,36 @@ impl StorageMetrics for CounterMetrics {
         } else {
             self.degree_cache_misses.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn mvcc_reader_gauges(
+        &self,
+        active: u64,
+        oldest_commit: CommitId,
+        newest_commit: CommitId,
+        max_age_ms: u64,
+    ) {
+        self.mvcc_reader_active.store(active, Ordering::Relaxed);
+        self.mvcc_reader_oldest_commit
+            .store(oldest_commit, Ordering::Relaxed);
+        self.mvcc_reader_newest_commit
+            .store(newest_commit, Ordering::Relaxed);
+        self.mvcc_reader_max_age_ms
+            .store(max_age_ms, Ordering::Relaxed);
+    }
+
+    fn mvcc_reader_totals(&self, begin_total: u64, end_total: u64) {
+        self.mvcc_reader_begin_total
+            .store(begin_total, Ordering::Relaxed);
+        self.mvcc_reader_end_total
+            .store(end_total, Ordering::Relaxed);
+    }
+
+    fn mvcc_page_versions(&self, total_versions: u64, pages_with_versions: u64) {
+        self.mvcc_page_versions_total
+            .store(total_versions, Ordering::Relaxed);
+        self.mvcc_pages_with_versions
+            .store(pages_with_versions, Ordering::Relaxed);
     }
 }
 
