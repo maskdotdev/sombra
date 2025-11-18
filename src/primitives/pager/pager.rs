@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -346,9 +346,24 @@ pub struct PagerStats {
     pub mvcc_reader_max_age_ms: u64,
 }
 
+/// Context provided to background maintenance hooks after auto-checkpoints.
+#[derive(Clone, Copy, Debug)]
+pub struct AutockptContext {
+    /// LSN of the last completed checkpoint.
+    pub last_checkpoint_lsn: Lsn,
+    /// Time elapsed since the last checkpoint finished.
+    pub elapsed_since_last: Duration,
+}
+
+/// Hook trait for background maintenance tasks that run on the pager thread.
+pub trait BackgroundMaintainer: 'static {
+    /// Invoked after `maybe_autocheckpoint` completes its work.
+    fn run_background_maint(&self, ctx: &AutockptContext);
+}
+
 /// Trait for page-oriented storage with transactional support.
 #[allow(dead_code)]
-pub trait PageStore: Send + Sync {
+pub trait PageStore: 'static {
     /// Returns the page size in bytes.
     fn page_size(&self) -> u32;
     /// Retrieves a page within a read transaction.
@@ -388,6 +403,12 @@ pub trait PageStore: Send + Sync {
     fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
         None
     }
+
+    /// Hook invoked after the pager finishes its auto-checkpoint pass.
+    fn maybe_background_maint(&self, _ctx: &AutockptContext) {}
+
+    /// Registers a background maintenance callback.
+    fn register_background_maint(&self, _hook: Weak<dyn BackgroundMaintainer>) {}
 }
 
 /// An immutable reference to a page.
@@ -742,6 +763,7 @@ pub struct Pager {
     mvcc_version_count: AtomicU64,
     mvcc_version_pages: AtomicU64,
     reader_metrics: Arc<ReaderMetrics>,
+    background_hooks: Mutex<Vec<Weak<dyn BackgroundMaintainer>>>,
 }
 
 impl Pager {
@@ -858,6 +880,7 @@ impl Pager {
             mvcc_version_count: AtomicU64::new(0),
             mvcc_version_pages: AtomicU64::new(0),
             reader_metrics: Arc::new(ReaderMetrics::new()),
+            background_hooks: Mutex::new(Vec::new()),
         };
         pager.load_freelist()?;
         Ok(pager)
@@ -2161,6 +2184,7 @@ impl Pager {
                 timer_triggered, "pager.autocheckpoint.requesting_checkpoint"
             );
             let _ = self.run_checkpoint(CheckpointMode::BestEffort);
+            *self.last_autocheckpoint.lock() = Some(Instant::now());
         } else {
             pager_test_log!(
                 "[pager.autockpt] no checkpoint needed pages_triggered={} timer_triggered={}",
@@ -2172,6 +2196,15 @@ impl Pager {
                 timer_triggered, "pager.autocheckpoint.no_checkpoint_needed"
             );
         }
+        let elapsed_since_last = {
+            let last = self.last_autocheckpoint.lock();
+            last.as_ref().map(|inst| inst.elapsed()).unwrap_or_default()
+        };
+        let ctx = AutockptContext {
+            last_checkpoint_lsn: self.last_checkpoint_lsn(),
+            elapsed_since_last,
+        };
+        self.notify_background_hooks(&ctx);
         Ok(())
     }
 
@@ -2198,6 +2231,23 @@ impl Pager {
     fn release_commits_up_to(&self, lsn: Lsn) {
         let mut table = self.commit_table.lock();
         table.release_committed(lsn.0);
+    }
+
+    fn notify_background_hooks(&self, ctx: &AutockptContext) {
+        let mut hooks = self.background_hooks.lock();
+        let mut callbacks: Vec<Arc<dyn BackgroundMaintainer>> = Vec::new();
+        hooks.retain(|weak| {
+            if let Some(hook) = weak.upgrade() {
+                callbacks.push(hook);
+                true
+            } else {
+                false
+            }
+        });
+        drop(hooks);
+        for hook in callbacks {
+            hook.run_background_maint(ctx);
+        }
     }
 
     fn cache_overlays(&self, frames: &[PendingWalFrame]) {
@@ -2593,6 +2643,14 @@ impl PageStore for Pager {
 
     fn commit_table(&self) -> Option<Arc<Mutex<CommitTable>>> {
         Some(Arc::clone(&self.commit_table))
+    }
+
+    fn maybe_background_maint(&self, ctx: &AutockptContext) {
+        self.notify_background_hooks(ctx);
+    }
+
+    fn register_background_maint(&self, hook: Weak<dyn BackgroundMaintainer>) {
+        self.background_hooks.lock().push(hook);
     }
 }
 
