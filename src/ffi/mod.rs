@@ -468,7 +468,7 @@ impl Database {
         let store: Arc<dyn PageStore> = pager.clone();
         let mut graph_opts = GraphOptions::new(Arc::clone(&store));
         graph_opts = graph_opts.distinct_neighbors_default(opts.distinct_neighbors_default);
-        let graph = Arc::new(Graph::open(graph_opts)?);
+        let graph = Graph::open(graph_opts)?;
 
         let dict = Arc::new(Dict::open(Arc::clone(&store), DictOptions::default())?);
         let catalog_root = graph.index_catalog_root();
@@ -536,7 +536,7 @@ impl Database {
         if node_limit == 0 || max_labels == 0 {
             return Ok(Vec::new());
         }
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         let samples = self.graph.sample_node_labels(&read, node_limit)?;
         drop(read);
 
@@ -620,7 +620,7 @@ impl Database {
 
     /// Fetches a node by ID and returns its properties and labels.
     pub fn get_node_record(&self, node_id: u64) -> Result<Option<NodeRecord>> {
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         let data = self.graph.get_node(&read, NodeId(node_id))?;
         let result = match data {
             Some(node) => Some(self.materialize_node(&read, NodeId(node_id), node)?),
@@ -631,7 +631,7 @@ impl Database {
 
     /// Fetches an edge by ID and returns its metadata.
     pub fn get_edge_record(&self, edge_id: u64) -> Result<Option<EdgeRecord>> {
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         let data = self.graph.get_edge(&read, EdgeId(edge_id))?;
         let result = match data {
             Some(edge) => Some(self.materialize_edge(&read, EdgeId(edge_id), edge)?),
@@ -643,7 +643,7 @@ impl Database {
     /// Counts the number of nodes with the provided label.
     pub fn count_nodes_with_label(&self, label: &str) -> Result<u64> {
         let label_id = self.lookup_label(label)?;
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         self.graph
             .count_nodes_with_label(&read, label_id)
             .map_err(FfiError::from)
@@ -652,7 +652,7 @@ impl Database {
     /// Counts the number of edges with the provided type.
     pub fn count_edges_with_type(&self, ty: &str) -> Result<u64> {
         let ty_id = self.lookup_edge_type(ty)?;
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         self.graph
             .count_edges_with_type(&read, ty_id)
             .map_err(FfiError::from)
@@ -661,7 +661,7 @@ impl Database {
     /// Returns all node identifiers that carry the provided label.
     pub fn node_ids_with_label(&self, label: &str) -> Result<Vec<u64>> {
         let label_id = self.lookup_label(label)?;
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         let nodes = self
             .graph
             .nodes_with_label(&read, label_id)
@@ -681,7 +681,7 @@ impl Database {
             Some(name) => Some(self.lookup_edge_type(name)?),
             None => None,
         };
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         let cursor = self.graph.neighbors(
             &read,
             NodeId(node_id),
@@ -716,7 +716,7 @@ impl Database {
             Some(names) if !names.is_empty() => Some(self.lookup_edge_types(names)?),
             _ => None,
         };
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         let options = BfsOptions {
             max_depth,
             direction,
@@ -2776,7 +2776,6 @@ mod tests {
     use super::*;
     use crate::query::Value as QueryValue;
     use serde_json::json;
-    use std::path::Path;
     use tempfile::tempdir;
 
     fn props(entries: &[(&str, Value)]) -> Map<String, Value> {
@@ -2871,12 +2870,12 @@ mod tests {
 
     #[test]
     fn sample_labels_returns_entries_for_demo_db() -> Result<()> {
-        let path = Path::new("tests/fixtures/demo-db/graph-demo.sombra");
-        let opts = DatabaseOptions {
-            create_if_missing: false,
-            ..DatabaseOptions::default()
-        };
-        let db = Database::open(path, opts)?;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("demo.sombra");
+        let mut opts = DatabaseOptions::default();
+        opts.create_if_missing = true;
+        let db = Database::open(&path, opts)?;
+        db.seed_demo()?;
         let labels = db.sample_labels(100, 5)?;
         assert!(!labels.is_empty(), "expected at least one label in demo db");
         Ok(())

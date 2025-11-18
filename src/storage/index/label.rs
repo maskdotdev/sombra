@@ -219,6 +219,11 @@ impl LabelIndex {
         self.tree.put(tx, &key, &tombstone)
     }
 
+    pub fn vacuum(&self, tx: &mut WriteGuard<'_>, horizon: CommitId) -> Result<u64> {
+        self.ensure_root_initialized(tx)?;
+        prune_versioned_tree(&self.tree, tx, horizon)
+    }
+
     pub fn scan<'a>(&'a self, tx: &'a ReadGuard, label: LabelId) -> Result<LabelScan<'a>> {
         let (lower, upper) = label_bounds(label);
         let snapshot = snapshot_commit(tx);
@@ -267,6 +272,27 @@ impl LabelIndex {
         header.encode(&mut data[..PAGE_HDR_LEN])?;
         page::write_initial_header(&mut data[PAGE_HDR_LEN..page_size], BTreePageKind::Leaf)
     }
+}
+
+fn prune_versioned_tree<V: ValCodec>(
+    tree: &BTree<Vec<u8>, VersionedValue<V>>,
+    tx: &mut WriteGuard<'_>,
+    horizon: CommitId,
+) -> Result<u64> {
+    let mut keys = Vec::new();
+    tree.for_each_with_write(tx, |key, value| {
+        if value.header.end != COMMIT_MAX && value.header.end <= horizon {
+            keys.push(key);
+        }
+        Ok(())
+    })?;
+    let mut pruned = 0u64;
+    for key in keys {
+        if tree.delete(tx, &key)? {
+            pruned = pruned.saturating_add(1);
+        }
+    }
+    Ok(pruned)
 }
 
 /// Iterator for scanning nodes with a specific label.

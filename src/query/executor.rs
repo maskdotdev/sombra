@@ -5,7 +5,7 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::primitives::pager::{PageStore, Pager, ReadGuard};
+use crate::primitives::pager::{Pager, ReadGuard};
 use crate::storage::index::{collect_all, PostingStream};
 use crate::storage::{
     Dir as StorageDir, ExpandOpts, Graph, NeighborCursor, NodeData, PropValueOwned,
@@ -224,7 +224,7 @@ impl Executor {
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<ResultStream> {
         let guard_timer = query_profile_timer();
-        let context = Arc::new(ReadContext::new(self.pager.begin_read()?));
+        let context = Arc::new(ReadContext::new(self.pager.begin_latest_committed_read()?));
         record_query_profile_timer(QueryProfileKind::ReadGuard, guard_timer);
         let cache: NodeCache = Arc::new(Mutex::new(HashMap::new()));
         let mut project_fields = None;
@@ -1422,7 +1422,7 @@ fn bound_ref<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::pager::{Pager, PagerOptions};
+    use crate::primitives::pager::{PageStore, Pager, PagerOptions};
     use crate::query::ast::Var;
     use crate::query::builder::QueryBuilder;
     use crate::query::metadata::InMemoryMetadata;
@@ -1444,7 +1444,7 @@ mod tests {
         let path = dir.path().join("executor.db");
         let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
         let store: Arc<dyn crate::primitives::pager::PageStore> = pager.clone();
-        let graph = Arc::new(Graph::open(GraphOptions::new(store))?);
+        let graph = Graph::open(GraphOptions::new(store))?;
         Ok((dir, pager, graph))
     }
 

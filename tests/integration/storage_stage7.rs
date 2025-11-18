@@ -13,7 +13,7 @@ use sombra::storage::{
 use sombra::types::{LabelId, PropId, Result, SombraError, TypeId};
 use tempfile::tempdir;
 
-fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Graph)> {
+fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Arc<Graph>)> {
     let pager = Arc::new(Pager::create(path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
     let graph = Graph::open(GraphOptions::new(store))?;

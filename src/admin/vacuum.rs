@@ -8,7 +8,7 @@ use crate::primitives::pager::{
     CheckpointMode, Meta, PageStore, Pager, MVCC_READER_WARN_THRESHOLD_MS,
 };
 use crate::storage::catalog::Dict;
-use crate::storage::Graph;
+use crate::storage::{Graph, VacuumTrigger, COMMIT_MAX};
 use crate::types::{NodeId, StrId};
 use serde::Serialize;
 
@@ -39,6 +39,16 @@ pub struct VacuumReport {
     pub analyze_summary: Option<AnalyzeSummary>,
     /// Number of historical versions pruned from the version log.
     pub version_log_pruned: u64,
+    /// Forward adjacency entries pruned.
+    pub adjacency_fwd_pruned: u64,
+    /// Reverse adjacency entries pruned.
+    pub adjacency_rev_pruned: u64,
+    /// Label index entries pruned.
+    pub index_label_pruned: u64,
+    /// Chunked property segments pruned.
+    pub index_chunked_pruned: u64,
+    /// B-tree property postings pruned.
+    pub index_btree_pruned: u64,
     /// Number of active MVCC readers when vacuum ran.
     pub mvcc_readers_active: Option<u64>,
     /// Oldest reader snapshot commit.
@@ -113,17 +123,17 @@ pub fn vacuum_into(
         None
     };
 
-    let (version_log_pruned, reader_snapshot) = match graph.commit_table() {
+    let (horizon, reader_snapshot) = match graph.commit_table() {
         Some(table) => {
             let guard = table.lock();
             let reader_snapshot = guard.reader_snapshot(Instant::now());
             let horizon = guard.oldest_visible();
             drop(guard);
-            let stats = graph.vacuum_version_log(horizon, None)?;
-            (stats.entries_pruned, Some(reader_snapshot))
+            (horizon, Some(reader_snapshot))
         }
-        None => (0, None),
+        None => (COMMIT_MAX, None),
     };
+    let vacuum_stats = graph.vacuum_mvcc(horizon, None, VacuumTrigger::Manual, None)?;
 
     drop(graph);
     drop(dict);
@@ -131,6 +141,13 @@ pub fn vacuum_into(
 
     ensure_parent_dir(dst_path)?;
     let copied = fs::copy(src_path, dst_path)?;
+
+    let total_pruned = vacuum_stats.versions_pruned
+        + vacuum_stats.adjacency_fwd_pruned
+        + vacuum_stats.adjacency_rev_pruned
+        + vacuum_stats.index_label_pruned
+        + vacuum_stats.index_chunked_pruned
+        + vacuum_stats.index_btree_pruned;
 
     let (mvcc_readers_active, mvcc_reader_oldest_snapshot, mvcc_reader_max_age_ms, mvcc_warning) =
         match &reader_snapshot {
@@ -140,7 +157,7 @@ pub fn vacuum_into(
                     .unwrap_or(meta.last_checkpoint_lsn.0);
                 let warning = if snapshot.active > 0
                     && snapshot.max_age_ms >= MVCC_READER_WARN_THRESHOLD_MS
-                    && version_log_pruned == 0
+                    && total_pruned == 0
                 {
                     Some(format!(
                         "unable to reclaim MVCC versions: {} readers active (oldest commit {}, max_age {} ms)",
@@ -167,7 +184,12 @@ pub fn vacuum_into(
         checkpoint_lsn: meta.last_checkpoint_lsn.0,
         analyze_performed: opts.analyze,
         analyze_summary,
-        version_log_pruned,
+        version_log_pruned: vacuum_stats.versions_pruned,
+        adjacency_fwd_pruned: vacuum_stats.adjacency_fwd_pruned,
+        adjacency_rev_pruned: vacuum_stats.adjacency_rev_pruned,
+        index_label_pruned: vacuum_stats.index_label_pruned,
+        index_chunked_pruned: vacuum_stats.index_chunked_pruned,
+        index_btree_pruned: vacuum_stats.index_btree_pruned,
         mvcc_readers_active,
         mvcc_reader_oldest_snapshot,
         mvcc_reader_max_age_ms,
@@ -176,6 +198,11 @@ pub fn vacuum_into(
     if let Some(snapshot) = reader_snapshot {
         info!(
             version_log_pruned = report.version_log_pruned,
+            adjacency_fwd_pruned = report.adjacency_fwd_pruned,
+            adjacency_rev_pruned = report.adjacency_rev_pruned,
+            index_label_pruned = report.index_label_pruned,
+            index_chunked_pruned = report.index_chunked_pruned,
+            index_btree_pruned = report.index_btree_pruned,
             reader_count = snapshot.active,
             reader_oldest_commit = snapshot
                 .oldest_snapshot
@@ -188,6 +215,11 @@ pub fn vacuum_into(
     } else {
         info!(
             version_log_pruned = report.version_log_pruned,
+            adjacency_fwd_pruned = report.adjacency_fwd_pruned,
+            adjacency_rev_pruned = report.adjacency_rev_pruned,
+            index_label_pruned = report.index_label_pruned,
+            index_chunked_pruned = report.index_chunked_pruned,
+            index_btree_pruned = report.index_btree_pruned,
             duration_ms = report.duration_ms,
             copied_bytes = report.copied_bytes,
             "admin.vacuum.completed"

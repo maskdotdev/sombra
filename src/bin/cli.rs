@@ -978,6 +978,14 @@ fn print_vacuum_text(_: &Ui, _: OutputFormat, output: &VacuumCommandOutput) {
         report.analyze_performed,
         report.version_log_pruned
     );
+    println!(
+        "  adjacency_pruned: fwd={} rev={}",
+        report.adjacency_fwd_pruned, report.adjacency_rev_pruned
+    );
+    println!(
+        "  index_pruned: label={} chunked={} btree={}",
+        report.index_label_pruned, report.index_chunked_pruned, report.index_btree_pruned
+    );
     if let Some(active) = report.mvcc_readers_active {
         let oldest = report.mvcc_reader_oldest_snapshot.unwrap_or(0);
         let max_age = report.mvcc_reader_max_age_ms.unwrap_or(0);

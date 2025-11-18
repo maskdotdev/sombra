@@ -26,6 +26,19 @@ pub struct IndexRoots {
 }
 
 /// Manages all indexing structures for the graph database.
+/// Statistics describing index cleanup results.
+/// Statistics describing index cleanup results.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IndexVacuumStats {
+    /// Number of label index entries removed.
+    pub label_entries_pruned: u64,
+    /// Number of chunked index segments removed.
+    pub chunked_segments_pruned: u64,
+    /// Number of B-tree postings removed.
+    pub btree_entries_pruned: u64,
+}
+
+/// Collection of all graph indexes.
 pub struct IndexStore {
     #[allow(dead_code)]
     store: Arc<dyn PageStore>,
@@ -58,6 +71,18 @@ impl IndexStore {
             prop_btree: index_store.btree.root_page(),
         };
         Ok((index_store, roots))
+    }
+
+    /// Removes historical index entries whose visibility ended at or before `horizon`.
+    pub fn vacuum(&self, tx: &mut WriteGuard<'_>, horizon: CommitId) -> Result<IndexVacuumStats> {
+        let label_entries_pruned = self.label_index.vacuum(tx, horizon)?;
+        let chunked_segments_pruned = self.chunked.vacuum(tx, horizon)?;
+        let btree_entries_pruned = self.btree.vacuum(tx, horizon)?;
+        Ok(IndexVacuumStats {
+            label_entries_pruned,
+            chunked_segments_pruned,
+            btree_entries_pruned,
+        })
     }
 
     /// Records the current oldest reader commit for downstream cleanup decisions.

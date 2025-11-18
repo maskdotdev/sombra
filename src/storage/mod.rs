@@ -55,9 +55,9 @@ pub use adjacency::{Dir, ExpandOpts, Neighbor, NeighborCursor};
 
 /// Core graph storage implementation.
 pub use graph::{
-    BfsOptions, BfsVisit, BulkEdgeValidator, CreateEdgeOptions, Graph, GraphWriter,
-    GraphWriterStats, PropStats, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE,
-    STORAGE_FLAG_DEGREE_CACHE,
+    AdjacencyVacuumStats, BfsOptions, BfsVisit, BulkEdgeValidator, CreateEdgeOptions, Graph,
+    GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats, VacuumTrigger, VersionVacuumStats,
+    DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE, STORAGE_FLAG_DEGREE_CACHE,
 };
 
 /// Index definitions and label scan operations.
@@ -72,7 +72,7 @@ pub use mvcc::{
 pub use metrics::{default_metrics, CounterMetrics, NoopMetrics, StorageMetrics};
 
 /// Graph configuration options.
-pub use options::GraphOptions;
+pub use options::{GraphOptions, VacuumCfg};
 
 /// Property patch operations for updates.
 pub use patch::{PropPatch, PropPatchOp};

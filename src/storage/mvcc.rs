@@ -3,7 +3,7 @@ use crate::types::{Result, SombraError};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::thread::ThreadId;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Opaque identifier assigned to every committed write transaction.
 ///
@@ -255,6 +255,7 @@ struct CommitEntry {
     id: CommitId,
     status: CommitStatus,
     reader_refs: u32,
+    committed_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -376,6 +377,7 @@ impl CommitTable {
             id,
             status: CommitStatus::Pending,
             reader_refs: 0,
+            committed_at: None,
         });
         Ok(())
     }
@@ -391,6 +393,7 @@ impl CommitTable {
             return Err(SombraError::Invalid("commit already finalized"));
         }
         entry.status = CommitStatus::Committed;
+        entry.committed_at = Some(Instant::now());
         Ok(())
     }
 
@@ -496,6 +499,27 @@ impl CommitTable {
             .front()
             .map(|entry| entry.id)
             .unwrap_or(self.released_up_to)
+    }
+
+    /// Returns the maximum commit ID eligible for cleanup given `retention`.
+    pub fn vacuum_horizon(&self, retention: Duration) -> CommitId {
+        let cutoff = Instant::now()
+            .checked_sub(retention)
+            .unwrap_or_else(Instant::now);
+        let mut floor = self.released_up_to;
+        for entry in self.entries.iter().rev() {
+            if entry.status != CommitStatus::Committed {
+                continue;
+            }
+            if let Some(committed_at) = entry.committed_at {
+                if committed_at <= cutoff {
+                    floor = floor.max(entry.id);
+                    break;
+                }
+            }
+        }
+        let oldest = self.oldest_visible();
+        floor.min(oldest)
     }
 
     /// Returns a snapshot describing currently active readers.

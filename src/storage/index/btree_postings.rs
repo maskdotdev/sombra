@@ -223,6 +223,16 @@ impl BTreePostings {
         Ok(())
     }
 
+    pub fn vacuum(&self, tx: &mut WriteGuard<'_>, horizon: CommitId) -> Result<u64> {
+        if self.root_page().0 == 0 {
+            return Ok(0);
+        }
+        self.ensure_tree_with_write(tx)?;
+        let tree_ref = self.tree.borrow();
+        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        prune_versioned_tree(tree, tx, horizon)
+    }
+
     fn ensure_tree_with_write(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
         if self.tree.borrow().is_some() {
             return Ok(());
@@ -338,6 +348,27 @@ impl BTreePostings {
         bytes.copy_from_slice(&key[key.len() - 8..]);
         Ok(NodeId(u64::from_be_bytes(bytes)))
     }
+}
+
+fn prune_versioned_tree<V: ValCodec>(
+    tree: &BTree<Vec<u8>, VersionedValue<V>>,
+    tx: &mut WriteGuard<'_>,
+    horizon: CommitId,
+) -> Result<u64> {
+    let mut keys = Vec::new();
+    tree.for_each_with_write(tx, |key, value| {
+        if value.header.end != COMMIT_MAX && value.header.end <= horizon {
+            keys.push(key);
+        }
+        Ok(())
+    })?;
+    let mut pruned = 0u64;
+    for key in keys {
+        if tree.delete(tx, &key)? {
+            pruned = pruned.saturating_add(1);
+        }
+    }
+    Ok(pruned)
 }
 
 impl BTreePostings {

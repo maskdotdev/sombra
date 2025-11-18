@@ -4,7 +4,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
-use crate::storage::btree::{page, BTree, BTreeOptions};
+use crate::storage::btree::{page, BTree, BTreeOptions, ValCodec};
 use crate::storage::{mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
@@ -231,6 +231,16 @@ impl ChunkedIndex {
         Ok(())
     }
 
+    pub fn vacuum(&self, tx: &mut WriteGuard<'_>, horizon: CommitId) -> Result<u64> {
+        if self.root_page().0 == 0 {
+            return Ok(0);
+        }
+        self.ensure_tree_with_write(tx)?;
+        let tree_ref = self.tree.borrow();
+        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        prune_versioned_tree(tree, tx, horizon)
+    }
+
     fn ensure_tree_with_write(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
         if self.tree.borrow().is_some() {
             return Ok(());
@@ -342,6 +352,27 @@ impl ChunkedIndex {
         buf.extend_from_slice(&segment.to_be_bytes());
         buf
     }
+}
+
+fn prune_versioned_tree<V: ValCodec>(
+    tree: &BTree<Vec<u8>, VersionedValue<V>>,
+    tx: &mut WriteGuard<'_>,
+    horizon: CommitId,
+) -> Result<u64> {
+    let mut keys = Vec::new();
+    tree.for_each_with_write(tx, |key, value| {
+        if value.header.end != COMMIT_MAX && value.header.end <= horizon {
+            keys.push(key);
+        }
+        Ok(())
+    })?;
+    let mut pruned = 0u64;
+    for key in keys {
+        if tree.delete(tx, &key)? {
+            pruned = pruned.saturating_add(1);
+        }
+    }
+    Ok(pruned)
 }
 
 fn base_prefix(label: LabelId, prop: PropId) -> Vec<u8> {

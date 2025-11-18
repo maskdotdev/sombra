@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::primitives::pager::PageStore;
 
@@ -21,6 +22,8 @@ pub struct GraphOptions {
     pub row_hash_header: bool,
     /// Whether to attempt in-place inserts for B-tree write paths.
     pub btree_inplace: bool,
+    /// Background MVCC vacuum configuration.
+    pub vacuum: VacuumCfg,
 }
 
 impl GraphOptions {
@@ -35,6 +38,7 @@ impl GraphOptions {
             metrics: None,
             row_hash_header: false,
             btree_inplace: false,
+            vacuum: VacuumCfg::default(),
         }
     }
 
@@ -78,5 +82,41 @@ impl GraphOptions {
     pub fn btree_inplace(mut self, enabled: bool) -> Self {
         self.btree_inplace = enabled;
         self
+    }
+
+    /// Sets the background vacuum configuration.
+    pub fn vacuum(mut self, cfg: VacuumCfg) -> Self {
+        self.vacuum = cfg;
+        self
+    }
+}
+
+/// Configuration for background MVCC cleanup.
+#[derive(Clone)]
+pub struct VacuumCfg {
+    /// Whether the background worker is enabled.
+    pub enabled: bool,
+    /// Target interval between cleanup passes.
+    pub interval: Duration,
+    /// Retention window for historical versions.
+    pub retention_window: Duration,
+    /// Version-log size that triggers eager cleanup.
+    pub log_high_water_bytes: u64,
+    /// Soft runtime budget per pass (milliseconds).
+    pub max_run_millis: u64,
+    /// Maximum version-log entries to prune per pass.
+    pub max_segments_per_run: u32,
+}
+
+impl Default for VacuumCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval: Duration::from_secs(30),
+            retention_window: Duration::from_secs(60 * 60 * 24),
+            log_high_water_bytes: 512 * 1024 * 1024,
+            max_run_millis: 50,
+            max_segments_per_run: 8,
+        }
     }
 }
