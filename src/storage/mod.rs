@@ -56,16 +56,17 @@ pub use adjacency::{Dir, ExpandOpts, Neighbor, NeighborCursor};
 /// Core graph storage implementation.
 pub use graph::{
     AdjacencyVacuumStats, BfsOptions, BfsVisit, BulkEdgeValidator, CreateEdgeOptions, Graph,
-    GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats, VacuumTrigger, VersionVacuumStats,
-    DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE, STORAGE_FLAG_DEGREE_CACHE,
+    GraphMvccStatus, GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats, VacuumTrigger,
+    VersionVacuumStats, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE,
+    STORAGE_FLAG_DEGREE_CACHE,
 };
 
 /// Index definitions and label scan operations.
 pub use index::{IndexDef, IndexKind, LabelScan, TypeTag};
 pub use mvcc::{
-    flags as mvcc_flags, CommitId, CommitReader, CommitStatus, CommitTable, ReaderSnapshot,
-    ReaderSnapshotEntry, VersionHeader, VersionLogEntry, VersionPtr, VersionSpace, VersionedValue,
-    COMMIT_MAX, VERSION_HEADER_LEN, VERSION_PTR_LEN,
+    flags as mvcc_flags, CommitEntrySnapshot, CommitId, CommitReader, CommitStatus, CommitTable,
+    CommitTableSnapshot, ReaderSnapshot, ReaderSnapshotEntry, VersionHeader, VersionLogEntry,
+    VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN, VERSION_PTR_LEN,
 };
 
 /// Metrics and profiling.

@@ -333,6 +333,32 @@ pub struct ReaderSnapshotEntry {
     pub thread_id: ThreadId,
 }
 
+/// Summary of a single commit tracked inside the commit table.
+#[derive(Clone, Debug)]
+pub struct CommitEntrySnapshot {
+    /// Commit identifier.
+    pub id: CommitId,
+    /// Lifecycle state for the commit.
+    pub status: CommitStatus,
+    /// Number of readers currently referencing this commit entry.
+    pub reader_refs: u32,
+    /// Age of the commit in milliseconds (if committed).
+    pub committed_ms_ago: Option<u64>,
+}
+
+/// Snapshot of the commit table state used for diagnostics.
+#[derive(Clone, Debug)]
+pub struct CommitTableSnapshot {
+    /// Oldest commit released back to the free list.
+    pub released_up_to: CommitId,
+    /// Smallest commit that must remain visible to readers.
+    pub oldest_visible: CommitId,
+    /// Outstanding commit entries that have not been released yet.
+    pub entries: Vec<CommitEntrySnapshot>,
+    /// Live reader statistics captured during the snapshot.
+    pub reader_snapshot: ReaderSnapshot,
+}
+
 /// In-memory commit table backed by WAL redo in future stages.
 ///
 /// The pager hands out monotonically increasing IDs via [`reserve`], storage records
@@ -560,6 +586,30 @@ impl CommitTable {
         snapshot.slow_readers = slow;
         snapshot
     }
+
+    /// Captures a diagnostic snapshot of the commit table state.
+    pub fn snapshot(&self, now: Instant) -> CommitTableSnapshot {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| CommitEntrySnapshot {
+                id: entry.id,
+                status: entry.status,
+                reader_refs: entry.reader_refs,
+                committed_ms_ago: entry.committed_at.map(|instant| {
+                    now.saturating_duration_since(instant)
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64
+                }),
+            })
+            .collect();
+        CommitTableSnapshot {
+            released_up_to: self.released_up_to,
+            oldest_visible: self.oldest_visible(),
+            entries,
+            reader_snapshot: self.reader_snapshot(now),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -640,6 +690,36 @@ mod commit_table_tests {
     }
 
     #[test]
+    fn vacuum_horizon_respects_active_readers() {
+        let mut table = CommitTable::new(0);
+        table.reserve(1).unwrap();
+        table.mark_committed(1).unwrap();
+        table.reserve(2).unwrap();
+        table.mark_committed(2).unwrap();
+        let reader = table
+            .register_reader(1, Instant::now(), thread::current().id())
+            .unwrap();
+        assert_eq!(table.vacuum_horizon(Duration::from_millis(0)), 1);
+        table.release_reader(reader);
+        table.release_committed(1);
+        assert_eq!(table.vacuum_horizon(Duration::from_millis(0)), 2);
+    }
+
+    #[test]
+    fn vacuum_horizon_respects_retention_window() {
+        let mut table = CommitTable::new(0);
+        table.reserve(1).unwrap();
+        table.mark_committed(1).unwrap();
+        table.reserve(2).unwrap();
+        table.mark_committed(2).unwrap();
+        let long_retention = table.vacuum_horizon(Duration::from_secs(60));
+        assert_eq!(long_retention, 0);
+        table.release_committed(2);
+        let immediate = table.vacuum_horizon(Duration::from_millis(0));
+        assert_eq!(immediate, 2);
+    }
+
+    #[test]
     fn reader_snapshot_reports_activity() {
         let mut table = CommitTable::new(0);
         table.reserve(1).unwrap();
@@ -664,6 +744,39 @@ mod commit_table_tests {
         let empty = table.reader_snapshot(now);
         assert_eq!(empty.active, 0);
         assert!(empty.oldest_snapshot.is_none());
+    }
+
+    #[test]
+    fn snapshot_reports_entries() {
+        let mut table = CommitTable::new(0);
+        table.reserve(1).unwrap();
+        table.mark_committed(1).unwrap();
+        table.reserve(2).unwrap();
+        let reader = table
+            .register_reader(2, Instant::now(), thread::current().id())
+            .unwrap();
+        let now = Instant::now();
+        let snapshot = table.snapshot(now);
+        assert_eq!(snapshot.released_up_to, 0);
+        assert_eq!(snapshot.oldest_visible, 1);
+        assert_eq!(snapshot.entries.len(), 2);
+        let committed = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.id == 1)
+            .expect("committed entry present");
+        assert_eq!(committed.status, CommitStatus::Committed);
+        assert!(committed.committed_ms_ago.is_some());
+        let pending = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.id == 2)
+            .expect("pending entry present");
+        assert_eq!(pending.status, CommitStatus::Pending);
+        assert_eq!(pending.reader_refs, 1);
+        assert!(pending.committed_ms_ago.is_none());
+        assert_eq!(snapshot.reader_snapshot.active, 1);
+        table.release_reader(reader);
     }
 
     #[test]

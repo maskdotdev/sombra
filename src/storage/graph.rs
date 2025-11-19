@@ -34,8 +34,8 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{
-    CommitId, CommitTable, VersionHeader, VersionLogEntry, VersionPtr, VersionSpace,
-    VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+    CommitId, CommitTable, CommitTableSnapshot, VersionHeader, VersionLogEntry, VersionPtr,
+    VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
 use super::node::{
@@ -252,6 +252,19 @@ pub struct GraphVacuumStats {
     pub bytes_reclaimed: u64,
 }
 
+/// Current MVCC status for observability/CLI tooling.
+#[derive(Clone, Debug)]
+pub struct GraphMvccStatus {
+    /// Bytes retained inside the version log B-tree.
+    pub version_log_bytes: u64,
+    /// Number of entries currently stored in the version log.
+    pub version_log_entries: u64,
+    /// Configured retention window used by vacuum.
+    pub retention_window: Duration,
+    /// Snapshot of the commit table (if MVCC is enabled).
+    pub commit_table: Option<CommitTableSnapshot>,
+}
+
 /// Reason a vacuum pass ran.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VacuumTrigger {
@@ -385,6 +398,25 @@ impl Graph {
         let table = self.commit_table.as_ref()?;
         let snapshot = table.lock().reader_snapshot(Instant::now());
         snapshot.oldest_snapshot
+    }
+
+    /// Returns the configured retention window for MVCC vacuum.
+    pub fn vacuum_retention_window(&self) -> Duration {
+        self.vacuum_cfg.retention_window
+    }
+
+    /// Returns MVCC-related diagnostics for the graph.
+    pub fn mvcc_status(&self) -> GraphMvccStatus {
+        let commit_table = self
+            .commit_table
+            .as_ref()
+            .map(|table| table.lock().snapshot(Instant::now()));
+        GraphMvccStatus {
+            version_log_bytes: self.version_log_bytes(),
+            version_log_entries: self.version_log_entry_count(),
+            retention_window: self.vacuum_cfg.retention_window,
+            commit_table,
+        }
     }
 
     /// Removes historical versions whose visibility ended at or before `horizon`.
@@ -597,6 +629,7 @@ impl Graph {
         if bytes_removed > 0 || !to_delete.is_empty() {
             self.publish_version_log_usage_metrics();
         }
+        self.vstore.flush_deferred(tx)?;
         Ok(VersionVacuumStats {
             entries_pruned: to_delete.len() as u64,
         })
@@ -1899,7 +1932,20 @@ impl Graph {
         if tombstone {
             header.flags |= mvcc_flags::TOMBSTONE;
         }
+        header.set_pending();
         VersionedValue::new(header, UnitValue)
+    }
+
+    fn finalize_version_header(&self, header: &mut VersionHeader) -> bool {
+        if !header.is_pending() {
+            return false;
+        }
+        header.clear_pending();
+        true
+    }
+
+    fn finalize_version_value(&self, value: &mut VersionedValue<UnitValue>) -> bool {
+        self.finalize_version_header(&mut value.header)
     }
 
     fn finalize_node_head(&self, tx: &mut WriteGuard<'_>, id: NodeId) -> Result<()> {
@@ -1907,10 +1953,9 @@ impl Graph {
             return Err(SombraError::Corruption("node head missing during finalize"));
         };
         let mut header = VersionHeader::decode(&bytes[..VERSION_HEADER_LEN])?;
-        if !header.is_pending() {
+        if !self.finalize_version_header(&mut header) {
             return Ok(());
         }
-        header.clear_pending();
         Self::overwrite_encoded_header(&mut bytes, &header);
         self.nodes.put(tx, &id.0, &bytes)?;
         Ok(())
@@ -1921,12 +1966,40 @@ impl Graph {
             return Err(SombraError::Corruption("edge head missing during finalize"));
         };
         let mut header = VersionHeader::decode(&bytes[..VERSION_HEADER_LEN])?;
-        if !header.is_pending() {
+        if !self.finalize_version_header(&mut header) {
             return Ok(());
         }
-        header.clear_pending();
         Self::overwrite_encoded_header(&mut bytes, &header);
         self.edges.put(tx, &id.0, &bytes)?;
+        Ok(())
+    }
+
+    fn finalize_adjacency_entry(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        tree: &BTree<Vec<u8>, VersionedValue<UnitValue>>,
+        key: &Vec<u8>,
+    ) -> Result<()> {
+        let Some(mut value) = tree.get_with_write(tx, key)? else {
+            return Err(SombraError::Corruption(
+                "adjacency entry missing during finalize",
+            ));
+        };
+        if !self.finalize_version_value(&mut value) {
+            return Ok(());
+        }
+        tree.put(tx, key, &value)
+    }
+
+    fn finalize_adjacency_entries(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        keys: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        for (fwd, rev) in keys {
+            self.finalize_adjacency_entry(tx, &self.adj_fwd, fwd)?;
+            self.finalize_adjacency_entry(tx, &self.adj_rev, rev)?;
+        }
         Ok(())
     }
 
@@ -2221,6 +2294,7 @@ impl Graph {
                 return Err(err);
             }
         }
+        self.finalize_adjacency_entries(tx, &keys)?;
         Ok(())
     }
 
@@ -3874,6 +3948,7 @@ mod vacuum_background_tests {
             },
         )?;
         pager.commit(write)?;
+        eprintln!("node created");
         let mut write = pager.begin_write()?;
         graph.delete_node(&mut write, node, DeleteNodeOpts::default())?;
         pager.commit(write)?;
@@ -3933,6 +4008,251 @@ mod vacuum_background_tests {
         assert_eq!(graph.vacuum_sched.next_deadline_ms.get(), 0);
         drop(graph);
         drop(pager);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_configured_retention_window() -> Result<()> {
+        let retention = Duration::from_secs(42);
+        let cfg = VacuumCfg {
+            enabled: true,
+            interval: Duration::from_millis(50),
+            retention_window: retention,
+            log_high_water_bytes: u64::MAX,
+            max_pages_per_pass: 16,
+            max_millis_per_pass: 10,
+            index_cleanup: true,
+        };
+        let (_tmpdir, _pager, graph) = setup_graph(cfg);
+        assert_eq!(graph.vacuum_retention_window(), retention);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod adjacency_commit_tests {
+    use super::*;
+    use crate::primitives::pager::{PageStore, Pager, PagerOptions};
+    use crate::storage::GraphOptions;
+    use crate::types::{Result, TypeId};
+    use std::ops::Bound;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn setup_graph() -> (tempfile::TempDir, Arc<Pager>, Arc<Graph>) {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("adj-commit.db");
+        let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+        let store: Arc<dyn PageStore> = pager.clone();
+        let graph = Graph::open(GraphOptions::new(store)).unwrap();
+        (dir, pager, graph)
+    }
+
+    fn insert_simple_nodes(pager: &Pager, graph: &Graph) -> Result<(NodeId, NodeId)> {
+        let mut write = pager.begin_write()?;
+        let a = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[],
+                props: &[],
+            },
+        )?;
+        let b = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[],
+                props: &[],
+            },
+        )?;
+        pager.commit(write)?;
+        Ok((a, b))
+    }
+
+    fn fetch_edge_commit(graph: &Graph, read: &ReadGuard, edge: EdgeId) -> Result<CommitId> {
+        let bytes = graph
+            .edges
+            .get(read, &edge.0)?
+            .ok_or(SombraError::Corruption("edge missing in test"))?;
+        let versioned = edge::decode(&bytes)?;
+        Ok(versioned.header.begin)
+    }
+
+    fn fetch_single_adj_commit(graph: &Graph, read: &ReadGuard) -> Result<CommitId> {
+        let mut cursor = graph
+            .adj_fwd
+            .range(read, Bound::Unbounded, Bound::Unbounded)?;
+        let (_, value) = cursor
+            .next()?
+            .ok_or(SombraError::Corruption("adjacency missing in test"))?;
+        Ok(value.header.begin)
+    }
+
+    #[test]
+    fn adjacency_commit_matches_graph_edges() -> Result<()> {
+        let (_tmp, pager, graph) = setup_graph();
+        let (src, dst) = insert_simple_nodes(&pager, &graph)?;
+        let mut write = pager.begin_write()?;
+        let edge_id = graph.create_edge(
+            &mut write,
+            EdgeSpec {
+                src,
+                dst,
+                ty: TypeId(1),
+                props: &[],
+            },
+        )?;
+        pager.commit(write)?;
+        let read = pager.begin_latest_committed_read()?;
+        let adj_commit = fetch_single_adj_commit(&graph, &read)?;
+        let edge_commit = fetch_edge_commit(&graph, &read, edge_id)?;
+        assert_eq!(adj_commit, edge_commit);
+        Ok(())
+    }
+
+    #[test]
+    fn adjacency_commit_matches_graph_writer_edges() -> Result<()> {
+        let (_tmp, pager, graph) = setup_graph();
+        let (src, dst) = insert_simple_nodes(&pager, &graph)?;
+        let mut writer = GraphWriter::try_new(&graph, CreateEdgeOptions::default(), None).unwrap();
+        let mut write = pager.begin_write()?;
+        let edge_id = writer.create_edge(
+            &mut write,
+            EdgeSpec {
+                src,
+                dst,
+                ty: TypeId(2),
+                props: &[],
+            },
+        )?;
+        pager.commit(write)?;
+        let read = pager.begin_latest_committed_read()?;
+        let adj_commit = fetch_single_adj_commit(&graph, &read)?;
+        let edge_commit = fetch_edge_commit(&graph, &read, edge_id)?;
+        assert_eq!(adj_commit, edge_commit);
+        Ok(())
+    }
+
+    #[test]
+    fn adjacency_entries_clear_pending_after_insert() -> Result<()> {
+        let (_tmp, pager, graph) = setup_graph();
+        let (src, dst) = insert_simple_nodes(&pager, &graph)?;
+        let mut write = pager.begin_write()?;
+        let ty = TypeId(7);
+        let edge_id = graph.create_edge(
+            &mut write,
+            EdgeSpec {
+                src,
+                dst,
+                ty,
+                props: &[],
+            },
+        )?;
+        let fwd_key = adjacency::encode_fwd_key(src, ty, dst, edge_id);
+        let rev_key = adjacency::encode_rev_key(dst, ty, src, edge_id);
+        let fwd_value = graph
+            .adj_fwd
+            .get_with_write(&mut write, &fwd_key)?
+            .expect("forward adjacency present");
+        assert!(
+            !fwd_value.header.is_pending(),
+            "forward adjacency must clear pending flag"
+        );
+        let rev_value = graph
+            .adj_rev
+            .get_with_write(&mut write, &rev_key)?
+            .expect("reverse adjacency present");
+        assert!(
+            !rev_value.header.is_pending(),
+            "reverse adjacency must clear pending flag"
+        );
+        pager.commit(write)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wal_recovery_tests {
+    use super::*;
+    use crate::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions};
+    use crate::storage::mvcc::VersionLogEntry;
+    use crate::storage::node;
+    use crate::storage::patch::{PropPatch, PropPatchOp};
+    use crate::storage::props;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn wal_recovery_restores_version_log_entries() -> Result<()> {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("mvcc_wal_recovery.db");
+        let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+        let store: Arc<dyn PageStore> = pager.clone();
+        let graph = Graph::open(GraphOptions::new(store)).unwrap();
+
+        let mut write = pager.begin_write()?;
+        let node = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[],
+                props: &[PropEntry::new(PropId(1), PropValue::Int(1))],
+            },
+        )?;
+        pager.commit(write)?;
+
+        let mut write = pager.begin_write()?;
+        graph.update_node(
+            &mut write,
+            node,
+            PropPatch::new(vec![PropPatchOp::Set(PropId(1), PropValue::Int(2))]),
+        )?;
+        pager.commit(write)?;
+        eprintln!("node updated");
+        pager.checkpoint(CheckpointMode::Force)?;
+        eprintln!("checkpoint after update");
+
+        drop(graph);
+        drop(pager);
+
+        let reopened_store: Arc<dyn PageStore> =
+            Arc::new(Pager::open(&path, PagerOptions::default()).unwrap());
+        let reopened_graph = Graph::open(GraphOptions::new(Arc::clone(&reopened_store))).unwrap();
+        let read = reopened_store.begin_latest_committed_read()?;
+
+        let mut cursor = reopened_graph
+            .nodes
+            .range(&read, Bound::Unbounded, Bound::Unbounded)?;
+        let (_node_key, head_bytes) = cursor.next()?.expect("node present after crash recovery");
+        let head = node::decode(&head_bytes)?;
+        let head_props = reopened_graph.read_node_prop_bytes(&head.row.props)?;
+        let head_raw = props::decode_raw(&head_props)?;
+        assert_eq!(head_raw.len(), 1);
+        match head_raw[0].value {
+            RawPropValue::Int(value) => assert_eq!(value, 2),
+            _ => panic!("unexpected property value {:?}", head_raw[0].value),
+        }
+
+        let prev_ptr = head.prev_ptr;
+        assert!(
+            !prev_ptr.is_null(),
+            "node update should log previous version"
+        );
+        let log_bytes = reopened_graph
+            .version_log
+            .get(&read, &prev_ptr.raw())?
+            .expect("version log entry missing after recovery");
+        let entry = VersionLogEntry::decode(&log_bytes)?;
+        let old_version = node::decode(&entry.bytes)?;
+        let old_props_bytes = reopened_graph.read_node_prop_bytes(&old_version.row.props)?;
+        let old_raw = props::decode_raw(&old_props_bytes)?;
+        assert_eq!(old_raw.len(), 1);
+        match old_raw[0].value {
+            RawPropValue::Int(value) => assert_eq!(value, 1),
+            _ => panic!("unexpected historical property {:?}", old_raw[0].value),
+        }
+
+        drop(read);
+        drop(reopened_graph);
+        drop(reopened_store);
         Ok(())
     }
 }
