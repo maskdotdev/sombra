@@ -23,16 +23,24 @@ sombra stats <DB>
 Prints pager/WAL/storage metadata. Use `--format json` for machine-readable output.
 
 ```
+sombra mvcc-status <DB>
+```
+
+Displays MVCC diagnostics, including version-log usage, the commit-table state,
+and currently active readers. Text output summarizes outstanding commits and
+slow readers; `--format json` emits the same data for automation.
+
+```
 sombra checkpoint <DB> [--mode {force|best-effort}]
 ```
 
 Forces or attempts a checkpoint against the target database. Reports elapsed time and resulting LSN.
 
 ```
-sombra vacuum <DB> --into <PATH> [--analyze]
+sombra vacuum <DB> [--into <PATH> | --replace [--backup <PATH>]] [--analyze]
 ```
 
-Copies the database file to `PATH`, forcing a checkpoint first. When `--analyze` is set the command gathers label-cardinality statistics and emits them in JSON/text output.
+Copies the database file to `PATH`, forcing a checkpoint first. When `--replace` is provided the compacted copy is swapped into place automatically (default backup `<DB>.bak`, configurable via `--backup`). When `--analyze` is set the command gathers label-cardinality statistics and emits them in JSON/text output.
 
 ```
 sombra verify <DB> [--level {fast|full}]

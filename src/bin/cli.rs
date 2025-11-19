@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use sombra::{
     admin::{
-        checkpoint, promote_vacuumed_copy, stats, vacuum_into, verify, AdminOpenOptions,
-        CheckpointMode, PagerOptions, VacuumOptions, VerifyLevel,
+        checkpoint, mvcc_status, promote_vacuumed_copy, stats, vacuum_into, verify,
+        AdminOpenOptions, CheckpointMode, MvccStatusReport, PagerOptions, VacuumOptions,
+        VerifyLevel,
     },
     cli::import_export::{
         run_export, run_import, CliError, EdgeImportConfig, ExportConfig, ImportConfig,
@@ -275,6 +276,12 @@ enum Command {
         db_path: PathBuf,
     },
 
+    #[command(about = "Show MVCC commit table status")]
+    MvccStatus {
+        #[arg(value_name = "DB")]
+        db_path: PathBuf,
+    },
+
     #[command(about = "Force a checkpoint on the database")]
     Checkpoint {
         #[arg(value_name = "DB")]
@@ -435,6 +442,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Command::Stats { db_path } => {
             let report = stats(&db_path, &open_opts)?;
             emit(&cli.format, &ui, &report, print_stats_text)?;
+        }
+        Command::MvccStatus { db_path } => {
+            let report = mvcc_status(&db_path, &open_opts)?;
+            emit(&cli.format, &ui, &report, print_mvcc_status_text)?;
         }
         Command::Checkpoint { db_path, mode } => {
             let report = checkpoint(&db_path, &open_opts, mode.into())?;
@@ -917,6 +928,111 @@ fn print_stats_text(_: &Ui, _: OutputFormat, report: &sombra::admin::StatsReport
             ("wal_size", format_bytes(report.filesystem.wal_size_bytes)),
         ],
     );
+}
+
+fn print_mvcc_status_text(_: &Ui, _: OutputFormat, report: &sombra::admin::MvccStatusReport) {
+    const LABEL_WIDTH: usize = 28;
+    print_section(
+        "Version Log",
+        LABEL_WIDTH,
+        vec![
+            ("entries", format_count(report.version_log_entries)),
+            ("bytes", format_bytes(report.version_log_bytes)),
+            (
+                "retention_window",
+                format_duration_ms(report.retention_window_ms),
+            ),
+        ],
+    );
+
+    match &report.commit_table {
+        Some(table) => {
+            let reader = &table.reader_snapshot;
+            print_section(
+                "Commit Table",
+                LABEL_WIDTH,
+                vec![
+                    ("released_up_to", format_count(table.released_up_to)),
+                    ("oldest_visible", format_count(table.oldest_visible)),
+                    ("entries", format_count(table.entries.len() as u64)),
+                    ("active_readers", format_count(reader.active)),
+                    (
+                        "oldest_reader",
+                        reader
+                            .oldest_snapshot
+                            .map(format_count)
+                            .unwrap_or_else(|| "-".to_string()),
+                    ),
+                    (
+                        "newest_reader",
+                        reader
+                            .newest_snapshot
+                            .map(format_count)
+                            .unwrap_or_else(|| "-".to_string()),
+                    ),
+                    ("max_reader_age", format_duration_ms(reader.max_age_ms)),
+                ],
+            );
+
+            if table.entries.is_empty() {
+                println!("No outstanding commit entries (all released).\n");
+            } else {
+                println!("Outstanding commits:");
+                println!(
+                    "  {:>12} {:>10} {:>12} {:>14}",
+                    "commit", "status", "reader_refs", "age"
+                );
+                let max_rows = 12usize;
+                for entry in table.entries.iter().take(max_rows) {
+                    let status = match entry.status {
+                        sombra::admin::CommitStatusKind::Pending => "pending",
+                        sombra::admin::CommitStatusKind::Committed => "committed",
+                    };
+                    let age = entry
+                        .committed_ms_ago
+                        .map(format_duration_ms)
+                        .unwrap_or_else(|| "-".into());
+                    println!(
+                        "  {:>12} {:>10} {:>12} {:>14}",
+                        format_count(entry.id),
+                        status,
+                        entry.reader_refs,
+                        age,
+                    );
+                }
+                if table.entries.len() > max_rows {
+                    println!(
+                        "  ... {} more pending entries",
+                        table.entries.len() - max_rows
+                    );
+                }
+                println!();
+            }
+
+            if reader.slow_readers.is_empty() {
+                println!("No slow readers registered.\n");
+            } else {
+                println!("Slow readers:");
+                println!(
+                    "  {:>8} {:>12} {:>12} {:>16}",
+                    "reader", "snapshot", "age", "thread"
+                );
+                for slow in &reader.slow_readers {
+                    println!(
+                        "  {:>8} {:>12} {:>12} {:>16}",
+                        slow.reader_id,
+                        format_count(slow.snapshot_commit),
+                        format_duration_ms(slow.age_ms),
+                        slow.thread
+                    );
+                }
+                println!();
+            }
+        }
+        None => {
+            println!("Commit table is unavailable (MVCC disabled for this database).\n");
+        }
+    }
 }
 
 fn print_section(title: &str, label_width: usize, rows: Vec<(&'static str, String)>) {

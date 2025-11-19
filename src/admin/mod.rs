@@ -8,6 +8,7 @@
 
 mod checkpoint;
 mod error;
+mod mvcc;
 mod options;
 mod stats;
 mod util;
@@ -38,10 +39,13 @@ pub use stats::{
     stats, FilesystemStats, PagerStatsSection, StatsReport, StorageStatsSection, WalStatsSection,
 };
 
+/// MVCC diagnostics and commit-table reporting.
+pub use mvcc::{mvcc_status, CommitEntryReport, CommitStatusKind, MvccStatusReport};
+
 /// Database vacuum (defragmentation) operations.
 ///
 /// Vacuum reclaims unused space in the database file and can optimize data layout.
-pub use vacuum::{vacuum_into, VacuumOptions, VacuumReport};
+pub use vacuum::{promote_vacuumed_copy, vacuum_into, VacuumOptions, VacuumReport};
 
 /// Database integrity verification.
 ///
