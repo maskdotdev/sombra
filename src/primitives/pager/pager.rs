@@ -3,6 +3,8 @@ use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
@@ -13,7 +15,6 @@ use parking_lot::{
     lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard},
     Mutex, RawRwLock,
 };
-use std::io::ErrorKind;
 
 use super::frame::{Frame, FrameState};
 use super::freelist::{free_page_capacity, read_free_page, write_free_page, Extent, FreeCache};
@@ -68,12 +69,18 @@ pub struct PagerOptions {
     pub autocheckpoint_pages: usize,
     /// Time interval in milliseconds before triggering automatic checkpoint.
     pub autocheckpoint_ms: Option<u64>,
-    /// Maximum number of commits to batch in WAL committer.
-    pub wal_commit_max_commits: usize,
-    /// Maximum number of frames to batch in WAL committer.
-    pub wal_commit_max_frames: usize,
-    /// Time in milliseconds to coalesce WAL commits.
-    pub wal_commit_coalesce_ms: u64,
+    /// Maximum number of writers to batch inside the WAL committer.
+    pub group_commit_max_writers: usize,
+    /// Maximum number of frames to batch per WAL write group.
+    pub group_commit_max_frames: usize,
+    /// Maximum time in milliseconds to wait for extra writers before flushing.
+    pub group_commit_max_wait_ms: u64,
+    /// Whether commits should return before fsync completes.
+    pub async_fsync: bool,
+    /// Preferred WAL segment size when preallocation is enabled.
+    pub wal_segment_size_bytes: u64,
+    /// Number of WAL segments to preallocate ahead of time.
+    pub wal_preallocate_segments: u32,
 }
 
 struct PendingWalFrame {
@@ -129,7 +136,7 @@ struct OverlayEntry {
 struct VersionChainEntry {
     lsn: Lsn,
     wal_offset: Option<u64>,
-    data: Arc<[u8]>,
+    data: Option<Arc<[u8]>>,
 }
 
 struct ReaderMetrics {
@@ -194,9 +201,12 @@ impl Default for PagerOptions {
             synchronous: Synchronous::Full,
             autocheckpoint_pages: 1024,
             autocheckpoint_ms: None,
-            wal_commit_max_commits: 32,
-            wal_commit_max_frames: 512,
-            wal_commit_coalesce_ms: 2,
+            group_commit_max_writers: 32,
+            group_commit_max_frames: 512,
+            group_commit_max_wait_ms: 2,
+            async_fsync: false,
+            wal_segment_size_bytes: 0,
+            wal_preallocate_segments: 0,
         }
     }
 }
@@ -258,6 +268,10 @@ fn wal_path(path: &Path) -> PathBuf {
     append_suffix(path, "-wal")
 }
 
+fn wal_cookie_path(path: &Path) -> PathBuf {
+    append_suffix(path, "-wal.dwm")
+}
+
 fn lock_path(path: &Path) -> PathBuf {
     append_suffix(path, "-lock")
 }
@@ -273,16 +287,64 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     new_path
 }
 
+#[derive(Debug, Clone)]
+struct WalDurableCookie {
+    path: PathBuf,
+}
+
+impl WalDurableCookie {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn read(&self) -> Result<Option<Lsn>> {
+        match File::open(&self.path) {
+            Ok(mut file) => {
+                let mut buf = [0u8; 8];
+                file.read_exact(&mut buf)?;
+                Ok(Some(Lsn(u64::from_be_bytes(buf))))
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(SombraError::from(err)),
+        }
+    }
+
+    fn persist(&self, lsn: Lsn) -> Result<()> {
+        let mut tmp = self.path.clone();
+        tmp.set_extension("tmp");
+        if let Some(parent) = tmp.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)?;
+            file.write_all(&lsn.0.to_be_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
 fn recover_database(
     wal: &Wal,
     db_io: &dyn FileIo,
     meta: &mut Meta,
     page_size: usize,
+    replay_limit: Option<Lsn>,
 ) -> Result<Lsn> {
     let mut iter = wal.iter()?;
     let mut frames = Vec::new();
     let mut max_lsn = meta.last_checkpoint_lsn;
     while let Some(frame) = iter.next_frame()? {
+        if let Some(limit) = replay_limit {
+            if frame.lsn.0 > limit.0 {
+                break;
+            }
+        }
         if frame.payload.as_slice().len() != page_size {
             return Err(SombraError::Corruption("wal frame payload length mismatch"));
         }
@@ -388,6 +450,16 @@ pub trait PageStore: 'static {
     fn meta(&self) -> Result<Meta>;
     /// Returns a snapshot of pager statistics.
     fn stats(&self) -> PagerStats;
+
+    /// Returns the latest committed LSN when provided by the pager.
+    fn latest_committed_lsn(&self) -> Option<Lsn> {
+        None
+    }
+
+    /// Returns the durable watermark LSN when available.
+    fn durable_lsn(&self) -> Option<Lsn> {
+        None
+    }
 
     /// Enables or disables checksum verification on page reads.
     fn set_checksum_verification(&self, enabled: bool) {
@@ -641,6 +713,7 @@ const NORMAL_SYNC_DELAY_MS: u64 = 10;
 struct WalSyncState {
     scheduled: bool,
     last_error: Option<SombraError>,
+    pending_lsn: Lsn,
 }
 
 impl WalSyncState {
@@ -648,6 +721,64 @@ impl WalSyncState {
         Self {
             scheduled: false,
             last_error: None,
+            pending_lsn: Lsn(0),
+        }
+    }
+}
+
+struct AsyncFsyncState {
+    scheduled: bool,
+    pending_lsn: Lsn,
+    durable_lsn: Lsn,
+    last_error: Option<SombraError>,
+}
+
+impl AsyncFsyncState {
+    fn new(initial: Lsn) -> Self {
+        Self {
+            scheduled: false,
+            pending_lsn: initial,
+            durable_lsn: initial,
+            last_error: None,
+        }
+    }
+}
+
+fn async_fsync_worker(
+    wal: Arc<Wal>,
+    cookie: Option<Arc<WalDurableCookie>>,
+    state_arc: Arc<Mutex<AsyncFsyncState>>,
+    durable: Arc<AtomicU64>,
+) {
+    loop {
+        let target = {
+            let mut state = state_arc.lock();
+            if state.pending_lsn.0 <= state.durable_lsn.0 {
+                state.scheduled = false;
+                return;
+            }
+            state.pending_lsn
+        };
+        if let Err(err) = wal.sync() {
+            let mut state = state_arc.lock();
+            state.last_error = Some(err);
+            state.scheduled = false;
+            return;
+        }
+        if let Some(cookie) = cookie.as_ref() {
+            if let Err(err) = cookie.persist(target) {
+                let mut state = state_arc.lock();
+                state.last_error = Some(err);
+                state.scheduled = false;
+                return;
+            }
+        }
+        durable.fetch_max(target.0, AtomicOrdering::Release);
+        let mut state = state_arc.lock();
+        state.durable_lsn = target;
+        if state.pending_lsn.0 <= state.durable_lsn.0 {
+            state.scheduled = false;
+            return;
         }
     }
 }
@@ -755,8 +886,11 @@ pub struct Pager {
     inner: Mutex<PagerInner>,
     last_autocheckpoint: Mutex<Option<Instant>>,
     wal_sync_state: Arc<Mutex<WalSyncState>>,
+    wal_cookie: Option<Arc<WalDurableCookie>>,
+    async_fsync_state: Option<Arc<Mutex<AsyncFsyncState>>>,
     checksum_verify_on_read: AtomicBool,
     latest_visible_lsn: AtomicU64,
+    durable_lsn: Arc<AtomicU64>,
     commit_table: Arc<Mutex<CommitTable>>,
     overlays: Mutex<HashMap<PageId, VecDeque<OverlayEntry>>>,
     version_chains: Mutex<HashMap<PageId, VecDeque<VersionChainEntry>>>,
@@ -803,7 +937,7 @@ impl Pager {
     pub fn set_wal_coalesce_ms(&self, ms: u64) {
         let config = {
             let mut options = self.options.lock();
-            options.wal_commit_coalesce_ms = ms;
+            options.group_commit_max_wait_ms = ms;
             Self::wal_commit_config_from_options(&*options)
         };
         self.wal_committer.set_config(config);
@@ -812,7 +946,7 @@ impl Pager {
     /// Returns the current WAL commit coalesce time in milliseconds.
     pub fn wal_coalesce_ms(&self) -> u64 {
         let options = self.options.lock();
-        options.wal_commit_coalesce_ms
+        options.group_commit_max_wait_ms
     }
 
     /// Sets the autocheckpoint interval in milliseconds at runtime.
@@ -841,20 +975,43 @@ impl Pager {
     ) -> Result<Self> {
         let wal_path = wal_path(path);
         let wal_io = Arc::new(StdFileIo::open(&wal_path)?);
-        let wal = Arc::new(Wal::open(
-            wal_io,
-            WalOptions::new(
-                meta.page_size,
-                meta.wal_salt,
-                Lsn(meta.last_checkpoint_lsn.0 + 1),
-            ),
-        )?);
+        let mut wal_options = WalOptions::new(
+            meta.page_size,
+            meta.wal_salt,
+            Lsn(meta.last_checkpoint_lsn.0 + 1),
+        );
+        wal_options.segment_size_bytes = options.wal_segment_size_bytes;
+        wal_options.preallocate_segments = options.wal_preallocate_segments;
+        let wal = Arc::new(Wal::open(wal_io, wal_options)?);
+        let wal_cookie = if options.async_fsync {
+            Some(Arc::new(WalDurableCookie::new(wal_cookie_path(path))))
+        } else {
+            None
+        };
+        let cookie_floor = if let Some(cookie) = wal_cookie.as_ref() {
+            cookie.read()?.unwrap_or(meta.last_checkpoint_lsn)
+        } else {
+            meta.last_checkpoint_lsn
+        };
         let next_lsn = if is_create {
             wal.reset(Lsn(meta.last_checkpoint_lsn.0 + 1))?;
             Lsn(meta.last_checkpoint_lsn.0 + 1)
         } else {
-            recover_database(wal.as_ref(), db_io.as_ref(), meta, meta.page_size as usize)?
+            recover_database(
+                wal.as_ref(),
+                db_io.as_ref(),
+                meta,
+                meta.page_size as usize,
+                if options.async_fsync {
+                    Some(cookie_floor)
+                } else {
+                    None
+                },
+            )?
         };
+        if let Some(cookie) = wal_cookie.as_ref() {
+            cookie.persist(meta.last_checkpoint_lsn)?;
+        }
         let locks = SingleWriter::open(lock_path(path))?;
         let page_size = meta.page_size as usize;
         let cache_pages = options.cache_pages;
@@ -862,6 +1019,14 @@ impl Pager {
         let wal_commit_config = Self::wal_commit_config_from_options(&options);
         let wal_committer = WalCommitter::new(Arc::clone(&wal), wal_commit_config);
         let commit_table = Arc::new(Mutex::new(CommitTable::new(meta.last_checkpoint_lsn.0)));
+        let durable_lsn = Arc::new(AtomicU64::new(meta.last_checkpoint_lsn.0));
+        let async_fsync_state = if options.async_fsync {
+            Some(Arc::new(Mutex::new(AsyncFsyncState::new(
+                meta.last_checkpoint_lsn,
+            ))))
+        } else {
+            None
+        };
         let pager = Self {
             db_io,
             wal,
@@ -872,8 +1037,11 @@ impl Pager {
             inner: Mutex::new(inner),
             last_autocheckpoint: Mutex::new(None),
             wal_sync_state: Arc::new(Mutex::new(WalSyncState::new())),
+            wal_cookie,
+            async_fsync_state,
             checksum_verify_on_read: AtomicBool::new(true),
             latest_visible_lsn: AtomicU64::new(meta.last_checkpoint_lsn.0),
+            durable_lsn,
             commit_table,
             overlays: Mutex::new(HashMap::new()),
             version_chains: Mutex::new(HashMap::new()),
@@ -1521,9 +1689,9 @@ impl Pager {
 
     fn wal_commit_config_from_options(options: &PagerOptions) -> WalCommitConfig {
         WalCommitConfig {
-            max_batch_commits: options.wal_commit_max_commits,
-            max_batch_frames: options.wal_commit_max_frames,
-            max_batch_wait: Duration::from_millis(options.wal_commit_coalesce_ms),
+            max_batch_commits: options.group_commit_max_writers,
+            max_batch_frames: options.group_commit_max_frames,
+            max_batch_wait: Duration::from_millis(options.group_commit_max_wait_ms),
         }
     }
 
@@ -1749,14 +1917,15 @@ impl Pager {
             }
         }
 
-        let synchronous = {
+        let (synchronous, async_fsync) = {
             let options = self.options.lock();
-            options.synchronous
+            (options.synchronous, options.async_fsync)
         };
-        let sync_mode = match synchronous {
-            Synchronous::Full => WalSyncMode::Immediate,
-            Synchronous::Normal => WalSyncMode::Deferred,
-            Synchronous::Off => WalSyncMode::Off,
+        let sync_mode = match (synchronous, async_fsync) {
+            (Synchronous::Full, true) => WalSyncMode::Deferred,
+            (Synchronous::Full, false) => WalSyncMode::Immediate,
+            (Synchronous::Normal, _) => WalSyncMode::Deferred,
+            (Synchronous::Off, _) => WalSyncMode::Off,
         };
         let has_borrowed = wal_frames.iter().any(|frame| frame.payload.is_borrowed());
         if has_borrowed {
@@ -1773,6 +1942,7 @@ impl Pager {
             let offsets = self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
             if !offsets.is_empty() {
                 self.attach_version_offsets(&version_targets, &offsets);
+                self.release_version_payloads_for_floor();
             }
             pager_test_log!(
                 "[pager.commit] flush complete lsn={} frames={}",
@@ -1790,8 +1960,11 @@ impl Pager {
                 lsn.0
             );
             debug!(lsn = lsn.0, "pager.commit_txn.writer_lock_released");
-            if matches!(synchronous, Synchronous::Normal) {
-                self.schedule_normal_sync()?;
+            match synchronous {
+                Synchronous::Full if async_fsync => self.schedule_async_fsync(lsn)?,
+                Synchronous::Full => self.mark_commit_durable(lsn)?,
+                Synchronous::Normal => self.schedule_normal_sync(lsn)?,
+                Synchronous::Off => {}
             }
             self.finalize_commit(lsn)?;
             self.record_committed_lsn(lsn);
@@ -1860,11 +2033,15 @@ impl Pager {
             guard.reacquire_writer_lock()?;
             return Err(err);
         }
-        if matches!(synchronous, Synchronous::Normal) {
-            self.schedule_normal_sync()?;
+        match synchronous {
+            Synchronous::Full if async_fsync => self.schedule_async_fsync(lsn)?,
+            Synchronous::Full => self.mark_commit_durable(lsn)?,
+            Synchronous::Normal => self.schedule_normal_sync(lsn)?,
+            Synchronous::Off => {}
         }
         if !offsets.is_empty() {
             self.attach_version_offsets(&version_targets, &offsets);
+            self.release_version_payloads_for_floor();
         }
         self.finalize_commit(lsn)?;
         self.record_committed_lsn(lsn);
@@ -2062,9 +2239,11 @@ impl Pager {
         self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
         inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
         inner.meta_dirty = false;
-        self.release_commits_up_to(inner.meta.last_checkpoint_lsn);
-        self.prune_overlays(inner.meta.last_checkpoint_lsn);
-        self.prune_version_chains(inner.meta.last_checkpoint_lsn);
+        let prune_lsn =
+            self.reader_prune_threshold(inner.meta.last_checkpoint_lsn, &reader_snapshot);
+        self.release_commits_up_to(prune_lsn);
+        self.prune_overlays(prune_lsn);
+        self.prune_version_chains(prune_lsn);
         *self.last_autocheckpoint.lock() = Some(Instant::now());
         pager_test_log!(
             "[pager.checkpoint] complete applied_frames={} new_last_lsn={}",
@@ -2086,12 +2265,15 @@ impl Pager {
         Ok(())
     }
 
-    fn schedule_normal_sync(&self) -> Result<()> {
+    fn schedule_normal_sync(&self, target: Lsn) -> Result<()> {
         let state_arc = Arc::clone(&self.wal_sync_state);
         {
             let mut state = state_arc.lock();
             if let Some(err) = state.last_error.take() {
                 return Err(err);
+            }
+            if target.0 > state.pending_lsn.0 {
+                state.pending_lsn = target;
             }
             if state.scheduled {
                 return Ok(());
@@ -2099,18 +2281,55 @@ impl Pager {
             state.scheduled = true;
         }
         let wal = Arc::clone(&self.wal);
+        let durable = Arc::clone(&self.durable_lsn);
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(NORMAL_SYNC_DELAY_MS));
             let result = wal.sync();
             let mut state = state_arc.lock();
             state.scheduled = false;
             match result {
-                Ok(()) => {}
+                Ok(()) => {
+                    let lsn = state.pending_lsn;
+                    durable.fetch_max(lsn.0, AtomicOrdering::Release);
+                }
                 Err(err) => {
                     state.last_error = Some(err);
                 }
             }
         });
+        Ok(())
+    }
+
+    fn schedule_async_fsync(&self, target: Lsn) -> Result<()> {
+        let Some(state_arc) = self.async_fsync_state.as_ref() else {
+            self.durable_lsn
+                .fetch_max(target.0, AtomicOrdering::Release);
+            if let Some(cookie) = &self.wal_cookie {
+                cookie.persist(target)?;
+            }
+            return Ok(());
+        };
+        let wal = Arc::clone(&self.wal);
+        let cookie = self.wal_cookie.clone();
+        let durable = Arc::clone(&self.durable_lsn);
+        let state_clone = Arc::clone(state_arc);
+        let mut spawn_worker = false;
+        {
+            let mut state = state_arc.lock();
+            if let Some(err) = state.last_error.take() {
+                return Err(err);
+            }
+            if target.0 > state.pending_lsn.0 {
+                state.pending_lsn = target;
+            }
+            if !state.scheduled {
+                state.scheduled = true;
+                spawn_worker = true;
+            }
+        }
+        if spawn_worker {
+            thread::spawn(move || async_fsync_worker(wal, cookie, state_clone, durable));
+        }
         Ok(())
     }
 
@@ -2218,6 +2437,19 @@ impl Pager {
         Lsn(self.latest_visible_lsn.load(AtomicOrdering::Acquire))
     }
 
+    /// Returns the most recent LSN known to be durable on disk.
+    pub fn durable_lsn(&self) -> Lsn {
+        Lsn(self.durable_lsn.load(AtomicOrdering::Acquire))
+    }
+
+    fn mark_commit_durable(&self, lsn: Lsn) -> Result<()> {
+        self.durable_lsn.fetch_max(lsn.0, AtomicOrdering::Release);
+        if let Some(cookie) = &self.wal_cookie {
+            cookie.persist(lsn)?;
+        }
+        Ok(())
+    }
+
     fn register_pending_commit(&self, lsn: Lsn) -> Result<()> {
         let mut table = self.commit_table.lock();
         table.reserve(lsn.0)
@@ -2268,7 +2500,13 @@ impl Pager {
                     lsn: frame.lsn,
                     data: Arc::clone(&data),
                 });
-            self.insert_version_chain_locked(&mut chains, frame.page_id, frame.lsn, None, data);
+            self.insert_version_chain_locked(
+                &mut chains,
+                frame.page_id,
+                frame.lsn,
+                None,
+                Some(data),
+            );
         }
     }
 
@@ -2278,7 +2516,7 @@ impl Pager {
         page_id: PageId,
         lsn: Lsn,
         wal_offset: Option<u64>,
-        data: Arc<[u8]>,
+        data: Option<Arc<[u8]>>,
     ) {
         let chain = chains.entry(page_id).or_insert_with(VecDeque::new);
         let was_empty = chain.is_empty();
@@ -2320,6 +2558,29 @@ impl Pager {
         }
     }
 
+    fn release_version_payloads_for_floor(&self) {
+        let floor_commit = {
+            let table = self.commit_table.lock();
+            table.oldest_visible()
+        };
+        if floor_commit == 0 {
+            return;
+        }
+        let upto = Lsn(floor_commit.saturating_sub(1));
+        self.release_version_payloads(upto);
+    }
+
+    fn release_version_payloads(&self, upto: Lsn) {
+        let mut chains = self.version_chains.lock();
+        for entries in chains.values_mut() {
+            for entry in entries.iter_mut() {
+                if entry.lsn.0 <= upto.0 && entry.wal_offset.is_some() {
+                    entry.data = None;
+                }
+            }
+        }
+    }
+
     fn overlay_from_cache(&self, page_id: PageId, snapshot_lsn: Lsn) -> Option<Arc<[u8]>> {
         let overlays = self.overlays.lock();
         overlays.get(&page_id).and_then(|queue| {
@@ -2332,14 +2593,81 @@ impl Pager {
     }
 
     fn version_page_for_snapshot(&self, page_id: PageId, snapshot_lsn: Lsn) -> Option<Arc<[u8]>> {
-        let chains = self.version_chains.lock();
-        chains.get(&page_id).and_then(|entries| {
-            entries
-                .iter()
-                .rev()
-                .find(|entry| entry.lsn.0 <= snapshot_lsn.0)
-                .map(|entry| Arc::clone(&entry.data))
-        })
+        let candidate = {
+            let chains = self.version_chains.lock();
+            chains.get(&page_id).and_then(|entries| {
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.lsn.0 <= snapshot_lsn.0)
+                    .map(|entry| {
+                        (
+                            entry.lsn,
+                            entry.wal_offset,
+                            entry.data.as_ref().map(Arc::clone),
+                        )
+                    })
+            })
+        };
+        let Some((lsn, wal_offset, data)) = candidate else {
+            return None;
+        };
+        if let Some(cached) = data {
+            return Some(cached);
+        }
+        let offset = wal_offset?;
+        match self.read_wal_version(page_id, lsn, offset) {
+            Ok(data) => {
+                self.backfill_version_data(page_id, lsn, Arc::clone(&data));
+                Some(data)
+            }
+            Err(err) => {
+                warn!(
+                    page_id = page_id.0,
+                    lsn = lsn.0,
+                    offset,
+                    error = %err,
+                    "pager.version_chain.rehydrate_failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn reader_prune_threshold(&self, checkpoint_lsn: Lsn, snapshot: &ReaderSnapshot) -> Lsn {
+        let cutoff = snapshot
+            .oldest_snapshot
+            .map(|commit| {
+                let floor = commit.saturating_sub(1);
+                floor.min(checkpoint_lsn.0)
+            })
+            .unwrap_or(checkpoint_lsn.0);
+        Lsn(cutoff)
+    }
+
+    fn read_wal_version(&self, page_id: PageId, lsn: Lsn, offset: u64) -> Result<Arc<[u8]>> {
+        let Some(frame) = self.wal.read_frame_at(offset)? else {
+            return Err(SombraError::Corruption(
+                "wal frame missing during version lookup",
+            ));
+        };
+        if frame.page_id != page_id || frame.lsn != lsn {
+            return Err(SombraError::Corruption(
+                "wal frame metadata mismatch during version lookup",
+            ));
+        }
+        Ok(Arc::<[u8]>::from(frame.payload))
+    }
+
+    fn backfill_version_data(&self, page_id: PageId, lsn: Lsn, data: Arc<[u8]>) {
+        let mut chains = self.version_chains.lock();
+        if let Some(entries) = chains.get_mut(&page_id) {
+            if let Some(entry) = entries.iter_mut().rev().find(|entry| entry.lsn == lsn) {
+                if entry.data.is_none() {
+                    entry.data = Some(data);
+                }
+            }
+        }
     }
 
     fn prune_overlays(&self, upto: Lsn) {
@@ -2459,6 +2787,27 @@ impl Pager {
         let inner = self.inner.lock();
         Ok(inner.meta.clone())
     }
+
+    #[cfg(test)]
+    fn drop_version_payloads_for_test(&self) {
+        let mut chains = self.version_chains.lock();
+        for entries in chains.values_mut() {
+            for entry in entries.iter_mut() {
+                if entry.wal_offset.is_some() {
+                    entry.data = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn test_version_page_for_snapshot(
+        &self,
+        page_id: PageId,
+        snapshot_lsn: Lsn,
+    ) -> Option<Arc<[u8]>> {
+        self.version_page_for_snapshot(page_id, snapshot_lsn)
+    }
 }
 
 impl PageStore for Pager {
@@ -2501,9 +2850,6 @@ impl PageStore for Pager {
                 inner.meta.last_checkpoint_lsn,
             )
         };
-        if let Some(data) = cached {
-            return Ok(PageRef { id, data });
-        }
         debug_assert!(
             snapshot_lsn.0 >= last_checkpoint_lsn.0,
             "snapshot regressed while reader active"
@@ -2549,12 +2895,16 @@ impl PageStore for Pager {
                 }
             }
         }
-        if snapshot_lsn.0 > last_checkpoint_lsn.0 {
+        let latest_committed = self.latest_committed_lsn();
+        if snapshot_lsn.0 < latest_committed.0 && snapshot_lsn.0 > last_checkpoint_lsn.0 {
             if let Some(overlay) =
                 self.overlay_page_for_snapshot(id, last_checkpoint_lsn, snapshot_lsn)?
             {
                 return Ok(PageRef { id, data: overlay });
             }
+        }
+        if let Some(data) = cached {
+            return Ok(PageRef { id, data });
         }
         Ok(PageRef {
             id,
@@ -2630,6 +2980,14 @@ impl PageStore for Pager {
 
     fn stats(&self) -> PagerStats {
         Pager::stats(self)
+    }
+
+    fn latest_committed_lsn(&self) -> Option<Lsn> {
+        Some(Pager::latest_committed_lsn(self))
+    }
+
+    fn durable_lsn(&self) -> Option<Lsn> {
+        Some(self.durable_lsn())
     }
 
     fn set_checksum_verification(&self, enabled: bool) {
@@ -2755,6 +3113,61 @@ mod tests {
         let read = pager.begin_read()?;
         let data = pager.get_page(&read, page)?;
         assert_eq!(&data.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4], b"DATA");
+        Ok(())
+    }
+
+    #[test]
+    fn version_chain_rehydrates_from_wal() -> Result<()> {
+        init_tracing();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rehydrate_wal.db");
+        let options = PagerOptions {
+            page_size: 4096,
+            cache_pages: 8,
+            prefetch_on_miss: false,
+            synchronous: Synchronous::Full,
+            autocheckpoint_pages: 32,
+            autocheckpoint_ms: None,
+            ..PagerOptions::default()
+        };
+        let pager = Pager::create(&path, options)?;
+        let page_id = {
+            let mut write = pager.begin_write()?;
+            let page = write.allocate_page()?;
+            write_test_payload(&pager, &mut write, page)?;
+            pager.commit(write)?;
+            page
+        };
+        let read_snapshot = pager.begin_latest_committed_read()?;
+        let mut write = pager.begin_write()?;
+        {
+            let mut page = write.page_mut(page_id)?;
+            page.data_mut()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4].copy_from_slice(b"NEWW");
+        }
+        pager.commit(write)?;
+        pager.drop_version_payloads_for_test();
+        {
+            let chains = pager.version_chains.lock();
+            let entries = chains.get(&page_id).expect("version chain present");
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.lsn.0 == 1 && entry.wal_offset.is_some()),
+                "expected wal offsets recorded for historical versions"
+            );
+        }
+        assert!(
+            pager
+                .test_version_page_for_snapshot(page_id, Lsn(1))
+                .is_some(),
+            "version chain should produce historical page"
+        );
+        let versioned = pager.get_page(&read_snapshot, page_id)?;
+        assert_eq!(&versioned.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4], b"DATA");
+
+        let latest = pager.begin_latest_committed_read()?;
+        let head = pager.get_page(&latest, page_id)?;
+        assert_eq!(&head.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4], b"NEWW");
         Ok(())
     }
 

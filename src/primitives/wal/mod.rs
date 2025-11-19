@@ -28,6 +28,10 @@ pub struct WalOptions {
     pub wal_salt: u64,
     /// Starting LSN for the log sequence
     pub start_lsn: Lsn,
+    /// Size of each WAL segment in bytes (0 disables segmentation)
+    pub segment_size_bytes: u64,
+    /// Number of segments to preallocate ahead of the append pointer
+    pub preallocate_segments: u32,
 }
 
 impl WalOptions {
@@ -37,6 +41,8 @@ impl WalOptions {
             page_size,
             wal_salt,
             start_lsn,
+            segment_size_bytes: 0,
+            preallocate_segments: 0,
         }
     }
 }
@@ -47,6 +53,8 @@ impl Default for WalOptions {
             page_size: 0,
             wal_salt: 0,
             start_lsn: Lsn(0),
+            segment_size_bytes: 0,
+            preallocate_segments: 0,
         }
     }
 }
@@ -200,16 +208,76 @@ struct WalState {
     append_offset: u64,
     prev_chain: u64,
     stats: WalStats,
+    segment: Option<WalSegmentState>,
 }
 
 impl WalState {
-    fn new(header: FileHeader, append_offset: u64) -> Self {
+    fn new(header: FileHeader, append_offset: u64, segment: Option<WalSegmentState>) -> Self {
         Self {
             header,
             append_offset,
             prev_chain: 0,
             stats: WalStats::default(),
+            segment,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WalSegmentState {
+    segment_size: u64,
+    ahead_segments: u32,
+    allocated_bytes: u64,
+}
+
+impl WalSegmentState {
+    fn initialize(
+        io: &Arc<dyn FileIo>,
+        segment_size: u64,
+        ahead_segments: u32,
+        current_len: u64,
+    ) -> Result<Self> {
+        let mut allocated = align_up(current_len, segment_size);
+        if allocated > current_len {
+            io.truncate(allocated)?;
+        }
+        let ahead_bytes = segment_size.saturating_mul(ahead_segments as u64);
+        if ahead_bytes > 0 {
+            let target = allocated.saturating_add(ahead_bytes);
+            if target > allocated {
+                io.truncate(target)?;
+                allocated = target;
+            }
+        }
+        Ok(Self {
+            segment_size,
+            ahead_segments,
+            allocated_bytes: allocated,
+        })
+    }
+
+    fn ensure_capacity(&mut self, io: &Arc<dyn FileIo>, required_end: u64) -> Result<()> {
+        let ahead_bytes = self.segment_size.saturating_mul(self.ahead_segments as u64);
+        let mut target = required_end.saturating_add(ahead_bytes);
+        if target <= self.allocated_bytes {
+            return Ok(());
+        }
+        target = align_up(target, self.segment_size);
+        io.truncate(target)?;
+        self.allocated_bytes = target;
+        Ok(())
+    }
+
+    fn reset(&mut self, io: &Arc<dyn FileIo>) -> Result<()> {
+        let mut target = FILE_HEADER_LEN as u64;
+        if target < self.segment_size {
+            target = self.segment_size;
+        }
+        let ahead_bytes = self.segment_size.saturating_mul(self.ahead_segments as u64);
+        target = align_up(target.saturating_add(ahead_bytes), self.segment_size);
+        io.truncate(target)?;
+        self.allocated_bytes = target;
+        Ok(())
     }
 }
 
@@ -252,10 +320,20 @@ impl Wal {
             header
         };
         let append_offset = io.len()?.max(FILE_HEADER_LEN as u64);
+        let segment_state = if options.segment_size_bytes > 0 {
+            Some(WalSegmentState::initialize(
+                &io,
+                options.segment_size_bytes,
+                options.preallocate_segments,
+                append_offset,
+            )?)
+        } else {
+            None
+        };
         let wal = Self {
             io,
             page_size: options.page_size as usize,
-            state: Mutex::new(WalState::new(header, append_offset)),
+            state: Mutex::new(WalState::new(header, append_offset, segment_state)),
         };
         Ok(wal)
     }
@@ -267,7 +345,11 @@ impl Wal {
         state.prev_chain = 0;
         state.stats = WalStats::default();
         self.io.write_at(0, &state.header.encode())?;
-        self.io.truncate(FILE_HEADER_LEN as u64)?;
+        if let Some(segment) = state.segment.as_mut() {
+            segment.reset(&self.io)?;
+        } else {
+            self.io.truncate(FILE_HEADER_LEN as u64)?;
+        }
         state.append_offset = FILE_HEADER_LEN as u64;
         Ok(())
     }
@@ -327,11 +409,15 @@ impl Wal {
                 slices.push(IoSlice::new(frame.payload));
             }
             let chunk_bytes = chunk.len() * frame_size;
+            let chunk_bytes_u64 = chunk_bytes as u64;
             let chunk_start = state.append_offset;
-            self.io.writev_at(state.append_offset, &slices)?;
-            state.append_offset += chunk_bytes as u64;
+            if let Some(segment) = state.segment.as_mut() {
+                segment.ensure_capacity(&self.io, chunk_start + chunk_bytes_u64)?;
+            }
+            self.io.writev_at(chunk_start, &slices)?;
+            state.append_offset += chunk_bytes_u64;
             state.stats.frames_appended += chunk.len() as u64;
-            state.stats.bytes_appended += chunk_bytes as u64;
+            state.stats.bytes_appended += chunk_bytes_u64;
             state.stats.coalesced_writes += 1;
             record_wal_coalesced_writes(1);
             record_wal_io_group_sample(chunk.len() as u64);
@@ -370,6 +456,44 @@ impl Wal {
             valid_up_to: FILE_HEADER_LEN as u64,
             header,
         })
+    }
+
+    /// Reads a WAL frame located at the provided byte `offset`.
+    ///
+    /// Returns `Ok(None)` when the offset lies beyond the end of the current WAL.
+    pub fn read_frame_at(&self, offset: u64) -> Result<Option<WalFrameOwned>> {
+        if offset < FILE_HEADER_LEN as u64 {
+            return Err(SombraError::Invalid("wal frame offset before header"));
+        }
+        let len = self.io.len()?;
+        let frame_size = FRAME_HEADER_LEN + self.page_size;
+        if offset + FRAME_HEADER_LEN as u64 > len {
+            return Ok(None);
+        }
+        let mut header_buf = [0u8; FRAME_HEADER_LEN];
+        self.io.read_at(offset, &mut header_buf)?;
+        let header = FrameHeader::decode(&header_buf)?;
+        {
+            let state = self.state.lock();
+            if header.frame_lsn.0 < state.header.start_lsn.0 {
+                return Err(SombraError::Corruption("wal frame lsn below start_lsn"));
+            }
+        }
+        let payload_off = offset + FRAME_HEADER_LEN as u64;
+        if payload_off + self.page_size as u64 > len {
+            return Ok(None);
+        }
+        let mut payload = vec![0u8; self.page_size];
+        self.io.read_at(payload_off, &mut payload)?;
+        let payload_crc = compute_crc32(&[&payload]);
+        if payload_crc != header.payload_crc32 {
+            return Err(SombraError::Corruption("wal frame payload crc mismatch"));
+        }
+        Ok(Some(WalFrameOwned {
+            lsn: header.frame_lsn,
+            page_id: header.page_id,
+            payload,
+        }))
     }
 
     /// Returns current statistics for this WAL instance.
@@ -850,6 +974,17 @@ fn compute_crc32(chunks: &[&[u8]]) -> u32 {
         hasher.update(chunk);
     }
     hasher.finalize()
+}
+
+fn align_up(value: u64, align: u64) -> u64 {
+    if align == 0 {
+        return value;
+    }
+    if value % align == 0 {
+        value
+    } else {
+        value + (align - (value % align))
+    }
 }
 
 #[cfg(test)]

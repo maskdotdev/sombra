@@ -6,8 +6,7 @@ use crate::admin::options::AdminOpenOptions;
 use crate::admin::util::open_graph;
 use crate::admin::Result;
 use crate::storage::{
-    CommitEntrySnapshot, CommitStatus, CommitTableSnapshot, ReaderSnapshot,
-    ReaderSnapshotEntry,
+    CommitEntrySnapshot, CommitStatus, CommitTableSnapshot, ReaderSnapshot, ReaderSnapshotEntry,
 };
 
 /// MVCC diagnostic report returned by `sombra admin mvcc-status`.
@@ -19,6 +18,12 @@ pub struct MvccStatusReport {
     pub version_log_entries: u64,
     /// Retention window (milliseconds) used when computing the vacuum horizon.
     pub retention_window_ms: u64,
+    /// Latest committed LSN when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_committed_lsn: Option<u64>,
+    /// Durable watermark LSN when async fsync is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable_lsn: Option<u64>,
     /// Commit table snapshot (present when MVCC is enabled for the database).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_table: Option<CommitTableReport>,
@@ -93,6 +98,8 @@ pub fn mvcc_status(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<Mv
         version_log_bytes: snapshot.version_log_bytes,
         version_log_entries: snapshot.version_log_entries,
         retention_window_ms: snapshot.retention_window.as_millis().min(u64::MAX as u128) as u64,
+        latest_committed_lsn: snapshot.latest_committed_lsn.map(|lsn| lsn.0),
+        durable_lsn: snapshot.durable_lsn.map(|lsn| lsn.0),
         commit_table: snapshot.commit_table.map(commit_table_report),
     })
 }

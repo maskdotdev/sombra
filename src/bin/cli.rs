@@ -119,6 +119,49 @@ struct OpenArgs {
         help = "Default distinct-neighbors behavior for storage accessors"
     )]
     distinct_neighbors_default: bool,
+
+    #[arg(
+        long = "pager-group-commit-max-writers",
+        value_name = "WRITERS",
+        help = "Maximum writers batched per WAL group commit"
+    )]
+    pager_group_commit_max_writers: Option<usize>,
+
+    #[arg(
+        long = "pager-group-commit-max-frames",
+        value_name = "FRAMES",
+        help = "Maximum WAL frames per group commit"
+    )]
+    pager_group_commit_max_frames: Option<usize>,
+
+    #[arg(
+        long = "pager-group-commit-max-wait-ms",
+        value_name = "MS",
+        help = "Time window in milliseconds to wait for group commits"
+    )]
+    pager_group_commit_max_wait_ms: Option<u64>,
+
+    #[arg(
+        long = "pager-async-fsync",
+        value_enum,
+        value_name = "on|off",
+        help = "Enable async fsync handling (on/off)"
+    )]
+    pager_async_fsync: Option<ToggleArg>,
+
+    #[arg(
+        long = "pager-wal-segment-bytes",
+        value_name = "BYTES",
+        help = "Preferred WAL segment size (bytes)"
+    )]
+    pager_wal_segment_bytes: Option<u64>,
+
+    #[arg(
+        long = "pager-wal-preallocate-segments",
+        value_name = "COUNT",
+        help = "Number of WAL segments to preallocate"
+    )]
+    pager_wal_preallocate_segments: Option<u32>,
 }
 
 #[derive(Args, Debug)]
@@ -393,6 +436,49 @@ struct ProfileSaveCmd {
     synchronous: Option<SynchronousArg>,
 
     #[arg(
+        long = "pager-group-commit-max-writers",
+        value_name = "WRITERS",
+        help = "Maximum writers batched per WAL group commit"
+    )]
+    pager_group_commit_max_writers: Option<usize>,
+
+    #[arg(
+        long = "pager-group-commit-max-frames",
+        value_name = "FRAMES",
+        help = "Maximum WAL frames per group commit"
+    )]
+    pager_group_commit_max_frames: Option<usize>,
+
+    #[arg(
+        long = "pager-group-commit-max-wait-ms",
+        value_name = "MS",
+        help = "Time window in milliseconds to wait for group commits"
+    )]
+    pager_group_commit_max_wait_ms: Option<u64>,
+
+    #[arg(
+        long = "pager-async-fsync",
+        value_enum,
+        value_name = "on|off",
+        help = "Enable async fsync handling (on/off)"
+    )]
+    pager_async_fsync: Option<ToggleArg>,
+
+    #[arg(
+        long = "pager-wal-segment-bytes",
+        value_name = "BYTES",
+        help = "Preferred WAL segment size (bytes)"
+    )]
+    pager_wal_segment_bytes: Option<u64>,
+
+    #[arg(
+        long = "pager-wal-preallocate-segments",
+        value_name = "COUNT",
+        help = "Number of WAL segments to preallocate"
+    )]
+    pager_wal_preallocate_segments: Option<u32>,
+
+    #[arg(
         long = "distinct-neighbors-default",
         action = ArgAction::SetTrue,
         conflicts_with = "no_distinct_neighbors_default",
@@ -550,6 +636,18 @@ impl From<SynchronousArg> for Synchronous {
             SynchronousArg::Normal => Synchronous::Normal,
             SynchronousArg::Off => Synchronous::Off,
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ToggleArg {
+    On,
+    Off,
+}
+
+impl ToggleArg {
+    fn as_bool(self) -> bool {
+        matches!(self, ToggleArg::On)
     }
 }
 
@@ -728,44 +826,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     } else {
                         format!("Profile '{}'", profile.name)
                     };
-                    let rows = [
-                        (
-                            "database",
-                            profile
-                                .database
-                                .as_ref()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|| "-".into()),
-                        ),
-                        (
-                            "page_size",
-                            profile
-                                .page_size
-                                .map(|v| format_bytes(v.into()))
-                                .unwrap_or_else(|| "-".into()),
-                        ),
-                        (
-                            "cache_pages",
-                            profile
-                                .cache_pages
-                                .map(|v| format_count(v as u64))
-                                .unwrap_or_else(|| "-".into()),
-                        ),
-                        (
-                            "synchronous",
-                            profile
-                                .synchronous
-                                .map(|mode| format!("{mode:?}"))
-                                .unwrap_or_else(|| "-".into()),
-                        ),
-                        (
-                            "distinct_neighbors_default",
-                            profile
-                                .distinct_neighbors_default
-                                .map(|v| format_bool(v))
-                                .unwrap_or_else(|| "-".into()),
-                        ),
-                    ];
+                    let rows = profile_rows(&profile);
                     ui.section(&title, rows);
                     ui.spacer();
                 }
@@ -784,6 +845,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             update.page_size = cmd.page_size;
             update.cache_pages = cmd.cache_pages;
             update.synchronous = cmd.synchronous;
+            update.group_commit_max_writers = cmd.pager_group_commit_max_writers;
+            update.group_commit_max_frames = cmd.pager_group_commit_max_frames;
+            update.group_commit_max_wait_ms = cmd.pager_group_commit_max_wait_ms;
+            update.async_fsync = cmd.pager_async_fsync.map(|toggle| toggle.as_bool());
+            update.wal_segment_size_bytes = cmd.pager_wal_segment_bytes;
+            update.wal_preallocate_segments = cmd.pager_wal_preallocate_segments;
             update.distinct_neighbors_default = distinct_pref;
             config.upsert_profile(&cmd.name, update)?;
             if cmd.set_default {
@@ -792,6 +859,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let path = config.persist()?;
             ui.success(&format!(
                 "Profile '{}' saved to {}",
+                cmd.name,
+                path.display()
+            ));
+        }
+        Command::Profile(ProfileCommand::Show(cmd)) => {
+            let profile = config
+                .profile(&cmd.name)
+                .cloned()
+                .ok_or_else(|| format!("profile '{}' not found", cmd.name))?;
+            let default_name = config.default_profile_name();
+            let title = if Some(profile.name.as_str()) == default_name {
+                format!("Profile '{}' (default)", profile.name)
+            } else {
+                format!("Profile '{}'", profile.name)
+            };
+            ui.section(&title, profile_rows(&profile));
+        }
+        Command::Profile(ProfileCommand::Delete(cmd)) => {
+            config.delete_profile(&cmd.name)?;
+            let path = config.persist()?;
+            ui.success(&format!(
+                "Profile '{}' deleted from {}",
                 cmd.name,
                 path.display()
             ));
@@ -832,6 +921,24 @@ fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOp
         if let Some(mode) = profile.synchronous {
             pager_opts.synchronous = mode.into();
         }
+        if let Some(max_writers) = profile.group_commit_max_writers {
+            pager_opts.group_commit_max_writers = max_writers;
+        }
+        if let Some(max_frames) = profile.group_commit_max_frames {
+            pager_opts.group_commit_max_frames = max_frames;
+        }
+        if let Some(wait_ms) = profile.group_commit_max_wait_ms {
+            pager_opts.group_commit_max_wait_ms = wait_ms;
+        }
+        if let Some(async_fsync) = profile.async_fsync {
+            pager_opts.async_fsync = async_fsync;
+        }
+        if let Some(segment_bytes) = profile.wal_segment_size_bytes {
+            pager_opts.wal_segment_size_bytes = segment_bytes;
+        }
+        if let Some(preallocate) = profile.wal_preallocate_segments {
+            pager_opts.wal_preallocate_segments = preallocate;
+        }
         if let Some(distinct) = profile.distinct_neighbors_default {
             opts.distinct_neighbors_default = distinct;
         }
@@ -845,6 +952,24 @@ fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOp
     }
     if let Some(mode) = args.synchronous {
         pager_opts.synchronous = mode.into();
+    }
+    if let Some(max_writers) = args.pager_group_commit_max_writers {
+        pager_opts.group_commit_max_writers = max_writers;
+    }
+    if let Some(max_frames) = args.pager_group_commit_max_frames {
+        pager_opts.group_commit_max_frames = max_frames;
+    }
+    if let Some(wait_ms) = args.pager_group_commit_max_wait_ms {
+        pager_opts.group_commit_max_wait_ms = wait_ms;
+    }
+    if let Some(async_fsync) = args.pager_async_fsync {
+        pager_opts.async_fsync = async_fsync.as_bool();
+    }
+    if let Some(segment_bytes) = args.pager_wal_segment_bytes {
+        pager_opts.wal_segment_size_bytes = segment_bytes;
+    }
+    if let Some(preallocate) = args.pager_wal_preallocate_segments {
+        pager_opts.wal_preallocate_segments = preallocate;
     }
 
     opts.pager = pager_opts;
@@ -1156,6 +1281,30 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
     );
     ui.spacer();
 
+    if report.latest_committed_lsn.is_some() || report.durable_lsn.is_some() {
+        let latest = report
+            .latest_committed_lsn
+            .map(format_count)
+            .unwrap_or_else(|| "-".into());
+        let durable = report
+            .durable_lsn
+            .map(format_count)
+            .unwrap_or_else(|| "-".into());
+        let lag = match (report.latest_committed_lsn, report.durable_lsn) {
+            (Some(latest), Some(durable)) => format_count(latest.saturating_sub(durable)),
+            _ => "-".into(),
+        };
+        ui.section(
+            "Durability",
+            [
+                ("latest_committed_lsn", latest),
+                ("durable_lsn", durable),
+                ("durability_lag", lag),
+            ],
+        );
+        ui.spacer();
+    }
+
     match &report.commit_table {
         Some(table) => {
             let reader = &table.reader_snapshot;
@@ -1223,7 +1372,7 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
             if reader.slow_readers.is_empty() {
                 ui.info("No slow readers registered.");
             } else {
-                let rows = reader
+                let rows: Vec<String> = reader
                     .slow_readers
                     .iter()
                     .map(|slow| {
@@ -1361,6 +1510,89 @@ fn format_count(value: u64) -> String {
         formatted.push(*ch as char);
     }
     formatted.chars().rev().collect()
+}
+
+fn profile_rows(profile: &Profile) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    rows.push((
+        "database",
+        profile
+            .database
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "page_size",
+        profile
+            .page_size
+            .map(|v| format_bytes(v.into()))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "cache_pages",
+        profile
+            .cache_pages
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "synchronous",
+        profile
+            .synchronous
+            .map(|mode| format!("{mode:?}"))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "distinct_neighbors_default",
+        profile
+            .distinct_neighbors_default
+            .map(|v| format_bool(v))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "group_commit_max_writers",
+        profile
+            .group_commit_max_writers
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "group_commit_max_frames",
+        profile
+            .group_commit_max_frames
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "group_commit_max_wait_ms",
+        profile
+            .group_commit_max_wait_ms
+            .map(format_count)
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "async_fsync",
+        profile
+            .async_fsync
+            .map(|flag| format_bool(flag))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "wal_segment_size_bytes",
+        profile
+            .wal_segment_size_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "wal_preallocate_segments",
+        profile
+            .wal_preallocate_segments
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows
 }
 
 fn format_duration_pretty(duration: Duration) -> String {

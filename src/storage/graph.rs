@@ -24,7 +24,9 @@ use crate::storage::index::{
     IndexRoots, IndexStore, IndexVacuumStats, LabelScan, PostingStream, TypeTag,
 };
 use crate::storage::vstore::VStore;
-use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId, VRef};
+use crate::types::{
+    EdgeId, LabelId, Lsn, NodeId, PageId, PropId, Result, SombraError, TypeId, VRef,
+};
 
 #[cfg(feature = "degree-cache")]
 use super::adjacency::DegreeDir;
@@ -263,6 +265,10 @@ pub struct GraphMvccStatus {
     pub retention_window: Duration,
     /// Snapshot of the commit table (if MVCC is enabled).
     pub commit_table: Option<CommitTableSnapshot>,
+    /// Latest committed LSN when exposed by the pager.
+    pub latest_committed_lsn: Option<Lsn>,
+    /// Last durable LSN (async fsync watermark).
+    pub durable_lsn: Option<Lsn>,
 }
 
 /// Reason a vacuum pass ran.
@@ -416,6 +422,8 @@ impl Graph {
             version_log_entries: self.version_log_entry_count(),
             retention_window: self.vacuum_cfg.retention_window,
             commit_table,
+            latest_committed_lsn: self.store.latest_committed_lsn(),
+            durable_lsn: self.store.durable_lsn(),
         }
     }
 
