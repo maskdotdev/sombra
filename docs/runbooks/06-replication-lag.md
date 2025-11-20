@@ -4,6 +4,9 @@ Replication Lag or Stuck Replicas
 Summary
 - Followers fall behind or stop applying WAL, threatening RPO/RTO and potentially blocking WAL truncation.
 
+Note
+- Replication plumbing is in progress. Use infra-level monitoring plus WAL size/segment metrics from `sombra stats --format json` to judge backlog. Replace TODOs with exact replica commands once available.
+
 Pre-checks
 - Determine whether lag is receiver (network ingest) or applier (replay) limited.
 - Check if lag is intentional (maintenance) or unexpected.
@@ -11,6 +14,7 @@ Pre-checks
 Signals
 - Metrics: WAL shipping rate; apply lag (LSN distance/time); replica CPU/IO; checkpoint duration on leader; GC safe point blocked by replicas.
 - Logs: replication disconnects; missing WAL complaints; checksum mismatches; apply errors.
+ - Available now: `sombra stats --format json` for `wal.size_bytes`, `wal.ready_segments`, `wal.recycle_segments`, and `wal.last_checkpoint_lsn` movement.
 
 Diagnosis
 1) Inspect per-replica lag and trend; find the worst offender.
@@ -21,7 +25,7 @@ Diagnosis
 
 Mitigations
 - Unstick replica:
-  - Restart replication receiver/applier if wedged; clear any bad WAL segment after ensuring availability of good copy.
+  - TODO: restart/repair replica commands once replication is implemented.
   - If disk bound, throttle leader WAL generation temporarily (admission control) or move replica to faster storage.
   - If network bound, relocate traffic or temporarily disable catch-up for least important replica.
 - Prevent blockage:

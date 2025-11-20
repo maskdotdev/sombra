@@ -9,7 +9,7 @@ Pre-checks
 - Check disk free space and IO latency.
 
 Signals
-- Metrics: checkpoint duration and throughput; WAL size; WAL stall alerts; fsync/flush latency; GC debt; write latency spikes.
+- Metrics: checkpoint duration and throughput; WAL size (`sombra stats --format json` → `wal.size_bytes`, `wal.ready_segments`, `wal.recycle_segments`); WAL stall alerts; fsync/flush latency; GC debt; write latency spikes.
 - Logs: checkpoint failures, fsync errors, long sync warnings, throttle messages.
 
 Diagnosis
@@ -21,14 +21,16 @@ Diagnosis
 
 Mitigations
 - Reduce stall pressure:
-  - Increase checkpoint frequency or Enable incremental/continuous checkpointing if supported to smooth IO.
+  - Increase checkpoint frequency or enable incremental/continuous checkpointing if supported to smooth IO (TODO: command/setting).
   - Throttle/batch writer workload temporarily; enable admission control for heavy writers.
 - Fix root causes:
   - Resolve IO errors or move WAL/data to healthier storage.
   - If checksum/torn-write protection causing excessive rewrite, confirm hardware alignment and page size.
 - Space safety:
   - If WAL near disk-full, archive WAL to secondary storage if safe and supported.
-  - As last resort, fence lagging replicas that block truncation (align with policy).
+  - Force a checkpoint if safe: `sombra checkpoint <db> --mode force`.
+  - Run `sombra vacuum <db> --into /tmp/compact.sombra` (or `--replace --backup <db>.bak`) to reclaim space if needed.
+- As last resort, fence lagging replicas that block truncation (align with policy).
 
 Verification
 - Checkpoint duration returns to normal; WAL size stops growing.

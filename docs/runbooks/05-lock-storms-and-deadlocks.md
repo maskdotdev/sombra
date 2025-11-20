@@ -11,6 +11,7 @@ Pre-checks
 Signals
 - Metrics: active vs blocked txns; deadlock count/rate; p99 latency spikes; contention per index/key if available.
 - Logs: deadlock detection reports; lock wait timeouts; aborted transactions.
+ - Instrumentation available now: `sombra stats --format json` exposes `pager.mvcc_readers_active` and `mvcc_reader_max_age_ms` (proxy for long holds). TODO: add explicit lock/queue metrics once implemented.
 
 Diagnosis
 1) Identify top contended resources (tables/indexes/keys) and query shapes causing waits.

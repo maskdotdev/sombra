@@ -4,6 +4,9 @@ Failover and Promotion
 Summary
 - Restore service when the leader is unhealthy or lost by promoting a follower safely and preventing split-brain.
 
+Note
+- Native HA/replication control is still WIP. Use infra-level fencing (stop the old leader VM/pod) and orchestration to repoint clients. Replace TODOs below with cluster commands once replication ships.
+
 Pre-checks
 - Confirm client-facing impact (writes failing? reads timing out?).
 - Identify current leader and candidate follower(s); ensure at least one is roughly caught up.
@@ -24,7 +27,7 @@ Diagnosis
 Promotion steps
 - Fence the old leader if possible to avoid split-brain (power off or remove from network/quorum).
 - Promote follower:
-  - Mark it leader (cluster command or config change; document exact command here).
+  - TODO: promotion command/config once HA is implemented; document it here.
   - Enable write acceptance; ensure it has replayed through latest received WAL.
 - Repoint clients:
   - Update service discovery/connection strings to the new leader.
@@ -33,7 +36,7 @@ Promotion steps
 Post-promotion verification
 - Metrics: replication lag from new leader to remaining followers trending down; write latency back to normal; no WAL stall.
 - Health: readiness passes on new leader; liveness stable.
-- Data check: optional consistency check or checksum on hot partitions if cheap.
+- Data check: run `sombra doctor <db> --verify-level full --json` on the new leader when feasible; `sombra stats <db> --format json` for WAL/path sanity.
 
 Follow-up
 - Autopsy root cause on original leader (hardware, IO, WAL stall, checkpoint runaway).

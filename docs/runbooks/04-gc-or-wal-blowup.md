@@ -9,12 +9,12 @@ Pre-checks
 - Check available disk and alert thresholds.
 
 Signals
-- Metrics: WAL bytes/s rising; WAL size; checkpoint duration; GC debt/version chain length; oldest active snapshot age; replication lag (may gate truncation).
+- Metrics: WAL size (`sombra stats --format json` → `wal.size_bytes`), checkpoint duration, GC debt/version chain length (TODO: add GC metrics), oldest active snapshot age (`pager.mvcc_reader_max_age_ms`), replication lag (may gate truncation).
 - Logs: checkpoint failures, fsync errors, GC errors, safe-point blocked messages.
 
 Diagnosis
 1) Check for long-running snapshots blocking GC.
-2) Inspect checkpoint health: recent successes? durations? any errors.
+2) Inspect checkpoint health: recent successes? durations? any errors (`sombra stats` for `wal.last_checkpoint_lsn` movement; logs for errors).
 3) Look for replication lag preventing WAL truncation.
 4) Verify disk/IO health (fsync errors or stalls).
 5) Confirm GC workers are running (threads alive, no panics).
@@ -22,12 +22,13 @@ Diagnosis
 Mitigations
 - Free space protection:
   - If near disk full, enable admission control or throttle writers.
-  - Consider temporary WAL archive offload if supported.
+  - Consider temporary WAL archive offload if supported (TODO: add command when available).
 - Unblock GC:
   - Terminate or restart long snapshots (coordinate with app owners).
   - Increase GC worker pacing temporarily.
 - Checkpoint recovery:
-  - Retry checkpoint in force mode if safe.
+  - Retry checkpoint in force mode if safe: `sombra checkpoint <db> --mode force`.
+  - If WAL is huge and reclaim needed, run `sombra vacuum <db> --into /tmp/compact.sombra && mv` or `sombra vacuum <db> --replace --backup <db>.bak`.
   - Fix underlying errors (permissions, disk space, IO issues) before retrying.
 - Replication gating:
   - If a follower is badly lagged and blocking truncation, decide to fence/bypass it after ensuring data safety policy allows it.

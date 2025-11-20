@@ -14,15 +14,15 @@ Signals
 - Logs: messages about safe-point advancement blocked/unblocked; GC eviction decisions.
 
 Diagnosis
-1) Locate offending sessions/readers and their start times.
-2) Check GC retention settings vs observed snapshot age.
+1) Locate offending sessions/readers and their start times (application logs or connection pool telemetry).
+2) Run `sombra stats <db> --format json` and inspect `pager.mvcc_reader_max_age_ms` and `pager.mvcc_reader_oldest_snapshot` vs configured retention.
 3) Check replication lag (if safe-point depends on replicas) and checkpoint backlog.
-4) Inspect version chain stats; ensure GC is running and not stalled by errors.
+4) Inspect version chain stats; ensure GC is running and not stalled by errors (TODO: link GC metrics when exposed).
 
 Mitigations
 - Short term:
   - Ask/force offending readers to restart with a fresh snapshot (application-level retry).
-  - If business-safe, temporarily increase retention window to clear backlog (may grow disk/WAL).
+  - If business-safe, temporarily increase retention window to clear backlog (may grow disk/WAL). TODO: fill in exact config flag once available.
   - Ensure replicas caught up if they are blocking safe-point advancement.
 - Correctness guardrails:
   - Do NOT disable GC entirely; avoid unbounded version growth.
