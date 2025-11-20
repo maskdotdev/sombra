@@ -48,6 +48,48 @@ pub trait StorageMetrics: Send + Sync {
 
     /// Records MVCC page version statistics.
     fn mvcc_page_versions(&self, _total_versions: u64, _pages_with_versions: u64) {}
+
+    /// Increments the total number of version-log entries pruned by vacuum.
+    fn vacuum_versions_pruned(&self, _count: u64) {}
+
+    /// Increments the total number of orphaned version-log entries pruned by vacuum.
+    fn vacuum_orphan_versions_pruned(&self, _count: u64) {}
+
+    /// Increments the total number of tombstone heads purged by vacuum.
+    fn vacuum_tombstone_heads_purged(&self, _count: u64) {}
+
+    /// Records adjacency entries removed by vacuum (forward and reverse).
+    fn vacuum_adjacency_pruned(&self, _fwd: u64, _rev: u64) {}
+
+    /// Records index entries removed by vacuum (label, chunked, btree).
+    fn vacuum_index_entries_pruned(&self, _label: u64, _chunked: u64, _btree: u64) {}
+
+    /// Increments the total number of bytes reclaimed by vacuum.
+    fn vacuum_bytes_reclaimed(&self, _bytes: u64) {}
+
+    /// Records the runtime in milliseconds for the most recent vacuum pass.
+    fn vacuum_run_millis(&self, _millis: u64) {}
+
+    /// Records the horizon commit applied by the most recent vacuum pass.
+    fn vacuum_horizon_commit(&self, _horizon: CommitId) {}
+
+    /// Updates gauges describing current version-log usage.
+    fn version_log_usage(&self, _bytes: u64, _entries: u64) {}
+
+    /// Records the number of commits acknowledged but not yet durable.
+    fn mvcc_commit_backlog(&self, _acked_not_durable: u64) {}
+
+    /// Records bytes processed by a version codec.
+    fn version_codec_bytes(&self, _codec: &'static str, _raw_bytes: u64, _encoded_bytes: u64) {}
+
+    /// Records a cache hit for the version cache.
+    fn version_cache_hit(&self) {}
+
+    /// Records a cache miss for the version cache.
+    fn version_cache_miss(&self) {}
+
+    /// Records a bulk adjacency flush.
+    fn adjacency_bulk_flush(&self, _inserts: usize, _removals: usize) {}
 }
 
 /// A no-op implementation of [`StorageMetrics`] that discards all recorded metrics.
@@ -129,6 +171,66 @@ pub struct CounterMetrics {
 
     /// Pages currently holding historical versions.
     pub mvcc_pages_with_versions: AtomicU64,
+
+    /// Total version-log entries pruned by background vacuum.
+    pub vacuum_versions_pruned_total: AtomicU64,
+
+    /// Total orphaned version-log entries pruned by background vacuum.
+    pub vacuum_orphan_versions_pruned_total: AtomicU64,
+
+    /// Total tombstone heads purged by vacuum.
+    pub vacuum_tombstone_heads_purged_total: AtomicU64,
+
+    /// Total forward adjacency entries pruned.
+    pub vacuum_adjacency_fwd_pruned_total: AtomicU64,
+
+    /// Total reverse adjacency entries pruned.
+    pub vacuum_adjacency_rev_pruned_total: AtomicU64,
+
+    /// Total label index entries pruned.
+    pub vacuum_index_label_pruned_total: AtomicU64,
+
+    /// Total chunked index segments pruned.
+    pub vacuum_index_chunked_pruned_total: AtomicU64,
+
+    /// Total B-tree index entries pruned.
+    pub vacuum_index_btree_pruned_total: AtomicU64,
+
+    /// Total bytes reclaimed by vacuum.
+    pub vacuum_bytes_reclaimed_total: AtomicU64,
+
+    /// Last observed vacuum runtime in milliseconds.
+    pub vacuum_last_run_millis: AtomicU64,
+
+    /// Horizon commit applied by the most recent vacuum pass.
+    pub vacuum_horizon_commit: AtomicU64,
+
+    /// Current bytes tracked in the version log.
+    pub version_log_bytes: AtomicU64,
+
+    /// Current number of entries tracked in the version log.
+    pub version_log_entries: AtomicU64,
+
+    /// Current number of commits acknowledged but not yet durable.
+    pub mvcc_commit_backlog: AtomicU64,
+
+    /// Total version cache hits.
+    pub version_cache_hits: AtomicU64,
+
+    /// Total version cache misses.
+    pub version_cache_misses: AtomicU64,
+
+    /// Bytes seen by version codecs (raw).
+    pub version_codec_raw_bytes: AtomicU64,
+
+    /// Bytes written after version codecs.
+    pub version_codec_encoded_bytes: AtomicU64,
+
+    /// Bulk adjacency inserts flushed.
+    pub adjacency_bulk_inserts: AtomicU64,
+
+    /// Bulk adjacency removals flushed.
+    pub adjacency_bulk_removals: AtomicU64,
 }
 
 impl StorageMetrics for CounterMetrics {
@@ -208,6 +310,86 @@ impl StorageMetrics for CounterMetrics {
             .store(total_versions, Ordering::Relaxed);
         self.mvcc_pages_with_versions
             .store(pages_with_versions, Ordering::Relaxed);
+    }
+
+    fn vacuum_versions_pruned(&self, count: u64) {
+        self.vacuum_versions_pruned_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn vacuum_orphan_versions_pruned(&self, count: u64) {
+        self.vacuum_orphan_versions_pruned_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn vacuum_tombstone_heads_purged(&self, count: u64) {
+        self.vacuum_tombstone_heads_purged_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn vacuum_adjacency_pruned(&self, fwd: u64, rev: u64) {
+        self.vacuum_adjacency_fwd_pruned_total
+            .fetch_add(fwd, Ordering::Relaxed);
+        self.vacuum_adjacency_rev_pruned_total
+            .fetch_add(rev, Ordering::Relaxed);
+    }
+
+    fn vacuum_index_entries_pruned(&self, label: u64, chunked: u64, btree: u64) {
+        self.vacuum_index_label_pruned_total
+            .fetch_add(label, Ordering::Relaxed);
+        self.vacuum_index_chunked_pruned_total
+            .fetch_add(chunked, Ordering::Relaxed);
+        self.vacuum_index_btree_pruned_total
+            .fetch_add(btree, Ordering::Relaxed);
+    }
+
+    fn vacuum_bytes_reclaimed(&self, bytes: u64) {
+        self.vacuum_bytes_reclaimed_total
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn vacuum_run_millis(&self, millis: u64) {
+        self.vacuum_last_run_millis.store(millis, Ordering::Relaxed);
+    }
+
+    fn vacuum_horizon_commit(&self, horizon: CommitId) {
+        self.vacuum_horizon_commit.store(horizon, Ordering::Relaxed);
+    }
+
+    fn version_log_usage(&self, bytes: u64, entries: u64) {
+        self.version_log_bytes.store(bytes, Ordering::Relaxed);
+        self.version_log_entries.store(entries, Ordering::Relaxed);
+    }
+
+    fn mvcc_commit_backlog(&self, acked_not_durable: u64) {
+        self.mvcc_commit_backlog
+            .store(acked_not_durable, Ordering::Relaxed);
+    }
+
+    fn version_codec_bytes(&self, _codec: &'static str, raw_bytes: u64, encoded_bytes: u64) {
+        self.version_codec_raw_bytes
+            .fetch_add(raw_bytes, Ordering::Relaxed);
+        self.version_codec_encoded_bytes
+            .fetch_add(encoded_bytes, Ordering::Relaxed);
+    }
+
+    fn version_cache_hit(&self) {
+        self.version_cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn version_cache_miss(&self) {
+        self.version_cache_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn adjacency_bulk_flush(&self, inserts: usize, removals: usize) {
+        if inserts > 0 {
+            self.adjacency_bulk_inserts
+                .fetch_add(inserts as u64, Ordering::Relaxed);
+        }
+        if removals > 0 {
+            self.adjacency_bulk_removals
+                .fetch_add(removals as u64, Ordering::Relaxed);
+        }
     }
 }
 

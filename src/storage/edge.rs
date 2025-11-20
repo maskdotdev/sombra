@@ -1,7 +1,7 @@
-use crate::types::{NodeId, Result, SombraError, TypeId, VRef};
-use super::mvcc::{flags, VersionHeader, VersionPtr, VERSION_HEADER_LEN, VERSION_PTR_LEN};
 #[cfg(test)]
 use super::mvcc::COMMIT_MAX;
+use super::mvcc::{flags, VersionHeader, VersionPtr, VERSION_HEADER_LEN, VERSION_PTR_LEN};
+use crate::types::{NodeId, Result, SombraError, TypeId, VRef};
 
 use super::rowhash::row_hash64;
 
@@ -37,6 +37,7 @@ pub struct VersionedEdgeRow {
     pub header: VersionHeader,
     pub prev_ptr: VersionPtr,
     pub row: EdgeRow,
+    pub inline_history: Option<Vec<u8>>,
 }
 
 /// Encoding options for edge rows.
@@ -56,7 +57,9 @@ impl EncodeOpts {
 #[derive(Clone, Debug)]
 pub struct EncodedEdgeRow {
     pub bytes: Vec<u8>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub header: VersionHeader,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub prev_ptr: VersionPtr,
     #[cfg_attr(not(test), allow(dead_code))]
     pub row_hash: Option<u64>,
@@ -70,6 +73,7 @@ pub fn encode(
     opts: EncodeOpts,
     mut version: VersionHeader,
     prev_ptr: VersionPtr,
+    inline_history: Option<&[u8]>,
 ) -> Result<EncodedEdgeRow> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&src.0.to_be_bytes());
@@ -101,6 +105,7 @@ pub fn encode(
             payload.extend_from_slice(&vref.n_pages.to_be_bytes());
             payload.extend_from_slice(&vref.len.to_be_bytes());
             payload.extend_from_slice(&vref.checksum.to_be_bytes());
+            payload.extend_from_slice(&vref.owner_commit.to_be_bytes());
         }
     }
     let row_hash = if opts.append_row_hash {
@@ -110,6 +115,17 @@ pub fn encode(
     } else {
         None
     };
+    if let Some(history) = inline_history {
+        let history_len =
+            u16::try_from(history.len()).map_err(|_| SombraError::Invalid("inline history too large"))?;
+        let needed = payload.len().saturating_add(2 + history.len());
+        if needed > u16::MAX as usize {
+            return Err(SombraError::Invalid("inline history exceeds payload limit"));
+        }
+        version.flags |= flags::INLINE_HISTORY;
+        payload.extend_from_slice(&history_len.to_be_bytes());
+        payload.extend_from_slice(history);
+    }
     let payload_len =
         u16::try_from(payload.len()).map_err(|_| SombraError::Invalid("edge payload too large"))?;
     version.payload_len = payload_len;
@@ -172,7 +188,7 @@ pub fn decode(data: &[u8]) -> Result<VersionedEdgeRow> {
             PropStorage::Inline(value)
         }
         ROW_STORAGE_VREF => {
-            if offset + 20 > payload.len() {
+            if offset + 28 > payload.len() {
                 return Err(SombraError::Corruption("edge vref payload truncated"));
             }
             let start_page = u64_from_be(&payload[offset..offset + 8]);
@@ -183,11 +199,14 @@ pub fn decode(data: &[u8]) -> Result<VersionedEdgeRow> {
             offset += 4;
             let checksum = u32_from_be(&payload[offset..offset + 4]);
             offset += 4;
+            let owner_commit = u64_from_be(&payload[offset..offset + 8]);
+            offset += 8;
             PropStorage::VRef(VRef {
                 start_page: crate::types::PageId(start_page),
                 n_pages,
                 len,
                 checksum,
+                owner_commit,
             })
         }
         _ => {
@@ -206,6 +225,30 @@ pub fn decode(data: &[u8]) -> Result<VersionedEdgeRow> {
     } else {
         None
     };
+    offset += if has_hash { 8 } else { 0 };
+    let mut inline_history = None;
+    if offset < payload.len() {
+        if payload.len() - offset < 2 {
+            return Err(SombraError::Corruption("inline history length missing"));
+        }
+        let len = u16_from_be(&payload[offset..offset + 2]) as usize;
+        offset += 2;
+        if offset + len > payload.len() {
+            return Err(SombraError::Corruption("inline history payload truncated"));
+        }
+        inline_history = Some(payload[offset..offset + len].to_vec());
+        offset += len;
+        if offset != payload.len() {
+            return Err(SombraError::Corruption(
+                "edge row trailing bytes after inline history",
+            ));
+        }
+    }
+    if (header.flags & flags::INLINE_HISTORY) != 0 && inline_history.is_none() {
+        return Err(SombraError::Corruption(
+            "inline history flag set but payload missing",
+        ));
+    }
     Ok(VersionedEdgeRow {
         header,
         prev_ptr,
@@ -216,6 +259,7 @@ pub fn decode(data: &[u8]) -> Result<VersionedEdgeRow> {
             props,
             row_hash,
         },
+        inline_history,
     })
 }
 
@@ -347,6 +391,7 @@ mod tests {
                 n_pages,
                 len,
                 checksum,
+                owner_commit: begin,
             };
             let payload = if use_vref {
                 PropPayload::VRef(vref)

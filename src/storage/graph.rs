@@ -16,8 +16,9 @@ use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::primitives::pager::{
-    AutockptContext, BackgroundMaintainer, PageStore, ReadGuard, WriteGuard,
+    AsyncFsyncBacklog, AutockptContext, BackgroundMaintainer, PageStore, ReadGuard, WriteGuard,
 };
+use crate::primitives::wal::{WalAllocatorStats, WalCommitBacklog};
 use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
 use crate::storage::index::{
     collect_all, CatalogEpoch, DdlEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef,
@@ -36,8 +37,8 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{
-    CommitId, CommitTable, CommitTableSnapshot, VersionHeader, VersionLogEntry, VersionPtr,
-    VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+    CommitId, CommitTable, CommitTableSnapshot, VersionCodecConfig, VersionHeader,
+    VersionLogEntry, VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
 use super::node::{
@@ -117,6 +118,12 @@ pub struct Graph {
     row_hash_header: bool,
     vacuum_cfg: VacuumCfg,
     vacuum_sched: VacuumSched,
+    inline_history: bool,
+    inline_history_max_bytes: usize,
+    defer_adjacency_flush: bool,
+    defer_index_flush: bool,
+    version_cache: Option<VersionCache>,
+    version_codec_cfg: VersionCodecConfig,
     version_log_bytes: AtomicU64,
     version_log_entries: AtomicU64,
 }
@@ -141,9 +148,57 @@ impl VacuumSched {
     }
 }
 
+struct VersionCache {
+    shards: Vec<Mutex<LruCache<u64, Arc<VersionLogEntry>>>>,
+}
+
+impl VersionCache {
+    fn new(shards: usize, capacity: usize) -> Self {
+        let shard_count = shards.max(1);
+        let per_shard_cap = (capacity / shard_count).max(1);
+        let mut shard_vec = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shard_vec.push(Mutex::new(LruCache::new(
+                NonZeroUsize::new(per_shard_cap).unwrap(),
+            )));
+        }
+        Self { shards: shard_vec }
+    }
+
+    fn shard_for(&self, ptr: VersionPtr) -> &Mutex<LruCache<u64, Arc<VersionLogEntry>>> {
+        let idx = (ptr.raw() as usize) % self.shards.len();
+        &self.shards[idx]
+    }
+
+    fn get(&self, ptr: VersionPtr) -> Option<Arc<VersionLogEntry>> {
+        let mut guard = self.shard_for(ptr).lock();
+        guard.get(&ptr.raw()).cloned()
+    }
+
+    fn insert(&self, ptr: VersionPtr, entry: Arc<VersionLogEntry>) {
+        let mut guard = self.shard_for(ptr).lock();
+        guard.put(ptr.raw(), entry);
+    }
+}
+
+#[derive(Default)]
+struct AdjacencyBuffer {
+    inserts: Vec<(NodeId, NodeId, TypeId, EdgeId, CommitId)>,
+    removals: Vec<(NodeId, NodeId, TypeId, EdgeId, CommitId)>,
+}
+
+#[derive(Default)]
+struct IndexBuffer {
+    label_inserts: Vec<(LabelId, NodeId, CommitId)>,
+    label_removes: Vec<(LabelId, NodeId, CommitId)>,
+    prop_inserts: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
+    prop_removes: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
+}
+
 trait VersionChainRecord {
     fn header(&self) -> &VersionHeader;
     fn prev_ptr(&self) -> VersionPtr;
+    fn inline_history(&self) -> Option<&[u8]>;
 }
 
 impl VersionChainRecord for node::VersionedNodeRow {
@@ -154,6 +209,10 @@ impl VersionChainRecord for node::VersionedNodeRow {
     fn prev_ptr(&self) -> VersionPtr {
         self.prev_ptr
     }
+
+    fn inline_history(&self) -> Option<&[u8]> {
+        self.inline_history.as_deref()
+    }
 }
 
 impl VersionChainRecord for edge::VersionedEdgeRow {
@@ -163,6 +222,10 @@ impl VersionChainRecord for edge::VersionedEdgeRow {
 
     fn prev_ptr(&self) -> VersionPtr {
         self.prev_ptr
+    }
+
+    fn inline_history(&self) -> Option<&[u8]> {
+        self.inline_history.as_deref()
     }
 }
 
@@ -269,6 +332,14 @@ pub struct GraphMvccStatus {
     pub latest_committed_lsn: Option<Lsn>,
     /// Last durable LSN (async fsync watermark).
     pub durable_lsn: Option<Lsn>,
+    /// Number of commits acknowledged but not yet durable.
+    pub acked_not_durable_commits: Option<u64>,
+    /// Pending WAL commit backlog when available.
+    pub wal_backlog: Option<WalCommitBacklog>,
+    /// WAL allocator/preallocation snapshot when available.
+    pub wal_allocator: Option<WalAllocatorStats>,
+    /// Async fsync backlog (pending vs durable) when enabled.
+    pub async_fsync_backlog: Option<AsyncFsyncBacklog>,
 }
 
 /// Reason a vacuum pass ran.
@@ -327,6 +398,16 @@ impl Graph {
         bytes[..VERSION_HEADER_LEN].copy_from_slice(&encoded);
     }
 
+    fn maybe_inline_history(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+        if !self.inline_history {
+            return None;
+        }
+        if bytes.len() > self.inline_history_max_bytes {
+            return None;
+        }
+        Some(bytes.to_vec())
+    }
+
     fn log_version_entry(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -340,14 +421,27 @@ impl Graph {
         if ptr_value == 0 {
             return Err(SombraError::Corruption("version log pointer overflowed"));
         }
+        let codec_outcome = self.version_codec_cfg.apply_owned(bytes)?;
+        let raw_len = u32::try_from(codec_outcome.raw_len)
+            .map_err(|_| SombraError::Invalid("version log payload too large"))?;
         let entry = VersionLogEntry {
             space,
             id,
             header,
             prev_ptr,
-            bytes,
+            codec: codec_outcome.codec,
+            raw_len,
+            bytes: codec_outcome.encoded,
         };
         let encoded = entry.encode()?;
+        self.metrics.version_codec_bytes(
+            entry.codec.as_str(),
+            u64::from(raw_len),
+            encoded.len() as u64,
+        );
+        if let Some(cache) = &self.version_cache {
+            cache.insert(VersionPtr::from_raw(ptr_value), Arc::new(entry.clone()));
+        }
         self.version_log.put(tx, &ptr_value, &encoded)?;
         self.version_log_bytes
             .fetch_add(encoded.len() as u64, AtomicOrdering::Relaxed);
@@ -375,10 +469,21 @@ impl Graph {
         if ptr.is_null() {
             return Ok(None);
         }
+        if let Some(cache) = &self.version_cache {
+            if let Some(hit) = cache.get(ptr) {
+                self.metrics.version_cache_hit();
+                return Ok(Some((*hit).clone()));
+            }
+        }
         let Some(bytes) = self.version_log.get(tx, &ptr.raw())? else {
             return Ok(None);
         };
-        VersionLogEntry::decode(&bytes).map(Some)
+        let decoded = VersionLogEntry::decode(&bytes)?;
+        if let Some(cache) = &self.version_cache {
+            cache.insert(ptr, Arc::new(decoded.clone()));
+            self.metrics.version_cache_miss();
+        }
+        Ok(Some(decoded))
     }
 
     /// Returns the commit table when the underlying pager provides one.
@@ -417,13 +522,29 @@ impl Graph {
             .commit_table
             .as_ref()
             .map(|table| table.lock().snapshot(Instant::now()));
+        let latest_committed_lsn = self.store.latest_committed_lsn();
+        let durable_lsn = self.store.durable_lsn();
+        let wal_backlog = self.store.wal_commit_backlog();
+        let wal_allocator = self.store.wal_allocator_stats();
+        let async_fsync_backlog = self.store.async_fsync_backlog();
+        let acked_not_durable_commits = match (latest_committed_lsn, durable_lsn) {
+            (Some(latest), Some(durable)) => Some(latest.0.saturating_sub(durable.0)),
+            _ => None,
+        };
+        if let Some(backlog) = acked_not_durable_commits {
+            self.metrics.mvcc_commit_backlog(backlog);
+        }
         GraphMvccStatus {
             version_log_bytes: self.version_log_bytes(),
             version_log_entries: self.version_log_entry_count(),
             retention_window: self.vacuum_cfg.retention_window,
             commit_table,
-            latest_committed_lsn: self.store.latest_committed_lsn(),
-            durable_lsn: self.store.durable_lsn(),
+            latest_committed_lsn,
+            durable_lsn,
+            acked_not_durable_commits,
+            wal_backlog,
+            wal_allocator,
+            async_fsync_backlog,
         }
     }
 
@@ -604,6 +725,7 @@ impl Graph {
         }
         let mut to_delete = Vec::new();
         let mut retired = Vec::new();
+        let mut retired_sizes = Vec::new();
         self.version_log.for_each_with_write(tx, |key, bytes| {
             if to_delete.len() >= max_prune {
                 return Ok(());
@@ -612,13 +734,16 @@ impl Graph {
             if entry.header.end != COMMIT_MAX && entry.header.end <= horizon {
                 to_delete.push(key);
                 retired.push(entry);
+                retired_sizes.push(bytes.len() as u64);
             }
             Ok(())
         })?;
         let mut bytes_removed = 0u64;
         for entry in &retired {
             self.retire_version_resources(tx, entry)?;
-            bytes_removed = bytes_removed.saturating_add(entry.bytes.len() as u64);
+        }
+        for encoded_len in retired_sizes {
+            bytes_removed = bytes_removed.saturating_add(encoded_len);
         }
         for key in &to_delete {
             let _ = self.version_log.delete(tx, key)?;
@@ -823,6 +948,14 @@ impl Graph {
             .unwrap_or(0);
 
         let commit_table = store.commit_table();
+        let version_cache = if opts.version_cache_capacity > 0 {
+            Some(VersionCache::new(
+                opts.version_cache_shards,
+                opts.version_cache_capacity,
+            ))
+        } else {
+            None
+        };
 
         let graph = Arc::new(Self {
             store,
@@ -862,6 +995,16 @@ impl Graph {
             row_hash_header,
             vacuum_cfg: opts.vacuum.clone(),
             vacuum_sched: VacuumSched::new(),
+            inline_history: opts.inline_history,
+            inline_history_max_bytes: opts.inline_history_max_bytes,
+            defer_adjacency_flush: opts.defer_adjacency_flush,
+            defer_index_flush: opts.defer_index_flush,
+            version_cache,
+            version_codec_cfg: VersionCodecConfig {
+                kind: opts.version_codec,
+                min_payload_len: opts.version_codec_min_payload_len,
+                min_savings_bytes: opts.version_codec_min_savings_bytes,
+            },
             version_log_bytes: AtomicU64::new(0),
             version_log_entries: AtomicU64::new(0),
         });
@@ -904,6 +1047,7 @@ impl Graph {
             NodeEncodeOpts::new(self.row_hash_header),
             version,
             VersionPtr::null(),
+            None,
         ) {
             Ok(encoded) => encoded.bytes,
             Err(err) => {
@@ -930,10 +1074,7 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Nodes)?;
-        if let Err(err) =
-            self.indexes
-                .insert_node_labels_with_commit(tx, node_id, &labels, Some(commit_id))
-        {
+        if let Err(err) = self.stage_label_inserts(tx, node_id, &labels, commit_id) {
             let _ = self.nodes.delete(tx, &node_id.0);
             if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
                 return Err(root_err);
@@ -1409,8 +1550,7 @@ impl Graph {
         }
 
         let (commit_id, mut tombstone_header) = self.tx_pending_version_header(tx);
-        self.indexes
-            .remove_node_labels_with_commit(tx, id, &row.labels, Some(commit_id))?;
+        self.stage_label_removals(tx, id, &row.labels, commit_id)?;
         let empty_props = BTreeMap::new();
         self.update_indexed_props_for_node(
             tx,
@@ -1430,15 +1570,20 @@ impl Graph {
             id.0,
             old_header,
             versioned.prev_ptr,
-            log_bytes,
+            log_bytes.clone(),
         )?;
+        let inline_history = self.maybe_inline_history(&log_bytes);
         tombstone_header.flags |= mvcc_flags::TOMBSTONE;
+        if inline_history.is_some() {
+            tombstone_header.flags |= mvcc_flags::INLINE_HISTORY;
+        }
         let encoded = node::encode(
             &[],
             node::PropPayload::Inline(&[]),
             NodeEncodeOpts::new(false),
             tombstone_header,
             prev_ptr,
+            inline_history.as_deref(),
         )?;
         self.nodes.put(tx, &id.0, &encoded.bytes)?;
         self.persist_tree_root(tx, RootKind::Nodes)?;
@@ -1492,14 +1637,20 @@ impl Graph {
             id.0,
             old_header,
             versioned.prev_ptr,
-            log_bytes,
+            log_bytes.clone(),
         )?;
+        let inline_history = self.maybe_inline_history(&log_bytes);
+        let mut new_header = new_header;
+        if inline_history.is_some() {
+            new_header.flags |= mvcc_flags::INLINE_HISTORY;
+        }
         let encoded_row = match node::encode(
             &labels,
             payload,
             NodeEncodeOpts::new(self.row_hash_header),
             new_header,
             prev_ptr,
+            inline_history.as_deref(),
         ) {
             Ok(encoded) => encoded,
             Err(err) => {
@@ -1567,6 +1718,7 @@ impl Graph {
             EdgeEncodeOpts::new(self.row_hash_header),
             version,
             VersionPtr::null(),
+            None,
         ) {
             Ok(encoded) => encoded.bytes,
             Err(err) => {
@@ -1593,8 +1745,11 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Edges)?;
-        if let Err(err) =
-            self.insert_adjacencies(tx, &[(spec.src, spec.dst, spec.ty, edge_id)], commit_id)
+        if let Err(err) = self.stage_adjacency_inserts(
+            tx,
+            &[(spec.src, spec.dst, spec.ty, edge_id)],
+            commit_id,
+        )
         {
             let _ = self.edges.delete(tx, &edge_id.0);
             if let Err(root_err) = self.persist_tree_root(tx, RootKind::Edges) {
@@ -1708,8 +1863,13 @@ impl Graph {
             id.0,
             old_header,
             versioned.prev_ptr,
-            log_bytes,
+            log_bytes.clone(),
         )?;
+        let inline_history = self.maybe_inline_history(&log_bytes);
+        let mut new_header = new_header;
+        if inline_history.is_some() {
+            new_header.flags |= mvcc_flags::INLINE_HISTORY;
+        }
         let encoded_row = match edge::encode(
             src,
             dst,
@@ -1718,6 +1878,7 @@ impl Graph {
             EdgeEncodeOpts::new(self.row_hash_header),
             new_header,
             prev_ptr,
+            inline_history.as_deref(),
         ) {
             Ok(encoded) => encoded,
             Err(err) => {
@@ -1860,7 +2021,7 @@ impl Graph {
         }
         let row = versioned.row;
         let (commit_id, mut tombstone_header) = self.tx_pending_version_header(tx);
-        self.remove_adjacency(tx, row.src, row.dst, row.ty, id, commit_id)?;
+        self.stage_adjacency_removals(tx, &[(row.src, row.dst, row.ty, id)], commit_id)?;
         let mut old_header = versioned.header;
         old_header.end = commit_id;
         let mut log_bytes = bytes.clone();
@@ -1871,9 +2032,13 @@ impl Graph {
             id.0,
             old_header,
             versioned.prev_ptr,
-            log_bytes,
+            log_bytes.clone(),
         )?;
         tombstone_header.flags |= mvcc_flags::TOMBSTONE;
+        let inline_history = self.maybe_inline_history(&log_bytes);
+        if inline_history.is_some() {
+            tombstone_header.flags |= mvcc_flags::INLINE_HISTORY;
+        }
         let encoded = edge::encode(
             row.src,
             row.dst,
@@ -1882,6 +2047,7 @@ impl Graph {
             EdgeEncodeOpts::new(false),
             tombstone_header,
             prev_ptr,
+            inline_history.as_deref(),
         )?;
         self.edges.put(tx, &id.0, &encoded.bytes)?;
         self.persist_tree_root(tx, RootKind::Edges)?;
@@ -2037,6 +2203,25 @@ impl Graph {
         let current = decode(bytes)?;
         if Self::version_visible(<T as VersionChainRecord>::header(&current), snapshot) {
             return Ok(Some(current));
+        }
+        if let Some(inline) = <T as VersionChainRecord>::inline_history(&current) {
+            let decoded_inline = decode(inline)?;
+            if Self::version_visible(<T as VersionChainRecord>::header(&decoded_inline), snapshot) {
+                return Ok(Some(decoded_inline));
+            }
+            let mut ptr = <T as VersionChainRecord>::prev_ptr(&decoded_inline);
+            while let Some(entry) = self.load_version_entry(tx, ptr)? {
+                if entry.space != space || entry.id != id {
+                    ptr = entry.prev_ptr;
+                    continue;
+                }
+                let decoded = decode(&entry.bytes)?;
+                if Self::version_visible(<T as VersionChainRecord>::header(&decoded), snapshot) {
+                    return Ok(Some(decoded));
+                }
+                ptr = <T as VersionChainRecord>::prev_ptr(&decoded);
+            }
+            return Ok(None);
         }
         let mut ptr = <T as VersionChainRecord>::prev_ptr(&current);
         if ptr.is_null() {
@@ -2247,6 +2432,205 @@ impl Graph {
         };
         let versioned = node::decode(&bytes)?;
         Ok(!versioned.header.is_tombstone() && !versioned.header.is_pending())
+    }
+
+    fn stage_adjacency_inserts(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        entries: &[(NodeId, NodeId, TypeId, EdgeId)],
+        commit: CommitId,
+    ) -> Result<()> {
+        if !self.defer_adjacency_flush {
+            return self.insert_adjacencies(tx, entries, commit);
+        }
+        let mut state = self.take_txn_state(tx);
+        let buffer = state
+            .deferred_adj
+            .get_or_insert_with(AdjacencyBuffer::default);
+        for (src, dst, ty, edge) in entries {
+            buffer
+                .inserts
+                .push((*src, *dst, *ty, *edge, commit));
+        }
+        self.store_txn_state(tx, state);
+        Ok(())
+    }
+
+    fn stage_adjacency_removals(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        entries: &[(NodeId, NodeId, TypeId, EdgeId)],
+        commit: CommitId,
+    ) -> Result<()> {
+        if !self.defer_adjacency_flush {
+            for (src, dst, ty, edge) in entries {
+                self.remove_adjacency(tx, *src, *dst, *ty, *edge, commit)?;
+            }
+            return Ok(());
+        }
+        let mut state = self.take_txn_state(tx);
+        let buffer = state
+            .deferred_adj
+            .get_or_insert_with(AdjacencyBuffer::default);
+        for (src, dst, ty, edge) in entries {
+            buffer
+                .removals
+                .push((*src, *dst, *ty, *edge, commit));
+        }
+        self.store_txn_state(tx, state);
+        Ok(())
+    }
+
+    /// Flushes buffered adjacency and index updates for the current transaction.
+    pub fn flush_deferred_writes(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        self.flush_deferred_adjacency(tx)?;
+        self.flush_deferred_indexes(tx)?;
+        Ok(())
+    }
+
+    fn flush_deferred_adjacency(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        if !self.defer_adjacency_flush {
+            return Ok(());
+        }
+        let mut state = self.take_txn_state(tx);
+        let Some(mut buffer) = state.deferred_adj.take() else {
+            self.store_txn_state(tx, state);
+            return Ok(());
+        };
+        let mut total_inserts = 0usize;
+        if !buffer.inserts.is_empty() {
+            let mut grouped: BTreeMap<CommitId, Vec<(NodeId, NodeId, TypeId, EdgeId)>> =
+                BTreeMap::new();
+            for (src, dst, ty, edge, commit) in buffer.inserts.drain(..) {
+                grouped
+                    .entry(commit)
+                    .or_default()
+                    .push((src, dst, ty, edge));
+            }
+            for (commit, batch) in grouped {
+                total_inserts = total_inserts.saturating_add(batch.len());
+                self.insert_adjacencies(tx, &batch, commit)?;
+            }
+        }
+        let total_removals = buffer.removals.len();
+        for (src, dst, ty, edge, commit) in buffer.removals.drain(..) {
+            self.remove_adjacency(tx, src, dst, ty, edge, commit)?;
+        }
+        self.metrics
+            .adjacency_bulk_flush(total_inserts, total_removals);
+        self.store_txn_state(tx, state);
+        Ok(())
+    }
+
+    fn stage_label_inserts(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        labels: &[LabelId],
+        commit: CommitId,
+    ) -> Result<()> {
+        if !self.defer_index_flush {
+            return self
+                .indexes
+                .insert_node_labels_with_commit(tx, node, labels, Some(commit));
+        }
+        let mut state = self.take_txn_state(tx);
+        let buffer = state
+            .deferred_index
+            .get_or_insert_with(IndexBuffer::default);
+        for label in labels {
+            buffer.label_inserts.push((*label, node, commit));
+        }
+        self.store_txn_state(tx, state);
+        Ok(())
+    }
+
+    fn stage_label_removals(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        labels: &[LabelId],
+        commit: CommitId,
+    ) -> Result<()> {
+        if !self.defer_index_flush {
+            return self
+                .indexes
+                .remove_node_labels_with_commit(tx, node, labels, Some(commit));
+        }
+        let mut state = self.take_txn_state(tx);
+        let buffer = state
+            .deferred_index
+            .get_or_insert_with(IndexBuffer::default);
+        for label in labels {
+            buffer.label_removes.push((*label, node, commit));
+        }
+        self.store_txn_state(tx, state);
+        Ok(())
+    }
+
+    fn stage_prop_index_op(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        def: IndexDef,
+        key: Vec<u8>,
+        node: NodeId,
+        commit: CommitId,
+        insert: bool,
+    ) -> Result<()> {
+        if !self.defer_index_flush {
+            if insert {
+                self.indexes
+                    .insert_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+            } else {
+                self.indexes
+                    .remove_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+            }
+            return Ok(());
+        }
+        let mut state = self.take_txn_state(tx);
+        let buffer = state
+            .deferred_index
+            .get_or_insert_with(IndexBuffer::default);
+        if insert {
+            buffer.prop_inserts.push((def, key, node, commit));
+        } else {
+            buffer.prop_removes.push((def, key, node, commit));
+        }
+        self.store_txn_state(tx, state);
+        Ok(())
+    }
+
+    fn flush_deferred_indexes(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        if !self.defer_index_flush {
+            return Ok(());
+        }
+        let mut state = self.take_txn_state(tx);
+        let Some(mut buffer) = state.deferred_index.take() else {
+            self.store_txn_state(tx, state);
+            return Ok(());
+        };
+        for (label, node, commit) in buffer.label_inserts.drain(..) {
+            if self.indexes.has_label_index_with_write(tx, label)? {
+                self.indexes
+                    .insert_node_labels_with_commit(tx, node, &[label], Some(commit))?;
+            }
+        }
+        for (label, node, commit) in buffer.label_removes.drain(..) {
+            if self.indexes.has_label_index_with_write(tx, label)? {
+                self.indexes
+                    .remove_node_labels_with_commit(tx, node, &[label], Some(commit))?;
+            }
+        }
+        for (def, key, node, commit) in buffer.prop_inserts.drain(..) {
+            self.indexes
+                .insert_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+        }
+        for (def, key, node, commit) in buffer.prop_removes.drain(..) {
+            self.indexes
+                .remove_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+        }
+        self.store_txn_state(tx, state);
+        Ok(())
     }
 
     fn insert_adjacencies(
@@ -3100,12 +3484,16 @@ fn open_degree_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Ve
 
 struct GraphTxnState {
     index_cache: GraphIndexCache,
+    deferred_adj: Option<AdjacencyBuffer>,
+    deferred_index: Option<IndexBuffer>,
 }
 
 impl GraphTxnState {
     fn new(epoch: DdlEpoch) -> Self {
         Self {
             index_cache: GraphIndexCache::new(epoch),
+            deferred_adj: None,
+            deferred_index: None,
         }
     }
 }
@@ -3585,6 +3973,38 @@ impl Graph {
     ) -> Result<()> {
         for label in labels {
             let defs = self.index_defs_for_label(tx, *label)?;
+            if self.defer_index_flush {
+                for def in defs.iter() {
+                    let old = old_props.get(&def.prop);
+                    let new = new_props.get(&def.prop);
+                    match (old, new) {
+                        (_, Some(value)) => {
+                            let key = encode_value_key_owned(def.ty, value)?;
+                            self.stage_prop_index_op(
+                                tx,
+                                *def,
+                                key,
+                                node,
+                                commit,
+                                true,
+                            )?;
+                        }
+                        (Some(prev), None) => {
+                            let key = encode_value_key_owned(def.ty, prev)?;
+                            self.stage_prop_index_op(
+                                tx,
+                                *def,
+                                key,
+                                node,
+                                commit,
+                                false,
+                            )?;
+                        }
+                        _ => {}
+                    };
+                }
+                continue;
+            }
             for def in defs.iter() {
                 let old = old_props.get(&def.prop);
                 let new = new_props.get(&def.prop);
@@ -3974,7 +4394,7 @@ mod vacuum_background_tests {
             max_millis_per_pass: 50,
             index_cleanup: true,
         };
-        let (_tmpdir, pager, graph) = setup_graph(cfg);
+        let (_tmpdir, pager, graph) = setup_graph(cfg.clone());
         create_and_delete_node(&pager, &graph)?;
         graph.vacuum_sched.last_stats.borrow_mut().take();
         graph.vacuum_sched.running.set(true);
@@ -3999,9 +4419,9 @@ mod vacuum_background_tests {
             max_millis_per_pass: 10,
             index_cleanup: true,
         };
-        let (_tmpdir, pager, graph) = setup_graph(cfg);
+        let (_tmpdir, pager, graph) = setup_graph(cfg.clone());
         let mut write = pager.begin_write()?;
-        graph.create_node(
+        let node = graph.create_node(
             &mut write,
             NodeSpec {
                 labels: &[LabelId(2)],
@@ -4009,6 +4429,16 @@ mod vacuum_background_tests {
             },
         )?;
         pager.commit(write)?;
+        let mut write = pager.begin_write()?;
+        graph.delete_node(&mut write, node, DeleteNodeOpts::default())?;
+        pager.commit(write)?;
+        let bytes = graph.version_log_bytes();
+        assert!(
+            bytes >= cfg.log_high_water_bytes,
+            "version_log_bytes below threshold: {} < {}",
+            bytes,
+            cfg.log_high_water_bytes
+        );
         assert!(matches!(
             graph.vacuum_sched.pending_trigger.get(),
             Some(VacuumTrigger::HighWater)
@@ -4041,7 +4471,7 @@ mod vacuum_background_tests {
 mod adjacency_commit_tests {
     use super::*;
     use crate::primitives::pager::{PageStore, Pager, PagerOptions};
-    use crate::storage::GraphOptions;
+    use crate::storage::{adjacency, GraphOptions};
     use crate::types::{Result, TypeId};
     use std::ops::Bound;
     use std::sync::Arc;
@@ -4174,6 +4604,49 @@ mod adjacency_commit_tests {
             "reverse adjacency must clear pending flag"
         );
         pager.commit(write)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_adjacency_flushes_before_commit() -> Result<()> {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("adj-deferred.db");
+        let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+        let store: Arc<dyn PageStore> = pager.clone();
+        let graph = Graph::open(GraphOptions::new(store).defer_adjacency_flush(true)).unwrap();
+        let (src, dst) = insert_simple_nodes(&pager, &graph)?;
+
+        let mut write = pager.begin_write()?;
+        let edge_id = graph.create_edge(
+            &mut write,
+            EdgeSpec {
+                src,
+                dst,
+                ty: TypeId(9),
+                props: &[],
+            },
+        )?;
+        let fwd_key = adjacency::encode_fwd_key(src, TypeId(9), dst, edge_id);
+        assert!(
+            graph
+                .adj_fwd
+                .get_with_write(&mut write, &fwd_key)?
+                .is_none(),
+            "adjacency should be buffered until flush"
+        );
+        graph.flush_deferred_writes(&mut write)?;
+        assert!(
+            graph
+                .adj_fwd
+                .get_with_write(&mut write, &fwd_key)?
+                .is_some(),
+            "adjacency should be visible after flush"
+        );
+        pager.commit(write)?;
+        let read = pager.begin_latest_committed_read()?;
+        let adj_commit = fetch_single_adj_commit(&graph, &read)?;
+        let edge_commit = fetch_edge_commit(&graph, &read, edge_id)?;
+        assert_eq!(adj_commit, edge_commit);
         Ok(())
     }
 }

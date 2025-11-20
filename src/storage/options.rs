@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::primitives::pager::PageStore;
+use crate::storage::mvcc::VersionCodecKind;
 
 /// Configuration options supplied when opening a [`super::Graph`].
 #[derive(Clone)]
@@ -24,6 +25,24 @@ pub struct GraphOptions {
     pub btree_inplace: bool,
     /// Background MVCC vacuum configuration.
     pub vacuum: VacuumCfg,
+    /// Codec to apply to historical version payloads.
+    pub version_codec: VersionCodecKind,
+    /// Minimum payload size before attempting compression.
+    pub version_codec_min_payload_len: usize,
+    /// Minimum bytes saved for compression to be applied.
+    pub version_codec_min_savings_bytes: usize,
+    /// Whether to embed the newest historical version inline on page heads.
+    pub inline_history: bool,
+    /// Maximum inline history payload size in bytes.
+    pub inline_history_max_bytes: usize,
+    /// Number of shards to split the version cache across.
+    pub version_cache_shards: usize,
+    /// Total capacity (entries) for the version cache.
+    pub version_cache_capacity: usize,
+    /// Whether adjacency updates should be buffered and flushed in bulk at commit.
+    pub defer_adjacency_flush: bool,
+    /// Whether index updates should be buffered and flushed in bulk at commit.
+    pub defer_index_flush: bool,
 }
 
 impl GraphOptions {
@@ -39,6 +58,15 @@ impl GraphOptions {
             row_hash_header: false,
             btree_inplace: false,
             vacuum: VacuumCfg::default(),
+            version_codec: VersionCodecKind::None,
+            version_codec_min_payload_len: 64,
+            version_codec_min_savings_bytes: 8,
+            inline_history: true,
+            inline_history_max_bytes: 1024,
+            version_cache_shards: 8,
+            version_cache_capacity: 2048,
+            defer_adjacency_flush: false,
+            defer_index_flush: false,
         }
     }
 
@@ -87,6 +115,60 @@ impl GraphOptions {
     /// Sets the background vacuum configuration.
     pub fn vacuum(mut self, cfg: VacuumCfg) -> Self {
         self.vacuum = cfg;
+        self
+    }
+
+    /// Selects the codec applied to version-log payloads.
+    pub fn version_codec(mut self, codec: VersionCodecKind) -> Self {
+        self.version_codec = codec;
+        self
+    }
+
+    /// Sets the minimum payload length before compression runs.
+    pub fn version_codec_min_payload_len(mut self, bytes: usize) -> Self {
+        self.version_codec_min_payload_len = bytes;
+        self
+    }
+
+    /// Sets the minimum bytes that must be saved by compression to accept it.
+    pub fn version_codec_min_savings_bytes(mut self, bytes: usize) -> Self {
+        self.version_codec_min_savings_bytes = bytes;
+        self
+    }
+
+    /// Enables or disables embedding the newest historical version inline.
+    pub fn inline_history(mut self, enabled: bool) -> Self {
+        self.inline_history = enabled;
+        self
+    }
+
+    /// Sets the maximum inline history payload length.
+    pub fn inline_history_max_bytes(mut self, bytes: usize) -> Self {
+        self.inline_history_max_bytes = bytes;
+        self
+    }
+
+    /// Configures the per-page version cache shards.
+    pub fn version_cache_shards(mut self, shards: usize) -> Self {
+        self.version_cache_shards = shards;
+        self
+    }
+
+    /// Configures the total capacity for the version cache.
+    pub fn version_cache_capacity(mut self, capacity: usize) -> Self {
+        self.version_cache_capacity = capacity;
+        self
+    }
+
+    /// Enables or disables buffering adjacency updates until commit.
+    pub fn defer_adjacency_flush(mut self, enabled: bool) -> Self {
+        self.defer_adjacency_flush = enabled;
+        self
+    }
+
+    /// Enables or disables buffering index updates until commit.
+    pub fn defer_index_flush(mut self, enabled: bool) -> Self {
+        self.defer_index_flush = enabled;
         self
     }
 }

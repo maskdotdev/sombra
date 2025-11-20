@@ -1,5 +1,6 @@
 use crate::storage::btree::ValCodec;
 use crate::types::{Result, SombraError};
+use snap::raw::{Decoder, Encoder};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::thread::ThreadId;
@@ -74,6 +75,8 @@ pub mod flags {
     pub const PAYLOAD_EXTERNAL: u16 = 0x0002;
     /// Record is pending (not yet visible).
     pub const PENDING: u16 = 0x0004;
+    /// Record carries an inline historical version payload.
+    pub const INLINE_HISTORY: u16 = 0x0008;
 }
 
 /// Fixed-size header prepended to every MVCC-aware payload.
@@ -781,12 +784,15 @@ mod commit_table_tests {
 
     #[test]
     fn version_log_entry_roundtrip() {
+        let payload = vec![1, 2, 3, 4, 5];
         let entry = VersionLogEntry {
             space: VersionSpace::Node,
             id: 42,
             header: VersionHeader::new(7, 11, 0x10, 32),
             prev_ptr: VersionPtr::from_raw(9),
-            bytes: vec![1, 2, 3, 4, 5],
+            codec: VersionCodecKind::None,
+            raw_len: payload.len() as u32,
+            bytes: payload.clone(),
         };
         let encoded = entry.encode().expect("encode succeeds");
         let decoded = VersionLogEntry::decode(&encoded).expect("decode succeeds");
@@ -794,7 +800,59 @@ mod commit_table_tests {
         assert_eq!(decoded.id, entry.id);
         assert_eq!(decoded.header, entry.header);
         assert_eq!(decoded.prev_ptr.raw(), entry.prev_ptr.raw());
-        assert_eq!(decoded.bytes, entry.bytes);
+        assert_eq!(decoded.codec, VersionCodecKind::None);
+        assert_eq!(decoded.raw_len, entry.raw_len);
+        assert_eq!(decoded.bytes, payload);
+    }
+
+    #[test]
+    fn version_log_entry_compressed_roundtrip() {
+        let payload = vec![7u8; 256];
+        let codec_cfg = VersionCodecConfig {
+            kind: VersionCodecKind::Snappy,
+            min_payload_len: 0,
+            min_savings_bytes: 0,
+        };
+        let compressed = codec_cfg
+            .apply_owned(payload.clone())
+            .expect("codec apply succeeds");
+        assert_eq!(compressed.codec, VersionCodecKind::Snappy);
+        assert!(compressed.encoded.len() < payload.len());
+        let entry = VersionLogEntry {
+            space: VersionSpace::Edge,
+            id: 9,
+            header: VersionHeader::new(1, 2, 0, 16),
+            prev_ptr: VersionPtr::from_raw(4),
+            codec: compressed.codec,
+            raw_len: compressed.raw_len as u32,
+            bytes: compressed.encoded,
+        };
+        let encoded = entry.encode().expect("encode succeeds");
+        let decoded = VersionLogEntry::decode(&encoded).expect("decode succeeds");
+        assert_eq!(decoded.space, entry.space);
+        assert_eq!(decoded.codec, VersionCodecKind::Snappy);
+        assert_eq!(decoded.raw_len as usize, payload.len());
+        assert_eq!(decoded.bytes, payload);
+    }
+
+    #[test]
+    fn version_log_entry_legacy_decode() {
+        let header = VersionHeader::new(3, 5, 0, 8);
+        let prev_ptr = VersionPtr::from_raw(2);
+        let payload = vec![0xAA, 0xBB, 0xCC];
+        let mut encoded = Vec::new();
+        encoded.push(VersionSpace::Edge.encode());
+        encoded.extend_from_slice(&42u64.to_be_bytes());
+        header.encode_into(&mut encoded);
+        encoded.extend_from_slice(&prev_ptr.to_bytes());
+        encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(&payload);
+        let decoded = VersionLogEntry::decode(&encoded).expect("decode succeeds");
+        assert_eq!(decoded.space, VersionSpace::Edge);
+        assert_eq!(decoded.id, 42);
+        assert_eq!(decoded.prev_ptr, prev_ptr);
+        assert_eq!(decoded.codec, VersionCodecKind::None);
+        assert_eq!(decoded.bytes, payload);
     }
 }
 
@@ -824,6 +882,140 @@ impl VersionSpace {
     }
 }
 
+/// Flag stored alongside the payload length to indicate codec metadata is present.
+const VERSION_ENTRY_CODEC_FLAG: u32 = 0x8000_0000;
+
+/// Compression strategy for version-log payloads.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VersionCodecKind {
+    /// Disable compression.
+    #[default]
+    None,
+    /// Apply Snappy compression.
+    Snappy,
+}
+
+impl VersionCodecKind {
+    fn tag(self) -> u8 {
+        match self {
+            VersionCodecKind::None => 0,
+            VersionCodecKind::Snappy => 1,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self> {
+        match tag {
+            0 => Ok(VersionCodecKind::None),
+            1 => Ok(VersionCodecKind::Snappy),
+            _ => Err(SombraError::Corruption("unknown version codec tag")),
+        }
+    }
+
+    /// Short identifier for observability sinks.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VersionCodecKind::None => "none",
+            VersionCodecKind::Snappy => "snappy",
+        }
+    }
+
+    fn decode_payload(self, payload: &[u8], raw_len: usize) -> Result<Vec<u8>> {
+        match self {
+            VersionCodecKind::None => {
+                if payload.len() != raw_len {
+                    return Err(SombraError::Corruption(
+                        "version log entry length mismatch",
+                    ));
+                }
+                Ok(payload.to_vec())
+            }
+            VersionCodecKind::Snappy => {
+                let mut decoder = Decoder::new();
+                let decoded = decoder
+                    .decompress_vec(payload)
+                    .map_err(|_| SombraError::Corruption("version log entry decompression failed"))?;
+                if decoded.len() != raw_len {
+                    return Err(SombraError::Corruption(
+                        "version log entry decompressed length mismatch",
+                    ));
+                }
+                Ok(decoded)
+            }
+        }
+    }
+}
+
+/// Configuration controlling when version payloads are compressed.
+#[derive(Clone, Debug)]
+pub struct VersionCodecConfig {
+    /// Compression strategy to apply.
+    pub kind: VersionCodecKind,
+    /// Minimum payload length before attempting compression.
+    pub min_payload_len: usize,
+    /// Minimum bytes that must be saved for compression to be accepted.
+    pub min_savings_bytes: usize,
+}
+
+impl Default for VersionCodecConfig {
+    fn default() -> Self {
+        Self {
+            kind: VersionCodecKind::None,
+            min_payload_len: 64,
+            min_savings_bytes: 8,
+        }
+    }
+}
+
+/// Result of applying a codec to a version payload.
+pub struct VersionCodecOutcome {
+    /// Codec selected for the payload.
+    pub codec: VersionCodecKind,
+    /// Encoded payload bytes (possibly identical to the input).
+    pub encoded: Vec<u8>,
+    /// Uncompressed payload length.
+    pub raw_len: usize,
+}
+
+impl VersionCodecConfig {
+    /// Applies the configured codec to the provided payload, returning the encoded form.
+    pub fn apply_owned(&self, payload: Vec<u8>) -> Result<VersionCodecOutcome> {
+        let raw_len = payload.len();
+        if self.kind == VersionCodecKind::None || raw_len < self.min_payload_len {
+            return Ok(VersionCodecOutcome {
+                codec: VersionCodecKind::None,
+                encoded: payload,
+                raw_len,
+            });
+        }
+        match self.kind {
+            VersionCodecKind::None => Ok(VersionCodecOutcome {
+                codec: VersionCodecKind::None,
+                encoded: payload,
+                raw_len,
+            }),
+            VersionCodecKind::Snappy => {
+                let mut encoder = Encoder::new();
+                let encoded = encoder
+                    .compress_vec(&payload)
+                    .map_err(|_| SombraError::Invalid("failed to compress version payload"))?;
+                let savings = raw_len.saturating_sub(encoded.len());
+                if savings < self.min_savings_bytes {
+                    return Ok(VersionCodecOutcome {
+                        codec: VersionCodecKind::None,
+                        encoded: payload,
+                        raw_len,
+                    });
+                }
+                Ok(VersionCodecOutcome {
+                    codec: VersionCodecKind::Snappy,
+                    encoded,
+                    raw_len,
+                })
+            }
+        }
+    }
+}
+
 /// Historical version held outside the primary B-tree.
 #[derive(Clone, Debug)]
 pub struct VersionLogEntry {
@@ -835,6 +1027,10 @@ pub struct VersionLogEntry {
     pub header: VersionHeader,
     /// Pointer to the next older version.
     pub prev_ptr: VersionPtr,
+    /// Codec used to store the payload.
+    pub codec: VersionCodecKind,
+    /// Length of the payload before compression.
+    pub raw_len: u32,
     /// Encoded record bytes (header + ptr + payload).
     pub bytes: Vec<u8>,
 }
@@ -842,15 +1038,32 @@ pub struct VersionLogEntry {
 impl VersionLogEntry {
     /// Encodes the entry into an owned byte buffer.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let len = u32::try_from(self.bytes.len())
+        let encoded_len = u32::try_from(self.bytes.len())
             .map_err(|_| SombraError::Invalid("version log payload too large"))?;
-        let mut out =
-            Vec::with_capacity(1 + 8 + VERSION_HEADER_LEN + VERSION_PTR_LEN + 4 + self.bytes.len());
+        if encoded_len >= VERSION_ENTRY_CODEC_FLAG {
+            return Err(SombraError::Invalid("version log payload too large"));
+        }
+        if self.codec == VersionCodecKind::None && self.raw_len != encoded_len {
+            return Err(SombraError::Invalid(
+                "uncompressed version payload length mismatch",
+            ));
+        }
+        if self.raw_len == 0 {
+            return Err(SombraError::Invalid(
+                "version log raw payload length missing",
+            ));
+        }
+        let mut out = Vec::with_capacity(
+            1 + 8 + VERSION_HEADER_LEN + VERSION_PTR_LEN + 4 + 1 + 4 + self.bytes.len(),
+        );
         out.push(self.space.encode());
         out.extend_from_slice(&self.id.to_be_bytes());
         self.header.encode_into(&mut out);
         out.extend_from_slice(&self.prev_ptr.to_bytes());
-        out.extend_from_slice(&len.to_be_bytes());
+        let len_with_flag = VERSION_ENTRY_CODEC_FLAG | encoded_len;
+        out.extend_from_slice(&len_with_flag.to_be_bytes());
+        out.push(self.codec.tag());
+        out.extend_from_slice(&self.raw_len.to_be_bytes());
         out.extend_from_slice(&self.bytes);
         Ok(out)
     }
@@ -873,17 +1086,50 @@ impl VersionLogEntry {
         let mut len_bytes = [0u8; 4];
         len_bytes.copy_from_slice(&data[offset..offset + 4]);
         offset += 4;
-        let payload_len = u32::from_be_bytes(len_bytes) as usize;
+        let len_field = u32::from_be_bytes(len_bytes);
+        let codec_tagged = (len_field & VERSION_ENTRY_CODEC_FLAG) != 0;
+        let payload_len = (len_field & !VERSION_ENTRY_CODEC_FLAG) as usize;
+        if !codec_tagged {
+            if data.len() < offset + payload_len {
+                return Err(SombraError::Corruption("version log payload truncated"));
+            }
+            let bytes = data[offset..offset + payload_len].to_vec();
+            return Ok(Self {
+                space,
+                id,
+                header,
+                prev_ptr,
+                codec: VersionCodecKind::None,
+                raw_len: payload_len as u32,
+                bytes,
+            });
+        }
+        if data.len() < offset + 1 + 4 + payload_len {
+            return Err(SombraError::Corruption("version log payload truncated"));
+        }
+        let codec_tag = data[offset];
+        offset += 1;
+        let mut raw_len_bytes = [0u8; 4];
+        raw_len_bytes.copy_from_slice(&data[offset..offset + 4]);
+        let raw_len = u32::from_be_bytes(raw_len_bytes);
+        offset += 4;
+        if raw_len == 0 {
+            return Err(SombraError::Corruption("version log raw length missing"));
+        }
         if data.len() < offset + payload_len {
             return Err(SombraError::Corruption("version log payload truncated"));
         }
-        let bytes = data[offset..offset + payload_len].to_vec();
+        let payload = &data[offset..offset + payload_len];
+        let codec = VersionCodecKind::from_tag(codec_tag)?;
+        let decoded = codec.decode_payload(payload, raw_len as usize)?;
         Ok(Self {
             space,
             id,
             header,
             prev_ptr,
-            bytes,
+            codec,
+            raw_len,
+            bytes: decoded,
         })
     }
 }

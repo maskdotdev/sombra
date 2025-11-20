@@ -65,8 +65,9 @@ pub use graph::{
 pub use index::{IndexDef, IndexKind, LabelScan, TypeTag};
 pub use mvcc::{
     flags as mvcc_flags, CommitEntrySnapshot, CommitId, CommitReader, CommitStatus, CommitTable,
-    CommitTableSnapshot, ReaderSnapshot, ReaderSnapshotEntry, VersionHeader, VersionLogEntry,
-    VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN, VERSION_PTR_LEN,
+    CommitTableSnapshot, ReaderSnapshot, ReaderSnapshotEntry, VersionCodecConfig,
+    VersionCodecKind, VersionHeader, VersionLogEntry, VersionPtr, VersionSpace, VersionedValue,
+    COMMIT_MAX, VERSION_HEADER_LEN, VERSION_PTR_LEN,
 };
 
 /// Metrics and profiling.
@@ -84,7 +85,8 @@ pub use profile::{
     profile_scope, profile_snapshot, record_btree_leaf_key_cmps, record_btree_leaf_key_decodes,
     record_btree_leaf_memcopy_bytes, record_pager_commit_borrowed_bytes, record_pager_fsync,
     record_pager_wal_bytes, record_pager_wal_frames, record_wal_coalesced_writes,
-    record_wal_io_group_sample, StorageProfileKind, StorageProfileSnapshot,
+    record_wal_io_group_sample, record_wal_reused_segments, StorageProfileKind,
+    StorageProfileSnapshot,
 };
 
 /// Node, edge, and property data types and operations.
