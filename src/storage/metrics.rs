@@ -50,6 +50,8 @@ pub trait StorageMetrics: Send + Sync {
     fn mvcc_page_versions(&self, _total_versions: u64, _pages_with_versions: u64) {}
     /// Records the current vacuum mode selection.
     fn mvcc_vacuum_mode(&self, _mode: &'static str) {}
+    /// Records opportunistic micro-GC trimming of version chains.
+    fn mvcc_micro_gc_trim(&self, _entries_pruned: u64, _pages_pruned: u64) {}
 
     /// Increments the total number of version-log entries pruned by vacuum.
     fn vacuum_versions_pruned(&self, _count: u64) {}
@@ -225,6 +227,12 @@ pub struct CounterMetrics {
     /// Last advertised vacuum mode (as numeric tag).
     pub mvcc_vacuum_mode: AtomicU64,
 
+    /// Total entries trimmed by micro-GC.
+    pub mvcc_micro_gc_entries_pruned_total: AtomicU64,
+
+    /// Total pages reclaimed by micro-GC.
+    pub mvcc_micro_gc_pages_pruned_total: AtomicU64,
+
     /// Bytes seen by version codecs (raw).
     pub version_codec_raw_bytes: AtomicU64,
 
@@ -394,6 +402,17 @@ impl StorageMetrics for CounterMetrics {
             _ => 3,
         };
         self.mvcc_vacuum_mode.store(tag, Ordering::Relaxed);
+    }
+
+    fn mvcc_micro_gc_trim(&self, entries_pruned: u64, pages_pruned: u64) {
+        if entries_pruned > 0 {
+            self.mvcc_micro_gc_entries_pruned_total
+                .fetch_add(entries_pruned, Ordering::Relaxed);
+        }
+        if pages_pruned > 0 {
+            self.mvcc_micro_gc_pages_pruned_total
+                .fetch_add(pages_pruned, Ordering::Relaxed);
+        }
     }
 
     fn adjacency_bulk_flush(&self, inserts: usize, removals: usize) {
