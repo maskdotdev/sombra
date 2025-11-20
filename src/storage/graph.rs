@@ -999,6 +999,10 @@ impl Graph {
             self.publish_version_log_usage_metrics();
         }
         self.vstore.flush_deferred(tx)?;
+        if !to_delete.is_empty() {
+            self.metrics
+                .mvcc_micro_gc_trim(retired.len() as u64, 0);
+        }
         Ok(VersionVacuumStats {
             entries_pruned: to_delete.len() as u64,
         })
