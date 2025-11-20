@@ -35,6 +35,8 @@ pub struct ConnectOptions {
   pub group_commit_max_wait_ms: Option<u32>,
   #[napi(js_name = "asyncFsync")]
   pub async_fsync: Option<bool>,
+  #[napi(js_name = "asyncFsyncMaxWaitMs")]
+  pub async_fsync_max_wait_ms: Option<u32>,
   #[napi(js_name = "walSegmentBytes")]
   pub wal_segment_bytes: Option<u32>,
   #[napi(js_name = "walPreallocateSegments")]
@@ -156,6 +158,9 @@ pub fn openDatabase(path: String, options: Option<ConnectOptions>) -> NapiResult
   if let Some(async_fsync) = opts.async_fsync {
     pager_opts.async_fsync = async_fsync;
   }
+  if let Some(wait_ms) = opts.async_fsync_max_wait_ms {
+    pager_opts.async_fsync_max_wait_ms = wait_ms as u64;
+  }
   if let Some(bytes) = opts.wal_segment_bytes {
     pager_opts.wal_segment_size_bytes = bytes as u64;
   }
@@ -170,6 +175,7 @@ pub fn openDatabase(path: String, options: Option<ConnectOptions>) -> NapiResult
     create_if_missing: opts.create_if_missing.unwrap_or(true),
     pager: pager_opts,
     distinct_neighbors_default: opts.distinct_neighbors_default.unwrap_or(false),
+    ..DatabaseOptions::default()
   };
 
   let db = Database::open(path, db_opts).map_err(to_napi_err)?;

@@ -29,6 +29,7 @@ struct PyConnectOptions {
     group_commit_max_frames: Option<u32>,
     group_commit_max_wait_ms: Option<u32>,
     async_fsync: Option<bool>,
+    async_fsync_max_wait_ms: Option<u32>,
     wal_segment_size_bytes: Option<u64>,
     wal_preallocate_segments: Option<u32>,
     autocheckpoint_ms: Option<u32>,
@@ -49,6 +50,7 @@ impl Default for PyConnectOptions {
             group_commit_max_frames: None,
             group_commit_max_wait_ms: None,
             async_fsync: None,
+            async_fsync_max_wait_ms: None,
             wal_segment_size_bytes: None,
             wal_preallocate_segments: None,
             autocheckpoint_ms: None,
@@ -138,6 +140,9 @@ fn parse_connect_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<PyConn
         if let Some(value) = dict.get_item("async_fsync")? {
             opts.async_fsync = Some(value.extract::<bool>()?);
         }
+        if let Some(value) = dict.get_item("async_fsync_max_wait_ms")? {
+            opts.async_fsync_max_wait_ms = Some(value.extract::<u32>()?);
+        }
         if let Some(value) = dict.get_item("wal_segment_size_bytes")? {
             opts.wal_segment_size_bytes = Some(value.extract::<u64>()?);
         }
@@ -186,6 +191,9 @@ fn open_database(path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<Da
     if let Some(async_fsync) = opts.async_fsync {
         pager.async_fsync = async_fsync;
     }
+    if let Some(wait_ms) = opts.async_fsync_max_wait_ms {
+        pager.async_fsync_max_wait_ms = wait_ms as u64;
+    }
     if let Some(bytes) = opts.wal_segment_size_bytes {
         pager.wal_segment_size_bytes = bytes;
     }
@@ -200,6 +208,7 @@ fn open_database(path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<Da
         create_if_missing: opts.create_if_missing,
         pager,
         distinct_neighbors_default: opts.distinct_neighbors_default,
+        ..DatabaseOptions::default()
     };
 
     let db = Database::open(path, db_opts).map_err(to_py_err)?;
