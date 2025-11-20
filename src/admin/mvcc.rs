@@ -41,6 +41,14 @@ pub struct MvccStatusReport {
     /// Commit table snapshot (present when MVCC is enabled for the database).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_table: Option<CommitTableReport>,
+    /// Current vacuum mode chosen by the scheduler.
+    pub vacuum_mode: String,
+    /// Current vacuum horizon if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vacuum_horizon: Option<u64>,
+    /// Snapshot pool occupancy when enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_pool: Option<MvccSnapshotPool>,
 }
 
 /// Snapshot of pending WAL commit work.
@@ -70,6 +78,13 @@ pub struct MvccAsyncFsync {
     pub pending_lag: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+/// Snapshot pool occupancy status.
+#[derive(Debug, Clone, Serialize)]
+pub struct MvccSnapshotPool {
+    pub capacity: usize,
+    pub available: usize,
 }
 
 /// Serializable snapshot of the commit table state.
@@ -148,6 +163,12 @@ pub fn mvcc_status(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<Mv
         wal_allocator: snapshot.wal_allocator.map(wal_allocator_report),
         async_fsync: snapshot.async_fsync_backlog.map(async_fsync_report),
         commit_table: snapshot.commit_table.map(commit_table_report),
+        vacuum_mode: format!("{:?}", snapshot.vacuum_mode),
+        vacuum_horizon: snapshot.vacuum_horizon,
+        snapshot_pool: snapshot.snapshot_pool.map(|pool| MvccSnapshotPool {
+            capacity: pool.capacity,
+            available: pool.available,
+        }),
     })
 }
 
