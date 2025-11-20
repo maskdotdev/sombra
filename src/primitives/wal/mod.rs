@@ -102,6 +102,10 @@ pub struct WalAllocatorStats {
     pub ready_segments: usize,
     /// Segments queued for recycling.
     pub recycle_segments: usize,
+    /// Total segments prepared from the recycle queue.
+    pub reused_segments_total: u64,
+    /// Total segments freshly created for readiness.
+    pub created_segments_total: u64,
     /// Last allocator error (e.g., ENOSPC) if any.
     pub allocation_error: Option<String>,
 }
@@ -489,6 +493,8 @@ impl PreallocQueues {
 struct PreallocState {
     ready: VecDeque<u64>,
     recycle: VecDeque<u64>,
+    reused_total: u64,
+    created_total: u64,
     enospc_error: Option<String>,
     shutdown: bool,
 }
@@ -566,6 +572,10 @@ impl Wal {
                     match self.prepare_recycled_segment(id) {
                         Ok(new_id) => {
                             debug!(segment_id = new_id, "wal.preallocator.reuse_ready");
+                            {
+                                let mut guard = self.prealloc.state.lock();
+                                guard.reused_total = guard.reused_total.saturating_add(1);
+                            }
                             self.push_ready_segment(new_id)
                         }
                         Err(err) => self.record_prealloc_error(&err),
@@ -576,6 +586,10 @@ impl Wal {
                     match self.create_ready_segment() {
                         Ok(id) => {
                             debug!(segment_id = id, "wal.preallocator.create_ready");
+                            {
+                                let mut guard = self.prealloc.state.lock();
+                                guard.created_total = guard.created_total.saturating_add(1);
+                            }
                             self.push_ready_segment(id)
                         }
                         Err(err) => self.record_prealloc_error(&err),
@@ -664,9 +678,13 @@ impl Wal {
             guard.recycle.pop_front()
         };
         if let Some(old_id) = recycled {
-            return Ok(Some(self.prepare_recycled_segment_with_template(
-                old_id, header, capacity,
-            )?));
+            let id =
+                self.prepare_recycled_segment_with_template(old_id, header, capacity)?;
+            {
+                let mut guard = self.prealloc.state.lock();
+                guard.reused_total = guard.reused_total.saturating_add(1);
+            }
+            return Ok(Some(id));
         }
         Ok(None)
     }
@@ -676,7 +694,12 @@ impl Wal {
             if let Some(id) = self.try_prepare_recycle_immediate(header, capacity)? {
                 return Ok(id);
             }
-            return self.create_ready_segment_with_template(header, capacity);
+            let id = self.create_ready_segment_with_template(header, capacity)?;
+            {
+                let mut guard = self.prealloc.state.lock();
+                guard.created_total = guard.created_total.saturating_add(1);
+            }
+            return Ok(id);
         }
         loop {
             let mut guard = self.prealloc.state.lock();
@@ -1082,6 +1105,8 @@ impl Wal {
             preallocate_segments: self.prealloc_target,
             ready_segments: queues.ready.len(),
             recycle_segments: queues.recycle.len(),
+            reused_segments_total: queues.reused_total,
+            created_segments_total: queues.created_total,
             allocation_error: queues.enospc_error.clone(),
         }
     }

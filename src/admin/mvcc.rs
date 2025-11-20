@@ -66,6 +66,8 @@ pub struct MvccWalAllocator {
     pub preallocate_segments: u32,
     pub ready_segments: u64,
     pub recycle_segments: u64,
+    pub reused_segments_total: u64,
+    pub created_segments_total: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allocation_error: Option<String>,
 }
@@ -189,6 +191,8 @@ fn wal_allocator_report(snapshot: WalAllocatorStats) -> MvccWalAllocator {
         preallocate_segments: snapshot.preallocate_segments,
         ready_segments: snapshot.ready_segments as u64,
         recycle_segments: snapshot.recycle_segments as u64,
+        reused_segments_total: snapshot.reused_segments_total,
+        created_segments_total: snapshot.created_segments_total,
         allocation_error: snapshot.allocation_error,
     }
 }

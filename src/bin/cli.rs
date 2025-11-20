@@ -1411,6 +1411,14 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
                 ),
                 ("ready_segments", format_count(allocator.ready_segments)),
                 ("recycle_segments", format_count(allocator.recycle_segments)),
+                (
+                    "reused_segments_total",
+                    format_count(allocator.reused_segments_total),
+                ),
+                (
+                    "created_segments_total",
+                    format_count(allocator.created_segments_total),
+                ),
             ],
         );
         if let Some(err) = &allocator.allocation_error {
