@@ -13,11 +13,11 @@ Template
 - Postmortem inputs: links to dashboards/logs, owner for follow-up.
 
 Scenarios to fill
-- Failover and promotion (leader/follower).
-- Restore-from-backup / PITR.
-- Snapshot-too-old events.
-- GC debt or WAL blow-up.
-- Lock storms and deadlock spikes.
-- Replication lag or stuck replicas.
-- Checkpoint overruns or WAL stall.
-Add more as they emerge; link each here once written.
+- [x] [Failover and promotion](01-failover-promotion.md).
+- [x] [Restore-from-backup / PITR](02-restore-pitr.md).
+- [x] [Snapshot-too-old events](03-snapshot-too-old.md).
+- [x] [GC debt or WAL blow-up](04-gc-or-wal-blowup.md).
+- [x] [Lock storms and deadlock spikes](05-lock-storms-and-deadlocks.md).
+- [x] [Replication lag or stuck replicas](06-replication-lag.md).
+- [x] [Checkpoint overruns or WAL stall](07-checkpoint-wal-stall.md).
+- [ ] Add more as they emerge; link each here once written.
