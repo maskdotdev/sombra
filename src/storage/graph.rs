@@ -803,6 +803,24 @@ impl Graph {
         self.maybe_background_vacuum(VacuumTrigger::Manual);
     }
 
+    /// Opportunistically trims expired versions without scheduling full vacuum.
+    pub fn micro_gc(&self, horizon: CommitId, max_entries: usize) -> Result<Option<VersionVacuumStats>> {
+        if max_entries == 0 {
+            return Ok(None);
+        }
+        if self.vacuum_sched.running.get() {
+            return Ok(None);
+        }
+        let mut write = self.store.begin_write()?;
+        let stats = self.vacuum_version_log_with_write(&mut write, horizon, Some(max_entries))?;
+        if stats.entries_pruned > 0 {
+            self.metrics
+                .mvcc_micro_gc_trim(stats.entries_pruned, 0);
+        }
+        self.store.commit(write)?;
+        Ok(Some(stats))
+    }
+
     fn maybe_background_vacuum(&self, default_trigger: VacuumTrigger) {
         debug_assert_eq!(
             thread::current().id(),
