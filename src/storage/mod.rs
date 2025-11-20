@@ -56,8 +56,8 @@ pub use adjacency::{Dir, ExpandOpts, Neighbor, NeighborCursor};
 /// Core graph storage implementation.
 pub use graph::{
     AdjacencyVacuumStats, BfsOptions, BfsVisit, BulkEdgeValidator, CreateEdgeOptions, Graph,
-    GraphMvccStatus, GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats, VacuumTrigger,
-    VersionVacuumStats, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE,
+    GraphMvccStatus, GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats, VacuumMode,
+    VacuumTrigger, VersionVacuumStats, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE,
     STORAGE_FLAG_DEGREE_CACHE,
 };
 

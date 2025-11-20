@@ -135,6 +135,7 @@ struct VacuumSched {
     last_stats: RefCell<Option<GraphVacuumStats>>,
     owner_tid: ThreadId,
     pending_trigger: Cell<Option<VacuumTrigger>>,
+    mode: Cell<VacuumMode>,
 }
 
 impl VacuumSched {
@@ -145,6 +146,7 @@ impl VacuumSched {
             last_stats: RefCell::new(None),
             owner_tid: thread::current().id(),
             pending_trigger: Cell::new(None),
+            mode: Cell::new(VacuumMode::Normal),
         }
     }
 }
@@ -455,6 +457,10 @@ pub struct GraphMvccStatus {
     pub async_fsync_backlog: Option<AsyncFsyncBacklog>,
     /// Snapshot pool occupancy when enabled.
     pub snapshot_pool: Option<SnapshotPoolStatus>,
+    /// Current vacuum mode selected by the scheduler.
+    pub vacuum_mode: VacuumMode,
+    /// Current vacuum horizon, if known.
+    pub vacuum_horizon: Option<CommitId>,
 }
 
 /// Summary of snapshot pooling state.
@@ -475,6 +481,32 @@ pub enum VacuumTrigger {
     HighWater,
     /// Explicit manual trigger (tests/CLI).
     Manual,
+    /// Opportunistic light pass triggered by readers.
+    Opportunistic,
+}
+
+/// Adaptive cadence tiers for vacuum scheduling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VacuumMode {
+    /// Lowest cadence; used when version log below thresholds.
+    Slow,
+    /// Default cadence.
+    Normal,
+    /// Aggressive cadence for backlog/high-water.
+    Fast,
+}
+
+impl VacuumMode {
+    fn tick_interval(&self, base: Duration) -> Duration {
+        match self {
+            VacuumMode::Fast => base
+                .checked_div(2)
+                .unwrap_or_else(|| Duration::from_millis(1))
+                .max(Duration::from_millis(1)),
+            VacuumMode::Normal => base,
+            VacuumMode::Slow => base.saturating_mul(2),
+        }
+    }
 }
 
 /// Budget controls for a single vacuum pass.
@@ -662,6 +694,8 @@ impl Graph {
         let wal_allocator = self.store.wal_allocator_stats();
         let async_fsync_backlog = self.store.async_fsync_backlog();
         let snapshot_pool = self.snapshot_pool.as_ref().map(|pool| pool.status());
+        let vacuum_horizon = self.compute_vacuum_horizon();
+        let vacuum_mode = self.select_vacuum_mode();
         let acked_not_durable_commits = match (latest_committed_lsn, durable_lsn) {
             (Some(latest), Some(durable)) => Some(latest.0.saturating_sub(durable.0)),
             _ => None,
@@ -681,6 +715,8 @@ impl Graph {
             wal_allocator,
             async_fsync_backlog,
             snapshot_pool,
+            vacuum_mode,
+            vacuum_horizon,
         }
     }
 
@@ -747,8 +783,19 @@ impl Graph {
         let now_ms = now_millis();
         let next_deadline = self.vacuum_sched.next_deadline_ms.get();
         let pending = self.vacuum_sched.pending_trigger.get();
+        let mode = self.select_vacuum_mode();
+        self.vacuum_sched.mode.set(mode);
         let high_water_triggered = self.vacuum_cfg.log_high_water_bytes > 0
             && self.version_log_bytes() >= self.vacuum_cfg.log_high_water_bytes;
+        let opportunistic_trigger = self.vacuum_cfg.log_high_water_bytes > 0
+            && self.vacuum_sched.pending_trigger.get().is_none()
+            && self.version_log_bytes()
+                >= (self.vacuum_cfg.log_high_water_bytes / 2).max(1);
+        if opportunistic_trigger {
+            self.vacuum_sched
+                .pending_trigger
+                .set(Some(VacuumTrigger::Opportunistic));
+        }
         if high_water_triggered && pending.is_none() {
             self.vacuum_sched
                 .pending_trigger
@@ -759,7 +806,15 @@ impl Graph {
             && !high_water_triggered
             && default_trigger != VacuumTrigger::Manual
         {
+            let interval = mode.tick_interval(self.vacuum_cfg.interval);
+            let interval_ms = interval.as_millis().max(1);
             if next_deadline != 0 && now_ms < next_deadline {
+                return;
+            }
+            if next_deadline == 0 {
+                self.vacuum_sched
+                    .next_deadline_ms
+                    .set(now_ms.saturating_add(interval_ms));
                 return;
             }
         }
@@ -782,11 +837,18 @@ impl Graph {
         let budget = VacuumBudget {
             max_versions: if self.vacuum_cfg.max_pages_per_pass == 0 {
                 None
+            } else if matches!(trigger, VacuumTrigger::Opportunistic) {
+                Some(self.vacuum_cfg.max_pages_per_pass.min(16))
             } else {
                 Some(self.vacuum_cfg.max_pages_per_pass)
             },
-            max_duration: Duration::from_millis(self.vacuum_cfg.max_millis_per_pass.max(1)),
-            index_cleanup: self.vacuum_cfg.index_cleanup,
+            max_duration: if matches!(trigger, VacuumTrigger::Opportunistic) {
+                Duration::from_millis(self.vacuum_cfg.max_millis_per_pass.max(1) / 2 + 1)
+            } else {
+                Duration::from_millis(self.vacuum_cfg.max_millis_per_pass.max(1))
+            },
+            index_cleanup: self.vacuum_cfg.index_cleanup
+                && !matches!(trigger, VacuumTrigger::Opportunistic),
         };
         let result = self.vacuum_mvcc(horizon, None, trigger, Some(&budget));
         match result {
@@ -797,7 +859,10 @@ impl Graph {
                 warn!(error = %err, "graph.vacuum.failed");
             }
         }
-        let interval_ms = std::cmp::max(1, self.vacuum_cfg.interval.as_millis() as u128);
+        let interval_ms = mode
+            .tick_interval(self.vacuum_cfg.interval)
+            .as_millis()
+            .max(1);
         self.vacuum_sched
             .next_deadline_ms
             .set(now_ms.saturating_add(interval_ms));
@@ -3249,6 +3314,21 @@ impl Graph {
             Some(guard.vacuum_horizon(self.vacuum_cfg.retention_window))
         } else {
             Some(COMMIT_MAX)
+        }
+    }
+
+    fn select_vacuum_mode(&self) -> VacuumMode {
+        let bytes = self.version_log_bytes();
+        let high_water = self.vacuum_cfg.log_high_water_bytes;
+        if high_water == 0 {
+            return VacuumMode::Normal;
+        }
+        if bytes >= high_water.saturating_mul(3) / 2 {
+            VacuumMode::Fast
+        } else if bytes <= high_water / 4 {
+            VacuumMode::Slow
+        } else {
+            VacuumMode::Normal
         }
     }
 
