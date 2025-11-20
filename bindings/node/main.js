@@ -358,6 +358,30 @@ function cloneSpec(spec) {
   return JSON.parse(JSON.stringify(spec))
 }
 
+function emptyMutationSummary() {
+  return {
+    createdNodes: [],
+    createdEdges: [],
+    updatedNodes: 0,
+    updatedEdges: 0,
+    deletedNodes: 0,
+    deletedEdges: 0,
+  }
+}
+
+function mergeMutationSummaries(a, b) {
+  const lhs = a ?? emptyMutationSummary()
+  const rhs = b ?? emptyMutationSummary()
+  return {
+    createdNodes: [...(lhs.createdNodes ?? []), ...(rhs.createdNodes ?? [])],
+    createdEdges: [...(lhs.createdEdges ?? []), ...(rhs.createdEdges ?? [])],
+    updatedNodes: (lhs.updatedNodes ?? 0) + (rhs.updatedNodes ?? 0),
+    updatedEdges: (lhs.updatedEdges ?? 0) + (rhs.updatedEdges ?? 0),
+    deletedNodes: (lhs.deletedNodes ?? 0) + (rhs.deletedNodes ?? 0),
+    deletedEdges: (lhs.deletedEdges ?? 0) + (rhs.deletedEdges ?? 0),
+  }
+}
+
 function normalizeExplainPayload(payload) {
   if (payload && typeof payload === 'object') {
     if (!('request_id' in payload)) {
@@ -1492,6 +1516,26 @@ class Database {
       throw new TypeError('mutateMany requires an array of operations')
     }
     return this.mutate({ ops: ops.map((op) => cloneSpec(op)) })
+  }
+
+  mutateBatched(ops, options = {}) {
+    if (!Array.isArray(ops)) {
+      throw new TypeError('mutateBatched requires an array of operations')
+    }
+    const { batchSize = 1024 } = options ?? {}
+    if (!Number.isInteger(batchSize) || batchSize <= 0) {
+      throw new RangeError('batchSize must be a positive integer')
+    }
+    if (ops.length === 0) {
+      return emptyMutationSummary()
+    }
+    let summary = emptyMutationSummary()
+    for (let i = 0; i < ops.length; i += batchSize) {
+      const chunk = ops.slice(i, i + batchSize)
+      const part = this.mutateMany(chunk)
+      summary = mergeMutationSummaries(summary, part)
+    }
+    return summary
   }
 
   async transaction(fn) {

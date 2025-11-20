@@ -105,6 +105,17 @@ test('mutateMany batches operations', (t) => {
   t.is(summary.createdNodes?.length, 2)
 })
 
+test('mutateBatched chunks large op lists', (t) => {
+  const db = Database.open(tempPath())
+  const ops = [
+    { op: 'createNode', labels: ['User'], props: { name: 'Batch0' } },
+    { op: 'createNode', labels: ['User'], props: { name: 'Batch1' } },
+    { op: 'createNode', labels: ['User'], props: { name: 'Batch2' } },
+  ]
+  const summary = db.mutateBatched(ops, { batchSize: 2 })
+  t.is(summary.createdNodes?.length, 3)
+})
+
 test('create builder supports handle references', (t) => {
   const db = Database.open(tempPath())
   const builder = db.create()

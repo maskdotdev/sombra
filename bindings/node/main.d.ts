@@ -175,6 +175,10 @@ export interface MutationSummary {
   deletedEdges?: number
 }
 
+export interface MutateBatchOptions {
+  batchSize?: number
+}
+
 export interface CreateSummary {
   nodes: number[]
   edges: number[]
@@ -341,6 +345,7 @@ export class Database<S extends NodeSchema = DefaultSchema> {
   seedDemo(): Database
   mutate(script: MutationScript): MutationSummary
   mutateMany(ops: MutationOp[]): MutationSummary
+  mutateBatched(ops: MutationOp[], options?: MutateBatchOptions | null): MutationSummary
   transaction<T>(fn: (tx: MutationBuilder) => T | Promise<T>): Promise<{
     summary: MutationSummary
     result: T
