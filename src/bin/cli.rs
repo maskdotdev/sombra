@@ -1340,6 +1340,22 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
         ui.spacer();
     }
 
+    ui.section(
+        "Vacuum",
+        [
+            ("mode", report.vacuum_mode.as_str()),
+            (
+                "horizon",
+                report
+                    .vacuum_horizon
+                    .map(format_count)
+                    .unwrap_or_else(|| "-".into())
+                    .as_str(),
+            ),
+        ],
+    );
+    ui.spacer();
+
     if let Some(backlog) = &report.wal_backlog {
         ui.section(
             "WAL Backlog",
@@ -1370,6 +1386,17 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
         if let Some(err) = &async_fsync.last_error {
             ui.info(&format!("last_error={err}"));
         }
+        ui.spacer();
+    }
+
+    if let Some(pool) = &report.snapshot_pool {
+        ui.section(
+            "Snapshot Pool",
+            [
+                ("capacity", format_count(pool.capacity as u64)),
+                ("available", format_count(pool.available as u64)),
+            ],
+        );
         ui.spacer();
     }
 
