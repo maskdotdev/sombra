@@ -116,8 +116,8 @@ pub fn encode(
         None
     };
     if let Some(history) = inline_history {
-        let history_len =
-            u16::try_from(history.len()).map_err(|_| SombraError::Invalid("inline history too large"))?;
+        let history_len = u16::try_from(history.len())
+            .map_err(|_| SombraError::Invalid("inline history too large"))?;
         let needed = payload.len().saturating_add(2 + history.len());
         if needed > u16::MAX as usize {
             return Err(SombraError::Invalid("inline history exceeds payload limit"));

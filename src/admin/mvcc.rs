@@ -43,6 +43,12 @@ pub struct MvccStatusReport {
     /// WAL allocator/preallocation queues.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wal_allocator: Option<MvccWalAllocator>,
+    /// Alerts derived from WAL/async-fsync state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wal_alerts: Vec<String>,
+    /// Recommended WAL reuse/preallocation depth when backlog is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_reuse_recommended_segments: Option<u64>,
     /// Async fsync backlog vs persisted durable watermark.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub async_fsync: Option<MvccAsyncFsync>,
@@ -179,6 +185,8 @@ pub fn mvcc_status(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<Mv
         acked_not_durable_commits: snapshot.acked_not_durable_commits,
         wal_backlog: snapshot.wal_backlog.map(wal_backlog_report),
         wal_allocator: snapshot.wal_allocator.map(wal_allocator_report),
+        wal_alerts: snapshot.wal_alerts,
+        wal_reuse_recommended_segments: snapshot.wal_reuse_recommended,
         async_fsync: snapshot.async_fsync_backlog.map(async_fsync_report),
         commit_table: snapshot.commit_table.map(commit_table_report),
         vacuum_mode: format!("{:?}", snapshot.vacuum_mode),

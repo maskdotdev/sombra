@@ -36,10 +36,7 @@ fn wal_replays_uncheckpointed_commit_after_crash() -> Result<()> {
     let page_ref = reopened.get_page(&read_guard, page)?;
     let payload = &page_ref.data()[PAGE_HDR_LEN..];
     assert_eq!(&payload[..pattern.len()], &pattern);
-    assert_eq!(
-        &payload[pattern.len()..pattern.len() + 8],
-        &[0x5A; 8]
-    );
+    assert_eq!(&payload[pattern.len()..pattern.len() + 8], &[0x5A; 8]);
     drop(read_guard);
 
     let meta = reopened.meta()?;

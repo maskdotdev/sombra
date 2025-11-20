@@ -1022,17 +1022,15 @@ impl VersionCodecKind {
         match self {
             VersionCodecKind::None => {
                 if payload.len() != raw_len {
-                    return Err(SombraError::Corruption(
-                        "version log entry length mismatch",
-                    ));
+                    return Err(SombraError::Corruption("version log entry length mismatch"));
                 }
                 Ok(payload.to_vec())
             }
             VersionCodecKind::Snappy => {
                 let mut decoder = Decoder::new();
-                let decoded = decoder
-                    .decompress_vec(payload)
-                    .map_err(|_| SombraError::Corruption("version log entry decompression failed"))?;
+                let decoded = decoder.decompress_vec(payload).map_err(|_| {
+                    SombraError::Corruption("version log entry decompression failed")
+                })?;
                 if decoded.len() != raw_len {
                     return Err(SombraError::Corruption(
                         "version log entry decompressed length mismatch",

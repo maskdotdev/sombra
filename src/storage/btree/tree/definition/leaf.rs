@@ -630,17 +630,28 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
         let mut record = Vec::with_capacity(record_len);
         page::encode_leaf_record(key, value, &mut record)?;
+        debug_assert!(
+            record.first().copied().unwrap_or(0) != 0,
+            "leaf record encoded with zero key length byte (key_len={}, value_len={}, record_len={})",
+            key.len(),
+            value.len(),
+            record_len
+        );
 
         let requires_low_fence_update = insert_idx == 0
             && !replaces_existing
             && (low_fence.is_empty()
                 || K::compare_encoded(key, low_fence.as_slice()) == Ordering::Less);
 
-        let insert_result = if replaces_existing {
-            allocator.replace_slot(insert_idx, &record)
-        } else {
-            allocator.insert_slot(insert_idx, &record)
-        };
+        if replaces_existing {
+            let snapshot = allocator.into_snapshot();
+            return Ok(InPlaceInsertResult::NotApplied {
+                snapshot: Some(snapshot),
+                pending_insert: None,
+            });
+        }
+
+        let insert_result = allocator.insert_slot(insert_idx, &record);
 
         match insert_result {
             Ok(()) => {

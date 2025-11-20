@@ -256,13 +256,13 @@ pub fn run_import(cfg: &ImportConfig, opts: &AdminOpenOptions) -> Result<ImportS
             summary.edges_imported = import_edges(&handle, edges_cfg, &mut id_map)?;
         }
 
-        handle.pager.checkpoint(CheckpointMode::Force)?;
+        handle.pager.checkpoint(CheckpointMode::BestEffort)?;
     }
 
     if cfg.build_indexes {
         let handle = open_graph(&cfg.db_path, opts)?;
         rebuild_property_indexes(&handle, &dropped_indexes)?;
-        handle.pager.checkpoint(CheckpointMode::Force)?;
+        handle.pager.checkpoint(CheckpointMode::BestEffort)?;
     }
 
     Ok(summary)

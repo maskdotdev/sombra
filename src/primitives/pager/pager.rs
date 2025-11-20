@@ -80,6 +80,8 @@ pub struct PagerOptions {
     pub group_commit_max_wait_ms: u64,
     /// Whether commits should return before fsync completes.
     pub async_fsync: bool,
+    /// Maximum time to defer async fsync to coalesce multiple commits.
+    pub async_fsync_max_wait_ms: u64,
     /// Preferred WAL segment size when preallocation is enabled.
     pub wal_segment_size_bytes: u64,
     /// Number of WAL segments to preallocate ahead of time.
@@ -208,6 +210,7 @@ impl Default for PagerOptions {
             group_commit_max_frames: 512,
             group_commit_max_wait_ms: 2,
             async_fsync: false,
+            async_fsync_max_wait_ms: 0,
             wal_segment_size_bytes: 64 * 1024 * 1024,
             wal_preallocate_segments: 0,
         }
@@ -786,9 +789,10 @@ fn async_fsync_worker(
     commit_table: Arc<Mutex<CommitTable>>,
     state_arc: Arc<Mutex<AsyncFsyncState>>,
     durable: Arc<AtomicU64>,
+    coalesce_wait: Duration,
 ) {
     loop {
-        let target = {
+        let mut target = {
             let mut state = state_arc.lock();
             if state.pending_lsn.0 <= state.durable_lsn.0 {
                 state.scheduled = false;
@@ -796,6 +800,15 @@ fn async_fsync_worker(
             }
             state.pending_lsn
         };
+        if !coalesce_wait.is_zero() {
+            thread::sleep(coalesce_wait);
+            let mut state = state_arc.lock();
+            if state.pending_lsn.0 <= state.durable_lsn.0 {
+                state.scheduled = false;
+                return;
+            }
+            target = state.pending_lsn;
+        }
         if let Err(err) = wal.sync() {
             let mut state = state_arc.lock();
             state.last_error = Some(err);
@@ -2371,6 +2384,10 @@ impl Pager {
             }
             return Ok(());
         };
+        let coalesce_wait = {
+            let opts = self.options.lock();
+            Duration::from_millis(opts.async_fsync_max_wait_ms.min(10_000))
+        };
         let wal = Arc::clone(&self.wal);
         let cookie = self.wal_cookie.clone();
         let durable = Arc::clone(&self.durable_lsn);
@@ -2392,7 +2409,14 @@ impl Pager {
         if spawn_worker {
             let commit_table = Arc::clone(&self.commit_table);
             thread::spawn(move || {
-                async_fsync_worker(wal, cookie, commit_table, state_clone, durable)
+                async_fsync_worker(
+                    wal,
+                    cookie,
+                    commit_table,
+                    state_clone,
+                    durable,
+                    coalesce_wait,
+                )
             });
         }
         Ok(())

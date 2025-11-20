@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, SystemTime};
@@ -131,6 +131,9 @@ pub struct Graph {
     version_cache_misses: AtomicU64,
     version_codec_raw_bytes: AtomicU64,
     version_codec_encoded_bytes: AtomicU64,
+    micro_gc_last_ms: AtomicU64,
+    micro_gc_budget_hint: AtomicUsize,
+    micro_gc_running: AtomicBool,
 }
 
 struct VacuumSched {
@@ -209,15 +212,22 @@ struct PooledSnapshot {
 
 struct SnapshotPool {
     store: Arc<dyn PageStore>,
+    metrics: Arc<dyn super::metrics::StorageMetrics>,
     retention: Duration,
     inner: Mutex<Vec<PooledSnapshot>>,
     capacity: usize,
 }
 
 impl SnapshotPool {
-    fn new(store: Arc<dyn PageStore>, capacity: usize, retention: Duration) -> Self {
+    fn new(
+        store: Arc<dyn PageStore>,
+        metrics: Arc<dyn super::metrics::StorageMetrics>,
+        capacity: usize,
+        retention: Duration,
+    ) -> Self {
         Self {
             store,
+            metrics,
             retention,
             inner: Mutex::new(Vec::new()),
             capacity: capacity.max(1),
@@ -236,12 +246,14 @@ impl SnapshotPool {
             if durable > snapshot.guard.snapshot_lsn().0 {
                 continue;
             }
+            self.metrics.snapshot_pool_hit();
             return Ok(SnapshotLease {
                 pool: Some(self),
                 snapshot: Some(snapshot),
             });
         }
         drop(pool);
+        self.metrics.snapshot_pool_miss();
         let guard = self.store.begin_latest_committed_read()?;
         Ok(SnapshotLease {
             pool: Some(self),
@@ -473,6 +485,10 @@ pub struct GraphMvccStatus {
     pub vacuum_mode: VacuumMode,
     /// Current vacuum horizon, if known.
     pub vacuum_horizon: Option<CommitId>,
+    /// WAL/async-fsync alerts derived from current state.
+    pub wal_alerts: Vec<String>,
+    /// Recommended reuse queue depth based on backlog and segment sizing.
+    pub wal_reuse_recommended: Option<u64>,
 }
 
 /// Summary of snapshot pooling state.
@@ -482,6 +498,81 @@ pub struct SnapshotPoolStatus {
     pub capacity: usize,
     /// Currently cached snapshots.
     pub available: usize,
+}
+
+fn wal_health(
+    page_size: u32,
+    wal_backlog: Option<&WalCommitBacklog>,
+    wal_allocator: Option<&WalAllocatorStats>,
+    async_fsync: Option<&AsyncFsyncBacklog>,
+    vacuum_horizon: Option<CommitId>,
+    durable_lsn: Option<Lsn>,
+) -> (Vec<String>, Option<u64>) {
+    let mut alerts = Vec::new();
+    let mut recommended_reuse: Option<u64> = None;
+    if let Some(backlog) = wal_backlog {
+        if backlog.pending_commits > WAL_BACKLOG_COMMITS_ALERT
+            || backlog.pending_frames > WAL_BACKLOG_FRAMES_ALERT
+        {
+            alerts.push(format!(
+                "wal backlog high ({} commits, {} frames)",
+                backlog.pending_commits, backlog.pending_frames
+            ));
+        }
+    }
+    if let Some(async_status) = async_fsync {
+        if async_status.pending_lag > ASYNC_FSYNC_LAG_ALERT {
+            alerts.push(format!(
+                "async fsync lagging by {} LSN from durable cookie",
+                async_status.pending_lag
+            ));
+        }
+        if let Some(err) = async_status.last_error.as_ref() {
+            alerts.push(format!("async fsync error: {err}"));
+        }
+    }
+    if let Some(allocator) = wal_allocator {
+        if let Some(err) = allocator.allocation_error.as_ref() {
+            alerts.push(format!("wal allocation error: {err}"));
+        }
+        if allocator.segment_size_bytes > 0 && page_size > 0 {
+            let frames_per_segment = allocator.segment_size_bytes / page_size as u64;
+            if frames_per_segment > 0 {
+                if let Some(backlog) = wal_backlog {
+                    let needed_segments = (backlog.pending_frames as u64 + frames_per_segment - 1)
+                        / frames_per_segment;
+                    let readyish =
+                        allocator.ready_segments as u64 + allocator.recycle_segments as u64;
+                    if needed_segments > readyish {
+                        alerts.push(format!(
+                            "wal reuse queue short by {} segments (need ~{}, ready {}, recycle {}, target {})",
+                            needed_segments.saturating_sub(readyish),
+                            needed_segments,
+                            allocator.ready_segments,
+                            allocator.recycle_segments,
+                            allocator.preallocate_segments
+                        ));
+                        recommended_reuse =
+                            Some(needed_segments.max(allocator.preallocate_segments as u64));
+                    } else if allocator.preallocate_segments as u64 > readyish {
+                        recommended_reuse = Some(allocator.preallocate_segments as u64);
+                    }
+                }
+            }
+        }
+    }
+    if let (Some(horizon), Some(durable)) = (vacuum_horizon, durable_lsn) {
+        if horizon != COMMIT_MAX {
+            let lag = durable.0.saturating_sub(horizon);
+            if lag > WAL_HORIZON_LAG_ALERT {
+                alerts.push(format!(
+                    "vacuum horizon lags durable LSN by {} commits; WAL reuse may be pinned by readers",
+                    lag
+                ));
+            }
+        }
+    }
+    (alerts, recommended_reuse)
 }
 
 /// Reason a vacuum pass ran.
@@ -519,6 +610,43 @@ impl VacuumMode {
             VacuumMode::Slow => base.saturating_mul(2),
         }
     }
+}
+
+const MICRO_GC_MAX_BUDGET: usize = 64;
+const WAL_BACKLOG_COMMITS_ALERT: usize = 8;
+const WAL_BACKLOG_FRAMES_ALERT: usize = 2_048;
+const ASYNC_FSYNC_LAG_ALERT: u64 = 4_096;
+const WAL_HORIZON_LAG_ALERT: u64 = 32_768;
+
+#[derive(Copy, Clone)]
+enum MicroGcTrigger {
+    ReadPath,
+    CacheMiss,
+    PostCommit,
+}
+
+impl MicroGcTrigger {
+    fn budget(self) -> usize {
+        match self {
+            MicroGcTrigger::ReadPath => 8,
+            MicroGcTrigger::CacheMiss => 16,
+            MicroGcTrigger::PostCommit => 64,
+        }
+    }
+
+    fn cooldown_ms(self) -> u64 {
+        match self {
+            MicroGcTrigger::ReadPath => 25,
+            MicroGcTrigger::CacheMiss => 10,
+            MicroGcTrigger::PostCommit => 5,
+        }
+    }
+}
+
+enum MicroGcOutcome {
+    Done,
+    Retry,
+    Skip,
 }
 
 /// Budget controls for a single vacuum pass.
@@ -576,7 +704,72 @@ impl Graph {
         Some(bytes.to_vec())
     }
 
+    fn request_micro_gc(&self, trigger: MicroGcTrigger) {
+        if !self.vacuum_cfg.enabled {
+            return;
+        }
+        let budget = trigger.budget().min(MICRO_GC_MAX_BUDGET);
+        if budget == 0 {
+            return;
+        }
+        self.micro_gc_budget_hint
+            .fetch_max(budget, AtomicOrdering::Relaxed);
+    }
+
+    fn drive_micro_gc(&self, trigger: MicroGcTrigger) {
+        if !self.vacuum_cfg.enabled {
+            return;
+        }
+        self.request_micro_gc(trigger);
+        let pending_budget = self.micro_gc_budget_hint.swap(0, AtomicOrdering::Relaxed);
+        if pending_budget == 0 {
+            return;
+        }
+        let budget = pending_budget.min(MICRO_GC_MAX_BUDGET);
+        let now_ms = now_millis();
+        let now_ms_u64 = now_ms.min(u64::MAX as u128) as u64;
+        let last = self.micro_gc_last_ms.load(AtomicOrdering::Relaxed);
+        if now_ms.saturating_sub(u128::from(last)) < u128::from(trigger.cooldown_ms()) {
+            self.micro_gc_budget_hint
+                .fetch_max(budget, AtomicOrdering::Relaxed);
+            return;
+        }
+        if self
+            .micro_gc_running
+            .compare_exchange(
+                false,
+                true,
+                AtomicOrdering::Acquire,
+                AtomicOrdering::Relaxed,
+            )
+            .is_err()
+        {
+            self.micro_gc_budget_hint
+                .fetch_max(budget, AtomicOrdering::Relaxed);
+            return;
+        }
+        let outcome = match self.compute_vacuum_horizon() {
+            Some(horizon) if horizon != COMMIT_MAX => match self.micro_gc(horizon, budget) {
+                Ok(Some(_)) => MicroGcOutcome::Done,
+                Ok(None) => MicroGcOutcome::Retry,
+                Err(err) => {
+                    debug!(error = %err, "graph.micro_gc.error");
+                    MicroGcOutcome::Retry
+                }
+            },
+            _ => MicroGcOutcome::Skip,
+        };
+        self.micro_gc_last_ms
+            .store(now_ms_u64, AtomicOrdering::Relaxed);
+        self.micro_gc_running.store(false, AtomicOrdering::Release);
+        if matches!(outcome, MicroGcOutcome::Retry) {
+            self.micro_gc_budget_hint
+                .fetch_max(budget, AtomicOrdering::Relaxed);
+        }
+    }
+
     fn lease_latest_snapshot(&self) -> Result<SnapshotLease<'_>> {
+        self.drive_micro_gc(MicroGcTrigger::ReadPath);
         if let Some(pool) = &self.snapshot_pool {
             pool.lease()
         } else {
@@ -659,6 +852,9 @@ impl Graph {
                 return Ok(Some((*hit).clone()));
             }
         }
+        if self.version_cache.is_some() {
+            self.request_micro_gc(MicroGcTrigger::CacheMiss);
+        }
         let Some(bytes) = self.version_log.get(tx, &ptr.raw())? else {
             return Ok(None);
         };
@@ -718,9 +914,7 @@ impl Graph {
         let vacuum_mode = self.select_vacuum_mode();
         let version_cache_hits = self.version_cache_hits.load(AtomicOrdering::Relaxed);
         let version_cache_misses = self.version_cache_misses.load(AtomicOrdering::Relaxed);
-        let version_codec_raw_bytes = self
-            .version_codec_raw_bytes
-            .load(AtomicOrdering::Relaxed);
+        let version_codec_raw_bytes = self.version_codec_raw_bytes.load(AtomicOrdering::Relaxed);
         let version_codec_encoded_bytes = self
             .version_codec_encoded_bytes
             .load(AtomicOrdering::Relaxed);
@@ -734,6 +928,14 @@ impl Graph {
         if let Some(backlog) = acked_not_durable_commits {
             self.metrics.mvcc_commit_backlog(backlog);
         }
+        let (wal_alerts, wal_reuse_recommended) = wal_health(
+            self.store.page_size(),
+            wal_backlog.as_ref(),
+            wal_allocator.as_ref(),
+            async_fsync_backlog.as_ref(),
+            vacuum_horizon,
+            durable_lsn,
+        );
         GraphMvccStatus {
             version_log_bytes: self.version_log_bytes(),
             version_log_entries: self.version_log_entry_count(),
@@ -752,6 +954,8 @@ impl Graph {
             snapshot_pool,
             vacuum_mode,
             vacuum_horizon,
+            wal_alerts,
+            wal_reuse_recommended,
         }
     }
 
@@ -804,7 +1008,11 @@ impl Graph {
     }
 
     /// Opportunistically trims expired versions without scheduling full vacuum.
-    pub fn micro_gc(&self, horizon: CommitId, max_entries: usize) -> Result<Option<VersionVacuumStats>> {
+    pub fn micro_gc(
+        &self,
+        horizon: CommitId,
+        max_entries: usize,
+    ) -> Result<Option<VersionVacuumStats>> {
         if max_entries == 0 {
             return Ok(None);
         }
@@ -814,8 +1022,7 @@ impl Graph {
         let mut write = self.store.begin_write()?;
         let stats = self.vacuum_version_log_with_write(&mut write, horizon, Some(max_entries))?;
         if stats.entries_pruned > 0 {
-            self.metrics
-                .mvcc_micro_gc_trim(stats.entries_pruned, 0);
+            self.metrics.mvcc_micro_gc_trim(stats.entries_pruned, 0);
         }
         self.store.commit(write)?;
         Ok(Some(stats))
@@ -842,8 +1049,7 @@ impl Graph {
             && self.version_log_bytes() >= self.vacuum_cfg.log_high_water_bytes;
         let opportunistic_trigger = self.vacuum_cfg.log_high_water_bytes > 0
             && self.vacuum_sched.pending_trigger.get().is_none()
-            && self.version_log_bytes()
-                >= (self.vacuum_cfg.log_high_water_bytes / 2).max(1);
+            && self.version_log_bytes() >= (self.vacuum_cfg.log_high_water_bytes / 2).max(1);
         if opportunistic_trigger {
             self.vacuum_sched
                 .pending_trigger
@@ -1018,8 +1224,7 @@ impl Graph {
         }
         self.vstore.flush_deferred(tx)?;
         if !to_delete.is_empty() {
-            self.metrics
-                .mvcc_micro_gc_trim(retired.len() as u64, 0);
+            self.metrics.mvcc_micro_gc_trim(retired.len() as u64, 0);
         }
         Ok(VersionVacuumStats {
             entries_pruned: to_delete.len() as u64,
@@ -1206,9 +1411,13 @@ impl Graph {
             .unwrap_or(0);
 
         let commit_table = store.commit_table();
+        let metrics: Arc<dyn super::metrics::StorageMetrics> = opts
+            .metrics
+            .unwrap_or_else(|| super::metrics::default_metrics());
         let snapshot_pool = if opts.snapshot_pool_size > 0 {
             Some(SnapshotPool::new(
                 Arc::clone(&store),
+                Arc::clone(&metrics),
                 opts.snapshot_pool_size,
                 Duration::from_millis(opts.snapshot_pool_max_age_ms.max(1)),
             ))
@@ -1254,9 +1463,7 @@ impl Graph {
             idx_cache_hits,
             idx_cache_misses,
             storage_flags,
-            metrics: opts
-                .metrics
-                .unwrap_or_else(|| super::metrics::default_metrics()),
+            metrics: Arc::clone(&metrics),
             mvcc_metrics_last: StdMutex::new(None),
             distinct_neighbors_default: opts.distinct_neighbors_default,
             row_hash_header,
@@ -1279,6 +1486,9 @@ impl Graph {
             version_cache_misses: AtomicU64::new(0),
             version_codec_raw_bytes: AtomicU64::new(0),
             version_codec_encoded_bytes: AtomicU64::new(0),
+            micro_gc_last_ms: AtomicU64::new(0),
+            micro_gc_budget_hint: AtomicUsize::new(0),
+            micro_gc_running: AtomicBool::new(false),
         });
         graph.recompute_version_log_bytes()?;
         graph.register_vacuum_hook();
@@ -2017,11 +2227,8 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Edges)?;
-        if let Err(err) = self.stage_adjacency_inserts(
-            tx,
-            &[(spec.src, spec.dst, spec.ty, edge_id)],
-            commit_id,
-        )
+        if let Err(err) =
+            self.stage_adjacency_inserts(tx, &[(spec.src, spec.dst, spec.ty, edge_id)], commit_id)
         {
             let _ = self.edges.delete(tx, &edge_id.0);
             if let Err(root_err) = self.persist_tree_root(tx, RootKind::Edges) {
@@ -2720,9 +2927,7 @@ impl Graph {
             .deferred_adj
             .get_or_insert_with(AdjacencyBuffer::default);
         for (src, dst, ty, edge) in entries {
-            buffer
-                .inserts
-                .push((*src, *dst, *ty, *edge, commit));
+            buffer.inserts.push((*src, *dst, *ty, *edge, commit));
         }
         self.store_txn_state(tx, state);
         Ok(())
@@ -2745,9 +2950,7 @@ impl Graph {
             .deferred_adj
             .get_or_insert_with(AdjacencyBuffer::default);
         for (src, dst, ty, edge) in entries {
-            buffer
-                .removals
-                .push((*src, *dst, *ty, *edge, commit));
+            buffer.removals.push((*src, *dst, *ty, *edge, commit));
         }
         self.store_txn_state(tx, state);
         Ok(())
@@ -2851,11 +3054,21 @@ impl Graph {
     ) -> Result<()> {
         if !self.defer_index_flush {
             if insert {
-                self.indexes
-                    .insert_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+                self.indexes.insert_property_value_with_commit(
+                    tx,
+                    &def,
+                    &key,
+                    node,
+                    Some(commit),
+                )?;
             } else {
-                self.indexes
-                    .remove_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+                self.indexes.remove_property_value_with_commit(
+                    tx,
+                    &def,
+                    &key,
+                    node,
+                    Some(commit),
+                )?;
             }
             return Ok(());
         }
@@ -3381,19 +3594,28 @@ impl Graph {
     fn select_vacuum_mode(&self) -> VacuumMode {
         let bytes = self.version_log_bytes();
         let high_water = self.vacuum_cfg.log_high_water_bytes;
-        if high_water == 0 {
-            return VacuumMode::Normal;
-        }
-        if bytes >= high_water.saturating_mul(3) / 2 {
-            self.metrics.mvcc_vacuum_mode("fast");
+        let stats = self.store.stats();
+        let retention_ms = self.vacuum_cfg.retention_window.as_millis().max(1) as u64;
+        let reader_lag_ms = stats.mvcc_reader_max_age_ms;
+        let reader_lag_ratio = (reader_lag_ms as f64 / retention_ms as f64).min(1.0);
+        let fast_due_to_lag = reader_lag_ratio >= 0.8;
+        let slow_due_to_lag = reader_lag_ratio <= 0.25;
+        let fast_due_to_bytes = high_water > 0 && bytes >= high_water.saturating_mul(3) / 2;
+        let slow_due_to_bytes = high_water > 0 && bytes <= high_water / 4;
+        let mode = if fast_due_to_bytes || fast_due_to_lag {
             VacuumMode::Fast
-        } else if bytes <= high_water / 4 {
-            self.metrics.mvcc_vacuum_mode("slow");
+        } else if slow_due_to_bytes && slow_due_to_lag {
             VacuumMode::Slow
         } else {
-            self.metrics.mvcc_vacuum_mode("normal");
             VacuumMode::Normal
-        }
+        };
+        let mode_label = match mode {
+            VacuumMode::Fast => "fast",
+            VacuumMode::Normal => "normal",
+            VacuumMode::Slow => "slow",
+        };
+        self.metrics.mvcc_vacuum_mode(mode_label);
+        mode
     }
 
     fn recompute_version_log_bytes(&self) -> Result<()> {
@@ -3605,6 +3827,7 @@ impl Drop for Graph {
 
 impl BackgroundMaintainer for Graph {
     fn run_background_maint(&self, _ctx: &AutockptContext) {
+        self.drive_micro_gc(MicroGcTrigger::PostCommit);
         self.maybe_background_vacuum(VacuumTrigger::Timer);
     }
 }
@@ -4270,25 +4493,11 @@ impl Graph {
                     match (old, new) {
                         (_, Some(value)) => {
                             let key = encode_value_key_owned(def.ty, value)?;
-                            self.stage_prop_index_op(
-                                tx,
-                                *def,
-                                key,
-                                node,
-                                commit,
-                                true,
-                            )?;
+                            self.stage_prop_index_op(tx, *def, key, node, commit, true)?;
                         }
                         (Some(prev), None) => {
                             let key = encode_value_key_owned(def.ty, prev)?;
-                            self.stage_prop_index_op(
-                                tx,
-                                *def,
-                                key,
-                                node,
-                                commit,
-                                false,
-                            )?;
+                            self.stage_prop_index_op(tx, *def, key, node, commit, false)?;
                         }
                         _ => {}
                     };
@@ -5025,5 +5234,53 @@ mod wal_recovery_tests {
         drop(reopened_graph);
         drop(reopened_store);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wal_alert_tests {
+    use super::*;
+
+    #[test]
+    fn recommends_reuse_when_backlog_exceeds_ready_queue() {
+        let backlog = WalCommitBacklog {
+            pending_commits: 12,
+            pending_frames: 20_000,
+            worker_running: true,
+        };
+        let allocator = WalAllocatorStats {
+            segment_size_bytes: 64 * 1024 * 1024,
+            preallocate_segments: 1,
+            ready_segments: 0,
+            recycle_segments: 0,
+            reused_segments_total: 0,
+            created_segments_total: 0,
+            allocation_error: None,
+        };
+        let (alerts, recommended) =
+            wal_health(4096, Some(&backlog), Some(&allocator), None, None, None);
+        assert!(alerts.iter().any(|a| a.contains("reuse queue short")));
+        assert_eq!(recommended, Some(2));
+    }
+
+    #[test]
+    fn alerts_on_async_fsync_lag_and_horizon_gap() {
+        let async_fsync = AsyncFsyncBacklog {
+            pending_lsn: Lsn(9000),
+            durable_lsn: Lsn(100),
+            pending_lag: ASYNC_FSYNC_LAG_ALERT + 10,
+            last_error: None,
+        };
+        let (alerts, recommended) = wal_health(
+            4096,
+            None,
+            None,
+            Some(&async_fsync),
+            Some(5),
+            Some(Lsn(WAL_HORIZON_LAG_ALERT + 50)),
+        );
+        assert!(alerts.iter().any(|a| a.contains("async fsync lag")));
+        assert!(alerts.iter().any(|a| a.contains("vacuum horizon lags")));
+        assert!(recommended.is_none());
     }
 }

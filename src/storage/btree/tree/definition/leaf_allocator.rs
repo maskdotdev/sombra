@@ -104,6 +104,7 @@ impl<'page> LeafAllocator<'page> {
     }
 
     /// Overwrites the record stored at `slot_idx`.
+    #[allow(dead_code)]
     pub fn replace_slot(&mut self, slot_idx: usize, record_bytes: &[u8]) -> Result<()> {
         if slot_idx >= self.slot_meta.len() {
             return Err(SombraError::Invalid("leaf slot replace out of range"));

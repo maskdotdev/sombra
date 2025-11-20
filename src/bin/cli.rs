@@ -22,6 +22,7 @@ use sombra::{
     dashboard::{self, DashboardOptions as DashboardServeOptions},
     ffi::{self, DatabaseOptions},
     primitives::pager::Synchronous,
+    storage::VersionCodecKind,
 };
 
 #[path = "cli/config.rs"]
@@ -150,6 +151,13 @@ struct OpenArgs {
     pager_async_fsync: Option<ToggleArg>,
 
     #[arg(
+        long = "pager-async-fsync-max-wait-ms",
+        value_name = "MS",
+        help = "Maximum coalesce delay for async fsync batching"
+    )]
+    pager_async_fsync_max_wait_ms: Option<u64>,
+
+    #[arg(
         long = "pager-wal-segment-bytes",
         value_name = "BYTES",
         help = "Preferred WAL segment size (bytes)"
@@ -162,6 +170,57 @@ struct OpenArgs {
         help = "Number of WAL segments to preallocate"
     )]
     pager_wal_preallocate_segments: Option<u32>,
+
+    #[arg(
+        long = "inline-history",
+        value_enum,
+        value_name = "on|off",
+        help = "Embed newest historical version inline on page heads (on/off)"
+    )]
+    inline_history: Option<ToggleArg>,
+
+    #[arg(
+        long = "inline-history-max-bytes",
+        value_name = "BYTES",
+        help = "Maximum inline history payload size in bytes"
+    )]
+    inline_history_max_bytes: Option<usize>,
+
+    #[arg(
+        long = "version-codec",
+        value_enum,
+        value_name = "CODEC",
+        help = "Codec to apply to historical versions (none|snappy)"
+    )]
+    version_codec: Option<VersionCodecArg>,
+
+    #[arg(
+        long = "version-codec-min-bytes",
+        value_name = "BYTES",
+        help = "Minimum payload size before compressing historical versions"
+    )]
+    version_codec_min_bytes: Option<usize>,
+
+    #[arg(
+        long = "version-codec-min-savings-bytes",
+        value_name = "BYTES",
+        help = "Minimum bytes saved to keep compression output"
+    )]
+    version_codec_min_savings_bytes: Option<usize>,
+
+    #[arg(
+        long = "snapshot-pool-size",
+        value_name = "COUNT",
+        help = "Cached snapshots to reuse for reads (0 disables)"
+    )]
+    snapshot_pool_size: Option<usize>,
+
+    #[arg(
+        long = "snapshot-pool-max-age-ms",
+        value_name = "MS",
+        help = "Maximum age for pooled read snapshots"
+    )]
+    snapshot_pool_max_age_ms: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -465,6 +524,13 @@ struct ProfileSaveCmd {
     pager_async_fsync: Option<ToggleArg>,
 
     #[arg(
+        long = "pager-async-fsync-max-wait-ms",
+        value_name = "MS",
+        help = "Maximum coalesce delay for async fsync batching"
+    )]
+    pager_async_fsync_max_wait_ms: Option<u64>,
+
+    #[arg(
         long = "pager-wal-segment-bytes",
         value_name = "BYTES",
         help = "Preferred WAL segment size (bytes)"
@@ -477,6 +543,57 @@ struct ProfileSaveCmd {
         help = "Number of WAL segments to preallocate"
     )]
     pager_wal_preallocate_segments: Option<u32>,
+
+    #[arg(
+        long = "inline-history",
+        value_enum,
+        value_name = "on|off",
+        help = "Embed newest historical version inline on page heads (on/off)"
+    )]
+    inline_history: Option<ToggleArg>,
+
+    #[arg(
+        long = "inline-history-max-bytes",
+        value_name = "BYTES",
+        help = "Maximum inline history payload size in bytes"
+    )]
+    inline_history_max_bytes: Option<usize>,
+
+    #[arg(
+        long = "version-codec",
+        value_enum,
+        value_name = "CODEC",
+        help = "Codec to apply to historical versions (none|snappy)"
+    )]
+    version_codec: Option<VersionCodecArg>,
+
+    #[arg(
+        long = "version-codec-min-bytes",
+        value_name = "BYTES",
+        help = "Minimum payload size before compressing historical versions"
+    )]
+    version_codec_min_bytes: Option<usize>,
+
+    #[arg(
+        long = "version-codec-min-savings-bytes",
+        value_name = "BYTES",
+        help = "Minimum bytes saved to keep compression output"
+    )]
+    version_codec_min_savings_bytes: Option<usize>,
+
+    #[arg(
+        long = "snapshot-pool-size",
+        value_name = "COUNT",
+        help = "Cached snapshots to reuse for reads (0 disables)"
+    )]
+    snapshot_pool_size: Option<usize>,
+
+    #[arg(
+        long = "snapshot-pool-max-age-ms",
+        value_name = "MS",
+        help = "Maximum age for pooled read snapshots"
+    )]
+    snapshot_pool_max_age_ms: Option<u64>,
 
     #[arg(
         long = "distinct-neighbors-default",
@@ -648,6 +765,39 @@ enum ToggleArg {
 impl ToggleArg {
     fn as_bool(self) -> bool {
         matches!(self, ToggleArg::On)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum VersionCodecArg {
+    None,
+    Snappy,
+}
+
+impl VersionCodecArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            VersionCodecArg::None => "none",
+            VersionCodecArg::Snappy => "snappy",
+        }
+    }
+}
+
+impl From<VersionCodecArg> for VersionCodecKind {
+    fn from(codec: VersionCodecArg) -> Self {
+        match codec {
+            VersionCodecArg::None => VersionCodecKind::None,
+            VersionCodecArg::Snappy => VersionCodecKind::Snappy,
+        }
+    }
+}
+
+impl From<VersionCodecKind> for VersionCodecArg {
+    fn from(codec: VersionCodecKind) -> Self {
+        match codec {
+            VersionCodecKind::None => VersionCodecArg::None,
+            VersionCodecKind::Snappy => VersionCodecArg::Snappy,
+        }
     }
 }
 
@@ -853,8 +1003,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
             update.group_commit_max_frames = cmd.pager_group_commit_max_frames;
             update.group_commit_max_wait_ms = cmd.pager_group_commit_max_wait_ms;
             update.async_fsync = cmd.pager_async_fsync.map(|toggle| toggle.as_bool());
+            update.async_fsync_max_wait_ms = cmd.pager_async_fsync_max_wait_ms;
             update.wal_segment_size_bytes = cmd.pager_wal_segment_bytes;
             update.wal_preallocate_segments = cmd.pager_wal_preallocate_segments;
+            update.inline_history = cmd.inline_history.map(|toggle| toggle.as_bool());
+            update.inline_history_max_bytes = cmd.inline_history_max_bytes;
+            update.version_codec = cmd.version_codec;
+            update.version_codec_min_bytes = cmd.version_codec_min_bytes;
+            update.version_codec_min_savings_bytes = cmd.version_codec_min_savings_bytes;
+            update.snapshot_pool_size = cmd.snapshot_pool_size;
+            update.snapshot_pool_max_age_ms = cmd.snapshot_pool_max_age_ms;
             update.distinct_neighbors_default = distinct_pref;
             config.upsert_profile(&cmd.name, update)?;
             if cmd.set_default {
@@ -937,6 +1095,9 @@ fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOp
         if let Some(async_fsync) = profile.async_fsync {
             pager_opts.async_fsync = async_fsync;
         }
+        if let Some(async_wait) = profile.async_fsync_max_wait_ms {
+            pager_opts.async_fsync_max_wait_ms = async_wait;
+        }
         if let Some(segment_bytes) = profile.wal_segment_size_bytes {
             pager_opts.wal_segment_size_bytes = segment_bytes;
         }
@@ -945,6 +1106,27 @@ fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOp
         }
         if let Some(distinct) = profile.distinct_neighbors_default {
             opts.distinct_neighbors_default = distinct;
+        }
+        if let Some(inline) = profile.inline_history {
+            opts.inline_history = inline;
+        }
+        if let Some(max_bytes) = profile.inline_history_max_bytes {
+            opts.inline_history_max_bytes = max_bytes;
+        }
+        if let Some(codec) = profile.version_codec {
+            opts.version_codec = codec.into();
+        }
+        if let Some(min_bytes) = profile.version_codec_min_bytes {
+            opts.version_codec_min_payload_len = min_bytes;
+        }
+        if let Some(min_savings) = profile.version_codec_min_savings_bytes {
+            opts.version_codec_min_savings_bytes = min_savings;
+        }
+        if let Some(pool_size) = profile.snapshot_pool_size {
+            opts.snapshot_pool_size = pool_size;
+        }
+        if let Some(pool_age) = profile.snapshot_pool_max_age_ms {
+            opts.snapshot_pool_max_age_ms = pool_age;
         }
     }
 
@@ -969,6 +1151,9 @@ fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOp
     if let Some(async_fsync) = args.pager_async_fsync {
         pager_opts.async_fsync = async_fsync.as_bool();
     }
+    if let Some(async_wait) = args.pager_async_fsync_max_wait_ms {
+        pager_opts.async_fsync_max_wait_ms = async_wait;
+    }
     if let Some(segment_bytes) = args.pager_wal_segment_bytes {
         pager_opts.wal_segment_size_bytes = segment_bytes;
     }
@@ -979,6 +1164,27 @@ fn build_open_options(args: &OpenArgs, profile: Option<&Profile>) -> AdminOpenOp
     opts.pager = pager_opts;
     if args.distinct_neighbors_default {
         opts.distinct_neighbors_default = true;
+    }
+    if let Some(inline) = args.inline_history {
+        opts.inline_history = inline.as_bool();
+    }
+    if let Some(max_bytes) = args.inline_history_max_bytes {
+        opts.inline_history_max_bytes = max_bytes;
+    }
+    if let Some(codec) = args.version_codec {
+        opts.version_codec = codec.into();
+    }
+    if let Some(min_bytes) = args.version_codec_min_bytes {
+        opts.version_codec_min_payload_len = min_bytes;
+    }
+    if let Some(min_savings) = args.version_codec_min_savings_bytes {
+        opts.version_codec_min_savings_bytes = min_savings;
+    }
+    if let Some(pool_size) = args.snapshot_pool_size {
+        opts.snapshot_pool_size = pool_size;
+    }
+    if let Some(pool_age) = args.snapshot_pool_max_age_ms {
+        opts.snapshot_pool_max_age_ms = pool_age;
     }
     opts
 }
@@ -1011,6 +1217,13 @@ fn run_seed_demo(
     db_opts.create_if_missing = cmd.create;
     db_opts.pager = open_opts.pager.clone();
     db_opts.distinct_neighbors_default = open_opts.distinct_neighbors_default;
+    db_opts.inline_history = open_opts.inline_history;
+    db_opts.inline_history_max_bytes = open_opts.inline_history_max_bytes;
+    db_opts.version_codec = open_opts.version_codec;
+    db_opts.version_codec_min_payload_len = open_opts.version_codec_min_payload_len;
+    db_opts.version_codec_min_savings_bytes = open_opts.version_codec_min_savings_bytes;
+    db_opts.snapshot_pool_size = open_opts.snapshot_pool_size;
+    db_opts.snapshot_pool_max_age_ms = open_opts.snapshot_pool_max_age_ms;
     let db = ffi::Database::open(&db_path, db_opts)?;
     db.seed_demo()?;
     let check_spec = serde_json::json!({
@@ -1322,7 +1535,10 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
         "Version Codec",
         [
             ("raw_bytes", format_bytes(report.version_codec_raw_bytes)),
-            ("encoded_bytes", format_bytes(report.version_codec_encoded_bytes)),
+            (
+                "encoded_bytes",
+                format_bytes(report.version_codec_encoded_bytes),
+            ),
         ],
     );
     ui.spacer();
@@ -1442,6 +1658,17 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
         if let Some(err) = &allocator.allocation_error {
             ui.info(&format!("allocation_error={err}"));
         }
+        if let Some(recommended) = report.wal_reuse_recommended_segments {
+            ui.info(&format!(
+                "suggested wal_preallocate_segments ~ {}",
+                format_count(recommended)
+            ));
+        }
+        ui.spacer();
+    }
+
+    if !report.wal_alerts.is_empty() {
+        ui.list("WAL Alerts", report.wal_alerts.clone());
         ui.spacer();
     }
 
@@ -1453,10 +1680,7 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
                 [
                     ("released_up_to", format_count(table.released_up_to)),
                     ("oldest_visible", format_count(table.oldest_visible)),
-                    (
-                        "acked_not_durable",
-                        format_count(table.acked_not_durable),
-                    ),
+                    ("acked_not_durable", format_count(table.acked_not_durable)),
                     ("entries", format_count(table.entries.len() as u64)),
                     ("active_readers", format_count(reader.active)),
                     (
@@ -1724,6 +1948,13 @@ fn profile_rows(profile: &Profile) -> Vec<(&'static str, String)> {
             .unwrap_or_else(|| "-".into()),
     ));
     rows.push((
+        "async_fsync_max_wait_ms",
+        profile
+            .async_fsync_max_wait_ms
+            .map(format_count)
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
         "wal_segment_size_bytes",
         profile
             .wal_segment_size_bytes
@@ -1735,6 +1966,55 @@ fn profile_rows(profile: &Profile) -> Vec<(&'static str, String)> {
         profile
             .wal_preallocate_segments
             .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "inline_history",
+        profile
+            .inline_history
+            .map(format_bool)
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "inline_history_max_bytes",
+        profile
+            .inline_history_max_bytes
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "version_codec",
+        profile
+            .version_codec
+            .map(|v| v.as_str().to_string())
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "version_codec_min_bytes",
+        profile
+            .version_codec_min_bytes
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "version_codec_min_savings_bytes",
+        profile
+            .version_codec_min_savings_bytes
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "snapshot_pool_size",
+        profile
+            .snapshot_pool_size
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into()),
+    ));
+    rows.push((
+        "snapshot_pool_max_age_ms",
+        profile
+            .snapshot_pool_max_age_ms
+            .map(format_count)
             .unwrap_or_else(|| "-".into()),
     ));
     rows

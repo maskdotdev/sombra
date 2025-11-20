@@ -6,6 +6,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IoSlice, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -27,6 +28,8 @@ const WAL_MAX_IO_SLICES: usize = 512;
 const WAL_SEGMENT_PREFIX: &str = "wal-";
 const WAL_LAYOUT_VERSION: u32 = 1;
 const WAL_LAYOUT_KIND: &str = "segmented_v1";
+/// Test-only delay for WAL batch application to surface backlogs.
+static APPLY_BATCH_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 /// Configuration options for opening a write-ahead log.
 #[derive(Clone, Debug)]
 pub struct WalOptions {
@@ -678,8 +681,7 @@ impl Wal {
             guard.recycle.pop_front()
         };
         if let Some(old_id) = recycled {
-            let id =
-                self.prepare_recycled_segment_with_template(old_id, header, capacity)?;
+            let id = self.prepare_recycled_segment_with_template(old_id, header, capacity)?;
             {
                 let mut guard = self.prealloc.state.lock();
                 guard.reused_total = guard.reused_total.saturating_add(1);
@@ -1317,6 +1319,13 @@ impl WalCommitConfig {
     }
 }
 
+/// Injects a fixed delay (in milliseconds) before applying each WAL batch.
+///
+/// Intended for testing/chaos scenarios to surface backlog handling.
+pub fn set_wal_batch_delay_ms_for_tests(ms: u64) {
+    APPLY_BATCH_DELAY_MS.store(ms, AtomicOrdering::Relaxed);
+}
+
 /// Snapshot of the WAL committer backlog.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct WalCommitBacklog {
@@ -1522,6 +1531,10 @@ impl WalCommitter {
             batch_commits = batch.len(),
             total_frames, "wal.committer.apply_batch.start"
         );
+        let delay_ms = APPLY_BATCH_DELAY_MS.load(AtomicOrdering::Relaxed);
+        if delay_ms > 0 {
+            thread::sleep(Duration::from_millis(delay_ms));
+        }
         let mut offsets_all: Vec<WalFramePtr> = Vec::new();
         if total_frames > 0 {
             let mut flat: Vec<WalFrame<'_>> = Vec::with_capacity(total_frames);

@@ -55,7 +55,7 @@ fn background_vacuum_runs_with_timer() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(stats) = graph.last_vacuum_stats() {
-            if stats.log_versions_pruned > 0 {
+            if stats.trigger == VacuumTrigger::Timer {
                 return Ok(());
             }
         }

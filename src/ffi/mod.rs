@@ -22,6 +22,7 @@ use crate::query::{
     Value as QueryValue,
 };
 use crate::storage::catalog::{Dict, DictOptions};
+use crate::storage::VersionCodecKind;
 use crate::storage::{
     BfsOptions, DeleteNodeOpts, Dir, EdgeData, EdgeSpec as StorageEdgeSpec, ExpandOpts, Graph,
     GraphOptions, IndexDef, IndexKind, NodeData, NodeSpec as StorageNodeSpec, PropEntry, PropPatch,
@@ -329,6 +330,20 @@ pub struct DatabaseOptions {
     pub pager: PagerOptions,
     /// Enable distinct neighbors by default in graph queries.
     pub distinct_neighbors_default: bool,
+    /// Whether to embed newest historical version inline on page heads.
+    pub inline_history: bool,
+    /// Maximum inline history payload size in bytes.
+    pub inline_history_max_bytes: usize,
+    /// Compression strategy applied to historical version payloads.
+    pub version_codec: VersionCodecKind,
+    /// Minimum payload size before attempting compression.
+    pub version_codec_min_payload_len: usize,
+    /// Minimum bytes that must be saved for compression to be applied.
+    pub version_codec_min_savings_bytes: usize,
+    /// Snapshot pool size for reusing read guards.
+    pub snapshot_pool_size: usize,
+    /// Maximum age in milliseconds for cached snapshots.
+    pub snapshot_pool_max_age_ms: u64,
 }
 
 impl Default for DatabaseOptions {
@@ -337,6 +352,13 @@ impl Default for DatabaseOptions {
             create_if_missing: true,
             pager: PagerOptions::default(),
             distinct_neighbors_default: false,
+            inline_history: true,
+            inline_history_max_bytes: 1024,
+            version_codec: VersionCodecKind::None,
+            version_codec_min_payload_len: 64,
+            version_codec_min_savings_bytes: 8,
+            snapshot_pool_size: 0,
+            snapshot_pool_max_age_ms: 200,
         }
     }
 }
@@ -467,7 +489,15 @@ impl Database {
 
         let store: Arc<dyn PageStore> = pager.clone();
         let mut graph_opts = GraphOptions::new(Arc::clone(&store));
-        graph_opts = graph_opts.distinct_neighbors_default(opts.distinct_neighbors_default);
+        graph_opts = graph_opts
+            .distinct_neighbors_default(opts.distinct_neighbors_default)
+            .inline_history(opts.inline_history)
+            .inline_history_max_bytes(opts.inline_history_max_bytes)
+            .version_codec(opts.version_codec)
+            .version_codec_min_payload_len(opts.version_codec_min_payload_len)
+            .version_codec_min_savings_bytes(opts.version_codec_min_savings_bytes)
+            .snapshot_pool_size(opts.snapshot_pool_size)
+            .snapshot_pool_max_age_ms(opts.snapshot_pool_max_age_ms);
         let graph = Graph::open(graph_opts)?;
 
         let dict = Arc::new(Dict::open(Arc::clone(&store), DictOptions::default())?);

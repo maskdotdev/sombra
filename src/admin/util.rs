@@ -49,7 +49,14 @@ pub fn open_graph(path: &Path, opts: &AdminOpenOptions) -> Result<GraphHandle> {
     let pager = open_pager(path, opts)?;
     let store: Arc<dyn PageStore> = pager.clone();
     let graph_opts = GraphOptions::new(Arc::clone(&store))
-        .distinct_neighbors_default(opts.distinct_neighbors_default);
+        .distinct_neighbors_default(opts.distinct_neighbors_default)
+        .inline_history(opts.inline_history)
+        .inline_history_max_bytes(opts.inline_history_max_bytes)
+        .version_codec(opts.version_codec)
+        .version_codec_min_payload_len(opts.version_codec_min_payload_len)
+        .version_codec_min_savings_bytes(opts.version_codec_min_savings_bytes)
+        .snapshot_pool_size(opts.snapshot_pool_size)
+        .snapshot_pool_max_age_ms(opts.snapshot_pool_max_age_ms);
     let graph = Graph::open(graph_opts)?;
     let dict = Arc::new(Dict::open(store, DictOptions::default())?);
     Ok(GraphHandle { pager, graph, dict })

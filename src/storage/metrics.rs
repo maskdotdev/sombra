@@ -92,6 +92,12 @@ pub trait StorageMetrics: Send + Sync {
     /// Records a cache miss for the version cache.
     fn version_cache_miss(&self) {}
 
+    /// Records a snapshot pool reuse.
+    fn snapshot_pool_hit(&self) {}
+
+    /// Records that a new snapshot had to be opened instead of reusing a pooled one.
+    fn snapshot_pool_miss(&self) {}
+
     /// Records a bulk adjacency flush.
     fn adjacency_bulk_flush(&self, _inserts: usize, _removals: usize) {}
 }
@@ -223,6 +229,12 @@ pub struct CounterMetrics {
 
     /// Total version cache misses.
     pub version_cache_misses: AtomicU64,
+
+    /// Snapshot pool hits.
+    pub snapshot_pool_hits: AtomicU64,
+
+    /// Snapshot pool misses.
+    pub snapshot_pool_misses: AtomicU64,
 
     /// Last advertised vacuum mode (as numeric tag).
     pub mvcc_vacuum_mode: AtomicU64,
@@ -392,6 +404,14 @@ impl StorageMetrics for CounterMetrics {
 
     fn version_cache_miss(&self) {
         self.version_cache_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot_pool_hit(&self) {
+        self.snapshot_pool_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot_pool_miss(&self) {
+        self.snapshot_pool_misses.fetch_add(1, Ordering::Relaxed);
     }
 
     fn mvcc_vacuum_mode(&self, mode: &'static str) {

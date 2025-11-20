@@ -1,4 +1,4 @@
-use super::SynchronousArg;
+use super::{SynchronousArg, VersionCodecArg};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,8 +18,16 @@ pub struct Profile {
     pub group_commit_max_frames: Option<usize>,
     pub group_commit_max_wait_ms: Option<u64>,
     pub async_fsync: Option<bool>,
+    pub async_fsync_max_wait_ms: Option<u64>,
     pub wal_segment_size_bytes: Option<u64>,
     pub wal_preallocate_segments: Option<u32>,
+    pub inline_history: Option<bool>,
+    pub inline_history_max_bytes: Option<usize>,
+    pub version_codec: Option<VersionCodecArg>,
+    pub version_codec_min_bytes: Option<usize>,
+    pub version_codec_min_savings_bytes: Option<usize>,
+    pub snapshot_pool_size: Option<usize>,
+    pub snapshot_pool_max_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -112,11 +120,35 @@ impl CliConfig {
         if let Some(async_fsync) = update.async_fsync {
             entry.async_fsync = Some(async_fsync);
         }
+        if let Some(async_wait) = update.async_fsync_max_wait_ms {
+            entry.async_fsync_max_wait_ms = Some(async_wait);
+        }
         if let Some(segment_bytes) = update.wal_segment_size_bytes {
             entry.wal_segment_size_bytes = Some(segment_bytes);
         }
         if let Some(preallocate) = update.wal_preallocate_segments {
             entry.wal_preallocate_segments = Some(preallocate);
+        }
+        if let Some(inline_history) = update.inline_history {
+            entry.inline_history = Some(inline_history);
+        }
+        if let Some(max_bytes) = update.inline_history_max_bytes {
+            entry.inline_history_max_bytes = Some(max_bytes);
+        }
+        if let Some(codec) = update.version_codec {
+            entry.version_codec = Some(codec_to_string(codec));
+        }
+        if let Some(min_bytes) = update.version_codec_min_bytes {
+            entry.version_codec_min_bytes = Some(min_bytes);
+        }
+        if let Some(min_savings) = update.version_codec_min_savings_bytes {
+            entry.version_codec_min_savings_bytes = Some(min_savings);
+        }
+        if let Some(pool_size) = update.snapshot_pool_size {
+            entry.snapshot_pool_size = Some(pool_size);
+        }
+        if let Some(pool_age) = update.snapshot_pool_max_age_ms {
+            entry.snapshot_pool_max_age_ms = Some(pool_age);
         }
         if let Some(distinct) = update.distinct_neighbors_default {
             entry.distinct_neighbors_default = Some(distinct);
@@ -171,6 +203,14 @@ fn sync_to_string(value: SynchronousArg) -> String {
     .to_string()
 }
 
+fn codec_to_string(value: VersionCodecArg) -> String {
+    match value {
+        VersionCodecArg::None => "none",
+        VersionCodecArg::Snappy => "snappy",
+    }
+    .to_string()
+}
+
 fn read_file(path: &Path) -> Result<RawConfig, ConfigError> {
     let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_path_buf(),
@@ -207,6 +247,15 @@ fn convert_profile(name: &str, raw: &RawProfile) -> Result<Profile, ConfigError>
         })?),
         None => None,
     };
+    let version_codec = match raw.version_codec.as_deref() {
+        Some(value) => Some(VersionCodecArg::from_str(value, true).map_err(|_| {
+            ConfigError::InvalidVersionCodec {
+                profile: name.to_string(),
+                value: value.to_string(),
+            }
+        })?),
+        None => None,
+    };
     Ok(Profile {
         name: name.to_string(),
         database: raw.database.clone(),
@@ -218,8 +267,16 @@ fn convert_profile(name: &str, raw: &RawProfile) -> Result<Profile, ConfigError>
         group_commit_max_frames: raw.group_commit_max_frames,
         group_commit_max_wait_ms: raw.group_commit_max_wait_ms,
         async_fsync: raw.async_fsync,
+        async_fsync_max_wait_ms: raw.async_fsync_max_wait_ms,
         wal_segment_size_bytes: raw.wal_segment_size_bytes,
         wal_preallocate_segments: raw.wal_preallocate_segments,
+        inline_history: raw.inline_history,
+        inline_history_max_bytes: raw.inline_history_max_bytes,
+        version_codec,
+        version_codec_min_bytes: raw.version_codec_min_bytes,
+        version_codec_min_savings_bytes: raw.version_codec_min_savings_bytes,
+        snapshot_pool_size: raw.snapshot_pool_size,
+        snapshot_pool_max_age_ms: raw.snapshot_pool_max_age_ms,
     })
 }
 
@@ -250,8 +307,16 @@ struct RawProfile {
     group_commit_max_frames: Option<usize>,
     group_commit_max_wait_ms: Option<u64>,
     async_fsync: Option<bool>,
+    async_fsync_max_wait_ms: Option<u64>,
     wal_segment_size_bytes: Option<u64>,
     wal_preallocate_segments: Option<u32>,
+    inline_history: Option<bool>,
+    inline_history_max_bytes: Option<usize>,
+    version_codec: Option<String>,
+    version_codec_min_bytes: Option<usize>,
+    version_codec_min_savings_bytes: Option<usize>,
+    snapshot_pool_size: Option<usize>,
+    snapshot_pool_max_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -265,8 +330,16 @@ pub struct ProfileUpdate {
     pub group_commit_max_frames: Option<usize>,
     pub group_commit_max_wait_ms: Option<u64>,
     pub async_fsync: Option<bool>,
+    pub async_fsync_max_wait_ms: Option<u64>,
     pub wal_segment_size_bytes: Option<u64>,
     pub wal_preallocate_segments: Option<u32>,
+    pub inline_history: Option<bool>,
+    pub inline_history_max_bytes: Option<usize>,
+    pub version_codec: Option<VersionCodecArg>,
+    pub version_codec_min_bytes: Option<usize>,
+    pub version_codec_min_savings_bytes: Option<usize>,
+    pub snapshot_pool_size: Option<usize>,
+    pub snapshot_pool_max_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -297,6 +370,8 @@ pub enum ConfigError {
     ProfileNotFound { name: String },
     #[error("profile '{profile}' synchronous value '{value}' is invalid")]
     InvalidSynchronous { profile: String, value: String },
+    #[error("profile '{profile}' version codec value '{value}' is invalid")]
+    InvalidVersionCodec { profile: String, value: String },
     #[error("no config directory found; pass --config or set SOMBRA_CONFIG")]
     NoConfigPath,
 }

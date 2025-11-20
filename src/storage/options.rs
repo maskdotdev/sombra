@@ -72,7 +72,7 @@ impl GraphOptions {
             defer_adjacency_flush: false,
             defer_index_flush: false,
             snapshot_pool_size: 0,
-            snapshot_pool_max_age_ms: 50,
+            snapshot_pool_max_age_ms: 200,
         }
     }
 

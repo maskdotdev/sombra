@@ -387,10 +387,20 @@ impl BenchResult {
                 profile.btree_leaf_allocator_snapshot_free_regions,
                 profile.btree_leaf_allocator_snapshot_reuse,
             );
+            let wal_coalesced = profile.wal_coalesced_writes;
+            let wal_reused = profile.wal_reused_segments;
+            let wal_group_p50 = profile.wal_commit_group_p50;
+            let wal_group_p95 = profile.wal_commit_group_p95;
+            let borrowed_bytes = profile.pager_commit_borrowed_bytes;
             println!(
-                "    metrics: wal_frames={} wal_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} (slot={} payload={} full={}) allocator_bytes_moved={} allocator_avg_bytes={:.1} allocator_builds={} allocator_build_avg_us={:.3} allocator_build_free_regions={:.1} allocator_cache_reuse={} allocator_cache_free_regions={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
+                "    metrics: wal_frames={} wal_bytes={} wal_coalesced={} wal_reused={} wal_group_p50={} wal_group_p95={} borrowed_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} (slot={} payload={} full={}) allocator_bytes_moved={} allocator_avg_bytes={:.1} allocator_builds={} allocator_build_avg_us={:.3} allocator_build_free_regions={:.1} allocator_cache_reuse={} allocator_cache_free_regions={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
                 profile.pager_wal_frames,
                 profile.pager_wal_bytes,
+                wal_coalesced,
+                wal_reused,
+                wal_group_p50,
+                wal_group_p95,
+                borrowed_bytes,
                 profile.pager_fsync_count,
                 profile.btree_leaf_key_decodes,
                 profile.btree_leaf_key_cmps,
