@@ -1,6 +1,7 @@
 //! Fast micro-benchmarks for Sombra DB
 //!
 //! Provides quick performance measurements with minimal overhead.
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ impl BenchResult {
 fn format_duration(d: Duration) -> String {
     let micros = d.as_micros();
     if micros < 1_000 {
-        format!("{} µs", micros)
+        format!("{micros} µs")
     } else if micros < 1_000_000 {
         format!("{:.2} ms", micros as f64 / 1_000.0)
     } else {

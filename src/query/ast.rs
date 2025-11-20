@@ -21,20 +21,15 @@ pub struct MatchClause {
 }
 
 /// Direction selector for edge traversals.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum EdgeDirection {
     /// Outgoing edges from the source node.
+    #[default]
     Out,
     /// Incoming edges to the target node.
     In,
     /// Edges in both directions.
     Both,
-}
-
-impl Default for EdgeDirection {
-    fn default() -> Self {
-        EdgeDirection::Out
-    }
 }
 
 /// Edge expansion captured in the AST.

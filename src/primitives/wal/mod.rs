@@ -340,11 +340,11 @@ fn recycle_dir(dir: &Path) -> PathBuf {
 }
 
 fn segment_path(dir: &Path, id: u64) -> PathBuf {
-    active_dir(dir).join(format!("{}{:06}", WAL_SEGMENT_PREFIX, id))
+    active_dir(dir).join(format!("{WAL_SEGMENT_PREFIX}{id:06}"))
 }
 
 fn recycle_segment_path(dir: &Path, id: u64) -> PathBuf {
-    recycle_dir(dir).join(format!("{}{:06}", WAL_SEGMENT_PREFIX, id))
+    recycle_dir(dir).join(format!("{WAL_SEGMENT_PREFIX}{id:06}"))
 }
 
 fn parse_segment_id(name: &str) -> Option<u64> {
@@ -445,11 +445,7 @@ impl SegmentWriter {
     }
 
     fn remaining(&self) -> u64 {
-        if self.offset >= self.max_len {
-            0
-        } else {
-            self.max_len - self.offset
-        }
+        self.max_len.saturating_sub(self.offset)
     }
 }
 
@@ -632,7 +628,7 @@ impl Wal {
         manifest.persist(&self.dir)?;
         drop(manifest);
         let path = recycle_segment_path(&self.dir, id);
-        initialize_segment_file(&path, &header, capacity)?;
+        initialize_segment_file(&path, header, capacity)?;
         Ok(id)
     }
 
@@ -667,7 +663,7 @@ impl Wal {
         drop(manifest);
         let dst = recycle_segment_path(&self.dir, new_id);
         fs::rename(&src, &dst)?;
-        initialize_segment_file(&dst, &header, capacity)?;
+        initialize_segment_file(&dst, header, capacity)?;
         Ok(new_id)
     }
 
@@ -784,7 +780,7 @@ impl Wal {
             if manifest_state.next_segment_id <= max_id {
                 manifest_state.next_segment_id = max_id
                     .checked_add(1)
-                    .ok_or_else(|| SombraError::Invalid("wal segment id overflow"))?;
+                    .ok_or(SombraError::Invalid("wal segment id overflow"))?;
                 manifest_dirty = true;
             }
         }
@@ -1846,6 +1842,21 @@ fn compute_crc32(chunks: &[&[u8]]) -> u32 {
     }
     hasher.finalize()
 }
+fn initialize_segment_file(path: &Path, header: &FileHeader, capacity: u64) -> Result<StdFileIo> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    let io = StdFileIo::new(file);
+    io.truncate(capacity)?;
+    io.write_at(0, &header.encode())?;
+    Ok(io)
+}
 
 #[cfg(test)]
 mod tests {
@@ -2048,25 +2059,9 @@ mod tests {
         assert_eq!(allocator.preallocate_segments, 0);
         assert!(
             allocator.recycle_segments >= 1,
-            "expected recycled segments after reset, got {:?}",
-            allocator
+            "expected recycled segments after reset, got {allocator:?}"
         );
         assert_eq!(wal.stats().frames_appended, 0);
         Ok(())
     }
-}
-fn initialize_segment_file(path: &Path, header: &FileHeader, capacity: u64) -> Result<StdFileIo> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    let io = StdFileIo::new(file);
-    io.truncate(capacity)?;
-    io.write_at(0, &header.encode())?;
-    Ok(io)
 }

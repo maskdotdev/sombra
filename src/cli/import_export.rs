@@ -341,8 +341,7 @@ fn import_nodes(
             })?;
         if id_map.contains_key(ext_id) {
             return Err(CliError::Message(format!(
-                "duplicate node id '{}' in nodes file",
-                ext_id
+                "duplicate node id '{ext_id}' in nodes file"
             )));
         }
 
@@ -355,8 +354,7 @@ fn import_nodes(
         }
         if labels.is_empty() {
             return Err(CliError::Message(format!(
-                "row with id '{}' has no labels (provide --node-labels or --node-label-column)",
-                ext_id
+                "row with id '{ext_id}' has no labels (provide --node-labels or --node-label-column)"
             )));
         }
 
@@ -421,10 +419,10 @@ fn import_edges(
         let src_ext = get_required(&record, src_index, &cfg.src_column)?;
         let dst_ext = get_required(&record, dst_index, &cfg.dst_column)?;
         let src = *id_map.get(src_ext).ok_or_else(|| {
-            CliError::Message(format!("edge references unknown src id '{}'", src_ext))
+            CliError::Message(format!("edge references unknown src id '{src_ext}'"))
         })?;
         let dst = *id_map.get(dst_ext).ok_or_else(|| {
-            CliError::Message(format!("edge references unknown dst id '{}'", dst_ext))
+            CliError::Message(format!("edge references unknown dst id '{dst_ext}'"))
         })?;
 
         let ty_value = match (&cfg.static_type, ty_index) {
@@ -661,7 +659,7 @@ fn find_column(headers: &StringRecord, name: &str) -> Result<usize, CliError> {
     headers
         .iter()
         .position(|h| h.eq_ignore_ascii_case(name))
-        .ok_or_else(|| CliError::Message(format!("column '{}' not found", name)))
+        .ok_or_else(|| CliError::Message(format!("column '{name}' not found")))
 }
 
 fn get_required<'a>(record: &'a StringRecord, idx: usize, name: &str) -> Result<&'a str, CliError> {
@@ -669,7 +667,7 @@ fn get_required<'a>(record: &'a StringRecord, idx: usize, name: &str) -> Result<
         .get(idx)
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| CliError::Message(format!("missing value for column '{}'", name)))
+        .ok_or_else(|| CliError::Message(format!("missing value for column '{name}'")))
 }
 
 fn parse_labels(raw: &str) -> Vec<String> {
@@ -708,19 +706,19 @@ fn parse_literal(raw: &str, ty: PropertyType) -> Result<Option<PropValueOwned>, 
         PropertyType::String => PropValueOwned::Str(raw.to_string()),
         PropertyType::Bool => {
             let parsed = parse_bool_literal(raw)
-                .ok_or_else(|| CliError::Message(format!("invalid boolean literal '{}'", raw)))?;
+                .ok_or_else(|| CliError::Message(format!("invalid boolean literal '{raw}'")))?;
             PropValueOwned::Bool(parsed)
         }
         PropertyType::Int => {
             let parsed = raw
                 .parse::<i64>()
-                .map_err(|_| CliError::Message(format!("invalid integer literal '{}'", raw)))?;
+                .map_err(|_| CliError::Message(format!("invalid integer literal '{raw}'")))?;
             PropValueOwned::Int(parsed)
         }
         PropertyType::Float => {
             let parsed = raw
                 .parse::<f64>()
-                .map_err(|_| CliError::Message(format!("invalid float literal '{}'", raw)))?;
+                .map_err(|_| CliError::Message(format!("invalid float literal '{raw}'")))?;
             PropValueOwned::Float(parsed)
         }
         PropertyType::Date => {
@@ -791,12 +789,8 @@ fn parse_bytes_literal(raw: &str) -> Result<Vec<u8>, CliError> {
             "byte literal must contain an even number of hex digits".into(),
         ));
     }
-    hex::decode(body).map_err(|_| {
-        CliError::Message(format!(
-            "byte literal '{}' contains non-hex characters",
-            raw
-        ))
-    })
+    hex::decode(body)
+        .map_err(|_| CliError::Message(format!("byte literal '{raw}' contains non-hex characters")))
 }
 
 fn looks_like_date(raw: &str) -> bool {
@@ -819,7 +813,7 @@ fn looks_like_datetime(raw: &str) -> bool {
 
 fn parse_iso_date(raw: &str) -> Result<i64, CliError> {
     let date = Date::parse(raw, DATE_FMT)
-        .map_err(|_| CliError::Message(format!("invalid date literal '{}'", raw)))?;
+        .map_err(|_| CliError::Message(format!("invalid date literal '{raw}'")))?;
     let epoch = Date::from_calendar_date(1970, Month::January, 1)
         .expect("1970-01-01 is a valid calendar date");
     Ok((date - epoch).whole_days())
@@ -842,8 +836,7 @@ fn parse_iso_datetime(raw: &str) -> Result<i64, CliError> {
         return nanos_to_millis(dt.assume_utc().unix_timestamp_nanos());
     }
     Err(CliError::Message(format!(
-        "invalid datetime literal '{}', expected RFC3339 or 'YYYY-MM-DD HH:MM:SS'",
-        raw
+        "invalid datetime literal '{raw}', expected RFC3339 or 'YYYY-MM-DD HH:MM:SS'"
     )))
 }
 
@@ -963,7 +956,7 @@ fn resolve_name(
 ) -> Result<String, CliError> {
     match handle.dict.resolve(read, StrId(raw)) {
         Ok(val) => Ok(val),
-        Err(_) => Ok(format!("{}#{}", prefix, raw)),
+        Err(_) => Ok(format!("{prefix}#{raw}")),
     }
 }
 

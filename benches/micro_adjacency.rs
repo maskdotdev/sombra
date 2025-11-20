@@ -1,6 +1,7 @@
 //! Micro benchmark for adjacency expansion primitives.
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::sync::Arc;
 
@@ -118,7 +119,6 @@ impl GraphHarness {
                 None,
                 ExpandOpts {
                     distinct_nodes: distinct,
-                    ..Default::default()
                 },
             )
             .expect("neighbors");

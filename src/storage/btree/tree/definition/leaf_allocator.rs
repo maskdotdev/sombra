@@ -294,11 +294,11 @@ impl<'page> LeafAllocator<'page> {
                     let meta = self
                         .slot_meta
                         .get(*idx)
-                        .ok_or_else(|| SombraError::Invalid("missing slot metadata"))?;
+                        .ok_or(SombraError::Invalid("missing slot metadata"))?;
                     let start = meta.offset as usize;
                     let end = start
                         .checked_add(meta.len as usize)
-                        .ok_or_else(|| SombraError::Invalid("leaf record extent overflow"))?;
+                        .ok_or(SombraError::Invalid("leaf record extent overflow"))?;
                     if end > payload_slice.len() {
                         return Err(SombraError::Invalid("leaf record beyond payload"));
                     }
@@ -310,10 +310,10 @@ impl<'page> LeafAllocator<'page> {
         let (left_slices, right_slices) = slices.split_at(split_idx);
         let left_first = left_slices
             .first()
-            .ok_or_else(|| SombraError::Invalid("left split missing entries"))?;
+            .ok_or(SombraError::Invalid("left split missing entries"))?;
         let right_first = right_slices
             .first()
-            .ok_or_else(|| SombraError::Invalid("right split missing entries"))?;
+            .ok_or(SombraError::Invalid("right split missing entries"))?;
         let left_min = decode_split_key(left_first, payload_slice, pending_bytes)?;
         let right_min = decode_split_key(right_first, payload_slice, pending_bytes)?;
 
@@ -372,7 +372,7 @@ impl<'page> LeafAllocator<'page> {
         let used_bytes = self
             .total_used_bytes()
             .checked_add(len)
-            .ok_or_else(|| SombraError::Invalid("leaf insert size overflow"))?;
+            .ok_or(SombraError::Invalid("leaf insert size overflow"))?;
         self.ensure_capacity_state(self.slot_meta.len() + 1, used_bytes, self.arena_start)?;
         self.reserve_with_gap(insert_idx, len)
     }
@@ -385,7 +385,7 @@ impl<'page> LeafAllocator<'page> {
     ) -> Result<()> {
         let slot_bytes = future_slots
             .checked_mul(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
+            .ok_or(SombraError::Invalid("slot directory overflow"))?;
         if slot_bytes > self.payload_len {
             record_leaf_allocator_failure(LeafAllocatorFailureKind::SlotOverflow);
             return Err(SombraError::Invalid("slot directory exceeds payload"));
@@ -393,7 +393,7 @@ impl<'page> LeafAllocator<'page> {
         let usable = self
             .payload_len
             .checked_sub(slot_bytes)
-            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+            .ok_or(SombraError::Invalid("slot directory exceeds payload"))?;
         if arena_start > usable {
             record_leaf_allocator_failure(LeafAllocatorFailureKind::PayloadExhausted);
             return Err(SombraError::Invalid("leaf payload exhausted"));
@@ -413,7 +413,7 @@ impl<'page> LeafAllocator<'page> {
             let offset = self.header.free_start;
             let new_free_start = (self.header.free_start as usize)
                 .checked_add(len)
-                .ok_or_else(|| SombraError::Invalid("leaf free_start overflow"))?;
+                .ok_or(SombraError::Invalid("leaf free_start overflow"))?;
             self.header.free_start = u16::try_from(new_free_start)
                 .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
             return Ok(offset);
@@ -467,7 +467,7 @@ impl<'page> LeafAllocator<'page> {
             .map_err(|_| SombraError::Invalid("leaf free_start overflow"))?;
         self.free_regions.clear();
         record_leaf_allocator_compaction(bytes_moved);
-        gap_offset.ok_or_else(|| SombraError::Invalid("gap allocation failed"))
+        gap_offset.ok_or(SombraError::Invalid("gap allocation failed"))
     }
 
     fn compact_all_from(&mut self, new_start: usize) -> Result<()> {
@@ -507,7 +507,7 @@ impl<'page> LeafAllocator<'page> {
             let len = meta.len as usize;
             let end = cursor
                 .checked_add(len)
-                .ok_or_else(|| SombraError::Invalid("record extent overflow"))?;
+                .ok_or(SombraError::Invalid("record extent overflow"))?;
             if end > payload.len() {
                 return Err(SombraError::Invalid("record extent beyond payload"));
             }
@@ -528,14 +528,14 @@ impl<'page> LeafAllocator<'page> {
         let slot_count = self.slot_meta.len();
         let slot_bytes = slot_count
             .checked_mul(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
+            .ok_or(SombraError::Invalid("slot directory overflow"))?;
         if slot_bytes > self.payload_len {
             return Err(SombraError::Invalid("slot directory exceeds payload"));
         }
         let new_free_end = self
             .payload_len
             .checked_sub(slot_bytes)
-            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+            .ok_or(SombraError::Invalid("slot directory exceeds payload"))?;
         if new_free_end < self.header.free_start as usize {
             return Err(SombraError::Invalid("leaf payload exhausted"));
         }
@@ -561,7 +561,7 @@ impl<'page> LeafAllocator<'page> {
         let start = offset as usize;
         let end = start
             .checked_add(record_bytes.len())
-            .ok_or_else(|| SombraError::Invalid("record extent overflow"))?;
+            .ok_or(SombraError::Invalid("record extent overflow"))?;
         if end > self.payload_len {
             return Err(SombraError::Invalid("record extent beyond payload"));
         }
@@ -715,7 +715,7 @@ impl SlotMeta {
         let start = self.offset as usize;
         let end = start
             .checked_add(self.len as usize)
-            .ok_or_else(|| SombraError::Invalid("record extent overflow"))?;
+            .ok_or(SombraError::Invalid("record extent overflow"))?;
         if end > payload.len() {
             return Err(SombraError::Invalid("record extent beyond payload"));
         }
@@ -748,7 +748,7 @@ fn build_record_slots(
     } else {
         slot_count
             .checked_add(1)
-            .ok_or_else(|| SombraError::Invalid("leaf slot count overflow"))?
+            .ok_or(SombraError::Invalid("leaf slot count overflow"))?
     };
     let mut slots = Vec::with_capacity(total_slots);
     for idx in 0..=slot_count {
@@ -856,7 +856,7 @@ impl LeafAllocatorSnapshot {
         let meta = self
             .slot_meta
             .get(idx)
-            .ok_or_else(|| SombraError::Invalid("snapshot slot index out of bounds"))?;
+            .ok_or(SombraError::Invalid("snapshot slot index out of bounds"))?;
         meta.slice(payload)
     }
 
@@ -868,7 +868,7 @@ impl LeafAllocatorSnapshot {
         let meta = self
             .slot_meta
             .get(idx)
-            .ok_or_else(|| SombraError::Invalid("snapshot slot index out of bounds"))?;
+            .ok_or(SombraError::Invalid("snapshot slot index out of bounds"))?;
         Ok(meta.len as usize)
     }
 }
@@ -883,10 +883,7 @@ impl<'a> Iterator for LeafSnapshotIter<'a> {
     type Item = Result<page::LeafRecordRef<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let meta = match self.slot_meta.get(self.idx) {
-            Some(meta) => meta,
-            None => return None,
-        };
+        let meta = self.slot_meta.get(self.idx)?;
         self.idx += 1;
         let slice = match meta.slice(self.payload) {
             Ok(slice) => slice,

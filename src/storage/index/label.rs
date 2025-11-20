@@ -271,7 +271,7 @@ impl LabelIndex {
             return Err(SombraError::Corruption("btree page shorter than header"));
         }
         let initialized = if &data[..4] == b"SOMB" {
-            page::Header::parse(&data[..]).is_ok()
+            page::Header::parse(data).is_ok()
         } else {
             false
         };

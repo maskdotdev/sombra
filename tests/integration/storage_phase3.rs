@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::sync::Arc;
 
@@ -81,7 +82,7 @@ fn create_edge_requires_existing_endpoints() -> Result<()> {
         Err(SombraError::Invalid(msg)) => {
             assert_eq!(msg, "edge source node missing");
         }
-        other => panic!("unexpected result: {:?}", other),
+        other => panic!("unexpected result: {other:?}"),
     }
     Ok(())
 }
@@ -519,7 +520,7 @@ fn delete_node_restrict_blocks_incident_edges() -> Result<()> {
         Err(SombraError::Invalid(msg)) => {
             assert_eq!(msg, "node has incident edges");
         }
-        other => panic!("expected invalid error, got {:?}", other),
+        other => panic!("expected invalid error, got {other:?}"),
     }
     Ok(())
 }

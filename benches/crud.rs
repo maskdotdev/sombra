@@ -13,7 +13,7 @@ mod bench {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
-    use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+    use criterion::{black_box, Criterion, Throughput};
     use serde_json::Value;
     use sombra::{
         ffi::{

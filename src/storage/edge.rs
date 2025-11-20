@@ -57,11 +57,11 @@ impl EncodeOpts {
 #[derive(Clone, Debug)]
 pub struct EncodedEdgeRow {
     pub bytes: Vec<u8>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub header: VersionHeader,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub prev_ptr: VersionPtr,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub row_hash: Option<u64>,
 }
 

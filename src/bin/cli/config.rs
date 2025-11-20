@@ -91,11 +91,7 @@ impl CliConfig {
     }
 
     pub fn upsert_profile(&mut self, name: &str, update: ProfileUpdate) -> Result<(), ConfigError> {
-        let entry = self
-            .data
-            .profiles
-            .entry(name.to_string())
-            .or_insert_with(RawProfile::default);
+        let entry = self.data.profiles.entry(name.to_string()).or_default();
         if let Some(db) = update.database {
             entry.database = Some(db);
         }

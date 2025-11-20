@@ -504,8 +504,8 @@ impl<'a> ChunkedPostingStream<'a> {
             self.key_pos += 1;
             let value = {
                 let tree = self.index.borrow_tree()?;
-                let result = tree.get(self.guard, key)?;
-                result
+
+                tree.get(self.guard, key)?
             };
             let value = match value {
                 Some(bytes) => bytes,
@@ -553,10 +553,8 @@ impl PostingStream for ChunkedPostingStream<'_> {
         }
         let mut produced = 0;
         while produced < max {
-            if self.buf_pos >= self.buffer.len() {
-                if !self.load_next_segment()? {
-                    return Ok(false);
-                }
+            if self.buf_pos >= self.buffer.len() && !self.load_next_segment()? {
+                return Ok(false);
             }
             let node = self.buffer[self.buf_pos];
             self.buf_pos += 1;

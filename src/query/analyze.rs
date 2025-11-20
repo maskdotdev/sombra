@@ -368,7 +368,7 @@ fn canonicalize_in_values(values: &mut Vec<Value>) -> AnalyzeResult<()> {
     }
     let mut seen = HashSet::with_capacity(values.len());
     values.retain(|value| seen.insert(value_sort_key(value)));
-    values.sort_by(|a, b| compare_values(a, b));
+    values.sort_by(compare_values);
     Ok(())
 }
 

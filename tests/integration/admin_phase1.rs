@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

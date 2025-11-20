@@ -539,8 +539,8 @@ fn wal_health(
             let frames_per_segment = allocator.segment_size_bytes / page_size as u64;
             if frames_per_segment > 0 {
                 if let Some(backlog) = wal_backlog {
-                    let needed_segments = (backlog.pending_frames as u64 + frames_per_segment - 1)
-                        / frames_per_segment;
+                    let needed_segments =
+                        (backlog.pending_frames as u64).div_ceil(frames_per_segment);
                     let readyish =
                         allocator.ready_segments as u64 + allocator.recycle_segments as u64;
                     if needed_segments > readyish {
@@ -566,8 +566,7 @@ fn wal_health(
             let lag = durable.0.saturating_sub(horizon);
             if lag > WAL_HORIZON_LAG_ALERT {
                 alerts.push(format!(
-                    "vacuum horizon lags durable LSN by {} commits; WAL reuse may be pinned by readers",
-                    lag
+                    "vacuum horizon lags durable LSN by {lag} commits; WAL reuse may be pinned by readers"
                 ));
             }
         }
@@ -1236,14 +1235,14 @@ impl Graph {
         let store = Arc::clone(&opts.store);
         let meta = store.meta()?;
 
-        let inline_blob_u32 = opts.inline_prop_blob.unwrap_or_else(|| {
+        let inline_blob_u32 = opts.inline_prop_blob.unwrap_or({
             if meta.storage_inline_prop_blob == 0 {
                 DEFAULT_INLINE_PROP_BLOB
             } else {
                 meta.storage_inline_prop_blob
             }
         });
-        let inline_value_u32 = opts.inline_prop_value.unwrap_or_else(|| {
+        let inline_value_u32 = opts.inline_prop_value.unwrap_or({
             if meta.storage_inline_prop_value == 0 {
                 DEFAULT_INLINE_PROP_VALUE
             } else {
@@ -1558,9 +1557,7 @@ impl Graph {
         self.persist_tree_root(tx, RootKind::Nodes)?;
         if let Err(err) = self.stage_label_inserts(tx, node_id, &labels, commit_id) {
             let _ = self.nodes.delete(tx, &node_id.0);
-            if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
-                return Err(root_err);
-            }
+            self.persist_tree_root(tx, RootKind::Nodes)?;
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
@@ -1570,9 +1567,7 @@ impl Graph {
         if let Err(err) = self.insert_indexed_props(tx, node_id, &labels, &prop_owned, commit_id) {
             let _ = self.indexes.remove_node_labels(tx, node_id, &labels);
             let _ = self.nodes.delete(tx, &node_id.0);
-            if let Err(root_err) = self.persist_tree_root(tx, RootKind::Nodes) {
-                return Err(root_err);
-            }
+            self.persist_tree_root(tx, RootKind::Nodes)?;
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
@@ -2231,9 +2226,7 @@ impl Graph {
             self.stage_adjacency_inserts(tx, &[(spec.src, spec.dst, spec.ty, edge_id)], commit_id)
         {
             let _ = self.edges.delete(tx, &edge_id.0);
-            if let Err(root_err) = self.persist_tree_root(tx, RootKind::Edges) {
-                return Err(root_err);
-            }
+            self.persist_tree_root(tx, RootKind::Edges)?;
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
             }
@@ -2404,7 +2397,7 @@ impl Graph {
     ) -> Result<NeighborCursor> {
         let mut neighbors: Vec<Neighbor> = Vec::new();
         let enable_distinct = opts.distinct_nodes || self.distinct_neighbors_default;
-        let mut seen_set = enable_distinct.then(|| HashSet::new());
+        let mut seen_set = enable_distinct.then(HashSet::new);
         if dir.includes_out() {
             self.metrics.adjacency_scan("out");
             self.collect_neighbors(tx, id, ty, true, seen_set.as_mut(), &mut neighbors)?;
@@ -3139,7 +3132,7 @@ impl Graph {
         let versioned_unit = Self::adjacency_value_for_commit(commit, false);
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(fwd, _)| fwd).collect();
-            refs.sort_unstable_by(|a, b| a.cmp(b));
+            refs.sort_unstable();
             let value_ref = &versioned_unit;
             let iter = refs.into_iter().map(|key| PutItem {
                 key,
@@ -3150,7 +3143,7 @@ impl Graph {
         }
         {
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(_, rev)| rev).collect();
-            refs.sort_unstable_by(|a, b| a.cmp(b));
+            refs.sort_unstable();
             let value_ref = &versioned_unit;
             let iter = refs.into_iter().map(|key| PutItem {
                 key,
@@ -3350,7 +3343,7 @@ impl Graph {
         seen: &mut HashSet<NodeId>,
         queue: &mut VecDeque<(NodeId, u32)>,
     ) -> Result<()> {
-        let mut cursor = self.neighbors(
+        let cursor = self.neighbors(
             tx,
             node,
             dir,
@@ -3359,7 +3352,7 @@ impl Graph {
                 distinct_nodes: false,
             },
         )?;
-        while let Some(neighbor) = cursor.next() {
+        for neighbor in cursor {
             if seen.insert(neighbor.neighbor) {
                 queue.push_back((neighbor.neighbor, next_depth));
             }
@@ -3793,7 +3786,7 @@ impl Graph {
         let current = tree.get_with_write(tx, &key)?;
         let current_val = current.unwrap_or(0);
         let new_val = if delta.is_negative() {
-            let abs = delta.abs() as u64;
+            let abs = delta.unsigned_abs();
             if abs > current_val {
                 return Err(SombraError::Corruption("degree underflow"));
             }
@@ -4094,19 +4087,11 @@ fn prop_stats_key(value: &PropValueOwned) -> Vec<u8> {
         }
         Str(v) => {
             out.push(4);
-            out.extend(
-                encode_bytes_key(v.as_bytes())
-                    .unwrap_or_else(|_| v.as_bytes().to_vec())
-                    .into_iter(),
-            );
+            out.extend(encode_bytes_key(v.as_bytes()).unwrap_or_else(|_| v.as_bytes().to_vec()));
         }
         Bytes(v) => {
             out.push(5);
-            out.extend(
-                encode_bytes_key(v)
-                    .unwrap_or_else(|_| v.clone())
-                    .into_iter(),
-            );
+            out.extend(encode_bytes_key(v).unwrap_or_else(|_| v.clone()));
         }
         Date(v) => {
             out.push(6);
@@ -4425,7 +4410,7 @@ impl Graph {
                     let key = encode_value_key_owned(def.ty, value)?;
                     self.indexes.insert_property_value_with_commit(
                         tx,
-                        &def,
+                        def,
                         &key,
                         node,
                         Some(commit),
@@ -4515,7 +4500,7 @@ impl Graph {
                         let key = encode_value_key_owned(def.ty, value)?;
                         self.indexes.insert_property_value_with_commit(
                             tx,
-                            &def,
+                            def,
                             &key,
                             node,
                             Some(commit),
@@ -4525,7 +4510,7 @@ impl Graph {
                         let key = encode_value_key_owned(def.ty, prev)?;
                         self.indexes.remove_property_value_with_commit(
                             tx,
-                            &def,
+                            def,
                             &key,
                             node,
                             Some(commit),

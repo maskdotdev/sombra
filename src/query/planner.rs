@@ -1409,11 +1409,7 @@ struct IndexedSelection {
 fn build_explain_tree(node: &PhysicalNode) -> ExplainNode {
     let mut explain = ExplainNode::new(op_name(&node.op));
     explain.props = op_props(&node.op);
-    explain.inputs = node
-        .inputs
-        .iter()
-        .map(|child| build_explain_tree(child))
-        .collect();
+    explain.inputs = node.inputs.iter().map(build_explain_tree).collect();
     explain
 }
 
@@ -1933,7 +1929,7 @@ fn literal_to_string(value: &LiteralValue) -> String {
         LiteralValue::Bool(v) => v.to_string(),
         LiteralValue::Int(v) => v.to_string(),
         LiteralValue::Float(v) => v.to_string(),
-        LiteralValue::String(v) => format!("{:?}", v),
+        LiteralValue::String(v) => format!("{v:?}"),
         LiteralValue::Bytes(bytes) => format!("bytes(len={})", bytes.len()),
         LiteralValue::DateTime(ts) => format!("datetime({ts})"),
     }

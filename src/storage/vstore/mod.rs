@@ -244,7 +244,7 @@ impl VStore {
             1
         } else {
             let capacity = self.data_capacity;
-            let required = (bytes.len() + capacity - 1) / capacity;
+            let required = bytes.len().div_ceil(capacity);
             if required > u32::MAX as usize {
                 return Err(SombraError::Invalid("page count exceeds u32::MAX"));
             }

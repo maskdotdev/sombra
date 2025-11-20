@@ -994,7 +994,7 @@ impl Pager {
         let config = {
             let mut options = self.options.lock();
             options.group_commit_max_wait_ms = ms;
-            Self::wal_commit_config_from_options(&*options)
+            Self::wal_commit_config_from_options(&options)
         };
         self.wal_committer.set_config(config);
     }
@@ -1268,7 +1268,7 @@ impl Pager {
                     None
                 }
             })
-            .ok_or_else(|| SombraError::Invalid("no eviction candidate available"))
+            .ok_or(SombraError::Invalid("no eviction candidate available"))
     }
 
     fn load_page_into_frame(
@@ -1458,7 +1458,7 @@ impl Pager {
         let needed_pages = if total_extents.is_empty() {
             0
         } else {
-            (total_extents.len() + capacity - 1) / capacity
+            total_extents.len().div_ceil(capacity)
         };
         pager_test_log!(
             "[pager.freelist] total_extents={} needed_pages={}",
@@ -2590,7 +2590,7 @@ impl Pager {
             let data = Arc::<[u8]>::from(frame.payload.as_slice());
             overlays
                 .entry(frame.page_id)
-                .or_insert_with(VecDeque::new)
+                .or_default()
                 .push_back(OverlayEntry {
                     lsn: frame.lsn,
                     data: Arc::clone(&data),
@@ -2613,7 +2613,7 @@ impl Pager {
         wal_offset: Option<WalFramePtr>,
         data: Option<Arc<[u8]>>,
     ) {
-        let chain = chains.entry(page_id).or_insert_with(VecDeque::new);
+        let chain = chains.entry(page_id).or_default();
         let was_empty = chain.is_empty();
         if let Some(last) = chain.back() {
             if last.lsn.0 > lsn.0 {
@@ -2835,7 +2835,7 @@ impl Pager {
                 overlay = Some(frame.payload);
             }
         }
-        Ok(overlay.map(|data| Arc::<[u8]>::from(data)))
+        Ok(overlay.map(Arc::<[u8]>::from))
     }
 
     fn begin_read_consistency(&self, consistency: ReadConsistency) -> Result<ReadGuard> {
@@ -3470,9 +3470,9 @@ mod tests {
             let mut write = pager.begin_write()?;
             eprintln!("[autockpt_ms] begin_write acquired (seed)");
             let page = write.allocate_page()?;
-            eprintln!("[autockpt_ms] allocate_page returned {:?}", page);
+            eprintln!("[autockpt_ms] allocate_page returned {page:?}");
             write_test_payload(&pager, &mut write, page)?;
-            eprintln!("[autockpt_ms] payload written to {:?}", page);
+            eprintln!("[autockpt_ms] payload written to {page:?}");
             eprintln!("[autockpt_ms] committing seed transaction");
             pager.commit(write)?;
             eprintln!("[autockpt_ms] seed commit complete");
@@ -3489,7 +3489,7 @@ mod tests {
         eprintln!("[autockpt_ms] starting timed write");
         let mut write = pager.begin_write()?;
         eprintln!("[autockpt_ms] begin_write acquired (timer)");
-        eprintln!("[autockpt_ms] modifying tracked page {:?}", page);
+        eprintln!("[autockpt_ms] modifying tracked page {page:?}");
         {
             let mut page_mut = write.page_mut(page)?;
             page_mut.data_mut()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4].copy_from_slice(b"TIME");
@@ -3588,14 +3588,8 @@ mod tests {
                 eprintln!("[random_workload] step {step}: begin_write acquired (alloc path)");
                 eprintln!("[random_workload] step {step}: calling allocate_page (alloc path)");
                 let page = write.allocate_page()?;
-                eprintln!(
-                    "[random_workload] step {step}: allocate_page returned {:?}",
-                    page
-                );
-                eprintln!(
-                    "[random_workload] step {step}: writing payload to {:?}",
-                    page
-                );
+                eprintln!("[random_workload] step {step}: allocate_page returned {page:?}");
+                eprintln!("[random_workload] step {step}: writing payload to {page:?}");
                 write_test_payload(&pager, &mut write, page)?;
                 eprintln!("[random_workload] step {step}: payload write complete");
                 eprintln!("[random_workload] step {step}: committing transaction (alloc path)");
@@ -3622,12 +3616,9 @@ mod tests {
                 eprintln!("[random_workload] step {step}: begin_write (free path)");
                 let mut write = pager.begin_write()?;
                 eprintln!("[random_workload] step {step}: begin_write acquired (free path)");
-                eprintln!(
-                    "[random_workload] step {step}: freeing {:?} inside txn",
-                    page
-                );
+                eprintln!("[random_workload] step {step}: freeing {page:?} inside txn");
                 write.free_page(page)?;
-                eprintln!("[random_workload] step {step}: page {:?} marked free", page);
+                eprintln!("[random_workload] step {step}: page {page:?} marked free");
                 eprintln!("[random_workload] step {step}: committing transaction (free path)");
                 pager.commit(write)?;
                 eprintln!("[random_workload] step {step}: commit complete (free path)");
@@ -3657,7 +3648,7 @@ mod tests {
         }
 
         for page in allocated.drain(..) {
-            eprintln!("[random_workload] draining page {:?}", page);
+            eprintln!("[random_workload] draining page {page:?}");
             let mut write = pager.begin_write()?;
             write.free_page(page)?;
             pager.commit(write)?;
@@ -3678,7 +3669,7 @@ mod tests {
             let page = write.allocate_page()?;
             pager.commit(write)?;
             ids.push(page);
-            eprintln!("[random_workload] reopen allocated page {:?}", page);
+            eprintln!("[random_workload] reopen allocated page {page:?}");
         }
         let set: HashSet<_> = ids.iter().copied().collect();
         assert_eq!(set.len(), ids.len());

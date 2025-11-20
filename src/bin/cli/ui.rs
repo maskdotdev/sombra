@@ -77,13 +77,11 @@ impl Ui {
             if self.paint {
                 println!(
                     "  {} {}",
-                    self.palette
-                        .key
-                        .paint(format!("{key:>width$}:", width = key_width)),
+                    self.palette.key.paint(format!("{key:>key_width$}:")),
                     self.palette.value.paint(value)
                 );
             } else {
-                println!("  {key:>width$}: {value}", width = key_width);
+                println!("  {key:>key_width$}: {value}");
             }
         }
     }
@@ -116,7 +114,7 @@ impl Ui {
         } else {
             Style::new().paint(INFO_ICON)
         };
-        println!("{} {message}", prefix);
+        println!("{prefix} {message}");
     }
 
     pub fn success(&self, message: &str) {
@@ -129,7 +127,7 @@ impl Ui {
         } else {
             Style::new().paint(SUCCESS_ICON)
         };
-        println!("{} {message}", prefix);
+        println!("{prefix} {message}");
     }
 
     pub fn warn(&self, message: &str) {
@@ -142,7 +140,7 @@ impl Ui {
         } else {
             Style::new().paint(WARNING_ICON)
         };
-        eprintln!("{} {message}", prefix);
+        eprintln!("{prefix} {message}");
     }
 
     pub fn task<'a>(&'a self, label: impl Into<String>) -> TaskGuard<'a> {

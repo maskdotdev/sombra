@@ -1,6 +1,7 @@
 //! Micro benchmarks focused on WAL append and checkpoint costs.
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::sync::Arc;
 

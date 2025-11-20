@@ -458,7 +458,7 @@ impl CommitTable {
             .entries
             .iter_mut()
             .find(|entry| entry.id == id)
-            .ok_or_else(|| SombraError::Invalid("unknown commit id"))?;
+            .ok_or(SombraError::Invalid("unknown commit id"))?;
         if entry.status == CommitStatus::Committed || entry.status == CommitStatus::Durable {
             return Err(SombraError::Invalid("commit already finalized"));
         }
@@ -512,7 +512,7 @@ impl CommitTable {
             .entries
             .iter_mut()
             .find(|entry| entry.id == snapshot)
-            .ok_or_else(|| SombraError::Invalid("reader snapshot unknown"))?;
+            .ok_or(SombraError::Invalid("reader snapshot unknown"))?;
         if entry.reader_refs == u32::MAX {
             return Err(SombraError::Invalid("reader ref overflow"));
         }

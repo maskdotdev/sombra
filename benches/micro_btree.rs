@@ -1,6 +1,7 @@
 //! Micro benchmarks for the on-disk B-Tree implementation.
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::ops::Bound;
 use std::sync::Arc;
@@ -26,7 +27,7 @@ fn micro_btree(c: &mut Criterion) {
     group.throughput(Throughput::Elements(INSERT_COUNT));
     group.bench_function("sequential_insert", |b| {
         b.iter_batched(
-            || FreshTree::new(),
+            FreshTree::new,
             |mut tree| {
                 tree.insert_sequence(0, INSERT_COUNT);
                 black_box(tree.tree.root_page());
@@ -40,7 +41,7 @@ fn micro_btree(c: &mut Criterion) {
     group.throughput(Throughput::Elements(INSERT_COUNT));
     group.bench_function("random_insert", |b| {
         b.iter_batched(
-            || FreshTree::new(),
+            FreshTree::new,
             |mut tree| {
                 tree.insert_keys(&random_keys);
                 black_box(tree.tree.root_page());

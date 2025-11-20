@@ -50,7 +50,7 @@ pub fn encode_props<'a>(
             spill_vrefs: Vec::new(),
         });
     }
-    let mut ordered: Vec<PropEntry<'_>> = entries.iter().cloned().collect();
+    let mut ordered: Vec<PropEntry<'_>> = entries.to_vec();
     ordered.sort_by(|a, b| a.prop.0.cmp(&b.prop.0));
     for pair in ordered.windows(2) {
         if pair[0].prop == pair[1].prop {

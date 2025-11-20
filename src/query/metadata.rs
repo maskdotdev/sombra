@@ -147,6 +147,12 @@ pub struct InMemoryMetadata {
     label_props: HashMap<LabelId, HashSet<PropId>>,
 }
 
+impl Default for InMemoryMetadata {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryMetadata {
     /// Creates a new empty in-memory metadata provider.
     pub fn new() -> Self {

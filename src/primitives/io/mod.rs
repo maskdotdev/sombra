@@ -40,7 +40,7 @@ pub trait FileIo: Send + Sync + 'static {
             self.write_at(off, slice)?;
             off = off
                 .checked_add(slice.len() as u64)
-                .ok_or_else(|| SombraError::Invalid("writev offset overflow"))?;
+                .ok_or(SombraError::Invalid("writev offset overflow"))?;
         }
         Ok(())
     }

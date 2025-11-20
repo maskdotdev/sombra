@@ -1312,8 +1312,7 @@ fn enforce_payload_size(spec: &Value) -> Result<()> {
         .map_err(|err| FfiError::Message(format!("failed to measure payload size: {err}")))?;
     if serialized.len() > MAX_PAYLOAD_BYTES {
         Err(FfiError::Message(format!(
-            "payload exceeds {} bytes",
-            MAX_PAYLOAD_BYTES
+            "payload exceeds {MAX_PAYLOAD_BYTES} bytes"
         )))
     } else {
         Ok(())
@@ -1702,7 +1701,7 @@ fn validate_scalar_value(value: &QueryValue) -> Result<()> {
             Err(FfiError::Message("float literal must be finite".into()))
         }
         QueryValue::Bytes(bytes) if bytes.len() > MAX_BYTES_LITERAL => Err(FfiError::Message(
-            format!("binary literal exceeds {} bytes", MAX_BYTES_LITERAL),
+            format!("binary literal exceeds {MAX_BYTES_LITERAL} bytes"),
         )),
         QueryValue::DateTime(ts) if *ts < i64::MIN as i128 || *ts > i64::MAX as i128 => Err(
             FfiError::Message("datetime literal must fit within 64-bit range".into()),
@@ -1735,8 +1734,7 @@ fn validate_in_values(values: &[QueryValue]) -> Result<()> {
     }
     if values.len() > MAX_IN_VALUES {
         return Err(FfiError::Message(format!(
-            "in() may not exceed {} values",
-            MAX_IN_VALUES
+            "in() may not exceed {MAX_IN_VALUES} values"
         )));
     }
     let mut tag = None;
@@ -1746,14 +1744,12 @@ fn validate_in_values(values: &[QueryValue]) -> Result<()> {
         if let QueryValue::Bytes(bytes) = value {
             total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
                 FfiError::Message(format!(
-                    "total bytes in in() literals exceeds {} bytes",
-                    MAX_BYTES_LITERAL
+                    "total bytes in in() literals exceeds {MAX_BYTES_LITERAL} bytes"
                 ))
             })?;
             if total_bytes > MAX_BYTES_LITERAL {
                 return Err(FfiError::Message(format!(
-                    "total bytes in in() literals exceeds {} bytes",
-                    MAX_BYTES_LITERAL
+                    "total bytes in in() literals exceeds {MAX_BYTES_LITERAL} bytes"
                 )));
             }
         }

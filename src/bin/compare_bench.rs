@@ -2,6 +2,7 @@
 //!
 //! Provides configurable workloads so we can capture perf baselines
 //! with consistent knobs (mode, commit cadence, transaction semantics).
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::error::Error;
 use std::fmt;
@@ -51,7 +52,7 @@ fn try_main() -> Result<(), Box<dyn Error>> {
             rows.push(result.to_csv_row());
         }
         std::fs::write(path, rows.join("\n"))?;
-        println!("CSV written to {}", path);
+        println!("CSV written to {path}");
     }
 
     Ok(())
@@ -459,7 +460,7 @@ fn avg_per_unit(total_ns: u64, units: u64) -> f64 {
 fn format_duration(d: Duration) -> String {
     let micros = d.as_micros();
     if micros < 1_000 {
-        format!("{} µs", micros)
+        format!("{micros} µs")
     } else if micros < 1_000_000 {
         format!("{:.2} ms", micros as f64 / 1_000.0)
     } else {
@@ -509,7 +510,7 @@ fn bench_sombra_reads(cfg: &BenchConfig) -> BenchResult {
         let read = pager.begin_latest_committed_read().unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
         for _ in 0..cfg.docs {
-            let idx = rng.gen_range(0..cfg.docs) as usize;
+            let idx = rng.gen_range(0..cfg.docs);
             let key = sombra_key_for_doc(cfg, idx);
             let _ = tree.get(&read, &key).unwrap();
         }
@@ -722,7 +723,7 @@ fn sombra_mixed_with_commits(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &B
                 pending = 0;
             }
             let read = pager.begin_latest_committed_read().unwrap();
-            let doc_idx = rng.gen_range(0..i) as usize;
+            let doc_idx = rng.gen_range(0..i);
             let key = sombra_key_for_doc(cfg, doc_idx);
             let _ = tree.get(&read, &key).unwrap();
         }
@@ -764,7 +765,7 @@ fn sombra_mixed_read_with_write(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg:
             if use_put_many {
                 batch.as_mut().unwrap().flush(tree, &mut write);
             }
-            let doc_idx = rng.gen_range(0..i) as usize;
+            let doc_idx = rng.gen_range(0..i);
             let key = sombra_key_for_doc(cfg, doc_idx);
             let _ = tree.get_with_write(&mut write, &key).unwrap();
         }

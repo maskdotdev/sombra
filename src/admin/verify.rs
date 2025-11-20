@@ -273,7 +273,7 @@ fn run_adjacency_checks(
         if !adjacency_edge_ids.contains(edge_id) {
             push_error(
                 findings,
-                format!("edge {} missing adjacency entries", edge_id),
+                format!("edge {edge_id} missing adjacency entries"),
             );
         }
         if findings.len() >= MAX_FINDINGS {
@@ -298,12 +298,9 @@ fn collect_nodes(
         return Ok(nodes);
     }
     for raw_id in 1..=max_id {
-        match graph.get_node(read, NodeId(raw_id))? {
-            Some(_data) => {
-                nodes.insert(raw_id);
-                counts.nodes_found += 1;
-            }
-            None => {}
+        if let Some(_data) = graph.get_node(read, NodeId(raw_id))? {
+            nodes.insert(raw_id);
+            counts.nodes_found += 1;
         }
         if findings.len() >= MAX_FINDINGS {
             break;
@@ -326,24 +323,21 @@ fn collect_edges(
         return Ok(edges_set);
     }
     for raw_id in 1..=max_id {
-        match graph.get_edge(read, EdgeId(raw_id))? {
-            Some(data) => {
-                edges_set.insert(raw_id);
-                counts.edges_found += 1;
-                if !nodes.contains(&data.src.0) {
-                    push_error(
-                        findings,
-                        format!("edge {} references missing src node {}", raw_id, data.src.0),
-                    );
-                }
-                if !nodes.contains(&data.dst.0) {
-                    push_error(
-                        findings,
-                        format!("edge {} references missing dst node {}", raw_id, data.dst.0),
-                    );
-                }
+        if let Some(data) = graph.get_edge(read, EdgeId(raw_id))? {
+            edges_set.insert(raw_id);
+            counts.edges_found += 1;
+            if !nodes.contains(&data.src.0) {
+                push_error(
+                    findings,
+                    format!("edge {} references missing src node {}", raw_id, data.src.0),
+                );
             }
-            None => {}
+            if !nodes.contains(&data.dst.0) {
+                push_error(
+                    findings,
+                    format!("edge {} references missing dst node {}", raw_id, data.dst.0),
+                );
+            }
         }
         if findings.len() >= MAX_FINDINGS {
             break;

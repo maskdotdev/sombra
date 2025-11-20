@@ -1,5 +1,6 @@
 //! Binary entry point for the Sombra administrative CLI.
 #![forbid(unsafe_code)]
+#![allow(clippy::large_enum_variant, clippy::field_reassign_with_default)]
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -1326,8 +1327,7 @@ fn parse_prop_types(raw: &Option<String>) -> Result<HashMap<String, PropertyType
         }
         let (name_raw, ty_raw) = trimmed.split_once(':').ok_or_else(|| {
             CliError::Message(format!(
-                "invalid property type mapping '{}', expected name:type",
-                trimmed
+                "invalid property type mapping '{trimmed}', expected name:type"
             ))
         })?;
         let name = name_raw.trim();
@@ -1360,8 +1360,7 @@ fn parse_property_type_token(token: &str) -> Result<PropertyType, CliError> {
         "bytes" => PropertyType::Bytes,
         other => {
             return Err(CliError::Message(format!(
-                "unsupported property type '{}'",
-                other
+                "unsupported property type '{other}'"
             )))
         }
     };
@@ -1594,14 +1593,8 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
         ui.section(
             "WAL Backlog",
             [
-                (
-                    "pending_commits",
-                    format_count(backlog.pending_commits as u64),
-                ),
-                (
-                    "pending_frames",
-                    format_count(backlog.pending_frames as u64),
-                ),
+                ("pending_commits", format_count(backlog.pending_commits)),
+                ("pending_frames", format_count(backlog.pending_frames)),
                 ("worker_running", format_bool(backlog.worker_running)),
             ],
         );
@@ -1799,7 +1792,7 @@ fn print_vacuum_text(ui: &Ui, report: &sombra::admin::VacuumReport) {
                 "{} (id={}): {} nodes",
                 name,
                 stat.label_id,
-                format_count(stat.nodes as u64)
+                format_count(stat.nodes)
             )
         });
         ui.list("Analyze summary", rows.collect::<Vec<_>>());
@@ -1856,7 +1849,7 @@ fn format_duration_ms(ms: f64) -> String {
     if ms >= 1000.0 {
         format!("{:.2}s", ms / 1000.0)
     } else {
-        format!("{:.0}ms", ms)
+        format!("{ms:.0}ms")
     }
 }
 
@@ -1916,7 +1909,7 @@ fn profile_rows(profile: &Profile) -> Vec<(&'static str, String)> {
         "distinct_neighbors_default",
         profile
             .distinct_neighbors_default
-            .map(|v| format_bool(v))
+            .map(format_bool)
             .unwrap_or_else(|| "-".into()),
     ));
     rows.push((
@@ -1944,7 +1937,7 @@ fn profile_rows(profile: &Profile) -> Vec<(&'static str, String)> {
         "async_fsync",
         profile
             .async_fsync
-            .map(|flag| format_bool(flag))
+            .map(format_bool)
             .unwrap_or_else(|| "-".into()),
     ));
     rows.push((

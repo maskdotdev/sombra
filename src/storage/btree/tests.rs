@@ -257,7 +257,7 @@ fn vec_key_put_many_round_trip() -> Result<()> {
     pager.checkpoint(CheckpointMode::Force)?;
     let read = pager.begin_read()?;
     for key in &keys {
-        assert!(tree.get(&read, key)?.is_some(), "missing key {:?}", key);
+        assert!(tree.get(&read, key)?.is_some(), "missing key {key:?}");
     }
     Ok(())
 }
@@ -363,7 +363,7 @@ fn vec_key_randomized_round_trip_matches_reference() -> Result<()> {
     let mut remaining = reference.clone();
     while let Some((key, value)) = cursor.next()? {
         let expected = remaining.remove(&key);
-        assert_eq!(expected, Some(value), "unexpected key {:?}", key);
+        assert_eq!(expected, Some(value), "unexpected key {key:?}");
     }
     assert!(remaining.is_empty(), "missing keys: {}", remaining.len());
     Ok(())
@@ -422,8 +422,7 @@ fn in_place_leaf_delete_updates_stats() -> Result<()> {
     let stats = tree.stats_snapshot();
     assert!(
         stats.leaf_in_place_edits > before_stats.leaf_in_place_edits,
-        "expected delete to increment in-place stats, before={:?} after={stats:?}",
-        before_stats
+        "expected delete to increment in-place stats, before={before_stats:?} after={stats:?}"
     );
     let read = pager.begin_read()?;
     assert!(tree.get(&read, &3)?.is_none());
@@ -940,7 +939,7 @@ fn delete_sequence_preserves_map_equivalence() -> Result<()> {
         let removed = match tree.delete(&mut write, &key) {
             Ok(value) => value,
             Err(err) => {
-                panic!("delete failed for key {key}: {:?}", err);
+                panic!("delete failed for key {key}: {err:?}");
             }
         };
         pager.commit(write)?;

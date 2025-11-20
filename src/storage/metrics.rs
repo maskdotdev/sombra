@@ -455,5 +455,5 @@ impl StorageMetrics for CounterMetrics {
 /// # Returns
 /// An [`Arc`] containing a [`NoopMetrics`] instance.
 pub fn default_metrics() -> Arc<dyn StorageMetrics> {
-    Arc::new(NoopMetrics::default())
+    Arc::new(NoopMetrics)
 }

@@ -199,7 +199,7 @@ impl<'a, K: KeyCodec, V: ValCodec> Cursor<'a, K, V> {
     fn current_extents(&self) -> Result<&page::SlotExtents> {
         self.slot_extents
             .as_ref()
-            .ok_or_else(|| SombraError::Corruption("cursor missing slot extents"))
+            .ok_or(SombraError::Corruption("cursor missing slot extents"))
     }
 
     fn lower_allows(&self, key: &[u8]) -> bool {

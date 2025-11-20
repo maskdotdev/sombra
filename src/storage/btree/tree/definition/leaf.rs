@@ -33,13 +33,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let slot_bytes = record_lengths
             .len()
             .checked_mul(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
+            .ok_or(SombraError::Invalid("slot directory overflow"))?;
         if slot_bytes > payload_len {
             return Ok(false);
         }
         let new_free_end = payload_len
             .checked_sub(slot_bytes)
-            .ok_or_else(|| SombraError::Invalid("slot directory exceeds payload"))?;
+            .ok_or(SombraError::Invalid("slot directory exceeds payload"))?;
         if new_free_end < fences_end {
             return Ok(false);
         }
@@ -47,7 +47,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         for len in record_lengths {
             total_records = total_records
                 .checked_add(*len)
-                .ok_or_else(|| SombraError::Invalid("leaf records overflow payload"))?;
+                .ok_or(SombraError::Invalid("leaf records overflow payload"))?;
             if fences_end + total_records > new_free_end {
                 return Ok(false);
             }
@@ -519,7 +519,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             }
         }
         let split_at = split_at
-            .ok_or_else(|| SombraError::Invalid("unable to split leaf into fitting halves"))?;
+            .ok_or(SombraError::Invalid("unable to split leaf into fitting halves"))?;
         let left_min = entries[0].0.clone();
         let right_min = entries[split_at].0.clone();
 

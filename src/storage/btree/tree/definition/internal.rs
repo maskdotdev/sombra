@@ -132,7 +132,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 break;
             }
         }
-        let split_at = split_at.ok_or_else(|| {
+        let split_at = split_at.ok_or({
             SombraError::Invalid("unable to split internal node into fitting halves")
         })?;
         let left_layout = left_layout.expect("left layout");

@@ -1,7 +1,6 @@
 //! Macro benchmark that runs representative query mixes over synthetic data.
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
-#![allow(missing_docs)]
 
 #[cfg(feature = "ffi-benches")]
 mod support;
@@ -18,7 +17,7 @@ mod bench {
     use std::path::PathBuf;
 
     use super::support::datasets::SyntheticDataset;
-    use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+    use criterion::{black_box, Criterion, Throughput};
     use serde_json::Value;
     use sombra::admin::AdminOpenOptions;
     use sombra::cli::import_export::{

@@ -1270,7 +1270,7 @@ fn evaluate_predicate(predicate: &PhysicalPredicate, node: &NodeData) -> Result<
     }
 }
 
-fn find_prop<'a>(node: &'a NodeData, prop: PropId) -> Option<&'a PropValueOwned> {
+fn find_prop(node: &NodeData, prop: PropId) -> Option<&PropValueOwned> {
     node.props
         .iter()
         .find_map(|(id, value)| if *id == prop { Some(value) } else { None })
@@ -1742,7 +1742,7 @@ mod tests {
             self.nodes
                 .get(&var.0)
                 .cloned()
-                .ok_or_else(|| SombraError::Invalid("missing test binding".into()))
+                .ok_or(SombraError::Invalid("missing test binding"))
         }
     }
 

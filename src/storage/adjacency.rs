@@ -145,18 +145,10 @@ impl Dir {
 }
 
 /// Options for neighbor expansion queries.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ExpandOpts {
     /// Whether to deduplicate nodes in the result set.
     pub distinct_nodes: bool,
-}
-
-impl Default for ExpandOpts {
-    fn default() -> Self {
-        Self {
-            distinct_nodes: false,
-        }
-    }
 }
 
 /// A neighboring node in the graph with its connecting edge information.

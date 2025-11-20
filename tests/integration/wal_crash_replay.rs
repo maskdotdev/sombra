@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+#![allow(clippy::field_reassign_with_default)]
 
 use sombra::primitives::pager::{PageStore, Pager, PagerOptions, Synchronous};
 use sombra::types::page::{PageHeader, PageKind, PAGE_HDR_LEN};

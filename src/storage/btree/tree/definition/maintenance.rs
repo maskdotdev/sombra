@@ -73,7 +73,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let slot_bytes = entries
             .len()
             .checked_mul(page::SLOT_ENTRY_LEN)
-            .ok_or_else(|| SombraError::Invalid("slot directory overflow"))?;
+            .ok_or(SombraError::Invalid("slot directory overflow"))?;
         if fences_end > payload_len {
             return Err(SombraError::Invalid("fence data exceeds payload"));
         }
@@ -82,7 +82,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
         let new_free_end = payload_len
             .checked_sub(slot_bytes)
-            .ok_or_else(|| SombraError::Invalid("slot directory larger than payload"))?;
+            .ok_or(SombraError::Invalid("slot directory larger than payload"))?;
         if new_free_end < fences_end {
             return Ok(None);
         }
@@ -266,7 +266,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         entries: &[(Vec<u8>, PageId)],
     ) -> Result<InternalLayout> {
         self.build_internal_layout(payload_len, low_fence, high_fence, entries)?
-            .ok_or_else(|| SombraError::Invalid("internal layout exceeds capacity"))
+            .ok_or(SombraError::Invalid("internal layout exceeds capacity"))
     }
 
     fn update_parent_separator(
@@ -305,11 +305,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let low_slice = entries
             .first()
             .map(|(k, _)| k.as_slice())
-            .ok_or_else(|| SombraError::Corruption("internal node has no entries"))?;
+            .ok_or(SombraError::Corruption("internal node has no entries"))?;
         let fences_end = page::PAYLOAD_HEADER_LEN + low_slice.len() + high_fence.len();
         let layout = self
             .build_internal_layout(payload_len, low_slice, high_fence.as_slice(), &entries)?
-            .ok_or_else(|| SombraError::Invalid("internal layout after delete exceeds capacity"))?;
+            .ok_or(SombraError::Invalid("internal layout after delete exceeds capacity"))?;
         self.apply_internal_layout(&mut page, &header, fences_end, &layout)?;
         let high_opt = if high_fence.is_empty() {
             None
@@ -378,18 +378,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let mut left_entries = left_snapshot.entries.clone();
         let borrowed = left_entries
             .pop()
-            .ok_or_else(|| SombraError::Corruption("left leaf empty during borrow"))?;
+            .ok_or(SombraError::Corruption("left leaf empty during borrow"))?;
         let mut leaf_entries = leaf_snapshot.entries.clone();
         leaf_entries.insert(0, borrowed.clone());
 
         let left_low = left_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("left leaf lost first key"))?;
+            .ok_or(SombraError::Corruption("left leaf lost first key"))?;
         let new_leaf_first = leaf_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("borrowed leaf has no keys"))?;
+            .ok_or(SombraError::Corruption("borrowed leaf has no keys"))?;
 
         if !self.slice_fits(
             left_payload_len,
@@ -575,11 +575,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let new_leaf_first = leaf_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("leaf empty after borrowing from right"))?;
+            .ok_or(SombraError::Corruption("leaf empty after borrowing from right"))?;
         let right_new_first = right_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("right leaf empty after lending"))?;
+            .ok_or(SombraError::Corruption("right leaf empty after lending"))?;
 
         if !self.slice_fits(
             right_payload_len,
@@ -1000,7 +1000,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                         while appended > 0 {
                             appended -= 1;
                             let idx = allocator.slot_count().saturating_sub(1);
-                            let _ = allocator.delete_slot(idx)?;
+                            allocator.delete_slot(idx)?;
                         }
                         let snapshot = allocator.into_snapshot();
                         self.leaf_allocator_cache(tx).insert(left_id, snapshot);
@@ -1238,7 +1238,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                         while appended > 0 {
                             appended -= 1;
                             let idx = allocator.slot_count().saturating_sub(1);
-                            let _ = allocator.delete_slot(idx)?;
+                            allocator.delete_slot(idx)?;
                         }
                         let snapshot = allocator.into_snapshot();
                         self.leaf_allocator_cache(tx).insert(leaf_id, snapshot);
@@ -1467,18 +1467,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let mut left_entries = left_snapshot.entries.clone();
         let borrowed = left_entries
             .pop()
-            .ok_or_else(|| SombraError::Corruption("left internal empty during borrow"))?;
+            .ok_or(SombraError::Corruption("left internal empty during borrow"))?;
         let mut node_entries = node_snapshot.entries.clone();
         node_entries.insert(0, borrowed.clone());
 
         let left_low = left_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("left internal lost first key"))?;
+            .ok_or(SombraError::Corruption("left internal lost first key"))?;
         let new_node_first = node_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("node internal empty after borrow"))?;
+            .ok_or(SombraError::Corruption("node internal empty after borrow"))?;
 
         let left_layout = self.internal_layout_or_err(
             left_payload_len,
@@ -1756,11 +1756,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let new_node_first = node_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("node internal empty after borrow"))?;
+            .ok_or(SombraError::Corruption("node internal empty after borrow"))?;
         let right_new_first = right_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| SombraError::Corruption("right internal empty after lend"))?;
+            .ok_or(SombraError::Corruption("right internal empty after lend"))?;
 
         let right_layout = self.internal_layout_or_err(
             right_payload_len,
@@ -1891,8 +1891,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
         let force_merge = self.options.page_fill_target >= 100;
         if let Some(left_id) = leaf_header.left_sibling {
-            if leaf_snapshot.entries.is_empty() || !left_insufficient || force_merge {
-                if self.merge_leaf_with_left(
+            if (leaf_snapshot.entries.is_empty() || !left_insufficient || force_merge)
+                && self.merge_leaf_with_left(
                     tx,
                     leaf_id,
                     &leaf_header,
@@ -1903,11 +1903,10 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 )? {
                     return Ok(());
                 }
-            }
         }
         if let Some(right_id) = leaf_header.right_sibling {
-            if leaf_snapshot.entries.is_empty() || force_merge {
-                if self.merge_leaf_with_right(
+            if (leaf_snapshot.entries.is_empty() || force_merge)
+                && self.merge_leaf_with_right(
                     tx,
                     leaf_id,
                     leaf_payload_len,
@@ -1919,7 +1918,6 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 )? {
                     return Ok(());
                 }
-            }
         }
 
         if let Some(first_key) = new_first_key.take() {
@@ -1946,11 +1944,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         let payload_len = self
             .page_size
             .checked_sub(PAGE_HDR_LEN)
-            .ok_or_else(|| SombraError::Invalid("page size smaller than header"))?;
+            .ok_or(SombraError::Invalid("page size smaller than header"))?;
         let entries = vec![(left_min.clone(), left), (right_min.clone(), right)];
         let layout = self
             .build_internal_layout(payload_len, left_min.as_slice(), &[], &entries)?
-            .ok_or_else(|| SombraError::Invalid("internal root layout too large"))?;
+            .ok_or(SombraError::Invalid("internal root layout too large"))?;
         let new_root_id = tx.allocate_page()?;
         {
             let mut root_page = tx.page_mut(new_root_id)?;

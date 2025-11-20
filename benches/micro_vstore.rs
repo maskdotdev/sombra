@@ -1,6 +1,7 @@
 //! Micro benchmarks for the value store component.
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use tempfile::TempDir;
 
 const WRITE_BATCH: usize = 64;
 const READ_BATCH: usize = 64;
-const SIZES: [usize; 3] = [1 * 1024, 16 * 1024, 1 * 1024 * 1024];
+const SIZES: [usize; 3] = [1024, 16 * 1024, 1024 * 1024];
 
 fn micro_vstore(c: &mut Criterion) {
     let mut group = c.benchmark_group("micro/vstore");
