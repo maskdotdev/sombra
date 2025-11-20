@@ -752,6 +752,10 @@ impl Graph {
             snapshot_pool,
             vacuum_mode,
             vacuum_horizon,
+            version_cache_hits,
+            version_cache_misses,
+            version_codec_raw_bytes,
+            version_codec_encoded_bytes,
         }
     }
 
@@ -3363,10 +3367,13 @@ impl Graph {
             return VacuumMode::Normal;
         }
         if bytes >= high_water.saturating_mul(3) / 2 {
+            self.metrics.mvcc_vacuum_mode("fast");
             VacuumMode::Fast
         } else if bytes <= high_water / 4 {
+            self.metrics.mvcc_vacuum_mode("slow");
             VacuumMode::Slow
         } else {
+            self.metrics.mvcc_vacuum_mode("normal");
             VacuumMode::Normal
         }
     }

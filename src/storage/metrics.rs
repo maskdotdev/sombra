@@ -48,6 +48,8 @@ pub trait StorageMetrics: Send + Sync {
 
     /// Records MVCC page version statistics.
     fn mvcc_page_versions(&self, _total_versions: u64, _pages_with_versions: u64) {}
+    /// Records the current vacuum mode selection.
+    fn mvcc_vacuum_mode(&self, _mode: &'static str) {}
 
     /// Increments the total number of version-log entries pruned by vacuum.
     fn vacuum_versions_pruned(&self, _count: u64) {}
@@ -220,6 +222,9 @@ pub struct CounterMetrics {
     /// Total version cache misses.
     pub version_cache_misses: AtomicU64,
 
+    /// Last advertised vacuum mode (as numeric tag).
+    pub mvcc_vacuum_mode: AtomicU64,
+
     /// Bytes seen by version codecs (raw).
     pub version_codec_raw_bytes: AtomicU64,
 
@@ -379,6 +384,16 @@ impl StorageMetrics for CounterMetrics {
 
     fn version_cache_miss(&self) {
         self.version_cache_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mvcc_vacuum_mode(&self, mode: &'static str) {
+        let tag = match mode {
+            "fast" => 2,
+            "normal" => 1,
+            "slow" => 0,
+            _ => 3,
+        };
+        self.mvcc_vacuum_mode.store(tag, Ordering::Relaxed);
     }
 
     fn adjacency_bulk_flush(&self, inserts: usize, removals: usize) {
