@@ -133,6 +133,30 @@ def _clone(obj: Dict[str, Any]) -> Dict[str, Any]:
     return copy.deepcopy(obj)
 
 
+def _empty_mutation_summary() -> Dict[str, Any]:
+    return {
+        "createdNodes": [],
+        "createdEdges": [],
+        "updatedNodes": 0,
+        "updatedEdges": 0,
+        "deletedNodes": 0,
+        "deletedEdges": 0,
+    }
+
+
+def _merge_mutation_summaries(lhs: Dict[str, Any], rhs: Dict[str, Any]) -> Dict[str, Any]:
+    left = lhs or _empty_mutation_summary()
+    right = rhs or _empty_mutation_summary()
+    return {
+        "createdNodes": list(left.get("createdNodes") or []) + list(right.get("createdNodes") or []),
+        "createdEdges": list(left.get("createdEdges") or []) + list(right.get("createdEdges") or []),
+        "updatedNodes": int(left.get("updatedNodes") or 0) + int(right.get("updatedNodes") or 0),
+        "updatedEdges": int(left.get("updatedEdges") or 0) + int(right.get("updatedEdges") or 0),
+        "deletedNodes": int(left.get("deletedNodes") or 0) + int(right.get("deletedNodes") or 0),
+        "deletedEdges": int(left.get("deletedEdges") or 0) + int(right.get("deletedEdges") or 0),
+    }
+
+
 def _normalize_envelope(payload: Dict[str, Any], *, expect_plan: bool = False) -> Dict[str, Any]:
     if "request_id" not in payload:
         payload["request_id"] = None
@@ -909,6 +933,26 @@ class Database:
 
     def mutate_many(self, ops: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         return self.mutate({"ops": [dict(op) for op in ops]})
+
+    def mutate_batched(
+        self,
+        ops: Sequence[Mapping[str, Any]],
+        *,
+        batch_size: int = 1024,
+    ) -> Dict[str, Any]:
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if isinstance(ops, (str, bytes)):
+            raise TypeError("mutate_batched requires a sequence of operations")
+        ops_list = list(ops)
+        if not ops_list:
+            return _empty_mutation_summary()
+        summary = _empty_mutation_summary()
+        for i in range(0, len(ops_list), batch_size):
+            chunk = [dict(op) for op in ops_list[i : i + batch_size]]
+            part = self.mutate({"ops": chunk})
+            summary = _merge_mutation_summaries(summary, part)
+        return summary
 
     def transaction(self, fn: Callable[["_MutationBatch"], Any]) -> Tuple[Any, Dict[str, Any]]:
         batch = _MutationBatch()

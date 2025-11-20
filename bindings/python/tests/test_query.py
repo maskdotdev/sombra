@@ -96,6 +96,18 @@ def test_mutate_many_batches_ops() -> None:
     assert len(created) == 2
 
 
+def test_mutate_batched_chunks_ops() -> None:
+    db = Database.open(temp_db_path())
+    ops = [
+        {"op": "createNode", "labels": ["User"], "props": {"name": "ChunkA"}},
+        {"op": "createNode", "labels": ["User"], "props": {"name": "ChunkB"}},
+        {"op": "createNode", "labels": ["User"], "props": {"name": "ChunkC"}},
+    ]
+    summary = db.mutate_batched(ops, batch_size=2)
+    created = summary.get("createdNodes") or []
+    assert len(created) == 3
+
+
 def test_create_builder_handle_refs() -> None:
     db = Database.open(temp_db_path())
     builder = db.create()
