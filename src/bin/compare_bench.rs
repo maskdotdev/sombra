@@ -44,6 +44,16 @@ fn try_main() -> Result<(), Box<dyn Error>> {
         result.print_telemetry();
     }
 
+    if let Some(path) = &cfg.csv_out {
+        let mut rows = Vec::with_capacity(results.len() + 1);
+        rows.push(BenchResult::csv_header().to_owned());
+        for result in &results {
+            rows.push(result.to_csv_row());
+        }
+        std::fs::write(path, rows.join("\n"))?;
+        println!("CSV written to {}", path);
+    }
+
     Ok(())
 }
 
@@ -80,6 +90,30 @@ struct Args {
     /// Database implementations to benchmark (both, sombra-only, sqlite-only).
     #[arg(long, value_enum, default_value_t = DatabaseSelection::Both)]
     databases: DatabaseSelection,
+
+    /// Enable group commit batching for Sombra.
+    #[arg(long)]
+    sombra_group_commit: bool,
+
+    /// Max writers to batch for group commit.
+    #[arg(long, default_value_t = 16)]
+    sombra_group_commit_max_writers: usize,
+
+    /// Max frames per group commit batch.
+    #[arg(long, default_value_t = 512)]
+    sombra_group_commit_max_frames: usize,
+
+    /// Max wait (ms) for group commit batching.
+    #[arg(long, default_value_t = 2)]
+    sombra_group_commit_max_wait_ms: u64,
+
+    /// Enable async fsync for Sombra.
+    #[arg(long)]
+    sombra_async_fsync: bool,
+
+    /// Emit CSV output to the given file.
+    #[arg(long)]
+    csv_out: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
@@ -145,6 +179,12 @@ struct BenchConfig {
     insert_api: SombraInsertApi,
     put_many_group: usize,
     databases: DatabaseSelection,
+    csv_out: Option<String>,
+    group_commit: bool,
+    group_commit_max_writers: usize,
+    group_commit_max_frames: usize,
+    group_commit_max_wait_ms: u64,
+    async_fsync: bool,
 }
 
 impl From<Args> for BenchConfig {
@@ -172,6 +212,12 @@ impl From<Args> for BenchConfig {
             insert_api: value.sombra_insert_api,
             put_many_group: value.put_many_group,
             databases: value.databases,
+            csv_out: value.csv_out,
+            group_commit: value.sombra_group_commit,
+            group_commit_max_writers: value.sombra_group_commit_max_writers,
+            group_commit_max_frames: value.sombra_group_commit_max_frames,
+            group_commit_max_wait_ms: value.sombra_group_commit_max_wait_ms,
+            async_fsync: value.sombra_async_fsync,
         }
     }
 }
@@ -179,6 +225,21 @@ impl From<Args> for BenchConfig {
 impl BenchConfig {
     fn btree_options(&self) -> BTreeOptions {
         BTreeOptions::default()
+    }
+
+    fn pager_options(&self) -> PagerOptions {
+        let mut opts = PagerOptions::default();
+        if self.group_commit {
+            opts.group_commit_max_writers = self.group_commit_max_writers;
+            opts.group_commit_max_frames = self.group_commit_max_frames;
+            opts.group_commit_max_wait_ms = self.group_commit_max_wait_ms;
+        } else {
+            opts.group_commit_max_writers = 1;
+            opts.group_commit_max_frames = 1;
+            opts.group_commit_max_wait_ms = 0;
+        }
+        opts.async_fsync = self.async_fsync;
+        opts
     }
 
     fn uses_put_many(&self) -> bool {
@@ -264,6 +325,24 @@ impl BenchResult {
             ops_per_sec as u64,
             us_per_op,
         );
+    }
+
+    fn csv_header() -> &'static str {
+        "database,mode,docs,time_ms,ops_per_sec,us_per_op"
+    }
+
+    fn to_csv_row(&self) -> String {
+        let ops_per_sec = self.docs as f64 / self.time.as_secs_f64();
+        let us_per_op = self.time.as_micros() as f64 / self.docs as f64;
+        format!(
+            "{},{},{},{:.3},{:.0},{:.3}",
+            self.db,
+            self.mode_label,
+            self.docs,
+            self.time.as_secs_f64() * 1000.0,
+            ops_per_sec,
+            us_per_op,
+        )
     }
 
     fn print_telemetry(&self) {
@@ -409,7 +488,7 @@ fn run_sombra_bench(cfg: &BenchConfig) -> BenchResult {
 fn bench_sombra_reads(cfg: &BenchConfig) -> BenchResult {
     let tmpdir = tempdir().unwrap();
     let path = tmpdir.path().join("btree.sombra");
-    let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+    let pager = Arc::new(Pager::create(&path, cfg.pager_options()).unwrap());
     let store: Arc<dyn PageStore> = pager.clone();
     let tree = BTree::open_or_create(&store, cfg.btree_options()).unwrap();
 
@@ -431,7 +510,7 @@ fn bench_sombra_reads(cfg: &BenchConfig) -> BenchResult {
 fn bench_sombra_inserts(cfg: &BenchConfig) -> BenchResult {
     let tmpdir = tempdir().unwrap();
     let path = tmpdir.path().join("btree.sombra");
-    let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+    let pager = Arc::new(Pager::create(&path, cfg.pager_options()).unwrap());
     let store: Arc<dyn PageStore> = pager.clone();
     let tree = BTree::open_or_create(&store, cfg.btree_options()).unwrap();
 
@@ -448,7 +527,7 @@ fn bench_sombra_inserts(cfg: &BenchConfig) -> BenchResult {
 fn bench_sombra_mixed(cfg: &BenchConfig) -> BenchResult {
     let tmpdir = tempdir().unwrap();
     let path = tmpdir.path().join("btree.sombra");
-    let pager = Arc::new(Pager::create(&path, PagerOptions::default()).unwrap());
+    let pager = Arc::new(Pager::create(&path, cfg.pager_options()).unwrap());
     let store: Arc<dyn PageStore> = pager.clone();
     let tree = BTree::open_or_create(&store, cfg.btree_options()).unwrap();
 
