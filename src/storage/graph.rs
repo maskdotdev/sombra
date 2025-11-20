@@ -752,10 +752,6 @@ impl Graph {
             snapshot_pool,
             vacuum_mode,
             vacuum_horizon,
-            version_cache_hits,
-            version_cache_misses,
-            version_codec_raw_bytes,
-            version_codec_encoded_bytes,
         }
     }
 
