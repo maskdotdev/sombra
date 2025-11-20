@@ -127,6 +127,10 @@ pub struct Graph {
     version_codec_cfg: VersionCodecConfig,
     version_log_bytes: AtomicU64,
     version_log_entries: AtomicU64,
+    version_cache_hits: AtomicU64,
+    version_cache_misses: AtomicU64,
+    version_codec_raw_bytes: AtomicU64,
+    version_codec_encoded_bytes: AtomicU64,
 }
 
 struct VacuumSched {
@@ -439,6 +443,14 @@ pub struct GraphMvccStatus {
     pub version_log_bytes: u64,
     /// Number of entries currently stored in the version log.
     pub version_log_entries: u64,
+    /// Version cache hits accumulated since startup.
+    pub version_cache_hits: u64,
+    /// Version cache misses accumulated since startup.
+    pub version_cache_misses: u64,
+    /// Raw bytes processed by the version codec.
+    pub version_codec_raw_bytes: u64,
+    /// Encoded bytes produced by the version codec.
+    pub version_codec_encoded_bytes: u64,
     /// Configured retention window used by vacuum.
     pub retention_window: Duration,
     /// Snapshot of the commit table (if MVCC is enabled).
@@ -605,6 +617,10 @@ impl Graph {
             u64::from(raw_len),
             encoded.len() as u64,
         );
+        self.version_codec_raw_bytes
+            .fetch_add(u64::from(raw_len), AtomicOrdering::Relaxed);
+        self.version_codec_encoded_bytes
+            .fetch_add(encoded.len() as u64, AtomicOrdering::Relaxed);
         if let Some(cache) = &self.version_cache {
             cache.insert(VersionPtr::from_raw(ptr_value), Arc::new(entry.clone()));
         }
@@ -638,6 +654,8 @@ impl Graph {
         if let Some(cache) = &self.version_cache {
             if let Some(hit) = cache.get(ptr) {
                 self.metrics.version_cache_hit();
+                self.version_cache_hits
+                    .fetch_add(1, AtomicOrdering::Relaxed);
                 return Ok(Some((*hit).clone()));
             }
         }
@@ -648,6 +666,8 @@ impl Graph {
         if let Some(cache) = &self.version_cache {
             cache.insert(ptr, Arc::new(decoded.clone()));
             self.metrics.version_cache_miss();
+            self.version_cache_misses
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
         Ok(Some(decoded))
     }
@@ -696,6 +716,14 @@ impl Graph {
         let snapshot_pool = self.snapshot_pool.as_ref().map(|pool| pool.status());
         let vacuum_horizon = self.compute_vacuum_horizon();
         let vacuum_mode = self.select_vacuum_mode();
+        let version_cache_hits = self.version_cache_hits.load(AtomicOrdering::Relaxed);
+        let version_cache_misses = self.version_cache_misses.load(AtomicOrdering::Relaxed);
+        let version_codec_raw_bytes = self
+            .version_codec_raw_bytes
+            .load(AtomicOrdering::Relaxed);
+        let version_codec_encoded_bytes = self
+            .version_codec_encoded_bytes
+            .load(AtomicOrdering::Relaxed);
         let acked_not_durable_commits = commit_table
             .as_ref()
             .map(|snapshot| snapshot.acked_not_durable)
@@ -709,6 +737,10 @@ impl Graph {
         GraphMvccStatus {
             version_log_bytes: self.version_log_bytes(),
             version_log_entries: self.version_log_entry_count(),
+            version_cache_hits,
+            version_cache_misses,
+            version_codec_raw_bytes,
+            version_codec_encoded_bytes,
             retention_window: self.vacuum_cfg.retention_window,
             commit_table,
             latest_committed_lsn,
@@ -1221,6 +1253,10 @@ impl Graph {
             },
             version_log_bytes: AtomicU64::new(0),
             version_log_entries: AtomicU64::new(0),
+            version_cache_hits: AtomicU64::new(0),
+            version_cache_misses: AtomicU64::new(0),
+            version_codec_raw_bytes: AtomicU64::new(0),
+            version_codec_encoded_bytes: AtomicU64::new(0),
         });
         graph.recompute_version_log_bytes()?;
         graph.register_vacuum_hook();

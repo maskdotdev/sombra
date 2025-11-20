@@ -18,6 +18,14 @@ pub struct MvccStatusReport {
     pub version_log_bytes: u64,
     /// Number of entries stored in the version log.
     pub version_log_entries: u64,
+    /// Version cache hits since startup.
+    pub version_cache_hits: u64,
+    /// Version cache misses since startup.
+    pub version_cache_misses: u64,
+    /// Raw bytes passed through the version codec.
+    pub version_codec_raw_bytes: u64,
+    /// Encoded bytes produced by the version codec.
+    pub version_codec_encoded_bytes: u64,
     /// Retention window (milliseconds) used when computing the vacuum horizon.
     pub retention_window_ms: u64,
     /// Latest committed LSN when available.
@@ -149,6 +157,7 @@ impl From<CommitStatus> for CommitStatusKind {
         match status {
             CommitStatus::Pending => CommitStatusKind::Pending,
             CommitStatus::Committed => CommitStatusKind::Committed,
+            CommitStatus::Durable => CommitStatusKind::Durable,
         }
     }
 }
@@ -160,6 +169,10 @@ pub fn mvcc_status(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<Mv
     Ok(MvccStatusReport {
         version_log_bytes: snapshot.version_log_bytes,
         version_log_entries: snapshot.version_log_entries,
+        version_cache_hits: snapshot.version_cache_hits,
+        version_cache_misses: snapshot.version_cache_misses,
+        version_codec_raw_bytes: snapshot.version_codec_raw_bytes,
+        version_codec_encoded_bytes: snapshot.version_codec_encoded_bytes,
         retention_window_ms: snapshot.retention_window.as_millis().min(u64::MAX as u128) as u64,
         latest_committed_lsn: snapshot.latest_committed_lsn.map(|lsn| lsn.0),
         durable_lsn: snapshot.durable_lsn.map(|lsn| lsn.0),

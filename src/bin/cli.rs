@@ -1309,6 +1309,24 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
     );
     ui.spacer();
 
+    ui.section(
+        "Version Cache",
+        [
+            ("hits", format_count(report.version_cache_hits)),
+            ("misses", format_count(report.version_cache_misses)),
+        ],
+    );
+    ui.spacer();
+
+    ui.section(
+        "Version Codec",
+        [
+            ("raw_bytes", format_bytes(report.version_codec_raw_bytes)),
+            ("encoded_bytes", format_bytes(report.version_codec_encoded_bytes)),
+        ],
+    );
+    ui.spacer();
+
     if report.latest_committed_lsn.is_some()
         || report.durable_lsn.is_some()
         || report.acked_not_durable_commits.is_some()
