@@ -2094,7 +2094,11 @@ mod tests {
     #[test]
     fn planner_builds_simple_plan() {
         let planner = planner_with_metadata();
-        let ast = QueryBuilder::new().r#match("User").select(["a"]).build();
+        let ast = QueryBuilder::new()
+            .r#match("User")
+            .select(["a"])
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         match &output.plan.root.op {
             PhysicalOp::Project { fields } => {
@@ -2119,7 +2123,8 @@ mod tests {
                 pred.ge("age", 21_i64);
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
@@ -2143,7 +2148,8 @@ mod tests {
                 pred.eq("name", "Ada");
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
@@ -2173,7 +2179,8 @@ mod tests {
                 pred.eq("status", "active");
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
@@ -2205,7 +2212,8 @@ mod tests {
                 pred.in_list("name", ["Ada", "Grace"]);
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
@@ -2253,7 +2261,8 @@ mod tests {
                 });
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
@@ -2281,7 +2290,8 @@ mod tests {
                 });
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {
@@ -2307,7 +2317,8 @@ mod tests {
                 });
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         assert!(ast.distinct);
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
@@ -2334,7 +2345,8 @@ mod tests {
                 });
             })
             .select(["a"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         assert!(ast.distinct);
         let output = planner.plan(&ast).expect("plan succeeds");
         match &output.plan.root.op {
@@ -2366,7 +2378,8 @@ mod tests {
                 pred.eq("name", "Ada");
             })
             .select(["a", "b"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         assert!(ast.distinct);
         let output = planner.plan(&ast).expect("plan succeeds");
         match &output.plan.root.op {
@@ -2393,7 +2406,8 @@ mod tests {
                 pred.eq("name", "Ada");
             })
             .select(["a", "b"])
-            .build();
+            .build()
+            .expect("builder succeeds");
         let output = planner.plan(&ast).expect("plan succeeds");
         let project_input = output.plan.root.inputs.first().expect("project input");
         match &project_input.op {

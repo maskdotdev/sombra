@@ -307,7 +307,7 @@ impl Dict {
     /// * `Ok(None)` - The string is not in the dictionary.
     /// * `Err(_)` - An error occurred during the lookup.
     pub fn lookup(&self, s: &str) -> Result<Option<StrId>> {
-        let key = encode_string_key(s);
+        let key = encode_string_key(s)?;
         let read = self.store.begin_latest_committed_read()?;
         let raw = self.s2i.get(&read, &key)?;
         drop(read);
@@ -338,7 +338,7 @@ impl Dict {
     /// * The dictionary runs out of available identifiers (u32::MAX reached).
     /// * A storage operation fails.
     pub fn intern(&self, tx: &mut WriteGuard<'_>, s: &str) -> Result<StrId> {
-        let key = encode_string_key(s);
+        let key = encode_string_key(s)?;
         self.metrics.intern_call();
         if let Some(existing) = self.s2i.get_with_write(tx, &key)? {
             if existing > u32::MAX as u64 {
@@ -450,8 +450,8 @@ impl Dict {
     }
 }
 
-fn encode_string_key(s: &str) -> Vec<u8> {
+fn encode_string_key(s: &str) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4 + s.len());
-    ord::put_str_key(&mut buf, s);
-    buf
+    ord::put_str_key(&mut buf, s)?;
+    Ok(buf)
 }

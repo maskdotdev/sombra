@@ -2538,7 +2538,10 @@ impl Graph {
         if self.commit_table.is_none() {
             return;
         }
-        let mut last = self.mvcc_metrics_last.lock().unwrap();
+        let mut last = match self.mvcc_metrics_last.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
         let now = Instant::now();
         if let Some(prev) = *last {
             if now.duration_since(prev) < MVCC_METRICS_PUBLISH_INTERVAL {

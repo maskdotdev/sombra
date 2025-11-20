@@ -4,87 +4,93 @@
 pub mod ord {
     //! Order-preserving encoders for numeric and string keys.
 
+    use crate::types::{Result, SombraError};
     use core::convert::TryInto;
 
     const U64_LEN: usize = core::mem::size_of::<u64>();
     const SIGN_BIT: u64 = 1 << 63;
 
     /// Big-endian encoding for lexicographic order preservation.
-    pub fn put_u64_be(dst: &mut [u8], v: u64) {
-        assert!(dst.len() >= U64_LEN, "destination too small");
+    pub fn put_u64_be(dst: &mut [u8], v: u64) -> Result<()> {
+        if dst.len() < U64_LEN {
+            return Err(SombraError::Corruption("destination too small for u64"));
+        }
         dst[..U64_LEN].copy_from_slice(&v.to_be_bytes());
+        Ok(())
     }
 
     /// Decodes a u64 from big-endian byte order.
-    pub fn get_u64_be(src: &[u8]) -> u64 {
+    pub fn get_u64_be(src: &[u8]) -> Result<u64> {
         let head = src
             .get(..U64_LEN)
-            .unwrap_or_else(|| panic!("u64 source shorter than 8 bytes (have {})", src.len()));
-        let bytes: [u8; U64_LEN] = head.try_into().unwrap();
-        u64::from_be_bytes(bytes)
+            .ok_or(SombraError::Corruption("u64 source shorter than 8 bytes"))?;
+        let bytes: [u8; U64_LEN] = head
+            .try_into()
+            .map_err(|_| SombraError::Corruption("u64 conversion failed"))?;
+        Ok(u64::from_be_bytes(bytes))
     }
 
     /// Encodes a signed i64 with order preservation (flip sign bit for sorting).
-    pub fn put_i64_be(dst: &mut [u8], v: i64) {
+    pub fn put_i64_be(dst: &mut [u8], v: i64) -> Result<()> {
         let flipped = (v as u64) ^ SIGN_BIT;
-        put_u64_be(dst, flipped);
+        put_u64_be(dst, flipped)
     }
 
     /// Decodes a signed i64 with order preservation.
-    pub fn get_i64_be(src: &[u8]) -> i64 {
-        let flipped = get_u64_be(src);
+    pub fn get_i64_be(src: &[u8]) -> Result<i64> {
+        let flipped = get_u64_be(src)?;
         let raw = flipped ^ SIGN_BIT;
-        raw as i64
+        Ok(raw as i64)
     }
 
     /// Encodes an f64 with order preservation (NaN not allowed).
-    pub fn put_f64_be(dst: &mut [u8], v: f64) {
-        debug_assert!(!v.is_nan(), "NaN keys are not allowed");
+    pub fn put_f64_be(dst: &mut [u8], v: f64) -> Result<()> {
+        if v.is_nan() {
+            return Err(SombraError::Invalid("NaN keys are not allowed"));
+        }
         let bits = encode_f64_bits(v);
-        put_u64_be(dst, bits);
+        put_u64_be(dst, bits)
     }
 
     /// Decodes an f64 with order preservation.
-    pub fn get_f64_be(src: &[u8]) -> f64 {
-        let bits = get_u64_be(src);
+    pub fn get_f64_be(src: &[u8]) -> Result<f64> {
+        let bits = get_u64_be(src)?;
         let decoded = decode_f64_bits(bits);
-        f64::from_bits(decoded)
+        Ok(f64::from_bits(decoded))
     }
 
     /// Appends a length-prefixed string key to a byte vector.
-    pub fn put_str_key(dst: &mut Vec<u8>, s: &str) {
+    pub fn put_str_key(dst: &mut Vec<u8>, s: &str) -> Result<()> {
         let len = s.len();
-        assert!(
-            len <= u32::MAX as usize,
-            "string key too long (>{} bytes)",
-            u32::MAX
-        );
+        if len > u32::MAX as usize {
+            return Err(SombraError::Invalid("string key too long"));
+        }
         dst.extend_from_slice(&(len as u32).to_be_bytes());
         dst.extend_from_slice(s.as_bytes());
+        Ok(())
     }
 
     /// Splits a length-prefixed string key, returning the string and its total length in bytes.
-    pub fn split_str_key(src: &[u8]) -> (&str, usize) {
+    pub fn split_str_key(src: &[u8]) -> Result<(&str, usize)> {
         const LEN_LEN: usize = core::mem::size_of::<u32>();
-        assert!(
-            src.len() >= LEN_LEN,
-            "string key slice shorter than length prefix"
-        );
+        if src.len() < LEN_LEN {
+            return Err(SombraError::Corruption(
+                "string key slice shorter than length prefix",
+            ));
+        }
         let len = u32::from_be_bytes(
             src[..LEN_LEN]
                 .try_into()
-                .expect("prefix conversion should not fail"),
+                .map_err(|_| SombraError::Corruption("prefix conversion failed"))?,
         ) as usize;
         let end = LEN_LEN + len;
-        assert!(
-            src.len() >= end,
-            "string key slice truncated (need {} bytes, have {})",
-            len,
-            src.len().saturating_sub(LEN_LEN)
-        );
+        if src.len() < end {
+            return Err(SombraError::Corruption("string key slice truncated"));
+        }
         let body = &src[LEN_LEN..end];
-        let s = core::str::from_utf8(body).expect("string key not valid UTF-8");
-        (s, end)
+        let s = core::str::from_utf8(body)
+            .map_err(|_| SombraError::Corruption("string key not valid UTF-8"))?;
+        Ok((s, end))
     }
 
     fn encode_f64_bits(v: f64) -> u64 {
@@ -108,6 +114,8 @@ pub mod ord {
 pub mod var {
     //! Unsigned varints and ZigZag signed integers.
 
+    use crate::types::{Result, SombraError};
+
     #[allow(clippy::inline_always)]
     #[inline]
     fn push_byte(byte: u8, out: &mut Vec<u8>) {
@@ -129,13 +137,13 @@ pub mod var {
     }
 
     /// Decodes a u64 varint from a slice, updating the offset.
-    pub fn decode_u64(src: &[u8], off: &mut usize) -> u64 {
+    pub fn decode_u64(src: &[u8], off: &mut usize) -> Result<u64> {
         let mut result = 0u64;
         let mut shift = 0u32;
         for i in 0..10 {
             let idx = *off;
             if idx >= src.len() {
-                panic!("varint decode truncated at byte {}", i);
+                return Err(SombraError::Corruption("varint decode truncated"));
             }
             let byte = src[idx];
             *off += 1;
@@ -143,16 +151,20 @@ pub mod var {
             result |= payload << shift;
             if (byte & 0x80) == 0 {
                 if i == 9 && payload > 1 {
-                    panic!("varint overflow (more than 64 bits)");
+                    return Err(SombraError::Corruption(
+                        "varint overflow (more than 64 bits)",
+                    ));
                 }
-                return result;
+                return Ok(result);
             }
             shift += 7;
             if shift >= 64 {
-                panic!("varint too long (exceeds 64 bits)");
+                return Err(SombraError::Corruption("varint too long (exceeds 64 bits)"));
             }
         }
-        panic!("varint too long (exceeded 10 bytes)");
+        Err(SombraError::Corruption(
+            "varint too long (exceeded 10 bytes)",
+        ))
     }
 
     /// Encodes an i64 as a ZigZag-encoded varint.
@@ -162,15 +174,16 @@ pub mod var {
     }
 
     /// Decodes a ZigZag-encoded i64 varint from a slice, updating the offset.
-    pub fn decode_i64(src: &[u8], off: &mut usize) -> i64 {
-        let zigzag = decode_u64(src, off);
-        ((zigzag >> 1) as i64) ^ (-((zigzag & 1) as i64))
+    pub fn decode_i64(src: &[u8], off: &mut usize) -> Result<i64> {
+        let zigzag = decode_u64(src, off)?;
+        Ok(((zigzag >> 1) as i64) ^ (-((zigzag & 1) as i64)))
     }
 }
 
 pub mod buf {
     //! A simple slice-backed cursor for ergonomic parsing.
 
+    use crate::types::{Result, SombraError};
     use core::fmt;
 
     /// A cursor for reading bytes from a slice with offset tracking.
@@ -188,21 +201,16 @@ pub mod buf {
         }
 
         /// Takes the next `n` bytes from the cursor, advancing the offset.
-        pub fn take(&mut self, n: usize) -> &'a [u8] {
-            let end = self
-                .off
-                .checked_add(n)
-                .expect("cursor offset overflow during take");
+        pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+            let end = self.off.checked_add(n).ok_or(SombraError::Corruption(
+                "cursor offset overflow during take",
+            ))?;
             if end > self.buf.len() {
-                panic!(
-                    "cursor take beyond buffer: need {}, remaining {}",
-                    n,
-                    self.remaining()
-                );
+                return Err(SombraError::Corruption("cursor take beyond buffer"));
             }
             let slice = &self.buf[self.off..end];
             self.off = end;
-            slice
+            Ok(slice)
         }
 
         /// Returns the number of bytes remaining in the buffer.
@@ -224,87 +232,93 @@ pub mod buf {
 #[cfg(test)]
 mod tests {
     use super::{buf::Cursor, ord, var};
+    use crate::types::{Result, SombraError};
     use proptest::prelude::*;
 
     #[test]
-    fn u64_roundtrip() {
+    fn u64_roundtrip() -> Result<()> {
         let mut dst = [0u8; 8];
-        ord::put_u64_be(&mut dst, 123456789);
-        assert_eq!(ord::get_u64_be(&dst), 123456789);
+        ord::put_u64_be(&mut dst, 123456789)?;
+        assert_eq!(ord::get_u64_be(&dst)?, 123456789);
+        Ok(())
     }
 
     #[test]
-    fn i64_roundtrip() {
+    fn i64_roundtrip() -> Result<()> {
         let mut dst = [0u8; 8];
         let values = [i64::MIN, -1, 0, 1, i64::MAX];
         for &v in &values {
-            ord::put_i64_be(&mut dst, v);
-            assert_eq!(ord::get_i64_be(&dst), v);
+            ord::put_i64_be(&mut dst, v)?;
+            assert_eq!(ord::get_i64_be(&dst)?, v);
         }
+        Ok(())
     }
 
     #[test]
-    fn f64_ordering_handles_neg_zero() {
+    fn f64_ordering_handles_neg_zero() -> Result<()> {
         let mut neg = [0u8; 8];
         let mut pos = [0u8; 8];
-        ord::put_f64_be(&mut neg, -0.0);
-        ord::put_f64_be(&mut pos, 0.0);
+        ord::put_f64_be(&mut neg, -0.0)?;
+        ord::put_f64_be(&mut pos, 0.0)?;
         assert!(neg < pos, "negative zero must sort before positive zero");
-        assert_eq!(ord::get_f64_be(&neg), -0.0);
-        assert_eq!(ord::get_f64_be(&pos), 0.0);
+        assert_eq!(ord::get_f64_be(&neg)?, -0.0);
+        assert_eq!(ord::get_f64_be(&pos)?, 0.0);
+        Ok(())
     }
 
     #[test]
-    fn str_key_roundtrip() {
+    fn str_key_roundtrip() -> Result<()> {
         let s = "héllo";
         let mut buf = Vec::new();
-        ord::put_str_key(&mut buf, s);
-        let (decoded, consumed) = ord::split_str_key(&buf);
+        ord::put_str_key(&mut buf, s)?;
+        let (decoded, consumed) = ord::split_str_key(&buf)?;
         assert_eq!(decoded, s);
         assert_eq!(consumed, buf.len());
+        Ok(())
     }
 
     #[test]
-    fn varint_roundtrip_edges() {
+    fn varint_roundtrip_edges() -> Result<()> {
         let mut buf = Vec::new();
         var::encode_u64(0, &mut buf);
         let mut off = 0;
-        assert_eq!(var::decode_u64(&buf, &mut off), 0);
+        assert_eq!(var::decode_u64(&buf, &mut off)?, 0);
         assert_eq!(off, buf.len());
 
         buf.clear();
         var::encode_u64(u64::MAX, &mut buf);
         off = 0;
-        assert_eq!(var::decode_u64(&buf, &mut off), u64::MAX);
+        assert_eq!(var::decode_u64(&buf, &mut off)?, u64::MAX);
         assert_eq!(off, buf.len());
 
         buf.clear();
         var::encode_i64(i64::MIN, &mut buf);
         off = 0;
-        assert_eq!(var::decode_i64(&buf, &mut off), i64::MIN);
+        assert_eq!(var::decode_i64(&buf, &mut off)?, i64::MIN);
+        Ok(())
     }
 
     #[test]
-    #[should_panic(expected = "cursor take beyond buffer")]
     fn cursor_take_panics_on_overread() {
         let mut cur = Cursor::new(&[1, 2, 3]);
-        let _ = cur.take(4);
+        let err = cur.take(4).expect_err("overread should error");
+        assert!(matches!(err, SombraError::Corruption(_)));
     }
 
     #[test]
-    #[should_panic(expected = "varint decode truncated")]
     fn varint_decode_rejects_truncated() {
         let data = vec![0x80]; // continuation bit without payload
         let mut off = 0;
-        let _ = var::decode_u64(&data, &mut off);
+        let err = var::decode_u64(&data, &mut off).expect_err("truncated decode");
+        assert!(matches!(err, SombraError::Corruption(_)));
     }
 
     #[test]
-    #[should_panic(expected = "varint too long")]
     fn varint_decode_rejects_too_long() {
         let data = vec![0x81; 11];
         let mut off = 0;
-        let _ = var::decode_u64(&data, &mut off);
+        let err = var::decode_u64(&data, &mut off).expect_err("too long decode");
+        assert!(matches!(err, SombraError::Corruption(_)));
     }
 
     proptest! {
@@ -314,14 +328,14 @@ mod tests {
                 .iter()
                 .map(|&v| {
                     let mut buf = [0u8; 8];
-                    ord::put_u64_be(&mut buf, v);
+                    ord::put_u64_be(&mut buf, v).unwrap();
                     (buf, v)
                 })
                 .collect();
             encoded.sort_by(|a, b| a.0.cmp(&b.0));
             let decoded: Vec<u64> = encoded
                 .iter()
-                .map(|(buf, _)| ord::get_u64_be(buf))
+                .map(|(buf, _)| ord::get_u64_be(buf).unwrap())
                 .collect();
             let mut expected = xs.clone();
             expected.sort();
@@ -334,14 +348,14 @@ mod tests {
                 .iter()
                 .map(|&v| {
                     let mut buf = [0u8; 8];
-                    ord::put_i64_be(&mut buf, v);
+                    ord::put_i64_be(&mut buf, v).unwrap();
                     (buf, v)
                 })
                 .collect();
             encoded.sort_by(|a, b| a.0.cmp(&b.0));
             let decoded: Vec<i64> = encoded
                 .iter()
-                .map(|(buf, _)| ord::get_i64_be(buf))
+                .map(|(buf, _)| ord::get_i64_be(buf).unwrap())
                 .collect();
             let mut expected = xs.clone();
             expected.sort();
@@ -357,14 +371,14 @@ mod tests {
                 .iter()
                 .map(|&v| {
                     let mut buf = [0u8; 8];
-                    ord::put_f64_be(&mut buf, v);
-                    (buf, v)
-                })
-                .collect();
+                        ord::put_f64_be(&mut buf, v).unwrap();
+                        (buf, v)
+                    })
+                    .collect();
             encoded.sort_by(|a, b| a.0.cmp(&b.0));
             let decoded: Vec<f64> = encoded
                 .iter()
-                .map(|(buf, _)| ord::get_f64_be(buf))
+                .map(|(buf, _)| ord::get_f64_be(buf).unwrap())
                 .collect();
             let mut expected = xs.clone();
             expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -374,8 +388,8 @@ mod tests {
         #[test]
         fn str_key_roundtrip_prop(s in proptest::collection::vec(any::<char>(), 0..64).prop_map(|chars| chars.into_iter().collect::<String>())) {
             let mut buf = Vec::new();
-            ord::put_str_key(&mut buf, &s);
-            let (decoded, consumed) = ord::split_str_key(&buf);
+            ord::put_str_key(&mut buf, &s).unwrap();
+            let (decoded, consumed) = ord::split_str_key(&buf).unwrap();
             prop_assert_eq!(decoded, s);
             prop_assert_eq!(consumed, buf.len());
         }
@@ -385,7 +399,7 @@ mod tests {
             let mut buf = Vec::new();
             var::encode_u64(v, &mut buf);
             let mut off = 0;
-            let decoded = var::decode_u64(&buf, &mut off);
+            let decoded = var::decode_u64(&buf, &mut off).unwrap();
             prop_assert_eq!(decoded, v);
             prop_assert_eq!(off, buf.len());
         }
@@ -395,7 +409,7 @@ mod tests {
             let mut buf = Vec::new();
             var::encode_i64(v, &mut buf);
             let mut off = 0;
-            let decoded = var::decode_i64(&buf, &mut off);
+            let decoded = var::decode_i64(&buf, &mut off).unwrap();
             prop_assert_eq!(decoded, v);
             prop_assert_eq!(off, buf.len());
         }

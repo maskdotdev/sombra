@@ -600,11 +600,12 @@ impl ExpandStream {
         loop {
             if let Some(cursor) = self.neighbors.as_mut() {
                 if let Some(neighbor) = cursor.next() {
-                    let mut row = self
-                        .current_row
-                        .as_ref()
-                        .expect("current row set when neighbors available")
-                        .clone();
+                    let Some(current) = self.current_row.as_ref() else {
+                        return Err(SombraError::Invalid(
+                            "expand missing current row during neighbor iteration",
+                        ));
+                    };
+                    let mut row = current.clone();
                     row.insert(&self.to, neighbor.neighbor);
                     return Ok(Some(row));
                 }
@@ -1108,13 +1109,16 @@ fn fetch_node_data(
     cache: &NodeCache,
     id: NodeId,
 ) -> Result<NodeData> {
-    if let Some(existing) = cache.lock().unwrap().get(&id).cloned() {
+    let mut guard = cache
+        .lock()
+        .map_err(|_| SombraError::Invalid("node cache lock poisoned"))?;
+    if let Some(existing) = guard.get(&id).cloned() {
         return Ok(existing);
     }
     let data = graph
         .get_node(context.guard(), id)?
         .ok_or(SombraError::Invalid("node missing during evaluation"))?;
-    cache.lock().unwrap().insert(id, data.clone());
+    guard.insert(id, data.clone());
     Ok(data)
 }
 
@@ -1172,11 +1176,14 @@ fn resolve_prop_name(
     cache: &PropNameCache,
     prop: PropId,
 ) -> Result<String> {
-    if let Some(name) = cache.lock().unwrap().get(&prop).cloned() {
+    let mut guard = cache
+        .lock()
+        .map_err(|_| SombraError::Invalid("prop name cache lock poisoned"))?;
+    if let Some(name) = guard.get(&prop).cloned() {
         return Ok(name);
     }
     let name = metadata.property_name(prop)?;
-    cache.lock().unwrap().insert(prop, name.clone());
+    guard.insert(prop, name.clone());
     Ok(name)
 }
 
@@ -1509,7 +1516,7 @@ mod tests {
         // Seed data.
         seed_users(&pager, &graph, &[Some(25), Some(30)])?;
 
-        let ast = QueryBuilder::new().r#match("User").select(["a"]).build();
+        let ast = QueryBuilder::new().r#match("User").select(["a"]).build()?;
         let planner = Planner::new(PlannerConfig::default(), Arc::clone(&metadata));
         let plan = planner.plan(&ast)?;
         let executor = Executor::new(graph, pager, metadata);
@@ -1599,7 +1606,7 @@ mod tests {
         let metadata = setup_metadata();
         seed_users(&pager, &graph, &[Some(25), Some(30)])?;
 
-        let ast = QueryBuilder::new().r#match("User").select(["a"]).build();
+        let ast = QueryBuilder::new().r#match("User").select(["a"]).build()?;
         let planner = Planner::new(PlannerConfig::default(), Arc::clone(&metadata));
         let plan = planner.plan(&ast)?;
         let executor = Executor::new(graph, pager, metadata);

@@ -111,16 +111,17 @@ impl MetadataProvider for CatalogMetadata {
     }
 
     fn property_stats(&self, label: LabelId, prop: PropId) -> Result<Option<PropStats>> {
-        if let Some(stats) = self.prop_stats.lock().unwrap().get(&(label, prop)).cloned() {
+        let mut guard = self
+            .prop_stats
+            .lock()
+            .map_err(|_| SombraError::Invalid("prop stats cache lock poisoned"))?;
+        if let Some(stats) = guard.get(&(label, prop)).cloned() {
             return Ok(Some((*stats).clone()));
         }
         let stats = self.graph.property_stats(label, prop)?;
         if let Some(stats) = stats {
             let arc = Arc::new(stats);
-            self.prop_stats
-                .lock()
-                .unwrap()
-                .insert((label, prop), arc.clone());
+            guard.insert((label, prop), arc.clone());
             Ok(Some((*arc).clone()))
         } else {
             Ok(None)

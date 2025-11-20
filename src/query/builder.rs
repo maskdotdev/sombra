@@ -8,7 +8,7 @@ use crate::query::{
     planner::{PlanExplain, Planner, PlannerOutput},
     Value,
 };
-use crate::types::Result;
+use crate::types::{Result, SombraError};
 use std::{mem, ops::Bound};
 
 /// Fluent builder matching the Stage 8 ergonomics.
@@ -18,6 +18,7 @@ pub struct QueryBuilder {
     last_var: Option<Var>,
     next_var_idx: usize,
     pending_direction: EdgeDirection,
+    error: Option<SombraError>,
 }
 
 impl QueryBuilder {
@@ -28,6 +29,7 @@ impl QueryBuilder {
             last_var: None,
             next_var_idx: 0,
             pending_direction: EdgeDirection::Out,
+            error: None,
         }
     }
 
@@ -41,6 +43,9 @@ impl QueryBuilder {
     where
         T: Into<MatchTarget>,
     {
+        if self.error.is_some() {
+            return self;
+        }
         let (var, label) = target.into().into_parts(self.next_auto_var());
         self.ast.matches.push(MatchClause {
             var: var.clone(),
@@ -56,10 +61,18 @@ impl QueryBuilder {
         E: Into<EdgeSpec>,
         T: Into<MatchTarget>,
     {
-        let from = self
-            .last_var
-            .clone()
-            .expect("where_edge requires an existing left variable");
+        if self.error.is_some() {
+            return self;
+        }
+        let from = self.last_var.clone().or_else(|| {
+            self.error = Some(SombraError::Invalid(
+                "where_edge requires an existing left variable",
+            ));
+            None
+        });
+        let Some(from) = from else {
+            return self;
+        };
         let target = target.into();
         let (to, label) = target.into_parts(self.next_auto_var());
         let edge_spec: EdgeSpec = edge.into();
@@ -90,12 +103,25 @@ impl QueryBuilder {
         S: Into<String>,
         F: FnOnce(&mut PredicateBuilder),
     {
+        if self.error.is_some() {
+            return self;
+        }
         let var = Var(var.into());
         let mut builder = PredicateBuilder::new(var);
         build(&mut builder);
-        let expr = builder
-            .finish()
-            .expect("where_var requires at least one predicate");
+        if let Some(err) = builder.error {
+            self.error = Some(err);
+            return self;
+        }
+        let expr = match builder.finish() {
+            Some(expr) => expr,
+            None => {
+                self.error = Some(SombraError::Invalid(
+                    "where_var requires at least one predicate",
+                ));
+                return self;
+            }
+        };
         self.append_bool_expr(expr);
         self
     }
@@ -123,6 +149,9 @@ impl QueryBuilder {
         I: IntoIterator<Item = P>,
         P: Into<ProjectionSpec>,
     {
+        if self.error.is_some() {
+            return self;
+        }
         self.ast.projections = fields
             .into_iter()
             .map(|p| p.into().into_projection())
@@ -131,13 +160,17 @@ impl QueryBuilder {
     }
 
     /// Builds the AST without planning.
-    pub fn build(self) -> QueryAst {
-        self.ast
+    pub fn build(self) -> Result<QueryAst> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+        Ok(self.ast)
     }
 
     /// Requests a plan from the supplied planner.
     pub fn plan(self, planner: &Planner) -> Result<PlannerOutput> {
-        planner.plan(&self.ast)
+        let ast = self.build()?;
+        planner.plan(&ast)
     }
 
     /// Explains the plan using the supplied planner.
@@ -258,6 +291,7 @@ pub struct PredicateBuilder {
     var: Var,
     mode: PredicateMode,
     exprs: Vec<BoolExpr>,
+    error: Option<SombraError>,
 }
 
 impl PredicateBuilder {
@@ -270,39 +304,57 @@ impl PredicateBuilder {
             var,
             mode,
             exprs: Vec::new(),
+            error: None,
         }
     }
 
     fn push_cmp(&mut self, cmp: Comparison) -> &mut Self {
+        if self.error.is_some() {
+            return self;
+        }
         self.exprs.push(BoolExpr::Cmp(cmp));
         self
     }
 
     fn push_expr(&mut self, expr: BoolExpr) -> &mut Self {
+        if self.error.is_some() {
+            return self;
+        }
         self.exprs.push(expr);
         self
     }
 
     fn finish(self) -> Option<BoolExpr> {
-        match self.exprs.len() {
-            0 => None,
-            1 => Some(self.exprs.into_iter().next().unwrap()),
-            _ => Some(match self.mode {
-                PredicateMode::And => BoolExpr::And(self.exprs),
-                PredicateMode::Or => BoolExpr::Or(self.exprs),
-            }),
+        match self.error {
+            Some(_) => None,
+            None => match self.exprs.len() {
+                0 => None,
+                1 => self.exprs.into_iter().next(),
+                _ => Some(match self.mode {
+                    PredicateMode::And => BoolExpr::And(self.exprs),
+                    PredicateMode::Or => BoolExpr::Or(self.exprs),
+                }),
+            },
         }
     }
 
-    fn build_group_expr<F>(var: Var, mode: PredicateMode, build: F) -> BoolExpr
+    fn build_group_expr<F>(var: Var, mode: PredicateMode, build: F) -> Result<BoolExpr>
     where
         F: FnOnce(&mut PredicateBuilder),
     {
         let mut nested = PredicateBuilder::with_mode(var, mode);
         build(&mut nested);
-        nested
-            .finish()
-            .expect("predicate group must emit at least one predicate")
+        if let Some(err) = nested.error {
+            return Err(err);
+        }
+        nested.finish().ok_or(SombraError::Invalid(
+            "predicate group must emit at least one predicate",
+        ))
+    }
+    fn record_error(&mut self, err: SombraError) {
+        if self.error.is_none() {
+            self.error = Some(err);
+        }
     }
 
     /// Adds an equality predicate comparing the property to a literal.
@@ -417,16 +469,23 @@ impl PredicateBuilder {
         I: IntoIterator<Item = V>,
         V: Into<Value>,
     {
+        if self.error.is_some() {
+            return self;
+        }
         let collected: Vec<Value> = values.into_iter().map(Into::into).collect();
         if collected.is_empty() {
-            panic!("in_list requires at least one value");
+            self.record_error(SombraError::Invalid("in_list requires at least one value"));
+            return self;
         }
         let first_tag = mem::discriminant(&collected[0]);
         if !collected
             .iter()
             .all(|value| mem::discriminant(value) == first_tag)
         {
-            panic!("in_list requires all values to share the same type");
+            self.record_error(SombraError::Invalid(
+                "in_list requires all values to share the same type",
+            ));
+            return self;
         }
         self.push_cmp(Comparison::In {
             var: self.var.clone(),
@@ -473,8 +532,13 @@ impl PredicateBuilder {
     where
         F: FnOnce(&mut PredicateBuilder),
     {
-        let expr = PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::And, build);
-        self.push_expr(expr)
+        match PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::And, build) {
+            Ok(expr) => self.push_expr(expr),
+            Err(err) => {
+                self.record_error(err);
+                self
+            }
+        }
     }
 
     /// Nests a group of predicates combined with logical OR.
@@ -482,8 +546,13 @@ impl PredicateBuilder {
     where
         F: FnOnce(&mut PredicateBuilder),
     {
-        let expr = PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::Or, build);
-        self.push_expr(expr)
+        match PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::Or, build) {
+            Ok(expr) => self.push_expr(expr),
+            Err(err) => {
+                self.record_error(err);
+                self
+            }
+        }
     }
 
     /// Nests a group of predicates and negates the result.
@@ -491,8 +560,13 @@ impl PredicateBuilder {
     where
         F: FnOnce(&mut PredicateBuilder),
     {
-        let expr = PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::And, build);
-        self.push_expr(BoolExpr::Not(Box::new(expr)))
+        match PredicateBuilder::build_group_expr(self.var.clone(), PredicateMode::And, build) {
+            Ok(expr) => self.push_expr(BoolExpr::Not(Box::new(expr))),
+            Err(err) => {
+                self.record_error(err);
+                self
+            }
+        }
     }
 }
 
@@ -567,7 +641,7 @@ mod tests {
             .where_edge("FOLLOWS", "User")
             .select(["a", "b"]);
 
-        let ast = builder.build();
+        let ast = builder.build().expect("builder should succeed");
         assert_eq!(ast.matches.len(), 2);
         assert_eq!(ast.edges.len(), 1);
         assert_eq!(ast.projections.len(), 2);
@@ -580,7 +654,8 @@ mod tests {
             .where_var("a", |pred| {
                 pred.ge("age", Value::Int(21));
             })
-            .build();
+            .build()
+            .expect("builder should succeed");
         assert!(ast.predicate.is_some());
     }
 }
