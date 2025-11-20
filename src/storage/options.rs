@@ -43,6 +43,10 @@ pub struct GraphOptions {
     pub defer_adjacency_flush: bool,
     /// Whether index updates should be buffered and flushed in bulk at commit.
     pub defer_index_flush: bool,
+    /// Maximum number of snapshots to retain for reuse.
+    pub snapshot_pool_size: usize,
+    /// Maximum age in milliseconds for cached snapshots.
+    pub snapshot_pool_max_age_ms: u64,
 }
 
 impl GraphOptions {
@@ -67,6 +71,8 @@ impl GraphOptions {
             version_cache_capacity: 2048,
             defer_adjacency_flush: false,
             defer_index_flush: false,
+            snapshot_pool_size: 0,
+            snapshot_pool_max_age_ms: 50,
         }
     }
 
@@ -169,6 +175,18 @@ impl GraphOptions {
     /// Enables or disables buffering index updates until commit.
     pub fn defer_index_flush(mut self, enabled: bool) -> Self {
         self.defer_index_flush = enabled;
+        self
+    }
+
+    /// Sets the snapshot pool size (0 disables pooling).
+    pub fn snapshot_pool_size(mut self, size: usize) -> Self {
+        self.snapshot_pool_size = size;
+        self
+    }
+
+    /// Sets the maximum cached snapshot age in milliseconds.
+    pub fn snapshot_pool_max_age_ms(mut self, ms: u64) -> Self {
+        self.snapshot_pool_max_age_ms = ms;
         self
     }
 }

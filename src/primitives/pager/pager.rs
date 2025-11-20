@@ -29,7 +29,7 @@ use crate::primitives::{
 };
 use crate::storage::{
     profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
-    record_pager_wal_frames, CommitId, CommitReader, CommitTable, ReaderSnapshot,
+    record_pager_wal_frames, CommitId, CommitReader, CommitTable, IntentId, ReaderSnapshot,
     StorageProfileKind,
 };
 use crate::types::{
@@ -581,6 +581,7 @@ pub struct WriteGuard<'a> {
     committed: bool,
     commit_lsn: Option<Lsn>,
     extensions: TxnExtensions,
+    intent_id: IntentId,
 }
 
 #[derive(Default)]
@@ -663,8 +664,8 @@ impl<'a> WriteGuard<'a> {
         inner.next_lsn = Lsn(lsn.0.saturating_add(1));
         drop(inner);
         self.pager
-            .register_pending_commit(lsn)
-            .expect("commit table reserve");
+            .promote_intent(self.intent_id, lsn)
+            .expect("commit table promote intent");
         self.commit_lsn = Some(lsn);
         lsn
     }
@@ -1860,7 +1861,7 @@ impl Pager {
             }
         };
         if newly_reserved {
-            self.register_pending_commit(lsn)?;
+            self.promote_intent(guard.intent_id, lsn)?;
         }
         pager_test_log!(
             "[pager.commit] start lsn={} dirty_pages={} meta_dirty={}",
@@ -2491,9 +2492,9 @@ impl Pager {
         Ok(())
     }
 
-    fn register_pending_commit(&self, lsn: Lsn) -> Result<()> {
+    fn promote_intent(&self, intent: IntentId, lsn: Lsn) -> Result<()> {
         let mut table = self.commit_table.lock();
-        table.reserve(lsn.0)
+        table.promote_intent(intent, lsn.0)
     }
 
     fn finalize_commit(&self, lsn: Lsn) -> Result<()> {
@@ -2982,6 +2983,10 @@ impl PageStore for Pager {
     fn begin_write(&self) -> Result<WriteGuard<'_>> {
         let lock = self.locks.acquire_writer()?;
         let inner = self.inner.lock();
+        let intent_id = {
+            let mut table = self.commit_table.lock();
+            table.reserve_intent()
+        };
         let guard = WriteGuard {
             pager: self,
             lock: Some(lock),
@@ -2997,6 +3002,7 @@ impl PageStore for Pager {
             committed: false,
             commit_lsn: None,
             extensions: TxnExtensions::default(),
+            intent_id,
         };
         drop(inner);
         Ok(guard)

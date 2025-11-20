@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 /// refactors can evolve independently.
 pub type CommitId = u64;
 
+/// Identifier handed out when a writer signals intent to commit.
+pub type IntentId = u64;
+
 /// Sentinel commit ID meaning "visible forever".
 pub const COMMIT_MAX: CommitId = 0;
 
@@ -375,6 +378,7 @@ pub struct CommitTable {
     reader_floor: BTreeMap<CommitId, u32>,
     readers: HashMap<ReaderId, ActiveReader>,
     next_reader_id: ReaderId,
+    next_intent_id: IntentId,
 }
 
 impl CommitTable {
@@ -386,7 +390,40 @@ impl CommitTable {
             reader_floor: BTreeMap::new(),
             readers: HashMap::new(),
             next_reader_id: 1,
+            next_intent_id: start_id.saturating_add(1),
         }
+    }
+
+    /// Reserves a new intent identifier for an upcoming commit.
+    pub fn reserve_intent(&mut self) -> IntentId {
+        let id = self.next_intent_id;
+        self.next_intent_id = self.next_intent_id.saturating_add(1);
+        id
+    }
+
+    /// Promotes a reserved intent to a concrete commit ID.
+    pub fn promote_intent(&mut self, intent: IntentId, commit: CommitId) -> Result<()> {
+        if commit == COMMIT_MAX {
+            return Err(SombraError::Invalid("commit id zero reserved"));
+        }
+        if intent == 0 || intent >= self.next_intent_id {
+            return Err(SombraError::Invalid("intent id unknown"));
+        }
+        if commit <= self.released_up_to {
+            return Err(SombraError::Invalid("commit id already released"));
+        }
+        if let Some(last) = self.entries.back() {
+            if commit <= last.id {
+                return Err(SombraError::Invalid("commit id must increase"));
+            }
+        }
+        self.entries.push_back(CommitEntry {
+            id: commit,
+            status: CommitStatus::Pending,
+            reader_refs: 0,
+            committed_at: None,
+        });
+        Ok(())
     }
 
     /// Registers a reserved commit ID, marking it pending.
@@ -624,8 +661,10 @@ mod commit_table_tests {
     #[test]
     fn reserve_and_commit_flow() {
         let mut table = CommitTable::new(0);
-        table.reserve(1).unwrap();
-        table.reserve(2).unwrap();
+        let intent1 = table.reserve_intent();
+        let intent2 = table.reserve_intent();
+        table.promote_intent(intent1, 1).unwrap();
+        table.promote_intent(intent2, 2).unwrap();
         assert_eq!(table.oldest_visible(), 1);
         table.mark_committed(1).unwrap();
         table.release_committed(1);
@@ -638,8 +677,10 @@ mod commit_table_tests {
     #[test]
     fn reject_unknown_ids() {
         let mut table = CommitTable::new(10);
-        assert!(table.reserve(5).is_err());
-        table.reserve(11).unwrap();
+        let intent = table.reserve_intent();
+        assert!(table.promote_intent(intent, 5).is_err());
+        let intent = table.reserve_intent();
+        table.promote_intent(intent, 11).unwrap();
         assert!(table.reserve(11).is_err());
         assert!(table.mark_committed(5).is_err());
     }
@@ -752,9 +793,11 @@ mod commit_table_tests {
     #[test]
     fn snapshot_reports_entries() {
         let mut table = CommitTable::new(0);
-        table.reserve(1).unwrap();
+        let intent1 = table.reserve_intent();
+        let intent2 = table.reserve_intent();
+        table.promote_intent(intent1, 1).unwrap();
         table.mark_committed(1).unwrap();
-        table.reserve(2).unwrap();
+        table.promote_intent(intent2, 2).unwrap();
         let reader = table
             .register_reader(2, Instant::now(), thread::current().id())
             .unwrap();

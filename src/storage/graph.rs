@@ -37,8 +37,8 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{
-    CommitId, CommitTable, CommitTableSnapshot, VersionCodecConfig, VersionHeader,
-    VersionLogEntry, VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+    CommitId, CommitTable, CommitTableSnapshot, VersionCodecConfig, VersionHeader, VersionLogEntry,
+    VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
 use super::node::{
@@ -122,6 +122,7 @@ pub struct Graph {
     inline_history_max_bytes: usize,
     defer_adjacency_flush: bool,
     defer_index_flush: bool,
+    snapshot_pool: Option<SnapshotPool>,
     version_cache: Option<VersionCache>,
     version_codec_cfg: VersionCodecConfig,
     version_log_bytes: AtomicU64,
@@ -193,6 +194,118 @@ struct IndexBuffer {
     label_removes: Vec<(LabelId, NodeId, CommitId)>,
     prop_inserts: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
     prop_removes: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
+}
+
+struct PooledSnapshot {
+    guard: ReadGuard,
+    acquired_at: Instant,
+}
+
+struct SnapshotPool {
+    store: Arc<dyn PageStore>,
+    retention: Duration,
+    inner: Mutex<Vec<PooledSnapshot>>,
+    capacity: usize,
+}
+
+impl SnapshotPool {
+    fn new(store: Arc<dyn PageStore>, capacity: usize, retention: Duration) -> Self {
+        Self {
+            store,
+            retention,
+            inner: Mutex::new(Vec::new()),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn lease(&self) -> Result<SnapshotLease<'_>> {
+        let now = Instant::now();
+        let durable = self.store.durable_lsn().map(|lsn| lsn.0).unwrap_or(0);
+        let mut pool = self.inner.lock();
+        while let Some(snapshot) = pool.pop() {
+            let age = now.saturating_duration_since(snapshot.acquired_at);
+            if age > self.retention {
+                continue;
+            }
+            if durable > snapshot.guard.snapshot_lsn().0 {
+                continue;
+            }
+            return Ok(SnapshotLease {
+                pool: Some(self),
+                snapshot: Some(snapshot),
+            });
+        }
+        drop(pool);
+        let guard = self.store.begin_latest_committed_read()?;
+        Ok(SnapshotLease {
+            pool: Some(self),
+            snapshot: Some(PooledSnapshot {
+                guard,
+                acquired_at: now,
+            }),
+        })
+    }
+
+    fn return_snapshot(&self, snapshot: PooledSnapshot) {
+        let now = Instant::now();
+        let durable = self.store.durable_lsn().map(|lsn| lsn.0).unwrap_or(0);
+        if now.saturating_duration_since(snapshot.acquired_at) > self.retention {
+            return;
+        }
+        if durable > snapshot.guard.snapshot_lsn().0 {
+            return;
+        }
+        let mut pool = self.inner.lock();
+        if pool.len() >= self.capacity {
+            return;
+        }
+        pool.push(snapshot);
+    }
+
+    fn status(&self) -> SnapshotPoolStatus {
+        let pool = self.inner.lock();
+        SnapshotPoolStatus {
+            capacity: self.capacity,
+            available: pool.len(),
+        }
+    }
+}
+
+struct SnapshotLease<'a> {
+    pool: Option<&'a SnapshotPool>,
+    snapshot: Option<PooledSnapshot>,
+}
+
+impl<'a> SnapshotLease<'a> {
+    fn inner(&self) -> &ReadGuard {
+        &self.snapshot.as_ref().expect("snapshot present").guard
+    }
+
+    fn direct(guard: ReadGuard) -> Self {
+        Self {
+            pool: None,
+            snapshot: Some(PooledSnapshot {
+                guard,
+                acquired_at: Instant::now(),
+            }),
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for SnapshotLease<'a> {
+    type Target = ReadGuard;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner()
+    }
+}
+
+impl<'a> Drop for SnapshotLease<'a> {
+    fn drop(&mut self) {
+        if let (Some(pool), Some(snapshot)) = (self.pool, self.snapshot.take()) {
+            pool.return_snapshot(snapshot);
+        }
+    }
 }
 
 trait VersionChainRecord {
@@ -340,6 +453,17 @@ pub struct GraphMvccStatus {
     pub wal_allocator: Option<WalAllocatorStats>,
     /// Async fsync backlog (pending vs durable) when enabled.
     pub async_fsync_backlog: Option<AsyncFsyncBacklog>,
+    /// Snapshot pool occupancy when enabled.
+    pub snapshot_pool: Option<SnapshotPoolStatus>,
+}
+
+/// Summary of snapshot pooling state.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotPoolStatus {
+    /// Maximum cached snapshots.
+    pub capacity: usize,
+    /// Currently cached snapshots.
+    pub available: usize,
 }
 
 /// Reason a vacuum pass ran.
@@ -406,6 +530,16 @@ impl Graph {
             return None;
         }
         Some(bytes.to_vec())
+    }
+
+    fn lease_latest_snapshot(&self) -> Result<SnapshotLease<'_>> {
+        if let Some(pool) = &self.snapshot_pool {
+            pool.lease()
+        } else {
+            self.store
+                .begin_latest_committed_read()
+                .map(SnapshotLease::direct)
+        }
     }
 
     fn log_version_entry(
@@ -527,6 +661,7 @@ impl Graph {
         let wal_backlog = self.store.wal_commit_backlog();
         let wal_allocator = self.store.wal_allocator_stats();
         let async_fsync_backlog = self.store.async_fsync_backlog();
+        let snapshot_pool = self.snapshot_pool.as_ref().map(|pool| pool.status());
         let acked_not_durable_commits = match (latest_committed_lsn, durable_lsn) {
             (Some(latest), Some(durable)) => Some(latest.0.saturating_sub(durable.0)),
             _ => None,
@@ -545,6 +680,7 @@ impl Graph {
             wal_backlog,
             wal_allocator,
             async_fsync_backlog,
+            snapshot_pool,
         }
     }
 
@@ -948,6 +1084,15 @@ impl Graph {
             .unwrap_or(0);
 
         let commit_table = store.commit_table();
+        let snapshot_pool = if opts.snapshot_pool_size > 0 {
+            Some(SnapshotPool::new(
+                Arc::clone(&store),
+                opts.snapshot_pool_size,
+                Duration::from_millis(opts.snapshot_pool_max_age_ms.max(1)),
+            ))
+        } else {
+            None
+        };
         let version_cache = if opts.version_cache_capacity > 0 {
             Some(VersionCache::new(
                 opts.version_cache_shards,
@@ -999,6 +1144,7 @@ impl Graph {
             inline_history_max_bytes: opts.inline_history_max_bytes,
             defer_adjacency_flush: opts.defer_adjacency_flush,
             defer_index_flush: opts.defer_index_flush,
+            snapshot_pool,
             version_cache,
             version_codec_cfg: VersionCodecConfig {
                 kind: opts.version_codec,
@@ -1193,7 +1339,7 @@ impl Graph {
 
     /// Checks if a property index exists for the given label and property.
     pub fn has_property_index(&self, label: LabelId, prop: PropId) -> Result<bool> {
-        let read = self.store.begin_latest_committed_read()?;
+        let read = self.lease_latest_snapshot()?;
         Ok(self
             .indexes
             .get_property_index(&read, label, prop)?
@@ -1207,7 +1353,7 @@ impl Graph {
 
     /// Retrieves the property index definition for a given label and property.
     pub fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
-        let read = self.store.begin_latest_committed_read()?;
+        let read = self.lease_latest_snapshot()?;
         self.indexes.get_property_index(&read, label, prop)
     }
 
@@ -1230,7 +1376,7 @@ impl Graph {
 
     /// Returns all property index definitions currently registered.
     pub fn all_property_indexes(&self) -> Result<Vec<IndexDef>> {
-        let read = self.store.begin_latest_committed_read()?;
+        let read = self.lease_latest_snapshot()?;
         self.indexes.all_property_indexes(&read)
     }
 
@@ -1530,7 +1676,7 @@ impl Graph {
         let prop_bytes = self.read_node_prop_bytes_with_write(tx, &row.props)?;
         let old_props_vec = self.materialize_props_owned_with_write(tx, &prop_bytes)?;
         let old_props: BTreeMap<PropId, PropValueOwned> = old_props_vec.into_iter().collect();
-        let read = self.store.begin_latest_committed_read()?;
+        let read = self.lease_latest_snapshot()?;
         let incident = self.collect_incident_edges(&read, id)?;
         drop(read);
 
@@ -3215,7 +3361,7 @@ impl Graph {
         match storage {
             NodePropStorage::Inline(bytes) => Ok(bytes.clone()),
             NodePropStorage::VRef(vref) => {
-                let read = self.store.begin_latest_committed_read()?;
+                let read = self.lease_latest_snapshot()?;
                 self.vstore.read(&read, *vref)
             }
         }
@@ -3245,7 +3391,7 @@ impl Graph {
 
     fn materialize_props_owned(&self, bytes: &[u8]) -> Result<Vec<(PropId, PropValueOwned)>> {
         let raw = props::decode_raw(bytes)?;
-        let read = self.store.begin_latest_committed_read()?;
+        let read = self.lease_latest_snapshot()?;
         let props = props::materialize_props(&raw, &self.vstore, &read)?;
         Ok(props)
     }
