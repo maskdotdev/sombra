@@ -309,7 +309,7 @@ impl BTree {
 
 **Design:**
 
-* **Coalescing:** Group consecutive pageIds (or file offsets) into a single `pwritev`. Bound groups by `wal_commit_max_frames` and `wal_commit_coalesce_ms`.
+* **Coalescing:** Group consecutive pageIds (or file offsets) into a single `pwritev`. Bound groups by `group_commit_max_frames` and `group_commit_max_wait_ms`.
 * **Parallelism:** Multiple in-flight I/O groups, capped by `numa_cores` or `IO_SQEs` hint. Preserve order constraints within a txn, but allow groups to be queued in parallel.
 * **Fsync strategy:** Single `fdatasync` at group tail (or range fsync if available). Keep `Synchronous::Full` semantics.
 
@@ -352,7 +352,7 @@ impl BTree {
 * **Counters:**
 
   * `btree_in_place_edits`, `btree_leaf_rebuilds`, `btree_splits`
-  * `wal_frames`, `wal_coalesced_writes`, `wal_commit_ms_p50/p95`
+  * `wal_frames`, `wal_coalesced_writes`, `group_commit_ms_p50/p95`
   * `idx_cache_hits`, `idx_cache_misses`
 * **Trace probes:** mark `put_many` groups and commit phases.
 * **Feature flags:**
@@ -509,7 +509,7 @@ fn insert_in_place(leaf: &mut [u8], pos: usize, cell: &[u8]) -> Result<bool> {
 
 * Introduce `PendingWalFrame` + `PageImageLease` so `Pager::commit` can hold read guards over dirty frames; if any leases exist we flush synchronously without cloning and unblock writers once the append completes.
 * Keep `WalFrameOwned` for the async path and convert pending frames into `Vec<u8>` only when no leases are present, preserving the existing background committer semantics for catalog/meta-only commits.
-* Add `WalIoBatch` to `WalCommitter`: bucket consecutive `page_id`s (or `page_offset`s) up to `wal_commit_max_frames`; emit vectored writes via a new optional `FileIo::writev_at` (Unix pwritev / Windows WriteFileGather) while retaining the existing `write_at` loop as a fallback.
+* Add `WalIoBatch` to `WalCommitter`: bucket consecutive `page_id`s (or `page_offset`s) up to `group_commit_max_frames`; emit vectored writes via a new optional `FileIo::writev_at` (Unix pwritev / Windows WriteFileGather) while retaining the existing `write_at` loop as a fallback.
 * Track `wal_coalesced_writes`, `wal_commit_group_len_{p50,p95}`, and `pager_commit_bytes_borrowed` counters through `storage::profile` + `StorageMetrics`.
 
 **Verification:**

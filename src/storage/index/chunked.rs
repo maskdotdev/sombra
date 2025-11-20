@@ -57,7 +57,7 @@ impl ChunkedIndex {
         };
         segment.insert(node);
         let encoded = segment.encode();
-        let value = self.versioned_bytes(tx, encoded, commit);
+        let value = self.versioned_bytes(tx, encoded, commit, false);
         tree.put(tx, &key, &value)
     }
 
@@ -87,15 +87,9 @@ impl ChunkedIndex {
         if !segment.remove(node) {
             return Err(SombraError::Corruption("chunked postings entry missing"));
         }
-        if segment.is_empty() {
-            let removed = tree.delete(tx, &key)?;
-            debug_assert!(removed, "expected postings segment to exist");
-            Ok(())
-        } else {
-            let encoded = segment.encode();
-            let value = self.versioned_bytes(tx, encoded, commit);
-            tree.put(tx, &key, &value)
-        }
+        let encoded = segment.encode();
+        let value = self.versioned_bytes(tx, encoded, commit, segment.is_empty());
+        tree.put(tx, &key, &value)
     }
 
     pub fn scan(&self, tx: &ReadGuard, prefix: &[u8]) -> Result<Vec<NodeId>> {
@@ -341,9 +335,14 @@ impl ChunkedIndex {
         tx: &mut WriteGuard<'_>,
         data: Vec<u8>,
         commit: Option<CommitId>,
+        tombstone: bool,
     ) -> VersionedValue<Vec<u8>> {
         let commit_id = commit.unwrap_or_else(|| tx.reserve_commit_id().0);
-        VersionedValue::new(VersionHeader::new(commit_id, COMMIT_MAX, 0, 0), data)
+        let mut header = VersionHeader::new(commit_id, COMMIT_MAX, 0, 0);
+        if tombstone {
+            header.flags |= mvcc_flags::TOMBSTONE;
+        }
+        VersionedValue::new(header, data)
     }
 
     fn init_root_page(&self, tx: &mut WriteGuard<'_>) -> Result<PageId> {
@@ -650,5 +649,47 @@ impl Segment {
 
     fn into_nodes(self) -> Vec<NodeId> {
         self.nodes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::pager::{Pager, PagerOptions};
+    use tempfile::tempdir;
+
+    #[test]
+    fn remove_marks_tombstone_instead_of_delete() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunked_remove.db");
+        let store: Arc<dyn PageStore> = Arc::new(Pager::create(&path, PagerOptions::default())?);
+        let (index, _) = ChunkedIndex::open(&store, PageId(0))?;
+        let prefix = ChunkedIndex::make_prefix(LabelId(7), PropId(9), b"value-key");
+        let node = NodeId(42);
+
+        {
+            let mut write = store.begin_write()?;
+            index.put_with_commit(&mut write, &prefix, node, None)?;
+            store.commit(write)?;
+        }
+
+        {
+            let mut write = store.begin_write()?;
+            index.remove_with_commit(&mut write, &prefix, node, None)?;
+            store.commit(write)?;
+        }
+
+        let read = store.begin_latest_committed_read()?;
+        let tree = index.borrow_tree()?;
+        let mut key = prefix.clone();
+        key.extend_from_slice(&SEGMENT_PRIMARY.to_be_bytes());
+        let value = tree
+            .get(&read, &key)?
+            .expect("tombstoned segment should remain insert-only");
+        assert!(
+            value.header.flags & mvcc_flags::TOMBSTONE != 0,
+            "segment removal must mark tombstone flag"
+        );
+        Ok(())
     }
 }

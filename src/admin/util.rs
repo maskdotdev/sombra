@@ -50,7 +50,7 @@ pub fn open_graph(path: &Path, opts: &AdminOpenOptions) -> Result<GraphHandle> {
     let store: Arc<dyn PageStore> = pager.clone();
     let graph_opts = GraphOptions::new(Arc::clone(&store))
         .distinct_neighbors_default(opts.distinct_neighbors_default);
-    let graph = Arc::new(Graph::open(graph_opts)?);
+    let graph = Graph::open(graph_opts)?;
     let dict = Arc::new(Dict::open(store, DictOptions::default())?);
     Ok(GraphHandle { pager, graph, dict })
 }
@@ -70,6 +70,17 @@ pub(crate) fn wal_path(path: &Path) -> PathBuf {
         .map(OsString::from)
         .unwrap_or_else(|| OsString::from("sombra"));
     name.push("-wal");
+    let mut output = path.to_path_buf();
+    output.set_file_name(name);
+    output
+}
+
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("sombra"));
+    name.push("-lock");
     let mut output = path.to_path_buf();
     output.set_file_name(name);
     output

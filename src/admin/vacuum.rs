@@ -123,11 +123,12 @@ pub fn vacuum_into(
         None
     };
 
+    let retention = graph.vacuum_retention_window();
     let (horizon, reader_snapshot) = match graph.commit_table() {
         Some(table) => {
             let guard = table.lock();
             let reader_snapshot = guard.reader_snapshot(Instant::now());
-            let horizon = guard.oldest_visible();
+            let horizon = guard.vacuum_horizon(retention);
             drop(guard);
             (horizon, Some(reader_snapshot))
         }
@@ -142,7 +143,7 @@ pub fn vacuum_into(
     ensure_parent_dir(dst_path)?;
     let copied = fs::copy(src_path, dst_path)?;
 
-    let total_pruned = vacuum_stats.versions_pruned
+    let total_pruned = vacuum_stats.log_versions_pruned
         + vacuum_stats.adjacency_fwd_pruned
         + vacuum_stats.adjacency_rev_pruned
         + vacuum_stats.index_label_pruned
@@ -184,7 +185,7 @@ pub fn vacuum_into(
         checkpoint_lsn: meta.last_checkpoint_lsn.0,
         analyze_performed: opts.analyze,
         analyze_summary,
-        version_log_pruned: vacuum_stats.versions_pruned,
+        version_log_pruned: vacuum_stats.log_versions_pruned,
         adjacency_fwd_pruned: vacuum_stats.adjacency_fwd_pruned,
         adjacency_rev_pruned: vacuum_stats.adjacency_rev_pruned,
         index_label_pruned: vacuum_stats.index_label_pruned,
@@ -353,8 +354,14 @@ fn rename_if_exists(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 fn remove_if_exists(path: &Path) -> std::io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
+    match fs::metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            }
+        }
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }

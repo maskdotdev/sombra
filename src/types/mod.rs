@@ -54,6 +54,8 @@ pub struct VRef {
     pub len: u32,
     /// Checksum for data integrity verification.
     pub checksum: u32,
+    /// Commit ID that owns this payload (0 means untracked/legacy).
+    pub owner_commit: u64,
 }
 
 /// Error types for Sombra database operations.

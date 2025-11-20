@@ -42,7 +42,7 @@ fn micro_property(c: &mut Criterion) {
 struct PropertyHarness {
     _tmpdir: TempDir,
     pager: Arc<Pager>,
-    graph: Graph,
+    graph: Arc<Graph>,
     label: LabelId,
     prop: PropId,
     domain: i64,

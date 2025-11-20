@@ -14,6 +14,12 @@ pub struct Profile {
     pub cache_pages: Option<usize>,
     pub synchronous: Option<SynchronousArg>,
     pub distinct_neighbors_default: Option<bool>,
+    pub group_commit_max_writers: Option<usize>,
+    pub group_commit_max_frames: Option<usize>,
+    pub group_commit_max_wait_ms: Option<u64>,
+    pub async_fsync: Option<bool>,
+    pub wal_segment_size_bytes: Option<u64>,
+    pub wal_preallocate_segments: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +100,24 @@ impl CliConfig {
         if let Some(sync) = update.synchronous {
             entry.synchronous = Some(sync_to_string(sync));
         }
+        if let Some(max_writers) = update.group_commit_max_writers {
+            entry.group_commit_max_writers = Some(max_writers);
+        }
+        if let Some(max_frames) = update.group_commit_max_frames {
+            entry.group_commit_max_frames = Some(max_frames);
+        }
+        if let Some(wait_ms) = update.group_commit_max_wait_ms {
+            entry.group_commit_max_wait_ms = Some(wait_ms);
+        }
+        if let Some(async_fsync) = update.async_fsync {
+            entry.async_fsync = Some(async_fsync);
+        }
+        if let Some(segment_bytes) = update.wal_segment_size_bytes {
+            entry.wal_segment_size_bytes = Some(segment_bytes);
+        }
+        if let Some(preallocate) = update.wal_preallocate_segments {
+            entry.wal_preallocate_segments = Some(preallocate);
+        }
         if let Some(distinct) = update.distinct_neighbors_default {
             entry.distinct_neighbors_default = Some(distinct);
         }
@@ -122,6 +146,19 @@ impl CliConfig {
             source,
         })?;
         Ok(target)
+    }
+
+    pub fn delete_profile(&mut self, name: &str) -> Result<(), ConfigError> {
+        if self.data.profiles.remove(name).is_none() {
+            return Err(ConfigError::ProfileNotFound {
+                name: name.to_string(),
+            });
+        }
+        if self.data.default_profile.as_deref() == Some(name) {
+            self.data.default_profile = None;
+        }
+        self.profiles = parse_profiles(&self.data)?;
+        Ok(())
     }
 }
 
@@ -177,6 +214,12 @@ fn convert_profile(name: &str, raw: &RawProfile) -> Result<Profile, ConfigError>
         cache_pages: raw.cache_pages,
         synchronous,
         distinct_neighbors_default: raw.distinct_neighbors_default,
+        group_commit_max_writers: raw.group_commit_max_writers,
+        group_commit_max_frames: raw.group_commit_max_frames,
+        group_commit_max_wait_ms: raw.group_commit_max_wait_ms,
+        async_fsync: raw.async_fsync,
+        wal_segment_size_bytes: raw.wal_segment_size_bytes,
+        wal_preallocate_segments: raw.wal_preallocate_segments,
     })
 }
 
@@ -203,6 +246,12 @@ struct RawProfile {
     cache_pages: Option<usize>,
     synchronous: Option<String>,
     distinct_neighbors_default: Option<bool>,
+    group_commit_max_writers: Option<usize>,
+    group_commit_max_frames: Option<usize>,
+    group_commit_max_wait_ms: Option<u64>,
+    async_fsync: Option<bool>,
+    wal_segment_size_bytes: Option<u64>,
+    wal_preallocate_segments: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -212,6 +261,12 @@ pub struct ProfileUpdate {
     pub cache_pages: Option<usize>,
     pub synchronous: Option<SynchronousArg>,
     pub distinct_neighbors_default: Option<bool>,
+    pub group_commit_max_writers: Option<usize>,
+    pub group_commit_max_frames: Option<usize>,
+    pub group_commit_max_wait_ms: Option<u64>,
+    pub async_fsync: Option<bool>,
+    pub wal_segment_size_bytes: Option<u64>,
+    pub wal_preallocate_segments: Option<u32>,
 }
 
 #[derive(Debug, Error)]

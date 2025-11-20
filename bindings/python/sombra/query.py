@@ -981,6 +981,38 @@ class Database:
         self._schema = _normalize_runtime_schema(schema)
         return self
 
+    def get_node_record(self, node_id: int) -> Optional[Dict[str, Any]]:
+        record = _native.database_get_node(self._handle, int(node_id))
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            raise TypeError("node record must be a mapping when present")
+        return record
+
+    def get_edge_record(self, edge_id: int) -> Optional[Dict[str, Any]]:
+        record = _native.database_get_edge(self._handle, int(edge_id))
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            raise TypeError("edge record must be a mapping when present")
+        return record
+
+    def count_nodes_with_label(self, label: str) -> int:
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("count_nodes_with_label requires a non-empty string label")
+        return int(_native.database_count_nodes_with_label(self._handle, label))
+
+    def count_edges_with_type(self, edge_type: str) -> int:
+        if not isinstance(edge_type, str) or not edge_type.strip():
+            raise ValueError("count_edges_with_type requires a non-empty edge type string")
+        return int(_native.database_count_edges_with_type(self._handle, edge_type))
+
+    def list_nodes_with_label(self, label: str) -> List[int]:
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("list_nodes_with_label requires a non-empty string label")
+        values = _native.database_list_nodes_with_label(self._handle, label)
+        return [int(value) for value in values]
+
     def create_node(
         self,
         labels: Union[str, Sequence[str]],

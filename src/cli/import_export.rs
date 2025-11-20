@@ -286,7 +286,7 @@ pub fn run_export(cfg: &ExportConfig, opts: &AdminOpenOptions) -> Result<ExportS
     }
 
     let handle = open_graph(&cfg.db_path, opts)?;
-    let read = handle.pager.begin_read()?;
+    let read = handle.pager.begin_latest_committed_read()?;
     let mut summary = ExportSummary::default();
 
     if let Some(path) = &cfg.nodes_out {
@@ -539,7 +539,7 @@ impl BulkEdgeValidator for SnapshotEdgeValidator {
         if edges.is_empty() {
             return Ok(());
         }
-        let read = self.pager.begin_read()?;
+        let read = self.pager.begin_latest_committed_read()?;
         for (src, dst) in edges {
             if !self.graph.node_exists(&read, *src)? {
                 return Err(SombraError::Invalid(

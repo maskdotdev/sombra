@@ -417,7 +417,7 @@ fn bench_sombra_reads(cfg: &BenchConfig) -> BenchResult {
     reset_profile_counters();
 
     bench(DatabaseKind::Sombra, cfg.mode.label(), cfg.docs, || {
-        let read = pager.begin_read().unwrap();
+        let read = pager.begin_latest_committed_read().unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
         for _ in 0..cfg.docs {
             let idx = rng.gen_range(0..cfg.docs) as usize;
@@ -632,7 +632,7 @@ fn sombra_mixed_with_commits(pager: &Arc<Pager>, tree: &BTree<u64, u64>, cfg: &B
                 pager.commit(guard).unwrap();
                 pending = 0;
             }
-            let read = pager.begin_read().unwrap();
+            let read = pager.begin_latest_committed_read().unwrap();
             let doc_idx = rng.gen_range(0..i) as usize;
             let key = sombra_key_for_doc(cfg, doc_idx);
             let _ = tree.get(&read, &key).unwrap();

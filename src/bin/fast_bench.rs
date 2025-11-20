@@ -100,7 +100,7 @@ fn bench_btree_find(docs: usize) -> BenchResult {
     pager.commit(write).unwrap();
 
     bench("Find", None, docs, move || {
-        let read = pager.begin_read().unwrap();
+        let read = pager.begin_latest_committed_read().unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         for _ in 0..docs {
             let key = rng.gen_range(0..docs) as u64;
@@ -124,7 +124,7 @@ fn bench_btree_read(docs: usize) -> BenchResult {
     pager.commit(write).unwrap();
 
     bench("Read", None, docs, move || {
-        let read = pager.begin_read().unwrap();
+        let read = pager.begin_latest_committed_read().unwrap();
         for i in 0..docs {
             let _ = tree.get(&read, &(i as u64)).unwrap();
         }
@@ -149,7 +149,7 @@ fn bench_btree_mixed(docs: usize) -> BenchResult {
             } else if i > 0 {
                 let key = rng.gen_range(0..i) as u64;
                 pager.commit(write).unwrap();
-                let read = pager.begin_read().unwrap();
+                let read = pager.begin_latest_committed_read().unwrap();
                 let _ = tree.get(&read, &key).unwrap();
                 write = pager.begin_write().unwrap();
             }

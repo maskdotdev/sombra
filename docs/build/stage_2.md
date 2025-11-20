@@ -180,9 +180,12 @@ pub struct PagerOptions {
     pub synchronous: Synchronous, // Stage 3+ durability
     pub autocheckpoint_pages: usize,
     pub autocheckpoint_ms: Option<u64>,
-    pub wal_commit_max_commits: usize,   // Stage 8.1 tuning
-    pub wal_commit_max_frames: usize,
-    pub wal_commit_coalesce_ms: u64,
+    pub group_commit_max_writers: usize,   // Stage 8.1 tuning
+    pub group_commit_max_frames: usize,
+    pub group_commit_max_wait_ms: u64,
+    pub async_fsync: bool,
+    pub wal_segment_size_bytes: u64,
+    pub wal_preallocate_segments: u32,
 }
 
 pub struct PagerStats {

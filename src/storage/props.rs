@@ -327,7 +327,7 @@ fn decode_bytes_like(buf: &[u8], cursor: &mut usize, is_string: bool) -> Result<
             })
         }
         1 => {
-            if *cursor + 20 > buf.len() {
+            if *cursor + 28 > buf.len() {
                 return Err(SombraError::Corruption("vref payload truncated"));
             }
             let start_page = read_u64_be(&buf[*cursor..*cursor + 8]);
@@ -338,11 +338,14 @@ fn decode_bytes_like(buf: &[u8], cursor: &mut usize, is_string: bool) -> Result<
             *cursor += 4;
             let checksum = read_u32_be(&buf[*cursor..*cursor + 4]);
             *cursor += 4;
+            let owner_commit = read_u64_be(&buf[*cursor..*cursor + 8]);
+            *cursor += 8;
             let vref = VRef {
                 start_page: crate::types::PageId(start_page),
                 n_pages,
                 len,
                 checksum,
+                owner_commit,
             };
             Ok(if is_string {
                 RawPropValue::StrVRef(vref)
@@ -359,6 +362,7 @@ fn encode_vref(dst: &mut Vec<u8>, vref: VRef) {
     dst.extend_from_slice(&vref.n_pages.to_be_bytes());
     dst.extend_from_slice(&vref.len.to_be_bytes());
     dst.extend_from_slice(&vref.checksum.to_be_bytes());
+    dst.extend_from_slice(&vref.owner_commit.to_be_bytes());
 }
 
 fn write_var_u64(mut v: u64, out: &mut Vec<u8>) {

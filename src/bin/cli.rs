@@ -742,10 +742,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let report = vacuum_into(&db_path, into, &open_opts, &vacuum_opts)?;
             let elapsed = task.finish();
             emit(cli.format, &ui, &report, print_vacuum_text)?;
-            ui.info(&format!(
-                "Vacuum completed in {}",
-                format_duration_pretty(elapsed)
-            ));
+            if matches!(cli.format, OutputFormat::Text) {
+                ui.info(&format!(
+                    "Vacuum completed in {}",
+                    format_duration_pretty(elapsed)
+                ));
+            }
         }
         Command::Verify { db_path, level } => {
             let db_path = resolve_db_path(db_path, default_db.as_ref(), "verify")?;
@@ -753,10 +755,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let report = verify(&db_path, &open_opts, level.into())?;
             let elapsed = task.finish();
             emit(cli.format, &ui, &report, print_verify_text)?;
-            ui.info(&format!(
-                "Verify finished in {}",
-                format_duration_pretty(elapsed)
-            ));
+            if matches!(cli.format, OutputFormat::Text) {
+                ui.info(&format!(
+                    "Verify finished in {}",
+                    format_duration_pretty(elapsed)
+                ));
+            }
             if !report.success {
                 std::process::exit(2);
             }
@@ -1218,6 +1222,30 @@ fn print_stats_text(ui: &Ui, report: &sombra::admin::StatsReport) {
             ("size", format_bytes(report.wal.size_bytes)),
             ("path", report.wal.path.clone()),
             (
+                "segment_size_bytes",
+                format_bytes(report.wal.segment_size_bytes),
+            ),
+            (
+                "preallocate_segments",
+                format_count(report.wal.preallocate_segments.into()),
+            ),
+            (
+                "ready_segments",
+                format_count(report.wal.ready_segments as u64),
+            ),
+            (
+                "recycle_segments",
+                format_count(report.wal.recycle_segments as u64),
+            ),
+            (
+                "allocation_error",
+                report
+                    .wal
+                    .allocation_error
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+            (
                 "last_checkpoint_lsn",
                 format_count(report.wal.last_checkpoint_lsn),
             ),
@@ -1281,7 +1309,10 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
     );
     ui.spacer();
 
-    if report.latest_committed_lsn.is_some() || report.durable_lsn.is_some() {
+    if report.latest_committed_lsn.is_some()
+        || report.durable_lsn.is_some()
+        || report.acked_not_durable_commits.is_some()
+    {
         let latest = report
             .latest_committed_lsn
             .map(format_count)
@@ -1290,18 +1321,74 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
             .durable_lsn
             .map(format_count)
             .unwrap_or_else(|| "-".into());
-        let lag = match (report.latest_committed_lsn, report.durable_lsn) {
-            (Some(latest), Some(durable)) => format_count(latest.saturating_sub(durable)),
-            _ => "-".into(),
-        };
+        let acked = report
+            .acked_not_durable_commits
+            .map(format_count)
+            .or_else(|| match (report.latest_committed_lsn, report.durable_lsn) {
+                (Some(latest), Some(durable)) => Some(format_count(latest.saturating_sub(durable))),
+                _ => None,
+            })
+            .unwrap_or_else(|| "-".into());
         ui.section(
             "Durability",
             [
                 ("latest_committed_lsn", latest),
                 ("durable_lsn", durable),
-                ("durability_lag", lag),
+                ("acked_not_durable_commits", acked),
             ],
         );
+        ui.spacer();
+    }
+
+    if let Some(backlog) = &report.wal_backlog {
+        ui.section(
+            "WAL Backlog",
+            [
+                (
+                    "pending_commits",
+                    format_count(backlog.pending_commits as u64),
+                ),
+                (
+                    "pending_frames",
+                    format_count(backlog.pending_frames as u64),
+                ),
+                ("worker_running", format_bool(backlog.worker_running)),
+            ],
+        );
+        ui.spacer();
+    }
+
+    if let Some(async_fsync) = &report.async_fsync {
+        ui.section(
+            "Async fsync",
+            [
+                ("pending_lsn", format_count(async_fsync.pending_lsn)),
+                ("durable_lsn_cookie", format_count(async_fsync.durable_lsn)),
+                ("pending_lag", format_count(async_fsync.pending_lag)),
+            ],
+        );
+        if let Some(err) = &async_fsync.last_error {
+            ui.info(&format!("last_error={err}"));
+        }
+        ui.spacer();
+    }
+
+    if let Some(allocator) = &report.wal_allocator {
+        ui.section(
+            "WAL Allocator",
+            [
+                ("segment_size", format_bytes(allocator.segment_size_bytes)),
+                (
+                    "preallocate_segments",
+                    format_count(allocator.preallocate_segments.into()),
+                ),
+                ("ready_segments", format_count(allocator.ready_segments)),
+                ("recycle_segments", format_count(allocator.recycle_segments)),
+            ],
+        );
+        if let Some(err) = &allocator.allocation_error {
+            ui.info(&format!("allocation_error={err}"));
+        }
         ui.spacer();
     }
 

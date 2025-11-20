@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
 
 use std::cmp::min;
+use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::primitives::pager::{PageMut, PageStore, ReadGuard, WriteGuard};
-use crate::storage::CommitId;
+use crate::storage::{CommitId, COMMIT_MAX};
 use crate::types::page::{PageHeader, PageKind, PAGE_HDR_LEN};
 use crate::types::{Checksum, Crc32Fast, PageId, Result, SombraError, VRef};
 #[cfg(debug_assertions)]
@@ -185,6 +186,7 @@ pub struct VStore {
     data_capacity: usize,
     metrics: Arc<VStoreMetrics>,
     oldest_reader_commit: AtomicU64,
+    deferred: Mutex<VecDeque<VRef>>,
 }
 
 impl VStore {
@@ -208,6 +210,7 @@ impl VStore {
             data_capacity,
             metrics: Arc::new(VStoreMetrics::default()),
             oldest_reader_commit: AtomicU64::new(0),
+            deferred: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -236,6 +239,7 @@ impl VStore {
         if bytes.len() > u32::MAX as usize {
             return Err(SombraError::Invalid("value larger than 4GB not supported"));
         }
+        let owner_commit = tx.reserve_commit_id().0;
         let needed_pages = if bytes.is_empty() {
             1
         } else {
@@ -289,6 +293,7 @@ impl VStore {
             n_pages: pages.len() as u32,
             len: bytes.len() as u32,
             checksum: checksum.finalize(),
+            owner_commit,
         })
     }
 
@@ -415,6 +420,70 @@ impl VStore {
 
     /// Frees the overflow pages associated with a VRef.
     pub fn free(&self, tx: &mut WriteGuard<'_>, vref: VRef) -> Result<()> {
+        self.drain_deferred_ready(tx)?;
+        if vref.n_pages == 0 {
+            return Ok(());
+        }
+        if self.can_free_commit(vref.owner_commit) {
+            self.free_chain(tx, vref)?;
+        } else {
+            trace!(
+                owner_commit = vref.owner_commit,
+                oldest_reader = self.oldest_reader_commit(),
+                "vstore.defer_free"
+            );
+            self.enqueue_deferred(vref);
+        }
+        Ok(())
+    }
+
+    /// Attempts to reclaim any deferred VRefs that are now behind the reader horizon.
+    pub fn flush_deferred(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        self.drain_deferred_ready(tx)
+    }
+
+    fn can_free_commit(&self, owner_commit: u64) -> bool {
+        if owner_commit == 0 {
+            return true;
+        }
+        Self::normalize_commit(owner_commit) <= Self::normalize_commit(self.oldest_reader_commit())
+    }
+
+    fn enqueue_deferred(&self, vref: VRef) {
+        let mut queue = self.deferred.lock().expect("vstore.deferred poisoned");
+        queue.push_back(vref);
+    }
+
+    fn drain_deferred_ready(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        loop {
+            let candidate = {
+                let mut queue = self.deferred.lock().expect("vstore.deferred poisoned");
+                if queue.is_empty() {
+                    None
+                } else {
+                    let len = queue.len();
+                    let mut ready = None;
+                    for _ in 0..len {
+                        if let Some(vref) = queue.pop_front() {
+                            if self.can_free_commit(vref.owner_commit) {
+                                ready = Some(vref);
+                                break;
+                            } else {
+                                queue.push_back(vref);
+                            }
+                        }
+                    }
+                    ready
+                }
+            };
+            match candidate {
+                Some(vref) => self.free_chain(tx, vref)?,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    fn free_chain(&self, tx: &mut WriteGuard<'_>, vref: VRef) -> Result<()> {
         if vref.n_pages == 0 {
             return Ok(());
         }
@@ -441,6 +510,14 @@ impl VStore {
         self.metrics.add_pages_freed(vref.n_pages as u64);
         trace!(pages = vref.n_pages, len = vref.len, "vstore.free");
         Ok(())
+    }
+
+    fn normalize_commit(commit: u64) -> u64 {
+        if commit == COMMIT_MAX {
+            u64::MAX
+        } else {
+            commit
+        }
     }
 
     /// Updates variable-length data in place if possible, otherwise reallocates.

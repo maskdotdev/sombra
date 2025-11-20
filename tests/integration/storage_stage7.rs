@@ -43,7 +43,7 @@ fn collect_property_eq_stream(
     prop: PropId,
     value: PropValueOwned,
 ) -> Result<Vec<sombra::types::NodeId>> {
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let mut stream = graph.property_scan_eq_stream(&read, label, prop, &value)?;
     let result = collect_stream(&mut *stream)?;
     drop(stream);
@@ -59,7 +59,7 @@ fn collect_property_range_stream(
     start: Bound<PropValueOwned>,
     end: Bound<PropValueOwned>,
 ) -> Result<Vec<sombra::types::NodeId>> {
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let start_owned = start;
     let end_owned = end;
     let start_ref = match &start_owned {
@@ -116,7 +116,7 @@ fn label_index_create_scan_drop() -> Result<()> {
     pager.commit(write)?;
     assert!(graph.has_label_index(LabelId(1))?);
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let scan = graph
         .label_scan(&read, LabelId(1))?
         .expect("label index stream");
@@ -135,7 +135,7 @@ fn label_index_create_scan_drop() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let scan = graph
         .label_scan(&read, LabelId(1))?
         .expect("label index stream after insert");
@@ -148,7 +148,7 @@ fn label_index_create_scan_drop() -> Result<()> {
     graph.delete_node(&mut write, node_a, DeleteNodeOpts::restrict())?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let scan = graph
         .label_scan(&read, LabelId(1))?
         .expect("label index stream after delete");
@@ -162,7 +162,7 @@ fn label_index_create_scan_drop() -> Result<()> {
     pager.commit(write)?;
     assert!(!graph.has_label_index(LabelId(1))?);
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     assert!(
         graph.label_scan(&read, LabelId(1))?.is_none(),
         "label scan absent after drop"
@@ -209,7 +209,7 @@ fn property_index_chunked_eq_updates() -> Result<()> {
     assert!(graph.has_property_index(LabelId(1), PropId(1))?);
 
     // Equality scan matches existing nodes.
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let mut matches =
         graph.property_scan_eq(&read, LabelId(1), PropId(1), &PropValueOwned::Int(10))?;
     drop(read);
@@ -235,7 +235,7 @@ fn property_index_chunked_eq_updates() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let mut matches =
         graph.property_scan_eq(&read, LabelId(1), PropId(1), &PropValueOwned::Int(10))?;
     drop(read);
@@ -259,7 +259,7 @@ fn property_index_chunked_eq_updates() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let mut matches =
         graph.property_scan_eq(&read, LabelId(1), PropId(1), &PropValueOwned::Int(10))?;
     drop(read);
@@ -279,7 +279,7 @@ fn property_index_chunked_eq_updates() -> Result<()> {
     graph.delete_node(&mut write, node_a, DeleteNodeOpts::restrict())?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let mut matches =
         graph.property_scan_eq(&read, LabelId(1), PropId(1), &PropValueOwned::Int(10))?;
     drop(read);
@@ -338,7 +338,7 @@ fn property_index_btree_eq() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let matches = graph.property_scan_eq(
         &read,
         LabelId(2),
@@ -400,7 +400,7 @@ fn property_index_chunked_range() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let matches = graph.property_scan_range(
         &read,
         LabelId(3),
@@ -423,7 +423,7 @@ fn property_index_chunked_range() -> Result<()> {
 
     let start_excl = PropValueOwned::Int(10);
     let end_excl = PropValueOwned::Int(25);
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let matches = graph.property_scan_range_bounds(
         &read,
         LabelId(3),
@@ -434,7 +434,7 @@ fn property_index_chunked_range() -> Result<()> {
     drop(read);
     assert_eq!(matches, vec![node_c]);
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let low = graph.property_scan_range(
         &read,
         LabelId(3),
@@ -455,7 +455,7 @@ fn property_index_chunked_range() -> Result<()> {
     assert_eq!(streamed, vec![node_a]);
 
     let upper_excl = PropValueOwned::Int(20);
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let matches = graph.property_scan_range_bounds(
         &read,
         LabelId(3),
@@ -475,7 +475,7 @@ fn property_index_chunked_range() -> Result<()> {
     )?;
     assert_eq!(streamed, vec![node_a, node_b]);
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let empty = graph.property_scan_range(
         &read,
         LabelId(3),
@@ -495,7 +495,7 @@ fn property_index_chunked_range() -> Result<()> {
     )?;
     assert!(streamed.is_empty());
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let inverted = graph.property_scan_range(
         &read,
         LabelId(3),
@@ -560,7 +560,7 @@ fn property_index_btree_range() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let matches = graph.property_scan_range(
         &read,
         LabelId(4),
@@ -583,7 +583,7 @@ fn property_index_btree_range() -> Result<()> {
 
     let start_excl = PropValueOwned::Str("aaa".into());
     let end_incl = PropValueOwned::Str("ccc".into());
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let matches = graph.property_scan_range_bounds(
         &read,
         LabelId(4),
@@ -604,7 +604,7 @@ fn property_index_btree_range() -> Result<()> {
     )?;
     assert_eq!(streamed, vec![node_b, node_c]);
 
-    let read = pager.begin_read()?;
+    let read = pager.begin_latest_committed_read()?;
     let full = graph.property_scan_range(
         &read,
         LabelId(4),
@@ -669,7 +669,7 @@ fn posting_stream_intersection() -> Result<()> {
     pager.commit(write)?;
 
     let mut intersection_sorted = {
-        let read = pager.begin_read()?;
+        let read = pager.begin_latest_committed_read()?;
         let mut label_stream = graph
             .label_scan(&read, LabelId(5))?
             .expect("label stream available");
@@ -687,7 +687,7 @@ fn posting_stream_intersection() -> Result<()> {
     assert_eq!(intersection_sorted, vec![node_a, node_c]);
 
     let mut intersection_k = {
-        let read = pager.begin_read()?;
+        let read = pager.begin_latest_committed_read()?;
         let mut label_stream = graph
             .label_scan(&read, LabelId(5))?
             .expect("label stream available");
@@ -760,7 +760,7 @@ fn posting_stream_intersection_btree() -> Result<()> {
     pager.commit(write)?;
 
     let mut intersection = {
-        let read = pager.begin_read()?;
+        let read = pager.begin_latest_committed_read()?;
         let mut label_stream = graph
             .label_scan(&read, LabelId(7))?
             .expect("label stream available");

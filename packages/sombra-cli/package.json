@@ -1,0 +1,37 @@
+{
+  "name": "sombra-cli",
+  "version": "0.3.6",
+  "description": "Prebuilt distribution of the Sombra database CLI",
+  "license": "MIT",
+  "bin": {
+    "sombra": "./bin/run.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "scripts",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node ./scripts/install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maskdotdev/sombra-db"
+  },
+  "keywords": [
+    "graph",
+    "database",
+    "cli",
+    "sombra"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "tar": "^7.4.3"
+  }
+}

@@ -13,7 +13,7 @@ pub use cache::{GraphIndexCache, GraphIndexCacheStats};
 pub use catalog::IndexCatalog;
 pub use epoch::{CatalogEpoch, DdlEpoch};
 pub use label::{LabelScan, LABEL_SENTINEL_NODE};
-pub use store::{IndexRoots, IndexStore};
+pub use store::{IndexRoots, IndexStore, IndexVacuumStats};
 pub use types::{
     collect_all, intersect_k, intersect_sorted, IndexDef, IndexKind, PostingStream, TypeTag,
     VecPostingStream,

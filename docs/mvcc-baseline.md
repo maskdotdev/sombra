@@ -447,5 +447,192 @@ struct PageVersionInfo {
 ## 15. Record encoding + fuzz coverage
 
 - Node and edge payload encoders already prepend `VersionHeader + VersionPtr` followed by the logical row payload (`src/storage/node.rs`, `src/storage/edge.rs`). Tombstones and pending bits travel in `VersionHeader.flags`; external blobs flip `PAYLOAD_EXTERNAL` automatically when `PropPayload::VRef` is used.
-- Property-based tests (`proptest`) now fuzz both inline blobs and `VRef` payloads with random commit metadata, ensuring `decode(encode(...))` preserves headers, version pointers, row hashes, and payload bytes regardless of hashing mode. See `proptest_versioned_node_roundtrip` and `proptest_versioned_edge_roundtrip` for reference.
-- Existing deterministic tests still pin edge cases (payload length bookkeeping, optional SipHash footer) so regressions surface quickly if the layout changes.
+- `EncodeOpts` still only toggles the SipHash footer. To reach parity with the spec we need to thread “MVCC context” through the helpers:
+  - `node::encode` / `edge::encode` should accept a `VersionContext { commit_id, prev_ptr, flags }` struct so callers don’t need to mutate `VersionHeader` in place.
+  - When a mutation reuses an existing `VersionHeader`, the helpers should assert `payload_len` matches the encoded bytes to catch double-encoding bugs.
+- Property-based tests (`proptest`) fuzz both inline blobs and `VRef` payloads with random commit metadata, ensuring `decode(encode(...))` preserves headers, version pointers, row hashes, and payload bytes regardless of hashing mode. See `proptest_versioned_node_roundtrip` and `proptest_versioned_edge_roundtrip` for reference. Extend these tests to randomly toggle the pending/tombstone/external bits so future edits cover intent flags automatically.
+- Existing deterministic tests still pin edge cases (payload length bookkeeping, optional SipHash footer). Add explicit regression tests that mutate `VersionHeader.begin/end` and verify `VersionHeader::decode` refuses truncated headers—this protects the migration path when we eventually bump the header size.
+
+### 15.1 Next steps
+
+1. Introduce a `VersionContext` struct under `storage::mvcc` and update `node::encode` / `edge::encode` / adjacency writers to consume it.
+2. Bump `docs/build/stage_5.md` to note the format dependency (existing databases must be rebuilt).
+3. Update the `proptest` fixtures to randomize header flags and `prev_ptr` so they validate writer-intent plumbing as it lands.
+
+## 16. Index visibility & adjacency filtering
+
+### 16.1 Label indexes
+
+- `LabelIndex::insert_node/remove_node` (fan-out from `IndexStore::insert_node_labels/remove_node_labels`) currently mutate B-tree leaves in place. Under MVCC each key stores `VersionedValue<Unit>` instead of raw `Unit`.
+- Writers always **insert** new heads with `VersionHeader { begin = commit_id, end = COMMIT_MAX }`. Deletions become tombstone heads (`flags::TOMBSTONE`), pointing their `prev_ptr` at the previously committed head so GC can prune once the node disappears globally.
+- Reads (`LabelIndex::scan`) wrap the existing page cursors so `VersionHeader::visible_at(snapshot_commit)` is checked before emitting node IDs. This happens directly inside the iterator so graph queries do not need to re-check.
+- Uniqueness constraints (labels are set membership) use the helper `visible_version(snapshot_commit)` to assert there is at most one visible head per `(label,node)` pair. Because we still have a single writer, intent bits are optional; we simply avoid removing prior heads until commit.
+
+### 16.2 Property indexes (chunked + B-tree postings)
+
+- `ChunkedIndex` appends `(prefix,node)` pairs where the payload is currently `NodeId`. Switch those payloads to `VersionedValue<Unit>` and reuse the same encode/decode helpers used by the main graph rows so WAL replay shares code.
+- Range/equality scans filter entries with `VersionHeader::visible_at`. Because chunked postings are append-only per prefix, we can opportunistically drop obsolete entries during scan if `snapshot_commit >= header.end` and `oldest_reader > header.end` (micro-GC in iterator).
+- `BTreePostings` already writes `VersionedValue<Unit>` but assumes `end = COMMIT_MAX`. We add slot reuse logic: removals append a tombstone entry and mark the previous head’s `end = commit_id`. During uniqueness enforcement for `IndexKind::BTree`, `put` checks for a visible head with matching `(value,node)` and bails early if found.
+
+### 16.3 Adjacency trees and secondary structures
+
+- Forward/reverse adjacency keys live in the same B-tree alongside `Unit` payloads. They adopt the same versioned encoding as indexes. Writes become insert-only; deletes append tombstones that hide edges until GC prunes them.
+- Neighbor lookups fetch from both the primary edge table (already versioned) and the adjacency cursor. Each neighbor struct carries `VersionHeader` so traversal filters once regardless of direction (in/out/both). This keeps adjacency caches truthful for read-committed snapshots without forcing a checkpoint.
+- Degree cache (feature-gated) tags entries with `VersionHeader` as well so degree counts ignore tombstoned edges until vacuum evicts them. The cache already recomputes counts during checkpoint, so we piggyback there.
+
+### 16.4 Writer intent / conflict probes
+
+- Before inserting into any index/adjacency structure we probe for existing visible heads at the same `(key,node)` to uphold uniqueness (labels, property indexes, adjacency duplicates). When a conflict exists we either:
+  1. Abort (for unique indexes); or
+  2. Convert the new entry into a no-op with a tombstone pointing at itself, so append-only invariants stay intact.
+- These probes reuse the same `CommitId` as the enclosing graph mutation to avoid snapshot skew. Later multi-writer scenarios can set `flags::PENDING` during the write and strip it during commit.
+
+## 17. Mutation path plumbing
+
+### 17.1 GraphWriter / Graph API
+
+- `GraphWriter::create_node`, `Graph::create_node`, `Graph::update_node`, `Graph::delete_node`, `Graph::create_edge`, `Graph::delete_edge`, and `Graph::update_edge` already centralize mutations. Each function now:
+  1. Calls `tx.reserve_commit_id()` once up-front and threads the `CommitId` + `VersionHeader` through helper structs.
+  2. Passes `VersionContext { commit_id, prev_ptr, tombstone }` into `node::encode`, `edge::encode`, adjacency insertions, and index updates.
+  3. Records “old head” pointers in a `VersionLogEntry` so WAL replay can rebuild head chains for GC.
+- Cascading deletes (restrict/cascade) open a read cursor pinned to the same `CommitId`, enumerating edges or properties that must receive tombstones. The cursor reuses the new `ReadGuard::snapshot_commit()` accessor (from §13).
+
+### 17.2 API plumbing down-stack
+
+- `IndexStore` functions accept an optional `VersionHeader`/`CommitId` argument. Graph-level code supplies them; default remains `COMMIT_MAX` for legacy (until MVCC flag enables).
+- `VStore::{write,free}` associates each allocation with the owning `CommitId`, allowing vacuum to skip freeing blobs referenced by alive versions. The `VRef` stored inside `VersionHeader` payload already carries commit metadata.
+- `patch`/`props` modules (used by `Graph::update_node/edge`) now output `PropDelta` structs tagged with MVCC metadata so downstream index maintenance knows whether to insert tombstones or new values.
+
+### 17.3 Consistency assertions
+
+- Every mutation path asserts the head/tombstone sequence remains linear (no mixing of committed + pending snapshots). For example, deleting a node with existing tombstone queued is a logic error.
+- Debug-only checks ensure that `prev_ptr` recorded in the new head actually points at the committed bytes fetched from disk/WAL.
+- We record `mvcc.graph.pending_versions` counters per mutation to surface regressions when vacuum falls behind or when mutation batching reuses stale commit IDs.
+
+## 18. Reader tracking metrics
+
+### 18.1 Commit table integration
+
+- `ReadGuard` already registers with `CommitTable::register_reader(snapshot_commit)`. Extend the returned handle so it exposes:
+  - `reader_id` (u32) used in metrics/logging.
+  - `snapshot_commit` for debug output.
+  - Drop hook that decrements the refcount and emits metrics.
+- Track readers in a `DashMap<ReaderId, ReaderStats>` containing `begin_instant`, `snapshot_commit`, and `thread_id`. This allows `/admin status` to dump the oldest readers blocking vacuum.
+
+### 18.2 Metrics surface
+
+- Gauges (exported via `StorageMetrics`):
+  - `mvcc.reader.count` – total active readers.
+  - `mvcc.reader.oldest_commit` – minimum `snapshot_commit` across readers.
+  - `mvcc.reader.newest_commit` – maximum `snapshot_commit` (should match `latest_committed`).
+  - `mvcc.reader.max_age_ms` – wall-clock age of the oldest reader.
+- Counters:
+  - `mvcc.reader.begin_total`, `mvcc.reader.end_total` – lifecycle totals.
+  - `mvcc.reader.evicted_due_to_timeout` – increments if we eventually implement reader timeouts.
+- Structured logs: when `reader.max_age_ms` exceeds configurable thresholds, emit a warning log with reader IDs + snapshot commits to ease debugging.
+
+### 18.3 Exposure pathways
+
+- `admin stats` command prints the gauges above and highlights if `oldest_commit` lags `latest_committed` beyond the vacuum retention window.
+- `GraphWriterStats` gains a `oldest_reader_commit` field sourced from the commit table so application-level monitoring can track lag without inspecting pager internals.
+- `Pager::checkpoint` and `Pager::vacuum` instrumentation include the reader metrics in their logs so we can correlate checkpoint skips with reader activity.
+
+## 19. Vacuum, GC, and checkpoint alignment
+
+### 19.1 Vacuum worker loop
+
+1. Periodically (configurable interval) call `commit_table.min_active()` to get `cutoff_commit`.
+2. Ask pager/storage layers for their pending version lists:
+   - Pager’s `version_chains` (see §14) return pages whose oldest commit < cutoff.
+   - Storage’s version log (node/edge/index heads) provides `VersionLogEntry` ranges ready for reclamation.
+3. Vacuum processes in priority order (oldest commit first), freeing WAL overlays, dropping version-chain entries whose `refcount == 0`, and compacting B-tree leaves by removing tombstoned heads <= cutoff.
+4. After each batch it updates metrics (`mvcc.vacuum.bytes_pruned`, `mvcc.vacuum.page_versions_retained`).
+
+### 19.2 Checkpoint/WAL pruning state machine
+
+```
+state Idle -> (WAL threshold) -> Pending
+Pending --(checkpoint lock acquired + cutoff satisfied)--> Applying
+Applying --(frames flushed, commit table synced)--> Truncating
+Truncating --(WAL segments dropped, overlays pruned)--> Idle
+```
+
+- Transition guard `cutoff satisfied` means `cutoff_commit >= oldest_version_needed` where `oldest_version_needed = min(commit_table.min_active(), pager.version_chain_min_commit())`.
+- During `Applying`, for each frame we consult `commit_table` to skip uncommitted LSNs (same as today) and to update version-chain metadata if the frame carries MVCC headers.
+- `Truncating` only runs if no `PageVersionInfo` references a WAL offset within the segment we plan to drop. Otherwise we defer truncation and keep WAL segments chained until vacuum frees them.
+
+### 19.3 Observability
+
+- Metrics:
+  - `mvcc.vacuum.loop_duration_ms`, `mvcc.vacuum.cutoff_commit`, `mvcc.vacuum.pages_cleaned`.
+  - `mvcc.checkpoint.skipped_due_to_readers` – increments when checkpoint cannot proceed because `min_active` is behind the target.
+  - `mvcc.wal.retained_segments` – number of WAL files kept because of old readers/version chains.
+- Logs: checkpoint logs include reasons when they exit early (e.g., “skip WAL truncation: reader 42 pinned commit 1_234_000”). Vacuum logs summarize bytes reclaimed per loop.
+
+### 19.4 Configuration knobs
+
+- `GraphOptions::mvcc_retention_ms` – default retention window before we warn about slow readers.
+- `PagerOptions::vacuum_batch_pages` – number of page versions to attempt per vacuum tick.
+- `PagerOptions::checkpoint_force_interval` – maximum interval before we run a checkpoint even if WAL threshold not hit (ensures WAL truncation eventually occurs once readers finish).
+
+## 20. Testing strategy
+
+### 20.1 Unit tests
+
+- Pager layer:
+  - `ReadGuard` lifecycle cases ensuring `snapshot_commit`, `wal_anchor`, and reader tracking behave as expected (begin/drop, double-drop panic, etc.).
+  - Page overlay tests verifying `overlay_page_for_snapshot` pulls from cache vs. WAL replay correctly across multiple dirty generations.
+  - Version chain tests: create synthetic `PageVersionInfo` sequences and simulate readers at different commits to ensure cleanup honors `min_active`.
+- Storage layer:
+  - Node/edge encode/decode (already fuzzed) + new tests for `VersionLogEntry` linking and `visible_version` helper logic.
+  - Index adapters: label/property/adjacency scans filtering out tombstones and respecting snapshot commits.
+  - Commit-table state machine tests covering reserve/commit/abort/release flows and reader registration.
+
+### 20.2 Integration tests
+
+- Extend existing suites (`storage_stage7`, `storage_stress`) with an MVCC flag:
+  - Concurrent reader/writer test that inserts nodes, updates properties, and ensures a pinned reader sees a stable snapshot while writer continues.
+  - Delete + cascade test verifying tombstones hide records immediately but physical cleanup waits for vacuum.
+  - WAL recovery test (building on `wal_crash_replay`) covering pending commits, commit descriptors, and version log replay.
+- Add targeted CLI/admin tests exercising `vacuum`, `checkpoint --force`, and `stats` to ensure new metrics + state machine transitions appear.
+
+### 20.3 Benchmarks & perf
+
+- Update `bench` suite with MVCC toggles:
+  - CRUD microbenchmarks measuring overhead of version headers and reader tracking.
+  - WAL append/checkpoint benchmarks with MVCC overlays enabled vs. disabled (leveraging existing `bench/micro_wal.rs`).
+  - Long-running workload replicating the CLI “demo” scenario to capture memory retention (page versions, version log size) over time.
+- Add regression scripts in `packages/benches/` that run both MVCC and legacy modes, producing markdown summaries for release sign-off.
+
+## 21. Path to snapshot isolation & deployment
+
+### 21.1 Snapshot isolation roadmap
+
+- Required deltas beyond read-committed:
+  - Introduce writer intent (`flags::PENDING`) + validation to support multiple writers (conflict detection, deadlock handling).
+  - Provide per-transaction snapshot selection independent of guard lifetime so long-running writers avoid seeing newer commits.
+  - Expand commit table to track transaction states beyond single-writer, possibly adding a lock manager or timestamp ordering.
+  - Add write-write conflict resolution for secondary indexes and adjacency structures.
+- Document blockers (SingleWriter lock, WAL serialization) with effort estimates and dependencies on current work.
+
+### 21.2 Metrics & logging roundup
+
+- Consolidated metrics list:
+  - Pager: `mvcc.latest_committed`, `mvcc.oldest_active`, `mvcc.page_versions_{total,active}`, `mvcc.cow_bytes_retained`.
+  - Storage: `mvcc.graph.pending_versions`, `mvcc.index.filtered_entries`, `mvcc.vstore.retained_bytes`.
+  - Vacuum/Checkpoint: `mvcc.vacuum.bytes_pruned`, `mvcc.vacuum.loop_duration_ms`, `mvcc.checkpoint.skipped_due_to_readers`, `mvcc.wal.retained_segments`.
+- Logging:
+  - Begin/commit logs include `commit_id`, dirty page count, and WAL bytes.
+  - Reader warnings when age exceeds threshold (see §18.2).
+  - Vacuum summaries listing commits freed per loop; checkpoint logs describing state transitions.
+
+### 21.3 Deployment & rollout plan
+
+- Feature flag `graph.mvcc` controlling whether MVCC headers/metadata are persisted. Default off; enabling requires full reinitialization due to format bump.
+- Rollout steps:
+  1. Ship MVCC code behind flag with dual-read capability (legacy + MVCC) for testing.
+  2. Provide CLI to export/import or rebuild databases since on-disk format changes.
+  3. Document rollback: disable flag, restore from pre-upgrade backup, optionally rerun checkpoint to trim WAL.
+- Operational guidance:
+  - Alert on `mvcc.reader.max_age_ms` and `mvcc.vacuum.bytes_pruned == 0` for extended periods.
+  - Provide `sombra admin mvcc-status` command printing commit table, reader stats, retention windows, and durability backlog (`latest_committed_lsn`, `durable_lsn`, `durability_lag`) to assist SREs.

@@ -25,6 +25,12 @@ struct PyConnectOptions {
     commit_coalesce_ms: Option<u32>,
     commit_max_frames: Option<u32>,
     commit_max_commits: Option<u32>,
+    group_commit_max_writers: Option<u32>,
+    group_commit_max_frames: Option<u32>,
+    group_commit_max_wait_ms: Option<u32>,
+    async_fsync: Option<bool>,
+    wal_segment_size_bytes: Option<u64>,
+    wal_preallocate_segments: Option<u32>,
     autocheckpoint_ms: Option<u32>,
 }
 
@@ -39,6 +45,12 @@ impl Default for PyConnectOptions {
             commit_coalesce_ms: None,
             commit_max_frames: None,
             commit_max_commits: None,
+            group_commit_max_writers: None,
+            group_commit_max_frames: None,
+            group_commit_max_wait_ms: None,
+            async_fsync: None,
+            wal_segment_size_bytes: None,
+            wal_preallocate_segments: None,
             autocheckpoint_ms: None,
         }
     }
@@ -54,18 +66,36 @@ pub struct StreamHandle {
     inner: QueryStream,
 }
 
-#[derive(Default)]
 struct ParsedNeighborOptions {
     direction: Dir,
     edge_type: Option<String>,
     distinct: bool,
 }
 
-#[derive(Default)]
 struct ParsedBfsOptions {
     direction: Dir,
     edge_types: Option<Vec<String>>,
     max_results: Option<usize>,
+}
+
+impl Default for ParsedNeighborOptions {
+    fn default() -> Self {
+        Self {
+            direction: Dir::Out,
+            edge_type: None,
+            distinct: true,
+        }
+    }
+}
+
+impl Default for ParsedBfsOptions {
+    fn default() -> Self {
+        Self {
+            direction: Dir::Out,
+            edge_types: None,
+            max_results: None,
+        }
+    }
 }
 
 fn parse_connect_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<PyConnectOptions> {
@@ -96,6 +126,24 @@ fn parse_connect_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<PyConn
         if let Some(value) = dict.get_item("commit_max_commits")? {
             opts.commit_max_commits = Some(value.extract::<u32>()?);
         }
+        if let Some(value) = dict.get_item("group_commit_max_writers")? {
+            opts.group_commit_max_writers = Some(value.extract::<u32>()?);
+        }
+        if let Some(value) = dict.get_item("group_commit_max_frames")? {
+            opts.group_commit_max_frames = Some(value.extract::<u32>()?);
+        }
+        if let Some(value) = dict.get_item("group_commit_max_wait_ms")? {
+            opts.group_commit_max_wait_ms = Some(value.extract::<u32>()?);
+        }
+        if let Some(value) = dict.get_item("async_fsync")? {
+            opts.async_fsync = Some(value.extract::<bool>()?);
+        }
+        if let Some(value) = dict.get_item("wal_segment_size_bytes")? {
+            opts.wal_segment_size_bytes = Some(value.extract::<u64>()?);
+        }
+        if let Some(value) = dict.get_item("wal_preallocate_segments")? {
+            opts.wal_preallocate_segments = Some(value.extract::<u32>()?);
+        }
         if let Some(value) = dict.get_item("autocheckpoint_ms")? {
             opts.autocheckpoint_ms = Some(value.extract::<u32>()?);
         }
@@ -117,14 +165,32 @@ fn open_database(path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<Da
     if let Some(mode) = opts.synchronous {
         pager.synchronous = mode;
     }
-    if let Some(ms) = opts.commit_coalesce_ms {
-        pager.wal_commit_coalesce_ms = ms as u64;
+    if let Some(ms) = opts
+        .group_commit_max_wait_ms
+        .or(opts.commit_coalesce_ms)
+    {
+        pager.group_commit_max_wait_ms = ms as u64;
     }
-    if let Some(frames) = opts.commit_max_frames {
-        pager.wal_commit_max_frames = frames as usize;
+    if let Some(frames) = opts
+        .group_commit_max_frames
+        .or(opts.commit_max_frames)
+    {
+        pager.group_commit_max_frames = frames as usize;
     }
-    if let Some(commits) = opts.commit_max_commits {
-        pager.wal_commit_max_commits = commits as usize;
+    if let Some(commits) = opts
+        .group_commit_max_writers
+        .or(opts.commit_max_commits)
+    {
+        pager.group_commit_max_writers = commits as usize;
+    }
+    if let Some(async_fsync) = opts.async_fsync {
+        pager.async_fsync = async_fsync;
+    }
+    if let Some(bytes) = opts.wal_segment_size_bytes {
+        pager.wal_segment_size_bytes = bytes;
+    }
+    if let Some(preallocate) = opts.wal_preallocate_segments {
+        pager.wal_preallocate_segments = preallocate;
     }
     if let Some(ms) = opts.autocheckpoint_ms {
         pager.autocheckpoint_ms = Some(ms as u64);

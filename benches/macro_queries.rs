@@ -17,6 +17,7 @@ mod bench {
     use std::fs;
     use std::path::PathBuf;
 
+    use super::support::datasets::SyntheticDataset;
     use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
     use serde_json::Value;
     use sombra::admin::AdminOpenOptions;
@@ -27,7 +28,6 @@ mod bench {
         Database, DatabaseOptions, DirectionSpec, EdgeSpec, MatchSpec, PayloadValue, PredicateSpec,
         ProjectionSpec, QuerySpec,
     };
-    use super::support::datasets::SyntheticDataset;
 
     const NODE_COUNT: usize = 50_000;
     const EDGE_COUNT: usize = 200_000;
@@ -202,9 +202,9 @@ mod bench {
             edges: vec![EdgeSpec {
                 from: "u".into(),
                 to: "f".into(),
-                    edge_type: Some("FOLLOWS".into()),
-                    direction: DirectionSpec::out(),
-                }],
+                edge_type: Some("FOLLOWS".into()),
+                direction: DirectionSpec::out(),
+            }],
             predicate: Some(PredicateSpec::Eq {
                 var: "u".into(),
                 prop: "name".into(),

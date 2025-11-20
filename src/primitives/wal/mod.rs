@@ -1,15 +1,21 @@
 #![forbid(unsafe_code)]
 
-use std::collections::VecDeque;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
-use std::io::{self, IoSlice};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, IoSlice, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
-use tracing::debug;
+use std::time::{Duration, Instant, SystemTime};
+use tracing::{debug, warn};
 
-use crate::primitives::io::FileIo;
-use crate::storage::{record_pager_fsync, record_wal_coalesced_writes, record_wal_io_group_sample};
+use crate::primitives::io::{FileIo, StdFileIo};
+use crate::storage::{
+    record_pager_fsync, record_wal_coalesced_writes, record_wal_io_group_sample,
+    record_wal_reused_segments,
+};
 use crate::types::{Checksum, Crc32Fast, Lsn, PageId, Result, SombraError};
 use parking_lot::{Condvar, Mutex};
 
@@ -18,7 +24,9 @@ const WAL_FORMAT_VERSION: u16 = 1;
 const FILE_HEADER_LEN: usize = 32;
 const FRAME_HEADER_LEN: usize = 32;
 const WAL_MAX_IO_SLICES: usize = 512;
-
+const WAL_SEGMENT_PREFIX: &str = "wal-";
+const WAL_LAYOUT_VERSION: u32 = 1;
+const WAL_LAYOUT_KIND: &str = "segmented_v1";
 /// Configuration options for opening a write-ahead log.
 #[derive(Clone, Debug)]
 pub struct WalOptions {
@@ -41,7 +49,7 @@ impl WalOptions {
             page_size,
             wal_salt,
             start_lsn,
-            segment_size_bytes: 0,
+            segment_size_bytes: 64 * 1024 * 1024,
             preallocate_segments: 0,
         }
     }
@@ -53,11 +61,22 @@ impl Default for WalOptions {
             page_size: 0,
             wal_salt: 0,
             start_lsn: Lsn(0),
-            segment_size_bytes: 0,
+            segment_size_bytes: 64 * 1024 * 1024,
             preallocate_segments: 0,
         }
     }
 }
+
+/// Logical pointer to a WAL frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalFramePtr {
+    /// Segment identifier when segmented WAL is enabled (0 for the legacy single file layout).
+    pub segment_id: u64,
+    /// Byte offset of the frame header within the selected segment.
+    pub offset: u64,
+}
+
+impl WalFramePtr {}
 
 /// Statistics tracking WAL operations.
 #[derive(Clone, Debug, Default)]
@@ -70,6 +89,21 @@ pub struct WalStats {
     pub syncs: u64,
     /// Number of coalesced write batches executed
     pub coalesced_writes: u64,
+}
+
+/// Snapshot of WAL segment allocator health.
+#[derive(Clone, Debug, Serialize)]
+pub struct WalAllocatorStats {
+    /// Configured segment size in bytes.
+    pub segment_size_bytes: u64,
+    /// Target number of preallocated segments.
+    pub preallocate_segments: u32,
+    /// Segments ready for activation.
+    pub ready_segments: usize,
+    /// Segments queued for recycling.
+    pub recycle_segments: usize,
+    /// Last allocator error (e.g., ENOSPC) if any.
+    pub allocation_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -203,82 +237,265 @@ impl FrameHeader {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WalDirectoryManifest {
+    layout: String,
+    version: u32,
+    page_size: u32,
+    wal_salt: u64,
+    start_lsn: u64,
+    segment_size_bytes: u64,
+    preallocate_segments: u32,
+    next_segment_id: u64,
+    created_unix_ms: u64,
+}
+
+impl WalDirectoryManifest {
+    fn new(options: &WalOptions) -> Self {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|dur| dur.as_millis() as u64)
+            .unwrap_or(0);
+        Self {
+            layout: WAL_LAYOUT_KIND.to_string(),
+            version: WAL_LAYOUT_VERSION,
+            page_size: options.page_size,
+            wal_salt: options.wal_salt,
+            start_lsn: options.start_lsn.0,
+            segment_size_bytes: options.segment_size_bytes,
+            preallocate_segments: options.preallocate_segments,
+            next_segment_id: 1,
+            created_unix_ms: now,
+        }
+    }
+
+    fn load(dir: &Path) -> Result<Self> {
+        let manifest_path = dir.join("manifest");
+        let mut file = File::open(&manifest_path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        let manifest: WalDirectoryManifest = serde_json::from_slice(&buf)
+            .map_err(|err| SombraError::InvalidOwned(format!("wal manifest parse error: {err}")))?;
+        Ok(manifest)
+    }
+
+    fn persist(&self, dir: &Path) -> Result<()> {
+        let manifest_path = dir.join("manifest");
+        let tmp_path = manifest_path.with_extension("tmp");
+        let data = serde_json::to_vec_pretty(self).map_err(|err| {
+            SombraError::InvalidOwned(format!("failed to serialize wal manifest: {err}"))
+        })?;
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(&data)?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &manifest_path)?;
+        Ok(())
+    }
+
+    fn bootstrap(dir: &Path, options: &WalOptions) -> Result<Self> {
+        if options.segment_size_bytes == 0 {
+            return Err(SombraError::Invalid(
+                "wal_segment_size_bytes must be greater than zero",
+            ));
+        }
+        match fs::metadata(dir) {
+            Ok(meta) if meta.is_file() => {
+                return Err(SombraError::Invalid(
+                    "wal path must be a directory named db-wal/",
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(dir)?;
+            }
+            Err(err) => return Err(SombraError::from(err)),
+        }
+        fs::create_dir_all(active_dir(dir))?;
+        fs::create_dir_all(recycle_dir(dir))?;
+        let manifest_path = dir.join("manifest");
+        if manifest_path.exists() {
+            return Self::load(dir);
+        }
+        let manifest = WalDirectoryManifest::new(options);
+        manifest.persist(dir)?;
+        Ok(manifest)
+    }
+}
+
+fn active_dir(dir: &Path) -> PathBuf {
+    dir.join("active")
+}
+
+fn recycle_dir(dir: &Path) -> PathBuf {
+    dir.join("recycle")
+}
+
+fn segment_path(dir: &Path, id: u64) -> PathBuf {
+    active_dir(dir).join(format!("{}{:06}", WAL_SEGMENT_PREFIX, id))
+}
+
+fn recycle_segment_path(dir: &Path, id: u64) -> PathBuf {
+    recycle_dir(dir).join(format!("{}{:06}", WAL_SEGMENT_PREFIX, id))
+}
+
+fn parse_segment_id(name: &str) -> Option<u64> {
+    name.strip_prefix(WAL_SEGMENT_PREFIX)?.parse().ok()
+}
+
+fn list_segments(dir: &Path) -> Result<Vec<u64>> {
+    let mut ids = Vec::new();
+    if !active_dir(dir).exists() {
+        return Ok(ids);
+    }
+    for entry in fs::read_dir(active_dir(dir))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            if let Some(id) = parse_segment_id(name) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+fn create_segment_file(
+    dir: &Path,
+    id: u64,
+    page_size: u32,
+    wal_salt: u64,
+    start_lsn: Lsn,
+    capacity: u64,
+) -> Result<Arc<StdFileIo>> {
+    let path = segment_path(dir, id);
+    debug!(
+        segment_id = id,
+        ?path,
+        capacity_bytes = capacity,
+        "wal.segment.create"
+    );
+    let header = FileHeader::new(page_size, wal_salt, start_lsn);
+    let io = initialize_segment_file(&path, &header, capacity)?;
+    Ok(Arc::new(io))
+}
+
+fn list_recycle_segments(dir: &Path) -> Result<Vec<u64>> {
+    let recycle = recycle_dir(dir);
+    if !recycle.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(recycle)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            if let Some(id) = parse_segment_id(name) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+fn open_segment_file(dir: &Path, id: u64, page_size: u32, wal_salt: u64) -> Result<Arc<StdFileIo>> {
+    let path = segment_path(dir, id);
+    let io = Arc::new(StdFileIo::open(&path)?);
+    let mut buf = [0u8; FILE_HEADER_LEN];
+    io.read_at(0, &mut buf)?;
+    let header = FileHeader::decode(&buf)?;
+    if header.page_size != page_size {
+        return Err(SombraError::Corruption("wal segment page size mismatch"));
+    }
+    if header.wal_salt != wal_salt {
+        return Err(SombraError::Corruption("wal segment salt mismatch"));
+    }
+    Ok(io)
+}
+
+struct SegmentWriter {
+    id: u64,
+    io: Arc<StdFileIo>,
+    offset: u64,
+    max_len: u64,
+}
+
+impl SegmentWriter {
+    fn new(id: u64, io: Arc<StdFileIo>, offset: u64, max_len: u64) -> Self {
+        Self {
+            id,
+            io,
+            offset,
+            max_len,
+        }
+    }
+
+    fn remaining(&self) -> u64 {
+        if self.offset >= self.max_len {
+            0
+        } else {
+            self.max_len - self.offset
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SegmentMeta {
+    len: u64,
+}
+
 struct WalState {
     header: FileHeader,
-    append_offset: u64,
     prev_chain: u64,
     stats: WalStats,
-    segment: Option<WalSegmentState>,
+    segment_writer: SegmentWriter,
+    segment_capacity: u64,
 }
 
 impl WalState {
-    fn new(header: FileHeader, append_offset: u64, segment: Option<WalSegmentState>) -> Self {
+    fn new(header: FileHeader, writer: SegmentWriter, segment_capacity: u64) -> Self {
         Self {
             header,
-            append_offset,
             prev_chain: 0,
             stats: WalStats::default(),
-            segment,
+            segment_writer: writer,
+            segment_capacity,
         }
     }
 }
 
-#[derive(Clone, Debug)]
-struct WalSegmentState {
-    segment_size: u64,
-    ahead_segments: u32,
-    allocated_bytes: u64,
+struct PreallocQueues {
+    state: Mutex<PreallocState>,
+    cv: Condvar,
 }
 
-impl WalSegmentState {
-    fn initialize(
-        io: &Arc<dyn FileIo>,
-        segment_size: u64,
-        ahead_segments: u32,
-        current_len: u64,
-    ) -> Result<Self> {
-        let mut allocated = align_up(current_len, segment_size);
-        if allocated > current_len {
-            io.truncate(allocated)?;
+impl PreallocQueues {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PreallocState::default()),
+            cv: Condvar::new(),
         }
-        let ahead_bytes = segment_size.saturating_mul(ahead_segments as u64);
-        if ahead_bytes > 0 {
-            let target = allocated.saturating_add(ahead_bytes);
-            if target > allocated {
-                io.truncate(target)?;
-                allocated = target;
-            }
-        }
-        Ok(Self {
-            segment_size,
-            ahead_segments,
-            allocated_bytes: allocated,
-        })
     }
+}
 
-    fn ensure_capacity(&mut self, io: &Arc<dyn FileIo>, required_end: u64) -> Result<()> {
-        let ahead_bytes = self.segment_size.saturating_mul(self.ahead_segments as u64);
-        let mut target = required_end.saturating_add(ahead_bytes);
-        if target <= self.allocated_bytes {
-            return Ok(());
-        }
-        target = align_up(target, self.segment_size);
-        io.truncate(target)?;
-        self.allocated_bytes = target;
-        Ok(())
-    }
+#[derive(Default)]
+struct PreallocState {
+    ready: VecDeque<u64>,
+    recycle: VecDeque<u64>,
+    enospc_error: Option<String>,
+    shutdown: bool,
+}
 
-    fn reset(&mut self, io: &Arc<dyn FileIo>) -> Result<()> {
-        let mut target = FILE_HEADER_LEN as u64;
-        if target < self.segment_size {
-            target = self.segment_size;
-        }
-        let ahead_bytes = self.segment_size.saturating_mul(self.ahead_segments as u64);
-        target = align_up(target.saturating_add(ahead_bytes), self.segment_size);
-        io.truncate(target)?;
-        self.allocated_bytes = target;
-        Ok(())
-    }
+enum PreallocOp {
+    Reuse(u64),
+    Create,
 }
 
 /// Write-ahead log that provides durability and crash recovery.
@@ -287,84 +504,411 @@ impl WalSegmentState {
 /// a page image along with metadata. Frames are checksummed and chained together
 /// to detect corruption.
 pub struct Wal {
-    io: Arc<dyn FileIo>,
+    dir: PathBuf,
     page_size: usize,
     state: Mutex<WalState>,
+    segments: Mutex<BTreeMap<u64, SegmentMeta>>,
+    segment_cache: Mutex<HashMap<u64, Arc<StdFileIo>>>,
+    manifest: Mutex<WalDirectoryManifest>,
+    prealloc: Arc<PreallocQueues>,
+    prealloc_thread: Mutex<Option<thread::JoinHandle<()>>>,
+    prealloc_target: u32,
+    pending_recycle: Mutex<Option<Vec<u64>>>,
 }
 
 impl Wal {
-    /// Opens or creates a write-ahead log with the given options.
-    ///
-    /// If the file already exists, validates that the stored page size and salt
-    /// match the provided options.
-    pub fn open(io: Arc<dyn FileIo>, options: WalOptions) -> Result<Self> {
+    fn initialize_ready_segments(&self) -> Result<()> {
+        let recycle_ids = list_recycle_segments(&self.dir)?;
+        if recycle_ids.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.prealloc.state.lock();
+        for id in recycle_ids {
+            state.recycle.push_back(id);
+        }
+        self.prealloc.cv.notify_all();
+        Ok(())
+    }
+
+    fn start_preallocator(self: &Arc<Self>) {
+        if self.prealloc_target == 0 {
+            return;
+        }
+        let mut guard = self.prealloc_thread.lock();
+        if guard.is_some() {
+            return;
+        }
+        let wal = Arc::clone(self);
+        let handle = thread::spawn(move || wal.preallocator_loop());
+        *guard = Some(handle);
+    }
+
+    fn preallocator_loop(self: Arc<Self>) {
+        loop {
+            let op = {
+                let mut guard = self.prealloc.state.lock();
+                loop {
+                    if guard.shutdown {
+                        return;
+                    }
+                    if let Some(id) = guard.recycle.pop_front() {
+                        break PreallocOp::Reuse(id);
+                    }
+                    if (guard.ready.len() as u32) < self.prealloc_target {
+                        break PreallocOp::Create;
+                    }
+                    self.prealloc.cv.wait(&mut guard);
+                }
+            };
+            match op {
+                PreallocOp::Reuse(id) => {
+                    debug!(segment_id = id, "wal.preallocator.reuse_start");
+                    match self.prepare_recycled_segment(id) {
+                        Ok(new_id) => {
+                            debug!(segment_id = new_id, "wal.preallocator.reuse_ready");
+                            self.push_ready_segment(new_id)
+                        }
+                        Err(err) => self.record_prealloc_error(&err),
+                    }
+                }
+                PreallocOp::Create => {
+                    debug!("wal.preallocator.create_start");
+                    match self.create_ready_segment() {
+                        Ok(id) => {
+                            debug!(segment_id = id, "wal.preallocator.create_ready");
+                            self.push_ready_segment(id)
+                        }
+                        Err(err) => self.record_prealloc_error(&err),
+                    }
+                }
+            }
+        }
+    }
+
+    fn record_prealloc_error(&self, err: &SombraError) {
+        let mut guard = self.prealloc.state.lock();
+        guard.enospc_error = Some(err.to_string());
+        self.prealloc.cv.notify_all();
+        warn!(error = %err, "wal.preallocator.error");
+    }
+
+    fn push_ready_segment(&self, id: u64) {
+        let mut guard = self.prealloc.state.lock();
+        guard.ready.push_back(id);
+        guard.enospc_error = None;
+        self.prealloc.cv.notify_all();
+    }
+
+    fn create_ready_segment(&self) -> Result<u64> {
+        let (header, capacity) = self.segment_template();
+        self.create_ready_segment_with_template(&header, capacity)
+    }
+
+    fn create_ready_segment_with_template(
+        &self,
+        header: &FileHeader,
+        capacity: u64,
+    ) -> Result<u64> {
+        let mut manifest = self.manifest.lock();
+        let id = manifest.next_segment_id;
+        manifest.next_segment_id += 1;
+        manifest.persist(&self.dir)?;
+        drop(manifest);
+        let path = recycle_segment_path(&self.dir, id);
+        initialize_segment_file(&path, &header, capacity)?;
+        Ok(id)
+    }
+
+    fn segment_template(&self) -> (FileHeader, u64) {
+        let state = self.state.lock();
+        (state.header.clone(), state.segment_capacity)
+    }
+
+    fn prepare_recycled_segment(&self, old_id: u64) -> Result<u64> {
+        let src = recycle_segment_path(&self.dir, old_id);
+        if !src.exists() {
+            return self.create_ready_segment();
+        }
+        let (header, capacity) = self.segment_template();
+        self.prepare_recycled_segment_with_template(old_id, &header, capacity)
+    }
+
+    fn prepare_recycled_segment_with_template(
+        &self,
+        old_id: u64,
+        header: &FileHeader,
+        capacity: u64,
+    ) -> Result<u64> {
+        let src = recycle_segment_path(&self.dir, old_id);
+        if !src.exists() {
+            return self.create_ready_segment_with_template(header, capacity);
+        }
+        let mut manifest = self.manifest.lock();
+        let new_id = manifest.next_segment_id;
+        manifest.next_segment_id += 1;
+        manifest.persist(&self.dir)?;
+        drop(manifest);
+        let dst = recycle_segment_path(&self.dir, new_id);
+        fs::rename(&src, &dst)?;
+        initialize_segment_file(&dst, &header, capacity)?;
+        Ok(new_id)
+    }
+
+    fn try_prepare_recycle_immediate(
+        &self,
+        header: &FileHeader,
+        capacity: u64,
+    ) -> Result<Option<u64>> {
+        let recycled = {
+            let mut guard = self.prealloc.state.lock();
+            guard.recycle.pop_front()
+        };
+        if let Some(old_id) = recycled {
+            return Ok(Some(self.prepare_recycled_segment_with_template(
+                old_id, header, capacity,
+            )?));
+        }
+        Ok(None)
+    }
+
+    fn take_ready_segment(&self, header: &FileHeader, capacity: u64) -> Result<u64> {
+        if self.prealloc_target == 0 {
+            if let Some(id) = self.try_prepare_recycle_immediate(header, capacity)? {
+                return Ok(id);
+            }
+            return self.create_ready_segment_with_template(header, capacity);
+        }
+        loop {
+            let mut guard = self.prealloc.state.lock();
+            if let Some(id) = guard.ready.pop_front() {
+                self.prealloc.cv.notify_all();
+                return Ok(id);
+            }
+            if let Some(err) = guard.enospc_error.clone() {
+                return Err(SombraError::InvalidOwned(format!(
+                    "wal segment allocation blocked: {err}"
+                )));
+            }
+            debug!("wal.take_ready_segment.waiting_for_segment");
+            self.prealloc.cv.wait(&mut guard);
+        }
+    }
+    /// Opens or creates a write-ahead log using the segmented directory layout.
+    pub fn open(dir: impl AsRef<Path>, options: WalOptions) -> Result<Arc<Self>> {
         if options.page_size == 0 {
             return Err(SombraError::Invalid("wal page size must be non-zero"));
         }
-        let len = io.len()?;
-        let header = if len < FILE_HEADER_LEN as u64 {
-            let header = FileHeader::new(options.page_size, options.wal_salt, options.start_lsn);
-            io.write_at(0, &header.encode())?;
-            io.truncate(FILE_HEADER_LEN as u64)?;
-            header
-        } else {
-            let mut buf = [0u8; FILE_HEADER_LEN];
-            io.read_at(0, &mut buf)?;
-            let header = FileHeader::decode(&buf)?;
-            if header.page_size != options.page_size {
-                return Err(SombraError::Corruption("wal page size mismatch"));
-            }
-            if header.wal_salt != options.wal_salt {
-                return Err(SombraError::Corruption("wal salt mismatch"));
-            }
-            header
-        };
-        let append_offset = io.len()?.max(FILE_HEADER_LEN as u64);
-        let segment_state = if options.segment_size_bytes > 0 {
-            Some(WalSegmentState::initialize(
-                &io,
+        if options.segment_size_bytes <= FILE_HEADER_LEN as u64 {
+            return Err(SombraError::Invalid(
+                "wal_segment_size_bytes must exceed the header length",
+            ));
+        }
+        let dir = dir.as_ref().to_path_buf();
+        debug!(
+            wal_dir = ?dir,
+            page_size = options.page_size,
+            segment_size_bytes = options.segment_size_bytes,
+            preallocate_segments = options.preallocate_segments,
+            start_lsn = options.start_lsn.0,
+            "wal.open.start"
+        );
+        let manifest = WalDirectoryManifest::bootstrap(&dir, &options)?;
+        if manifest.layout != WAL_LAYOUT_KIND || manifest.version != WAL_LAYOUT_VERSION {
+            return Err(SombraError::Corruption("wal manifest layout mismatch"));
+        }
+        if manifest.page_size != options.page_size {
+            return Err(SombraError::Corruption("wal manifest page size mismatch"));
+        }
+        if manifest.wal_salt != options.wal_salt {
+            return Err(SombraError::Corruption("wal manifest salt mismatch"));
+        }
+        let mut manifest_state = manifest;
+        let mut manifest_dirty = false;
+        if manifest_state.start_lsn != options.start_lsn.0 {
+            manifest_state.start_lsn = options.start_lsn.0;
+            manifest_dirty = true;
+        }
+        if manifest_state.segment_size_bytes != options.segment_size_bytes {
+            manifest_state.segment_size_bytes = options.segment_size_bytes;
+            manifest_dirty = true;
+        }
+        if manifest_state.preallocate_segments != options.preallocate_segments {
+            manifest_state.preallocate_segments = options.preallocate_segments;
+            manifest_dirty = true;
+        }
+        if manifest_dirty {
+            manifest_state.persist(&dir)?;
+        }
+        let mut segment_ids = list_segments(&dir)?;
+        if segment_ids.is_empty() {
+            let id = manifest_state.next_segment_id;
+            create_segment_file(
+                &dir,
+                id,
+                options.page_size,
+                options.wal_salt,
+                options.start_lsn,
                 options.segment_size_bytes,
-                options.preallocate_segments,
-                append_offset,
-            )?)
-        } else {
-            None
-        };
-        let wal = Self {
-            io,
+            )?;
+            manifest_state.next_segment_id += 1;
+            manifest_state.persist(&dir)?;
+            segment_ids.push(id);
+        }
+        segment_ids.sort_unstable();
+        if let Some(&max_id) = segment_ids.last() {
+            if manifest_state.next_segment_id <= max_id {
+                manifest_state.next_segment_id = max_id
+                    .checked_add(1)
+                    .ok_or_else(|| SombraError::Invalid("wal segment id overflow"))?;
+                manifest_dirty = true;
+            }
+        }
+        if manifest_dirty {
+            manifest_state.persist(&dir)?;
+        }
+        let active_id = *segment_ids.last().expect("at least one segment");
+        let active_io = open_segment_file(&dir, active_id, options.page_size, options.wal_salt)?;
+        let header = FileHeader::new(options.page_size, options.wal_salt, options.start_lsn);
+        let mut segment_cache = HashMap::new();
+        segment_cache.insert(active_id, Arc::clone(&active_io));
+        let mut metadata = BTreeMap::new();
+        for id in &segment_ids {
+            let path = segment_path(&dir, *id);
+            let raw_len = fs::metadata(&path)?.len().max(FILE_HEADER_LEN as u64);
+            let io = if *id == active_id {
+                Arc::clone(&active_io)
+            } else {
+                open_segment_file(&dir, *id, options.page_size, options.wal_salt)?
+            };
+            let valid_len = detect_valid_prefix(&io, raw_len, options.page_size as usize, &header)?;
+            metadata.insert(*id, SegmentMeta { len: valid_len });
+            if *id != active_id {
+                segment_cache.insert(*id, Arc::clone(&io));
+            }
+        }
+        let active_len = metadata
+            .get(&active_id)
+            .map(|meta| meta.len)
+            .unwrap_or(FILE_HEADER_LEN as u64);
+        if active_len > options.segment_size_bytes {
+            return Err(SombraError::Corruption(
+                "wal segment exceeds configured size",
+            ));
+        }
+        let writer =
+            SegmentWriter::new(active_id, active_io, active_len, options.segment_size_bytes);
+        let state = WalState::new(header, writer, options.segment_size_bytes);
+        let wal = Arc::new(Self {
+            dir,
             page_size: options.page_size as usize,
-            state: Mutex::new(WalState::new(header, append_offset, segment_state)),
-        };
+            state: Mutex::new(state),
+            segments: Mutex::new(metadata),
+            segment_cache: Mutex::new(segment_cache),
+            manifest: Mutex::new(manifest_state),
+            prealloc: Arc::new(PreallocQueues::new()),
+            prealloc_thread: Mutex::new(None),
+            prealloc_target: options.preallocate_segments,
+            pending_recycle: Mutex::new(None),
+        });
+        wal.initialize_ready_segments()?;
+        wal.start_preallocator();
         Ok(wal)
     }
 
     /// Resets the WAL to a new starting LSN, truncating all existing frames.
     pub fn reset(&self, start_lsn: Lsn) -> Result<()> {
+        debug!(start_lsn = start_lsn.0, "wal.reset.start");
         let mut state = self.state.lock();
+        let recycled_ids = {
+            let mut pending = self.pending_recycle.lock();
+            match pending.take() {
+                Some(ids) => ids,
+                None => self.recycle_segments_internal()?,
+            }
+        };
         state.header = FileHeader::new(state.header.page_size, state.header.wal_salt, start_lsn);
         state.prev_chain = 0;
         state.stats = WalStats::default();
-        self.io.write_at(0, &state.header.encode())?;
-        if let Some(segment) = state.segment.as_mut() {
-            segment.reset(&self.io)?;
-        } else {
-            self.io.truncate(FILE_HEADER_LEN as u64)?;
+        let new_id = self.take_ready_segment(&state.header, state.segment_capacity)?;
+        let segment_io =
+            self.activate_ready_segment(new_id, &state.header, state.segment_capacity)?;
+        state.segment_writer = SegmentWriter::new(
+            new_id,
+            segment_io,
+            FILE_HEADER_LEN as u64,
+            state.segment_capacity,
+        );
+        {
+            let mut manifest = self.manifest.lock();
+            manifest.start_lsn = start_lsn.0;
+            manifest.persist(&self.dir)?;
         }
-        state.append_offset = FILE_HEADER_LEN as u64;
+        if !recycled_ids.is_empty() {
+            record_wal_reused_segments(recycled_ids.len() as u64);
+        }
+        debug!(
+            start_lsn = start_lsn.0,
+            recycled_segments = recycled_ids.len(),
+            new_segment_id = new_id,
+            "wal.reset.complete"
+        );
         Ok(())
+    }
+
+    /// Moves active segments into the recycle queue ahead of a reset.
+    ///
+    /// This allows the background preallocator to prepare fresh segments while
+    /// checkpoint/replay work proceeds, reducing stalls when `reset` is
+    /// ultimately invoked. Callers must ensure no further WAL appends occur
+    /// before the reset completes.
+    pub fn recycle_active_segments(&self) -> Result<usize> {
+        {
+            let pending = self.pending_recycle.lock();
+            if let Some(ids) = pending.as_ref() {
+                return Ok(ids.len());
+            }
+        }
+        let _state_guard = self.state.lock();
+        let recycled = self.recycle_segments_internal()?;
+        let len = recycled.len();
+        let mut pending = self.pending_recycle.lock();
+        *pending = Some(recycled);
+        Ok(len)
+    }
+
+    fn recycle_segments_internal(&self) -> Result<Vec<u64>> {
+        let old_ids: Vec<u64> = {
+            let segments = self.segments.lock();
+            segments.keys().copied().collect()
+        };
+        if old_ids.is_empty() {
+            return Ok(old_ids);
+        }
+        {
+            let mut segments = self.segments.lock();
+            let mut cache = self.segment_cache.lock();
+            for id in &old_ids {
+                segments.remove(id);
+                cache.remove(id);
+            }
+        }
+        for id in &old_ids {
+            let _ = self.enqueue_recycle(*id);
+        }
+        Ok(old_ids)
     }
 
     /// Appends a single frame to the WAL.
     ///
     /// The frame payload must match the configured page size. This method does not
     /// sync to disk; call `sync()` to ensure durability.
-    pub fn append_frame(&self, frame: WalFrame<'_>) -> Result<Vec<u64>> {
+    pub fn append_frame(&self, frame: WalFrame<'_>) -> Result<Vec<WalFramePtr>> {
         let frames = [frame];
         self.append_frame_batch(&frames)
     }
 
     /// Appends a batch of frames, coalescing writes when possible.
-    pub fn append_frame_batch(&self, frames: &[WalFrame<'_>]) -> Result<Vec<u64>> {
+    pub fn append_frame_batch(&self, frames: &[WalFrame<'_>]) -> Result<Vec<WalFramePtr>> {
         if frames.is_empty() {
             return Ok(Vec::new());
         }
@@ -379,7 +923,10 @@ impl Wal {
         }
         if state.stats.frames_appended == 0 && frames[0].lsn.0 > state.header.start_lsn.0 {
             state.header.start_lsn = frames[0].lsn;
-            self.io.write_at(0, &state.header.encode())?;
+            state
+                .segment_writer
+                .io
+                .write_at(0, &state.header.encode())?;
         }
         let frame_size = FRAME_HEADER_LEN + self.page_size;
         let mut offsets = Vec::with_capacity(frames.len());
@@ -410,19 +957,21 @@ impl Wal {
             }
             let chunk_bytes = chunk.len() * frame_size;
             let chunk_bytes_u64 = chunk_bytes as u64;
-            let chunk_start = state.append_offset;
-            if let Some(segment) = state.segment.as_mut() {
-                segment.ensure_capacity(&self.io, chunk_start + chunk_bytes_u64)?;
-            }
-            self.io.writev_at(chunk_start, &slices)?;
-            state.append_offset += chunk_bytes_u64;
+            self.ensure_segment_capacity(&mut state, chunk_bytes_u64)?;
+            let chunk_start = state.segment_writer.offset;
+            state.segment_writer.io.writev_at(chunk_start, &slices)?;
+            state.segment_writer.offset += chunk_bytes_u64;
             state.stats.frames_appended += chunk.len() as u64;
             state.stats.bytes_appended += chunk_bytes_u64;
             state.stats.coalesced_writes += 1;
             record_wal_coalesced_writes(1);
             record_wal_io_group_sample(chunk.len() as u64);
+            self.update_segment_len(state.segment_writer.id, state.segment_writer.offset);
             for frame_idx in 0..chunk.len() {
-                offsets.push(chunk_start + (frame_idx * frame_size) as u64);
+                offsets.push(WalFramePtr {
+                    segment_id: state.segment_writer.id,
+                    offset: chunk_start + (frame_idx * frame_size) as u64,
+                });
             }
             index = slice_end;
         }
@@ -431,7 +980,11 @@ impl Wal {
 
     /// Syncs all pending writes to persistent storage.
     pub fn sync(&self) -> Result<()> {
-        self.io.sync_all()?;
+        let io = {
+            let state = self.state.lock();
+            Arc::clone(&state.segment_writer.io)
+        };
+        io.sync_all()?;
         record_pager_fsync();
         let mut state = self.state.lock();
         state.stats.syncs += 1;
@@ -440,18 +993,27 @@ impl Wal {
 
     /// Creates an iterator to read frames from the WAL.
     pub fn iter(&self) -> Result<WalIterator> {
-        let len = self.io.len()?;
-        if len < FILE_HEADER_LEN as u64 {
-            return Err(SombraError::Corruption("wal truncated header"));
+        let header = {
+            let state = self.state.lock();
+            state.header.clone()
+        };
+        let segments_snapshot = self.segments.lock().clone();
+        let mut segments = Vec::with_capacity(segments_snapshot.len());
+        let mut base = 0u64;
+        for (id, meta) in segments_snapshot {
+            let io = self.open_segment_cached(id)?;
+            segments.push(SegmentIterState {
+                io,
+                offset: FILE_HEADER_LEN as u64,
+                end: meta.len,
+                base,
+            });
+            base += meta.len;
         }
-        let mut header_buf = [0u8; FILE_HEADER_LEN];
-        self.io.read_at(0, &mut header_buf)?;
-        let header = FileHeader::decode(&header_buf)?;
         Ok(WalIterator {
-            io: Arc::clone(&self.io),
+            segments,
+            segment_index: 0,
             page_size: self.page_size,
-            offset: FILE_HEADER_LEN as u64,
-            end: len,
             prev_chain: 0,
             valid_up_to: FILE_HEADER_LEN as u64,
             header,
@@ -461,17 +1023,23 @@ impl Wal {
     /// Reads a WAL frame located at the provided byte `offset`.
     ///
     /// Returns `Ok(None)` when the offset lies beyond the end of the current WAL.
-    pub fn read_frame_at(&self, offset: u64) -> Result<Option<WalFrameOwned>> {
-        if offset < FILE_HEADER_LEN as u64 {
+    pub fn read_frame_at(&self, ptr: WalFramePtr) -> Result<Option<WalFrameOwned>> {
+        if ptr.offset < FILE_HEADER_LEN as u64 {
             return Err(SombraError::Invalid("wal frame offset before header"));
         }
-        let len = self.io.len()?;
-        let frame_size = FRAME_HEADER_LEN + self.page_size;
-        if offset + FRAME_HEADER_LEN as u64 > len {
+        let segment_len = {
+            let segments = self.segments.lock();
+            match segments.get(&ptr.segment_id) {
+                Some(meta) => meta.len,
+                None => return Ok(None),
+            }
+        };
+        if ptr.offset + FRAME_HEADER_LEN as u64 > segment_len {
             return Ok(None);
         }
+        let io = self.open_segment_cached(ptr.segment_id)?;
         let mut header_buf = [0u8; FRAME_HEADER_LEN];
-        self.io.read_at(offset, &mut header_buf)?;
+        io.read_at(ptr.offset, &mut header_buf)?;
         let header = FrameHeader::decode(&header_buf)?;
         {
             let state = self.state.lock();
@@ -479,12 +1047,12 @@ impl Wal {
                 return Err(SombraError::Corruption("wal frame lsn below start_lsn"));
             }
         }
-        let payload_off = offset + FRAME_HEADER_LEN as u64;
-        if payload_off + self.page_size as u64 > len {
+        let payload_off = ptr.offset + FRAME_HEADER_LEN as u64;
+        if payload_off + self.page_size as u64 > segment_len {
             return Ok(None);
         }
         let mut payload = vec![0u8; self.page_size];
-        self.io.read_at(payload_off, &mut payload)?;
+        io.read_at(payload_off, &mut payload)?;
         let payload_crc = compute_crc32(&[&payload]);
         if payload_crc != header.payload_crc32 {
             return Err(SombraError::Corruption("wal frame payload crc mismatch"));
@@ -502,14 +1070,148 @@ impl Wal {
         state.stats.clone()
     }
 
+    /// Returns allocator/preallocation state for observability.
+    pub fn allocator_stats(&self) -> WalAllocatorStats {
+        let segment_size_bytes = {
+            let state = self.state.lock();
+            state.segment_capacity
+        };
+        let queues = self.prealloc.state.lock();
+        WalAllocatorStats {
+            segment_size_bytes,
+            preallocate_segments: self.prealloc_target,
+            ready_segments: queues.ready.len(),
+            recycle_segments: queues.recycle.len(),
+            allocation_error: queues.enospc_error.clone(),
+        }
+    }
+
     /// Returns the total size of the WAL file in bytes.
     pub fn len(&self) -> Result<u64> {
-        self.io.len()
+        let segments = self.segments.lock();
+        Ok(segments.values().map(|meta| meta.len).sum())
     }
 
     /// Returns true if the WAL contains no frames.
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? <= FILE_HEADER_LEN as u64)
+    }
+
+    fn ensure_segment_capacity(&self, state: &mut WalState, required: u64) -> Result<()> {
+        let max_payload = state
+            .segment_capacity
+            .saturating_sub(FILE_HEADER_LEN as u64);
+        if required > max_payload {
+            return Err(SombraError::Invalid(
+                "wal frame batch exceeds segment capacity",
+            ));
+        }
+        while state.segment_writer.remaining() < required {
+            self.rotate_segment(state)?;
+        }
+        Ok(())
+    }
+
+    fn rotate_segment(&self, state: &mut WalState) -> Result<()> {
+        self.update_segment_len(state.segment_writer.id, state.segment_writer.offset);
+        let new_id = self.take_ready_segment(&state.header, state.segment_capacity)?;
+        let segment_io =
+            self.activate_ready_segment(new_id, &state.header, state.segment_capacity)?;
+        state.segment_writer = SegmentWriter::new(
+            new_id,
+            segment_io,
+            FILE_HEADER_LEN as u64,
+            state.segment_capacity,
+        );
+        Ok(())
+    }
+
+    fn update_segment_len(&self, id: u64, len: u64) {
+        let mut segments = self.segments.lock();
+        if let Some(meta) = segments.get_mut(&id) {
+            meta.len = len;
+        }
+    }
+
+    fn activate_ready_segment(
+        &self,
+        id: u64,
+        header: &FileHeader,
+        capacity: u64,
+    ) -> Result<Arc<StdFileIo>> {
+        let src = recycle_segment_path(&self.dir, id);
+        let dst = segment_path(&self.dir, id);
+        debug!(
+            segment_id = id,
+            ?dst,
+            capacity_bytes = capacity,
+            recycled = src.exists(),
+            "wal.segment.activate"
+        );
+        if src.exists() {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&src, &dst)?;
+        }
+        let io = Arc::new(StdFileIo::open(&dst)?);
+        io.truncate(capacity)?;
+        io.write_at(0, &header.encode())?;
+        {
+            let mut segments = self.segments.lock();
+            segments.insert(
+                id,
+                SegmentMeta {
+                    len: FILE_HEADER_LEN as u64,
+                },
+            );
+        }
+        {
+            let mut cache = self.segment_cache.lock();
+            cache.insert(id, Arc::clone(&io));
+        }
+        Ok(io)
+    }
+
+    fn enqueue_recycle(&self, id: u64) -> Result<()> {
+        let src = segment_path(&self.dir, id);
+        let dst = recycle_segment_path(&self.dir, id);
+        if Path::new(&src).exists() {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(src, dst)?;
+        }
+        let mut guard = self.prealloc.state.lock();
+        guard.recycle.push_back(id);
+        self.prealloc.cv.notify_all();
+        Ok(())
+    }
+
+    fn open_segment_cached(&self, id: u64) -> Result<Arc<StdFileIo>> {
+        if let Some(io) = self.segment_cache.lock().get(&id) {
+            return Ok(Arc::clone(io));
+        }
+        let (page_size, wal_salt) = {
+            let state = self.state.lock();
+            (state.header.page_size, state.header.wal_salt)
+        };
+        let io = open_segment_file(&self.dir, id, page_size, wal_salt)?;
+        let mut cache = self.segment_cache.lock();
+        Ok(Arc::clone(cache.entry(id).or_insert(io)))
+    }
+}
+
+impl Drop for Wal {
+    fn drop(&mut self) {
+        {
+            let mut state = self.prealloc.state.lock();
+            state.shutdown = true;
+        }
+        self.prealloc.cv.notify_all();
+        if let Some(handle) = self.prealloc_thread.lock().take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -590,6 +1292,17 @@ impl WalCommitConfig {
     }
 }
 
+/// Snapshot of the WAL committer backlog.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WalCommitBacklog {
+    /// Pending commit requests waiting to be flushed.
+    pub pending_commits: usize,
+    /// Total WAL frames queued across pending commits.
+    pub pending_frames: usize,
+    /// Whether the worker thread is currently running.
+    pub worker_running: bool,
+}
+
 /// Asynchronous WAL committer that batches writes for improved throughput.
 ///
 /// Spawns a background worker thread that coalesces multiple commit requests
@@ -612,7 +1325,7 @@ impl WalCommitTicket {
     /// Blocks until the associated commit operation completes.
     ///
     /// Returns an error if the commit failed.
-    pub fn wait(self) -> Result<Vec<u64>> {
+    pub fn wait(self) -> Result<Vec<WalFramePtr>> {
         self.request.wait()
     }
 }
@@ -668,7 +1381,11 @@ impl WalCommitter {
     }
 
     /// Enqueues a commit request and blocks until it completes.
-    pub fn commit(&self, frames: Vec<WalFrameOwned>, sync_mode: WalSyncMode) -> Result<Vec<u64>> {
+    pub fn commit(
+        &self,
+        frames: Vec<WalFrameOwned>,
+        sync_mode: WalSyncMode,
+    ) -> Result<Vec<WalFramePtr>> {
         match self.enqueue(frames, sync_mode) {
             Some(ticket) => ticket.wait(),
             None => Ok(Vec::new()),
@@ -682,6 +1399,17 @@ impl WalCommitter {
             *guard = config.normalize();
         }
         self.wakeup.notify_one();
+    }
+
+    /// Returns a snapshot of the pending commit backlog for observability.
+    pub fn backlog(&self) -> WalCommitBacklog {
+        let guard = self.state.lock();
+        let pending_frames = guard.pending.iter().map(|req| req.frames.len()).sum();
+        WalCommitBacklog {
+            pending_commits: guard.pending.len(),
+            pending_frames,
+            worker_running: guard.worker_running,
+        }
     }
 
     fn spawn_worker(
@@ -769,7 +1497,7 @@ impl WalCommitter {
             batch_commits = batch.len(),
             total_frames, "wal.committer.apply_batch.start"
         );
-        let mut offsets_all = Vec::new();
+        let mut offsets_all: Vec<WalFramePtr> = Vec::new();
         if total_frames > 0 {
             let mut flat: Vec<WalFrame<'_>> = Vec::with_capacity(total_frames);
             for req in batch.iter() {
@@ -800,8 +1528,8 @@ impl WalCommitter {
             let frame_count = req.frames.len();
             let mut per_req_offsets = Vec::with_capacity(frame_count);
             for _ in 0..frame_count {
-                if let Some(offset) = offsets_all.get(offset_index) {
-                    per_req_offsets.push(*offset);
+                if let Some(offset) = offsets_all.get(offset_index).copied() {
+                    per_req_offsets.push(offset);
                 }
                 offset_index += 1;
             }
@@ -833,7 +1561,7 @@ struct CommitState {
 struct CommitRequest {
     frames: Vec<WalFrameOwned>,
     sync_mode: WalSyncMode,
-    result: Mutex<Option<Result<Vec<u64>>>>,
+    result: Mutex<Option<Result<Vec<WalFramePtr>>>>,
     cv: Condvar,
 }
 
@@ -847,7 +1575,7 @@ impl CommitRequest {
         }
     }
 
-    fn finish(&self, outcome: Result<Vec<u64>>) {
+    fn finish(&self, outcome: Result<Vec<WalFramePtr>>) {
         let mut result = self.result.lock();
         if result.is_none() {
             *result = Some(outcome);
@@ -855,7 +1583,7 @@ impl CommitRequest {
         }
     }
 
-    fn wait(&self) -> Result<Vec<u64>> {
+    fn wait(&self) -> Result<Vec<WalFramePtr>> {
         let mut guard = self.result.lock();
         loop {
             if let Some(result) = guard.take() {
@@ -870,13 +1598,19 @@ impl CommitRequest {
 ///
 /// Stops iteration when corruption is detected or end of valid frames is reached.
 pub struct WalIterator {
-    io: Arc<dyn FileIo>,
+    segments: Vec<SegmentIterState>,
+    segment_index: usize,
     page_size: usize,
-    offset: u64,
-    end: u64,
     prev_chain: u64,
     valid_up_to: u64,
     header: FileHeader,
+}
+
+struct SegmentIterState {
+    io: Arc<StdFileIo>,
+    offset: u64,
+    end: u64,
+    base: u64,
 }
 
 impl WalIterator {
@@ -884,73 +1618,172 @@ impl WalIterator {
     ///
     /// Returns None when reaching the end of valid frames or detecting corruption.
     pub fn next_frame(&mut self) -> Result<Option<WalFrameOwned>> {
-        if self.offset + FRAME_HEADER_LEN as u64 > self.end {
-            self.offset = self.end;
-            return Ok(None);
-        }
-        let mut header_buf = [0u8; FRAME_HEADER_LEN];
-        let read = self.io.read_at(self.offset, &mut header_buf);
-        if let Err(err) = read {
-            if matches!(err, SombraError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
-            {
-                self.offset = self.end;
+        while self.segment_index < self.segments.len() {
+            let segment = &mut self.segments[self.segment_index];
+            if segment.offset + FRAME_HEADER_LEN as u64 > segment.end {
+                self.segment_index += 1;
+                continue;
+            }
+            let mut header_buf = [0u8; FRAME_HEADER_LEN];
+            let read = segment.io.read_at(segment.offset, &mut header_buf);
+            if let Err(err) = read {
+                if matches!(err, SombraError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+                {
+                    self.segment_index = self.segments.len();
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+            let header = match FrameHeader::decode(&header_buf) {
+                Ok(header) => header,
+                Err(_) => {
+                    debug!(
+                        segment_id = segment.base,
+                        offset = segment.offset,
+                        "wal.iterator.header_decode_failed"
+                    );
+                    #[cfg(test)]
+                    eprintln!(
+                        "[wal.iter] header decode failed segment_base={} offset={}",
+                        segment.base, segment.offset
+                    );
+                    self.segment_index = self.segments.len();
+                    return Ok(None);
+                }
+            };
+            if header.frame_lsn.0 < self.header.start_lsn.0 {
+                return Err(SombraError::Corruption("wal frame lsn below start_lsn"));
+            }
+            if header.prev_crc32_chain != self.prev_chain {
+                debug!(
+                    expected_prev_chain = self.prev_chain,
+                    observed_prev_chain = header.prev_crc32_chain,
+                    segment_offset = segment.offset,
+                    "wal.iterator.prev_chain_mismatch"
+                );
+                #[cfg(test)]
+                eprintln!(
+                    "[wal.iter] prev_chain mismatch expected={} observed={} offset={}",
+                    self.prev_chain, header.prev_crc32_chain, segment.offset
+                );
+                self.segment_index = self.segments.len();
                 return Ok(None);
             }
-            return Err(err);
-        }
-        let header = match FrameHeader::decode(&header_buf) {
-            Ok(header) => header,
-            Err(_) => {
-                self.offset = self.end;
+            let mut payload = vec![0u8; self.page_size];
+            let payload_off = segment.offset + FRAME_HEADER_LEN as u64;
+            let payload_res = segment.io.read_at(payload_off, &mut payload);
+            if let Err(err) = payload_res {
+                if matches!(err, SombraError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+                {
+                    debug!(
+                        segment_offset = segment.offset,
+                        "wal.iterator.payload_truncated"
+                    );
+                    #[cfg(test)]
+                    eprintln!("[wal.iter] payload truncated offset={}", segment.offset);
+                    self.segment_index = self.segments.len();
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+            let payload_crc = compute_crc32(&[&payload]);
+            if payload_crc != header.payload_crc32 {
+                debug!(
+                    expected_crc = header.payload_crc32,
+                    observed_crc = payload_crc,
+                    segment_offset = segment.offset,
+                    "wal.iterator.payload_crc_mismatch"
+                );
+                #[cfg(test)]
+                eprintln!(
+                    "[wal.iter] payload crc mismatch expected={} observed={} offset={}",
+                    header.payload_crc32, payload_crc, segment.offset
+                );
+                self.segment_index = self.segments.len();
                 return Ok(None);
             }
-        };
-        if header.frame_lsn.0 < self.header.start_lsn.0 {
-            return Err(SombraError::Corruption("wal frame lsn below start_lsn"));
+            let mut encoded_header = header.encode();
+            encoded_header[28..32].copy_from_slice(&header.header_crc32.to_be_bytes());
+            let frame_size = FRAME_HEADER_LEN + self.page_size;
+            let mut chain_hasher = Crc32Fast::default();
+            chain_hasher.update(&self.prev_chain.to_be_bytes());
+            chain_hasher.update(&encoded_header);
+            chain_hasher.update(&payload);
+            let chain_crc = chain_hasher.finalize();
+            let new_chain = ((frame_size as u64) << 32) | u64::from(chain_crc);
+            self.prev_chain = new_chain;
+            segment.offset += frame_size as u64;
+            self.valid_up_to = segment.base + segment.offset;
+            return Ok(Some(WalFrameOwned {
+                lsn: header.frame_lsn,
+                page_id: header.page_id,
+                payload,
+            }));
         }
-        if header.prev_crc32_chain != self.prev_chain {
-            self.offset = self.end;
-            return Ok(None);
-        }
-        let mut payload = vec![0u8; self.page_size];
-        let payload_off = self.offset + FRAME_HEADER_LEN as u64;
-        let payload_res = self.io.read_at(payload_off, &mut payload);
-        if let Err(err) = payload_res {
-            if matches!(err, SombraError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
-            {
-                self.offset = self.end;
-                return Ok(None);
-            }
-            return Err(err);
-        }
-        let payload_crc = compute_crc32(&[&payload]);
-        if payload_crc != header.payload_crc32 {
-            self.offset = self.end;
-            return Ok(None);
-        }
-        let mut encoded_header = header.encode();
-        encoded_header[28..32].copy_from_slice(&header.header_crc32.to_be_bytes());
-        let frame_size = FRAME_HEADER_LEN + self.page_size;
-        let mut chain_hasher = Crc32Fast::default();
-        chain_hasher.update(&self.prev_chain.to_be_bytes());
-        chain_hasher.update(&encoded_header);
-        chain_hasher.update(&payload);
-        let chain_crc = chain_hasher.finalize();
-        let new_chain = ((frame_size as u64) << 32) | u64::from(chain_crc);
-        self.prev_chain = new_chain;
-        self.offset += frame_size as u64;
-        self.valid_up_to = self.offset;
-        Ok(Some(WalFrameOwned {
-            lsn: header.frame_lsn,
-            page_id: header.page_id,
-            payload,
-        }))
+        Ok(None)
     }
 
     /// Returns the file offset up to which frames have been validated.
     pub fn valid_up_to(&self) -> u64 {
         self.valid_up_to
     }
+}
+
+fn detect_valid_prefix(
+    io: &Arc<StdFileIo>,
+    segment_len: u64,
+    page_size: usize,
+    header: &FileHeader,
+) -> Result<u64> {
+    let mut offset = FILE_HEADER_LEN as u64;
+    let frame_size = FRAME_HEADER_LEN as u64 + page_size as u64;
+    let mut prev_chain = 0u64;
+    while offset + FRAME_HEADER_LEN as u64 <= segment_len {
+        let mut header_buf = [0u8; FRAME_HEADER_LEN];
+        if let Err(err) = io.read_at(offset, &mut header_buf) {
+            if matches!(err, SombraError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+            {
+                break;
+            }
+            return Err(err);
+        }
+        let frame_header = match FrameHeader::decode(&header_buf) {
+            Ok(hdr) => hdr,
+            Err(_) => break,
+        };
+        if frame_header.frame_lsn.0 < header.start_lsn.0 {
+            break;
+        }
+        if frame_header.prev_crc32_chain != prev_chain {
+            break;
+        }
+        let payload_off = offset + FRAME_HEADER_LEN as u64;
+        if payload_off + page_size as u64 > segment_len {
+            break;
+        }
+        let mut payload = vec![0u8; page_size];
+        if let Err(err) = io.read_at(payload_off, &mut payload) {
+            if matches!(err, SombraError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+            {
+                break;
+            }
+            return Err(err);
+        }
+        let payload_crc = compute_crc32(&[&payload]);
+        if payload_crc != frame_header.payload_crc32 {
+            break;
+        }
+        let mut encoded_header = frame_header.encode();
+        encoded_header[28..32].copy_from_slice(&frame_header.header_crc32.to_be_bytes());
+        let mut chain_hasher = Crc32Fast::default();
+        chain_hasher.update(&prev_chain.to_be_bytes());
+        chain_hasher.update(&encoded_header);
+        chain_hasher.update(&payload);
+        let chain_crc = chain_hasher.finalize();
+        prev_chain = (frame_size << 32) | u64::from(chain_crc);
+        offset += frame_size;
+    }
+    Ok(offset)
 }
 
 fn clone_error(err: &SombraError) -> SombraError {
@@ -976,29 +1809,16 @@ fn compute_crc32(chunks: &[&[u8]]) -> u32 {
     hasher.finalize()
 }
 
-fn align_up(value: u64, align: u64) -> u64 {
-    if align == 0 {
-        return value;
-    }
-    if value % align == 0 {
-        value
-    } else {
-        value + (align - (value % align))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::io::StdFileIo;
     use tempfile::tempdir;
 
     #[test]
     fn wal_append_and_iterate_roundtrip() -> Result<()> {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal_roundtrip");
-        let io = StdFileIo::open(&path)?;
-        let wal = Wal::open(Arc::new(io), WalOptions::new(4096, 42, Lsn(1)))?;
+        let wal = Wal::open(&path, WalOptions::new(4096, 42, Lsn(1)))?;
         let payload_a = vec![1u8; 4096];
         let _ = wal.append_frame(WalFrame {
             lsn: Lsn(1),
@@ -1030,8 +1850,7 @@ mod tests {
     fn wal_detects_corruption() -> Result<()> {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal_corruption");
-        let io = StdFileIo::open(&path)?;
-        let wal = Wal::open(Arc::new(io.clone()), WalOptions::new(4096, 777, Lsn(5)))?;
+        let wal = Wal::open(&path, WalOptions::new(4096, 777, Lsn(5)))?;
         let payload = vec![3u8; 4096];
         let _ = wal.append_frame(WalFrame {
             lsn: Lsn(5),
@@ -1041,6 +1860,8 @@ mod tests {
         wal.sync()?;
 
         // Corrupt a byte in the payload.
+        let segment = path.join("active").join("wal-000001");
+        let io = StdFileIo::open(&segment)?;
         let mut buf = vec![0u8; FRAME_HEADER_LEN + 4096];
         io.read_at(FILE_HEADER_LEN as u64, &mut buf)?;
         buf[FRAME_HEADER_LEN + 10] ^= 0xFF;
@@ -1056,11 +1877,7 @@ mod tests {
     fn wal_committer_appends_and_syncs() -> Result<()> {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal_committer_basic");
-        let io = StdFileIo::open(&path)?;
-        let wal = Arc::new(Wal::open(
-            Arc::new(io),
-            WalOptions::new(4096, 555, Lsn(10)),
-        )?);
+        let wal = Wal::open(&path, WalOptions::new(4096, 555, Lsn(10)))?;
         let committer = WalCommitter::new(Arc::clone(&wal), WalCommitConfig::default());
         let mut payload = vec![0u8; 4096];
         payload[0] = 42;
@@ -1084,8 +1901,7 @@ mod tests {
     fn wal_committer_empty_batch_syncs() -> Result<()> {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal_committer_empty");
-        let io = StdFileIo::open(&path)?;
-        let wal = Arc::new(Wal::open(Arc::new(io), WalOptions::new(4096, 111, Lsn(1)))?);
+        let wal = Wal::open(&path, WalOptions::new(4096, 111, Lsn(1)))?;
         let committer = WalCommitter::new(Arc::clone(&wal), WalCommitConfig::default());
         let _ = committer.commit(Vec::new(), WalSyncMode::Immediate)?;
         assert_eq!(wal.stats().syncs, 1);
@@ -1096,8 +1912,7 @@ mod tests {
     fn wal_committer_update_config_runtime() -> Result<()> {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wal_committer_update");
-        let io = StdFileIo::open(&path)?;
-        let wal = Arc::new(Wal::open(Arc::new(io), WalOptions::new(4096, 222, Lsn(1)))?);
+        let wal = Wal::open(&path, WalOptions::new(4096, 222, Lsn(1)))?;
         let committer = WalCommitter::new(Arc::clone(&wal), WalCommitConfig::default());
         committer.set_config(WalCommitConfig {
             max_batch_commits: 0,
@@ -1117,4 +1932,103 @@ mod tests {
         assert_eq!(wal.stats().coalesced_writes, 1);
         Ok(())
     }
+
+    #[test]
+    fn wal_rejects_file_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("walfile");
+        File::create(&path).unwrap();
+        let err = match Wal::open(&path, WalOptions::new(4096, 7, Lsn(1))) {
+            Ok(_) => panic!("expected wal open to fail on file path"),
+            Err(err) => err,
+        };
+        let message = match err {
+            SombraError::Invalid(msg) => msg.to_string(),
+            SombraError::InvalidOwned(msg) => msg,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(
+            message.contains("wal path must be a directory"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn wal_rotates_and_iterates_across_segments() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_rotate");
+        let mut opts = WalOptions::new(512, 9, Lsn(1));
+        // Force each segment to accommodate exactly one frame to trigger rotation.
+        opts.segment_size_bytes = (FILE_HEADER_LEN + FRAME_HEADER_LEN + 512) as u64 + 1;
+        opts.preallocate_segments = 0;
+        let wal = Wal::open(&path, opts)?;
+        let a = vec![1u8; 512];
+        wal.append_frame(WalFrame {
+            lsn: Lsn(1),
+            page_id: PageId(1),
+            payload: &a,
+        })?;
+        let b = vec![2u8; 512];
+        wal.append_frame(WalFrame {
+            lsn: Lsn(2),
+            page_id: PageId(2),
+            payload: &b,
+        })?;
+        let mut iter = wal.iter()?;
+        let first = iter.next_frame()?.expect("first frame");
+        assert_eq!(first.lsn, Lsn(1));
+        assert_eq!(first.payload, a);
+        let second = iter.next_frame()?.expect("second frame");
+        assert_eq!(second.lsn, Lsn(2));
+        assert_eq!(second.payload, b);
+        assert!(iter.next_frame()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn wal_recycles_segments_on_reset() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_recycle_reset");
+        let mut opts = WalOptions::new(512, 5, Lsn(1));
+        opts.segment_size_bytes = (FILE_HEADER_LEN + FRAME_HEADER_LEN + 512) as u64 + 1;
+        opts.preallocate_segments = 0;
+        let wal = Wal::open(&path, opts)?;
+        let payload = vec![3u8; 512];
+        wal.append_frame(WalFrame {
+            lsn: Lsn(1),
+            page_id: PageId(1),
+            payload: &payload,
+        })?;
+        let payload_b = vec![4u8; 512];
+        wal.append_frame(WalFrame {
+            lsn: Lsn(2),
+            page_id: PageId(2),
+            payload: &payload_b,
+        })?;
+        wal.reset(Lsn(5))?;
+        let allocator = wal.allocator_stats();
+        assert_eq!(allocator.preallocate_segments, 0);
+        assert!(
+            allocator.recycle_segments >= 1,
+            "expected recycled segments after reset, got {:?}",
+            allocator
+        );
+        assert_eq!(wal.stats().frames_appended, 0);
+        Ok(())
+    }
+}
+fn initialize_segment_file(path: &Path, header: &FileHeader, capacity: u64) -> Result<StdFileIo> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    let io = StdFileIo::new(file);
+    io.truncate(capacity)?;
+    io.write_at(0, &header.encode())?;
+    Ok(io)
 }

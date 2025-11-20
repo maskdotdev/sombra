@@ -5,9 +5,9 @@
 mod support;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use std::collections::HashMap;
 use sombra::admin::AdminOpenOptions;
 use sombra::cli::import_export::{run_import, EdgeImportConfig, ImportConfig, NodeImportConfig};
+use std::collections::HashMap;
 use support::datasets::SyntheticDataset;
 
 const NODE_COUNT: usize = 50_000;

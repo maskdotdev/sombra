@@ -102,7 +102,7 @@ impl MetadataProvider for CatalogMetadata {
     }
 
     fn property_index(&self, label: LabelId, prop: PropId) -> Result<Option<IndexDef>> {
-        let read = self.catalog.store().begin_read()?;
+        let read = self.catalog.store().begin_latest_committed_read()?;
         self.catalog.get(&read, label, prop)
     }
 

@@ -36,8 +36,9 @@ Sombra is a single-file property graph database inspired by SQLite’s architect
 
 ### Reliability & Operations
 - **Write-Ahead Logging** with WAL files colocated next to the main DB, configurable sync levels, WAL commit coalescing, and forced checkpoints (`sombra checkpoint`, `db.pragma("autocheckpoint_ms", …)`).
-- **On-Disk Verification & Vacuum** via `sombra verify --level full` and `sombra vacuum --into <path> [--analyze]`, plus statistics from `sombra stats --format json` and WAL metadata on every CLI run.
+- **On-Disk Verification & Vacuum** via `sombra verify --level full` and `sombra vacuum [--into <path> | --replace [--backup <path>]] [--analyze]`, plus statistics from `sombra stats --format json` and WAL metadata on every CLI run.
 - **Import/Export Tooling** supports typed CSV ingest with property type overrides, inline label/type definitions, endpoint validation caches (`--edge-exists-cache`), `--disable-indexes` / `--build-indexes`, and CSV export filters.
+- [CLI Guide](docs/cli/README.md) – global flags, telemetry, init/doctor, profiles
 - **Structured Logging & Telemetry** use `tracing` + `tracing-subscriber` from both the CLI and dashboard server for consistent logs, with optional JSON outputs for automation.
 - **Safety Rails for Bindings** include payload-size enforcement (8 MiB cap), schema-version negotiation, cancellable query IDs, and request-scoped streaming with graceful shutdown.
 - **Configurable Resource Limits** through `pragma`s (`synchronous`, `autocheckpoint_ms`, `wal_coalesce_ms`) and CLI flags (`--page-size`, `--cache-pages`, `--distinct-neighbors-default`) to fit edge devices or SSD-heavy hosts.
@@ -196,6 +197,10 @@ sombra import graph.sombra \
 sombra dashboard tests/fixtures/demo-db/graph-demo.sombra --read-only
 VITE_SOMBRA_API=http://127.0.0.1:7654 npm run dev --prefix packages/dashboard
 ```
+
+Run the `seed-demo` command at least once to materialize
+`tests/fixtures/demo-db/graph-demo.sombra`; the repository no longer
+ships a pre-generated copy so the later examples assume you've created it locally.
 
 - `--assets /path/to/packages/dashboard/build/client` overrides the embedded bundle if you rebuild the frontend locally.
 - `--allow-origin https://example.com` enables remote access (defaults to loopback + strict CORS).

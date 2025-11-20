@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use crate::primitives::pager::PagerStats;
@@ -63,17 +64,27 @@ pub struct PagerStatsSection {
 
 /// Write-ahead log (WAL) statistics.
 ///
-/// Contains information about the WAL file location, size, and state.
+/// Contains information about the WAL directory location, size, and state.
 #[derive(Debug, Clone, Serialize)]
 pub struct WalStatsSection {
-    /// Path to the WAL file.
+    /// Path to the WAL directory.
     pub path: String,
-    /// Whether the WAL file exists on disk.
+    /// Whether the WAL directory exists on disk.
     pub exists: bool,
-    /// Size of the WAL file in bytes.
+    /// Total size of WAL files in bytes.
     pub size_bytes: u64,
     /// Log sequence number of the last checkpoint.
     pub last_checkpoint_lsn: u64,
+    /// WAL segment size in bytes.
+    pub segment_size_bytes: u64,
+    /// Target number of preallocated segments.
+    pub preallocate_segments: u32,
+    /// Segments ready for activation.
+    pub ready_segments: usize,
+    /// Segments queued for recycling.
+    pub recycle_segments: usize,
+    /// Last allocator error (e.g., ENOSPC) if any.
+    pub allocation_error: Option<String>,
 }
 
 /// Storage layer statistics.
@@ -140,10 +151,14 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
     let pager = open_pager(path, opts)?;
     let meta = pager.meta()?;
     let pager_counters: PagerStats = pager.stats();
+    let wal_allocator = pager.wal_allocator_stats();
     let db_meta = fs::metadata(path)?;
     let wal_path = wal_path(path);
     let wal_meta = fs::metadata(&wal_path).ok();
-    let wal_size = wal_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let wal_size = wal_meta
+        .as_ref()
+        .map(|_| directory_size(&wal_path).unwrap_or(0))
+        .unwrap_or(0);
     let wal_exists = wal_meta.is_some();
 
     let pager_section = PagerStatsSection {
@@ -169,6 +184,11 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
         exists: wal_exists,
         size_bytes: wal_size,
         last_checkpoint_lsn: meta.last_checkpoint_lsn.0,
+        segment_size_bytes: wal_allocator.segment_size_bytes,
+        preallocate_segments: wal_allocator.preallocate_segments,
+        ready_segments: wal_allocator.ready_segments,
+        recycle_segments: wal_allocator.recycle_segments,
+        allocation_error: wal_allocator.allocation_error,
     };
 
     let estimated_node_count = meta.storage_next_node_id.saturating_sub(1);
@@ -197,4 +217,20 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
         storage: storage_section,
         filesystem: filesystem_section,
     })
+}
+
+fn directory_size(path: &Path) -> io::Result<u64> {
+    let meta = fs::metadata(path)?;
+    if meta.is_file() {
+        return Ok(meta.len());
+    }
+    if meta.is_dir() {
+        let mut total = 0;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            total += directory_size(&entry.path())?;
+        }
+        return Ok(total);
+    }
+    Ok(0)
 }

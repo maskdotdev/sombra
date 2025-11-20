@@ -1,8 +1,9 @@
 #![deny(clippy::all)]
 
+use std::convert::TryFrom;
 use std::sync::Arc;
 
-use napi::bindgen_prelude::Result as NapiResult;
+use napi::{bindgen_prelude::Result as NapiResult, Error as NapiError, Status};
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +27,18 @@ pub struct ConnectOptions {
   pub commit_max_frames: Option<u32>,
   #[napi(js_name = "commitMaxCommits")]
   pub commit_max_commits: Option<u32>,
+  #[napi(js_name = "groupCommitMaxWriters")]
+  pub group_commit_max_writers: Option<u32>,
+  #[napi(js_name = "groupCommitMaxFrames")]
+  pub group_commit_max_frames: Option<u32>,
+  #[napi(js_name = "groupCommitMaxWaitMs")]
+  pub group_commit_max_wait_ms: Option<u32>,
+  #[napi(js_name = "asyncFsync")]
+  pub async_fsync: Option<bool>,
+  #[napi(js_name = "walSegmentBytes")]
+  pub wal_segment_bytes: Option<u32>,
+  #[napi(js_name = "walPreallocateSegments")]
+  pub wal_preallocate_segments: Option<u32>,
   #[napi(js_name = "autocheckpointMs")]
   pub autocheckpoint_ms: Option<u32>,
 }
@@ -71,9 +84,9 @@ pub struct BfsTraversalOptions {
 #[napi(object)]
 pub struct NeighborRecord {
   #[napi(js_name = "nodeId")]
-  pub node_id: u64,
+  pub node_id: i64,
   #[napi(js_name = "edgeId")]
-  pub edge_id: u64,
+  pub edge_id: i64,
   #[napi(js_name = "typeId")]
   pub type_id: u32,
 }
@@ -82,8 +95,30 @@ pub struct NeighborRecord {
 #[napi(object)]
 pub struct BfsVisitRecord {
   #[napi(js_name = "nodeId")]
-  pub node_id: u64,
+  pub node_id: i64,
   pub depth: u32,
+}
+
+fn js_id_from_u64(value: u64, ctx: &str) -> NapiResult<i64> {
+  if value > i64::MAX as u64 {
+    Err(NapiError::new(
+      Status::InvalidArg,
+      format!("{ctx} result exceeds supported range"),
+    ))
+  } else {
+    Ok(value as i64)
+  }
+}
+
+fn u64_from_js_id(value: i64, ctx: &str) -> NapiResult<u64> {
+  if value < 0 {
+    Err(NapiError::new(
+      Status::InvalidArg,
+      format!("{ctx} requires a non-negative integer id"),
+    ))
+  } else {
+    Ok(value as u64)
+  }
 }
 
 #[allow(non_snake_case)]
@@ -100,14 +135,32 @@ pub fn openDatabase(path: String, options: Option<ConnectOptions>) -> NapiResult
   if let Some(mode) = opts.synchronous.as_deref() {
     pager_opts.synchronous = parse_synchronous(mode)?;
   }
-  if let Some(ms) = opts.commit_coalesce_ms {
-    pager_opts.wal_commit_coalesce_ms = ms as u64;
+  if let Some(ms) = opts
+    .group_commit_max_wait_ms
+    .or(opts.commit_coalesce_ms)
+  {
+    pager_opts.group_commit_max_wait_ms = ms as u64;
   }
-  if let Some(frames) = opts.commit_max_frames {
-    pager_opts.wal_commit_max_frames = frames as usize;
+  if let Some(frames) = opts
+    .group_commit_max_frames
+    .or(opts.commit_max_frames)
+  {
+    pager_opts.group_commit_max_frames = frames as usize;
   }
-  if let Some(commits) = opts.commit_max_commits {
-    pager_opts.wal_commit_max_commits = commits as usize;
+  if let Some(commits) = opts
+    .group_commit_max_writers
+    .or(opts.commit_max_commits)
+  {
+    pager_opts.group_commit_max_writers = commits as usize;
+  }
+  if let Some(async_fsync) = opts.async_fsync {
+    pager_opts.async_fsync = async_fsync;
+  }
+  if let Some(bytes) = opts.wal_segment_bytes {
+    pager_opts.wal_segment_size_bytes = bytes as u64;
+  }
+  if let Some(preallocate) = opts.wal_preallocate_segments {
+    pager_opts.wal_preallocate_segments = preallocate;
   }
   if let Some(auto_ms) = opts.autocheckpoint_ms {
     pager_opts.autocheckpoint_ms = Some(auto_ms as u64);
@@ -186,15 +239,17 @@ pub fn databaseCancelRequest(handle: &DatabaseHandle, request_id: String) -> Nap
 
 #[allow(non_snake_case)]
 #[napi]
-pub fn databaseGetNode(handle: &DatabaseHandle, node_id: u64) -> NapiResult<Option<Value>> {
-  let record = handle.inner.get_node_record(node_id).map_err(to_napi_err)?;
+pub fn databaseGetNode(handle: &DatabaseHandle, node_id: i64) -> NapiResult<Option<Value>> {
+  let id = u64_from_js_id(node_id, "getNodeRecord")?;
+  let record = handle.inner.get_node_record(id).map_err(to_napi_err)?;
   record.map(|node| to_json_value(node)).transpose()
 }
 
 #[allow(non_snake_case)]
 #[napi]
-pub fn databaseGetEdge(handle: &DatabaseHandle, edge_id: u64) -> NapiResult<Option<Value>> {
-  let record = handle.inner.get_edge_record(edge_id).map_err(to_napi_err)?;
+pub fn databaseGetEdge(handle: &DatabaseHandle, edge_id: i64) -> NapiResult<Option<Value>> {
+  let id = u64_from_js_id(edge_id, "getEdgeRecord")?;
+  let record = handle.inner.get_edge_record(id).map_err(to_napi_err)?;
   record.map(|edge| to_json_value(edge)).transpose()
 }
 
@@ -232,35 +287,43 @@ pub fn databaseListNodesWithLabel(
 #[napi]
 pub fn databaseNeighbors(
   handle: &DatabaseHandle,
-  node_id: u64,
+  node_id: i64,
   options: Option<NeighborOptions>,
 ) -> NapiResult<Vec<NeighborRecord>> {
+  let id = u64_from_js_id(node_id, "neighbors")?;
   let opts = options.unwrap_or_default();
   let dir = parse_direction(opts.direction.as_deref())?;
   let distinct = opts.distinct.unwrap_or(true);
   let neighbors = handle
     .inner
-    .neighbors_with_options(node_id, dir, opts.edge_type.as_deref(), distinct)
+    .neighbors_with_options(id, dir, opts.edge_type.as_deref(), distinct)
     .map_err(to_napi_err)?;
-  Ok(neighbors.into_iter().map(NeighborRecord::from).collect())
+  neighbors
+    .into_iter()
+    .map(NeighborRecord::try_from)
+    .collect::<Result<Vec<_>, _>>()
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseBfsTraversal(
   handle: &DatabaseHandle,
-  start_id: u64,
+  start_id: i64,
   max_depth: u32,
   options: Option<BfsTraversalOptions>,
 ) -> NapiResult<Vec<BfsVisitRecord>> {
+  let start = u64_from_js_id(start_id, "bfsTraversal")?;
   let opts = options.unwrap_or_default();
   let dir = parse_direction(opts.direction.as_deref())?;
   let max_results = opts.max_results.map(|value| value as usize);
   let visits = handle
     .inner
-    .bfs_traversal(start_id, dir, max_depth, opts.edge_types.as_deref(), max_results)
+    .bfs_traversal(start, dir, max_depth, opts.edge_types.as_deref(), max_results)
     .map_err(to_napi_err)?;
-  Ok(visits.into_iter().map(BfsVisitRecord::from).collect())
+  visits
+    .into_iter()
+    .map(BfsVisitRecord::try_from)
+    .collect::<Result<Vec<_>, _>>()
 }
 
 #[napi]
@@ -301,21 +364,25 @@ fn parse_synchronous(value: &str) -> NapiResult<Synchronous> {
   })
 }
 
-impl From<NeighborInfo> for NeighborRecord {
-  fn from(value: NeighborInfo) -> Self {
-    Self {
-      node_id: value.node_id,
-      edge_id: value.edge_id,
+impl TryFrom<NeighborInfo> for NeighborRecord {
+  type Error = NapiError;
+
+  fn try_from(value: NeighborInfo) -> Result<Self, Self::Error> {
+    Ok(Self {
+      node_id: js_id_from_u64(value.node_id, "neighbor node id")?,
+      edge_id: js_id_from_u64(value.edge_id, "neighbor edge id")?,
       type_id: value.type_id,
-    }
+    })
   }
 }
 
-impl From<BfsVisitInfo> for BfsVisitRecord {
-  fn from(value: BfsVisitInfo) -> Self {
-    Self {
-      node_id: value.node_id,
+impl TryFrom<BfsVisitInfo> for BfsVisitRecord {
+  type Error = NapiError;
+
+  fn try_from(value: BfsVisitInfo) -> Result<Self, Self::Error> {
+    Ok(Self {
+      node_id: js_id_from_u64(value.node_id, "bfs traversal node id")?,
       depth: value.depth,
-    }
+    })
   }
 }

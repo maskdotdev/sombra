@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::primitives::pager::{PageStore, ReadGuard};
+use crate::primitives::pager::ReadGuard;
 use crate::storage::Graph;
 use crate::types::{EdgeId, NodeId, TypeId};
 use serde::Serialize;
@@ -119,7 +119,7 @@ pub fn verify(
     }
 
     if matches!(level, VerifyLevel::Full) {
-        let read = pager.begin_read()?;
+        let read = pager.begin_latest_committed_read()?;
         let nodes = collect_nodes(
             &graph,
             &read,

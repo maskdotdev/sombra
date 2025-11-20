@@ -8,7 +8,7 @@ use sombra::storage::{
     DeleteNodeOpts, Graph, GraphOptions, NodeSpec, PropEntry, PropValue, VacuumCfg, VacuumTrigger,
 };
 use sombra::types::{LabelId, PropId, Result};
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
 
 fn small_vacuum_cfg(interval: Duration, high_water_bytes: u64) -> VacuumCfg {
     VacuumCfg {
@@ -22,18 +22,18 @@ fn small_vacuum_cfg(interval: Duration, high_water_bytes: u64) -> VacuumCfg {
     }
 }
 
-fn setup_graph(cfg: VacuumCfg) -> Result<(Arc<Pager>, Arc<Graph>)> {
+fn setup_graph(cfg: VacuumCfg) -> Result<(TempDir, Arc<Pager>, Arc<Graph>)> {
     let dir = tempdir()?;
     let path = dir.path().join("vacuum_worker.db");
     let pager = Arc::new(Pager::create(&path, PagerOptions::default())?);
     let store: Arc<dyn PageStore> = pager.clone();
     let graph = Graph::open(GraphOptions::new(store).vacuum(cfg))?;
-    Ok((pager, graph))
+    Ok((dir, pager, graph))
 }
 
 #[test]
 fn background_vacuum_runs_with_timer() -> Result<()> {
-    let (pager, graph) = setup_graph(small_vacuum_cfg(Duration::from_millis(25), 0))?;
+    let (_dir, pager, graph) = setup_graph(small_vacuum_cfg(Duration::from_millis(25), 0))?;
 
     let mut write = pager.begin_write()?;
     let node = graph.create_node(
@@ -68,7 +68,7 @@ fn background_vacuum_runs_with_timer() -> Result<()> {
 
 #[test]
 fn high_water_trigger_fires() -> Result<()> {
-    let (pager, graph) = setup_graph(small_vacuum_cfg(Duration::from_secs(60), 1))?;
+    let (_dir, pager, graph) = setup_graph(small_vacuum_cfg(Duration::from_secs(60), 1))?;
 
     let mut write = pager.begin_write()?;
     let node = graph.create_node(

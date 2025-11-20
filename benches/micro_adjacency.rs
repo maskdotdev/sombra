@@ -43,7 +43,7 @@ fn micro_adjacency(c: &mut Criterion) {
 struct GraphHarness {
     _tmpdir: TempDir,
     pager: Arc<Pager>,
-    graph: Graph,
+    graph: Arc<Graph>,
     nodes: Vec<NodeId>,
     cursor: usize,
 }

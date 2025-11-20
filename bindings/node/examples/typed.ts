@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs'
-import path from 'node:path'
+import { basename } from 'node:path'
 
 import { SombraDB } from '../typed'
 import type { GraphSchema } from '../typed'
@@ -8,10 +8,10 @@ const DB_PATH = './typed-example.db'
 
 interface MyGraphSchema extends GraphSchema {
   nodes: {
-    Person: { name: string; age: number }
-    Company: { name: string; employees: number }
-    City: { name: string; state: string }
-    Pet: { name: string; species: string }
+    Person: { properties: { name: string; age: number } }
+    Company: { properties: { name: string; employees: number } }
+    City: { properties: { name: string; state: string } }
+    Pet: { properties: { name: string; species: string } }
   }
   edges: {
     KNOWS: {
@@ -48,10 +48,12 @@ interface MyGraphSchema extends GraphSchema {
 }
 
 function resetDb(file: string): void {
-  try {
-    rmSync(file)
-  } catch {
-    /* ignore */
+  for (const suffix of ['', '-wal', '-shm', '-lock']) {
+    try {
+      rmSync(`${file}${suffix}`)
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -111,9 +113,7 @@ async function run(): Promise<void> {
   const auroraId = db.findNodeByProperty('Company', 'name', 'AuroraTech')
   if (auroraId) {
     const auroraNode = db.getNode(auroraId, 'Company')
-    console.log(
-      `   Found: ${auroraNode?.properties.name} with ${auroraNode?.properties.employees} employees\n`,
-    )
+    console.log(`   Found: ${auroraNode?.properties.name} with ${auroraNode?.properties.employees} employees\n`)
   }
 
   console.log('2. Get all employees at AuroraTech (type-safe edge traversal):')
@@ -126,11 +126,7 @@ async function run(): Promise<void> {
   console.log()
 
   console.log('3. Using type-safe query builder:')
-  const result = db
-    .query()
-    .startFromLabel('Company')
-    .traverse(['WORKS_AT'], 'in', 1)
-    .getIds()
+  const result = db.query().startFromLabel('Company').traverse(['WORKS_AT'], 'in', 1).getIds()
   console.log(`   Found ${result.nodeIds.length} total employees across all companies\n`)
 
   console.log('4. Find all people in Austin:')
@@ -153,8 +149,10 @@ async function run(): Promise<void> {
   const bfsResults = db.bfsTraversal(fabian, 2)
   console.log(`   Reached ${bfsResults.length} nodes:`)
   for (const { nodeId, depth } of bfsResults.slice(0, 5)) {
-    const node = db.getNode(nodeId, 'Person')
-    console.log(`   - ${node?.properties.name ?? 'N/A'} (depth: ${depth})`)
+    const nodeRecord = db.raw().getNodeRecord(nodeId)
+    const primaryLabel = nodeRecord?.labels?.[0] ?? 'Unknown'
+    const displayName = (nodeRecord?.properties?.name as string | undefined) ?? 'N/A'
+    console.log(`   - ${primaryLabel}: ${displayName} (depth: ${depth})`)
   }
   console.log()
 
@@ -166,7 +164,7 @@ async function run(): Promise<void> {
   console.log('- Backed by the same rust core and traversal primitives')
 }
 
-if (path.basename(process.argv[1] ?? '') === path.basename(__filename)) {
+if (basename(process.argv[1] ?? '') === basename(__filename)) {
   run().catch((err) => {
     console.error(err)
     process.exitCode = 1

@@ -171,6 +171,7 @@ impl ValCodec for StrEntry {
                 out.extend_from_slice(&vref.n_pages.to_be_bytes());
                 out.extend_from_slice(&vref.len.to_be_bytes());
                 out.extend_from_slice(&vref.checksum.to_be_bytes());
+                out.extend_from_slice(&vref.owner_commit.to_be_bytes());
             }
         }
     }
@@ -192,7 +193,7 @@ impl ValCodec for StrEntry {
                 Ok(StrEntry::Inline(data))
             }
             1 => {
-                if src.len() != 1 + 8 + 4 + 4 + 4 {
+                if src.len() != 1 + 8 + 4 + 4 + 4 + 8 {
                     return Err(SombraError::Corruption("vref payload length mismatch"));
                 }
                 let mut buf8 = [0u8; 8];
@@ -205,11 +206,14 @@ impl ValCodec for StrEntry {
                 let len = u32::from_be_bytes(buf4);
                 buf4.copy_from_slice(&src[17..21]);
                 let checksum = u32::from_be_bytes(buf4);
+                buf8.copy_from_slice(&src[21..29]);
+                let owner_commit = u64::from_be_bytes(buf8);
                 Ok(StrEntry::VRef(VRef {
                     start_page,
                     n_pages,
                     len,
                     checksum,
+                    owner_commit,
                 }))
             }
             _ => Err(SombraError::Corruption("unknown string entry tag")),

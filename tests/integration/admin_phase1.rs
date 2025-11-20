@@ -1,12 +1,13 @@
 #![allow(missing_docs)]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sombra::{
     admin::{
-        checkpoint, stats, vacuum_into, verify, AdminOpenOptions, CheckpointMode, VacuumOptions,
-        VerifyLevel,
+        checkpoint, promote_vacuumed_copy, stats, vacuum_into, verify, AdminOpenOptions,
+        CheckpointMode, VacuumOptions, VerifyLevel,
     },
     primitives::pager::{PageStore, Pager, PagerOptions},
     storage::{EdgeSpec, Graph, GraphOptions, NodeSpec, PropEntry, PropValue},
@@ -97,6 +98,33 @@ fn vacuum_into_creates_copy_with_analysis() {
     assert!(report.analyze_performed);
     assert!(report.analyze_summary.is_some());
     assert!(report.copied_bytes > 0);
+}
+
+#[test]
+fn vacuum_replace_promotes_copy_and_backs_up() {
+    let (dir, db_path) = setup_db("admin-vacuum-promote");
+    let dst = dir.path().join("vacuumed.sombra");
+    let backup = dir.path().join("vacuumed-backup.sombra");
+    let opts = admin_opts();
+    let report = vacuum_into(&db_path, &dst, &opts, &VacuumOptions::default()).expect("vacuum");
+    let original_size = fs::metadata(&db_path).expect("original metadata").len();
+
+    promote_vacuumed_copy(&db_path, &dst, Some(&backup)).expect("promote");
+
+    assert!(
+        !dst.exists(),
+        "staging file should be moved into the original path"
+    );
+    assert!(db_path.exists(), "database should exist after promotion");
+    assert!(backup.exists(), "backup should be created");
+    assert_eq!(
+        fs::metadata(&backup).expect("backup metadata").len(),
+        original_size
+    );
+    assert_eq!(
+        fs::metadata(&db_path).expect("db metadata").len(),
+        report.copied_bytes
+    );
 }
 
 #[test]

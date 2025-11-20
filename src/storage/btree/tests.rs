@@ -305,7 +305,7 @@ fn vec_key_randomized_round_trip_matches_reference() -> Result<()> {
                 let mut write = pager.begin_write()?;
                 tree.put(&mut write, &key, &value)?;
                 pager.commit(write)?;
-                let read = pager.begin_read()?;
+                let read = pager.begin_latest_committed_read()?;
                 assert_eq!(tree.get(&read, &key)?, Some(value));
             }
             1 => {
@@ -319,7 +319,7 @@ fn vec_key_randomized_round_trip_matches_reference() -> Result<()> {
                 let mut write = pager.begin_write()?;
                 tree.put(&mut write, &key, &value)?;
                 pager.commit(write)?;
-                let read = pager.begin_read()?;
+                let read = pager.begin_latest_committed_read()?;
                 assert_eq!(tree.get(&read, &key)?, Some(value));
             }
             _ => {
@@ -333,7 +333,7 @@ fn vec_key_randomized_round_trip_matches_reference() -> Result<()> {
                 let removed = tree.delete(&mut write, &key)?;
                 pager.commit(write)?;
                 if !removed {
-                    let read = pager.begin_read()?;
+                    let read = pager.begin_latest_committed_read()?;
                     let mut cursor = tree.range(
                         &read,
                         Bound::Unbounded::<Vec<u8>>,
@@ -347,7 +347,7 @@ fn vec_key_randomized_round_trip_matches_reference() -> Result<()> {
                         "expected delete to remove existing key at step {step}: {key:?}; history: {history:?}; tree={remaining_keys:?}"
                     );
                 }
-                let read = pager.begin_read()?;
+                let read = pager.begin_latest_committed_read()?;
                 assert!(tree.get(&read, &key)?.is_none());
             }
         }

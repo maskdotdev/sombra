@@ -4,6 +4,43 @@ Python bindings for the Sombra graph database. The package exposes the Stage 8
 fluent query builder together with lightweight CRUD helpers that forward to the
 Rust planner/executor through `pyo3`.
 
+## Typed facade
+
+For schema-aware CRUD helpers that mirror the TypeScript ergonomics, use the
+`SombraDB` wrapper under `sombra.typed`:
+
+```python
+from typing import TypedDict
+from typing_extensions import Literal
+
+from sombra.typed import NodeSchema, SombraDB, TypedGraphSchema
+
+
+class PersonProps(TypedDict):
+    name: str
+    age: int
+
+
+class PersonNode(NodeSchema):
+    properties: PersonProps
+
+
+class GraphSchema(TypedGraphSchema):
+    nodes: dict[str, PersonNode]
+    edges: dict[str, TypedDict("KnowsEdge", {"from": Literal["Person"], "to": Literal["Person"], "properties": dict})]
+
+
+schema: GraphSchema = {
+    "nodes": {"Person": {"properties": {"name": "", "age": 0}}},
+    "edges": {"KNOWS": {"from": "Person", "to": "Person", "properties": {}}},
+}
+
+db = SombraDB("/tmp/typed.db", schema=schema)
+friend = db.add_node("Person", {"name": "Ada", "age": 33})
+```
+
+See `examples/typed.py` for a longer walkthrough that mirrors the Node.js demo.
+
 ## Quick start
 
 ```python
@@ -62,4 +99,3 @@ publish the bindings.
 1. Land a `feat` commit that touches `bindings/python/**` whenever you want the PyO3 wheel to bump its minor version. Release Please maps that commit to a new `sombrapy` release PR.
 2. Before merging the PR, build and test the wheel locally: `maturin develop`, `pytest -q`, and `maturin build --release` (or `maturin publish --dry-run`).
 3. Merge the release PR to tag the repo; the `publish-python.yml` workflow uploads the wheels to PyPI. Re-run `maturin publish` manually only if the workflow fails.
-

@@ -22,7 +22,10 @@ use super::meta::{create_meta, load_meta, write_meta_page, Meta};
 use crate::primitives::{
     concurrency::{ReaderGuard as LockReaderGuard, SingleWriter, WriterGuard as LockWriterGuard},
     io::{FileIo, StdFileIo},
-    wal::{Wal, WalCommitConfig, WalCommitter, WalFrame, WalFrameOwned, WalOptions, WalSyncMode},
+    wal::{
+        Wal, WalAllocatorStats, WalCommitBacklog, WalCommitConfig, WalCommitter, WalFrame,
+        WalFrameOwned, WalFramePtr, WalOptions, WalSyncMode,
+    },
 };
 use crate::storage::{
     profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
@@ -135,7 +138,7 @@ struct OverlayEntry {
 
 struct VersionChainEntry {
     lsn: Lsn,
-    wal_offset: Option<u64>,
+    wal_offset: Option<WalFramePtr>,
     data: Option<Arc<[u8]>>,
 }
 
@@ -205,7 +208,7 @@ impl Default for PagerOptions {
             group_commit_max_frames: 512,
             group_commit_max_wait_ms: 2,
             async_fsync: false,
-            wal_segment_size_bytes: 0,
+            wal_segment_size_bytes: 64 * 1024 * 1024,
             wal_preallocate_segments: 0,
         }
     }
@@ -269,7 +272,9 @@ fn wal_path(path: &Path) -> PathBuf {
 }
 
 fn wal_cookie_path(path: &Path) -> PathBuf {
-    append_suffix(path, "-wal.dwm")
+    let mut dir = wal_path(path);
+    dir.push("wal.dwm");
+    dir
 }
 
 fn lock_path(path: &Path) -> PathBuf {
@@ -357,6 +362,7 @@ fn recover_database(
         frames.push(frame);
     }
     if frames.is_empty() {
+        let _ = wal.recycle_active_segments()?;
         wal.reset(Lsn(meta.last_checkpoint_lsn.0 + 1))?;
         return Ok(Lsn(meta.last_checkpoint_lsn.0 + 1));
     }
@@ -372,6 +378,7 @@ fn recover_database(
     db_io.sync_all()?;
     let refreshed = load_meta(db_io, meta.page_size)?;
     *meta = refreshed;
+    let _ = wal.recycle_active_segments()?;
     wal.reset(Lsn(meta.last_checkpoint_lsn.0 + 1))?;
     Ok(Lsn(meta.last_checkpoint_lsn.0 + 1))
 }
@@ -458,6 +465,21 @@ pub trait PageStore: 'static {
 
     /// Returns the durable watermark LSN when available.
     fn durable_lsn(&self) -> Option<Lsn> {
+        None
+    }
+
+    /// Returns the current WAL commit backlog when available.
+    fn wal_commit_backlog(&self) -> Option<WalCommitBacklog> {
+        None
+    }
+
+    /// Returns allocator/preallocation stats for the WAL when available.
+    fn wal_allocator_stats(&self) -> Option<WalAllocatorStats> {
+        None
+    }
+
+    /// Returns async fsync backlog details, including pending cookie LSN.
+    fn async_fsync_backlog(&self) -> Option<AsyncFsyncBacklog> {
         None
     }
 
@@ -726,6 +748,19 @@ impl WalSyncState {
     }
 }
 
+/// Describes the outstanding async fsync backlog.
+#[derive(Clone, Debug)]
+pub struct AsyncFsyncBacklog {
+    /// Highest LSN queued for async fsync.
+    pub pending_lsn: Lsn,
+    /// Last LSN synced and persisted to the durable cookie.
+    pub durable_lsn: Lsn,
+    /// Difference between pending and durable LSNs.
+    pub pending_lag: u64,
+    /// Last error observed by the async fsync worker, if any.
+    pub last_error: Option<String>,
+}
+
 struct AsyncFsyncState {
     scheduled: bool,
     pending_lsn: Lsn,
@@ -973,8 +1008,7 @@ impl Pager {
         options: PagerOptions,
         is_create: bool,
     ) -> Result<Self> {
-        let wal_path = wal_path(path);
-        let wal_io = Arc::new(StdFileIo::open(&wal_path)?);
+        let wal_dir = wal_path(path);
         let mut wal_options = WalOptions::new(
             meta.page_size,
             meta.wal_salt,
@@ -982,7 +1016,7 @@ impl Pager {
         );
         wal_options.segment_size_bytes = options.wal_segment_size_bytes;
         wal_options.preallocate_segments = options.wal_preallocate_segments;
-        let wal = Arc::new(Wal::open(wal_io, wal_options)?);
+        let wal = Wal::open(&wal_dir, wal_options)?;
         let wal_cookie = if options.async_fsync {
             Some(Arc::new(WalDurableCookie::new(wal_cookie_path(path))))
         } else {
@@ -1125,6 +1159,11 @@ impl Pager {
     /// Returns the page size in bytes.
     pub fn page_size(&self) -> u32 {
         self.page_size as u32
+    }
+
+    /// Returns allocator state for the backing WAL.
+    pub fn wal_allocator_stats(&self) -> WalAllocatorStats {
+        self.wal.allocator_stats()
     }
 
     /// Returns a snapshot of current pager statistics.
@@ -2057,7 +2096,7 @@ impl Pager {
         &self,
         frames: &[PendingWalFrame],
         sync_mode: WalSyncMode,
-    ) -> Result<Vec<u64>> {
+    ) -> Result<Vec<WalFramePtr>> {
         if frames.is_empty() {
             return Ok(Vec::new());
         }
@@ -2173,6 +2212,7 @@ impl Pager {
             "pager.checkpoint.plan"
         );
         if frames.is_empty() {
+            let _ = self.wal.recycle_active_segments()?;
             self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
             inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
             pager_test_log!("[pager.checkpoint] no frames; reset wal");
@@ -2236,6 +2276,7 @@ impl Pager {
         self.db_io.write_at(0, &meta_buf)?;
         self.db_io.sync_all()?;
         pager_test_log!("[pager.checkpoint] meta page written+synced");
+        let _ = self.wal.recycle_active_segments()?;
         self.wal.reset(Lsn(inner.meta.last_checkpoint_lsn.0 + 1))?;
         inner.next_lsn = Lsn(inner.meta.last_checkpoint_lsn.0 + 1);
         inner.meta_dirty = false;
@@ -2515,7 +2556,7 @@ impl Pager {
         chains: &mut HashMap<PageId, VecDeque<VersionChainEntry>>,
         page_id: PageId,
         lsn: Lsn,
-        wal_offset: Option<u64>,
+        wal_offset: Option<WalFramePtr>,
         data: Option<Arc<[u8]>>,
     ) {
         let chain = chains.entry(page_id).or_insert_with(VecDeque::new);
@@ -2544,7 +2585,7 @@ impl Pager {
             .fetch_add(1, AtomicOrdering::Relaxed);
     }
 
-    fn attach_version_offsets(&self, targets: &[Option<(PageId, Lsn)>], offsets: &[u64]) {
+    fn attach_version_offsets(&self, targets: &[Option<(PageId, Lsn)>], offsets: &[WalFramePtr]) {
         let mut chains = self.version_chains.lock();
         for (meta, offset) in targets.iter().zip(offsets.iter()) {
             let Some((page_id, lsn)) = meta else {
@@ -2615,8 +2656,8 @@ impl Pager {
         if let Some(cached) = data {
             return Some(cached);
         }
-        let offset = wal_offset?;
-        match self.read_wal_version(page_id, lsn, offset) {
+        let ptr = wal_offset?;
+        match self.read_wal_version(page_id, lsn, ptr) {
             Ok(data) => {
                 self.backfill_version_data(page_id, lsn, Arc::clone(&data));
                 Some(data)
@@ -2625,7 +2666,8 @@ impl Pager {
                 warn!(
                     page_id = page_id.0,
                     lsn = lsn.0,
-                    offset,
+                    segment_id = ptr.segment_id,
+                    offset = ptr.offset,
                     error = %err,
                     "pager.version_chain.rehydrate_failed"
                 );
@@ -2645,8 +2687,8 @@ impl Pager {
         Lsn(cutoff)
     }
 
-    fn read_wal_version(&self, page_id: PageId, lsn: Lsn, offset: u64) -> Result<Arc<[u8]>> {
-        let Some(frame) = self.wal.read_frame_at(offset)? else {
+    fn read_wal_version(&self, page_id: PageId, lsn: Lsn, ptr: WalFramePtr) -> Result<Arc<[u8]>> {
+        let Some(frame) = self.wal.read_frame_at(ptr)? else {
             return Err(SombraError::Corruption(
                 "wal frame missing during version lookup",
             ));
@@ -2990,6 +3032,27 @@ impl PageStore for Pager {
         Some(self.durable_lsn())
     }
 
+    fn wal_commit_backlog(&self) -> Option<WalCommitBacklog> {
+        Some(self.wal_committer.backlog())
+    }
+
+    fn wal_allocator_stats(&self) -> Option<WalAllocatorStats> {
+        Some(Pager::wal_allocator_stats(self))
+    }
+
+    fn async_fsync_backlog(&self) -> Option<AsyncFsyncBacklog> {
+        self.async_fsync_state.as_ref().map(|state| {
+            let guard = state.lock();
+            let pending_lag = guard.pending_lsn.0.saturating_sub(guard.durable_lsn.0);
+            AsyncFsyncBacklog {
+                pending_lsn: guard.pending_lsn,
+                durable_lsn: guard.durable_lsn,
+                pending_lag,
+                last_error: guard.last_error.as_ref().map(|err| err.to_string()),
+            }
+        })
+    }
+
     fn set_checksum_verification(&self, enabled: bool) {
         self.checksum_verify_on_read
             .store(enabled, AtomicOrdering::Relaxed);
@@ -3074,8 +3137,8 @@ mod tests {
     fn init_tracing() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            let filter =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("pager=debug"));
+            let filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("pager=debug,sombra::primitives::wal=debug"));
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)

@@ -1339,22 +1339,51 @@ class CreateBuilder {
   }
 }
 
-function normalizeIdList(value) {
+function normalizeIdList(value, ctx = 'id list') {
+  const target = []
   if (Array.isArray(value)) {
+    for (let idx = 0; idx < value.length; idx += 1) {
+      target.push(normalizeSingleId(value[idx], `${ctx}[${idx}]`))
+    }
+    return target
+  }
+  if (value && typeof value === 'object' && typeof value.length === 'number' && ArrayBuffer.isView(value)) {
+    const view = Array.prototype.slice.call(value)
+    for (let idx = 0; idx < view.length; idx += 1) {
+      target.push(normalizeSingleId(view[idx], `${ctx}[${idx}]`))
+    }
+    return target
+  }
+  return target
+}
+
+function normalizeSingleId(value, ctx) {
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new TypeError(`${ctx} must be a non-negative integer`)
+    }
+    if (!Number.isSafeInteger(value)) {
+      throw new RangeError(`${ctx} exceeds the safe integer range`)
+    }
     return value
   }
-  if (value && typeof value === 'object' && typeof value.length === 'number') {
-    if (ArrayBuffer.isView(value)) {
-      return Array.prototype.slice.call(value)
+  if (typeof value === 'bigint') {
+    if (value < 0n) {
+      throw new TypeError(`${ctx} must be a non-negative integer`)
     }
+    const max = BigInt(Number.MAX_SAFE_INTEGER)
+    if (value > max) {
+      throw new RangeError(`${ctx} exceeds the safe integer range`)
+    }
+    return Number(value)
   }
-  return []
+  throw new TypeError(`${ctx} must contain numeric ids`)
 }
 
 function createSummaryWithAliasHelper(summary) {
   const result = {
-    nodes: normalizeIdList(summary?.nodes),
-    edges: normalizeIdList(summary?.edges),
+    nodes: normalizeIdList(summary?.nodes, 'mutation summary nodes'),
+    edges: normalizeIdList(summary?.edges, 'mutation summary edges'),
     aliases:
       summary && summary.aliases && typeof summary.aliases === 'object'
         ? { ...summary.aliases }
@@ -1507,17 +1536,29 @@ class Database {
 
   countNodesWithLabel(label) {
     const normalized = assertLabel(label, 'countNodesWithLabel')
-    return native.databaseCountNodesWithLabel(this._handle, normalized)
+    if (typeof native.databaseCountNodesWithLabel === 'function') {
+      return native.databaseCountNodesWithLabel(this._handle, normalized)
+    }
+    return this.listNodesWithLabel(normalized).length
   }
 
   countEdgesWithType(edgeType) {
     const normalized = assertEdgeType(edgeType, 'countEdgesWithType')
-    return native.databaseCountEdgesWithType(this._handle, normalized)
+    if (typeof native.databaseCountEdgesWithType === 'function') {
+      return native.databaseCountEdgesWithType(this._handle, normalized)
+    }
+    return this._countEdgesWithTypeFallback(normalized)
   }
 
   listNodesWithLabel(label) {
     const normalized = assertLabel(label, 'listNodesWithLabel')
-    return native.databaseListNodesWithLabel(this._handle, normalized)
+    if (typeof native.databaseListNodesWithLabel === 'function') {
+      return normalizeIdList(
+        native.databaseListNodesWithLabel(this._handle, normalized),
+        'listNodesWithLabel result',
+      )
+    }
+    return this._listNodesWithLabelFallback(normalized)
   }
 
   neighbors(nodeId, options) {
@@ -1578,6 +1619,33 @@ class Database {
 
   _stream(spec) {
     return native.databaseStream(this._handle, spec)
+  }
+
+  _listNodesWithLabelFallback(label) {
+    const matchVar = '__sombra_list_nodes'
+    const builder = new QueryBuilder(this, this._schema)
+    builder.match({ var: matchVar, label })
+    const payload = this._execute(builder._build())
+    const rows = Array.isArray(payload?.rows) ? payload.rows : []
+    const ids = []
+    for (const row of rows) {
+      const entry = row && row[matchVar]
+      if (entry && typeof entry._id === 'number') {
+        ids.push(entry._id)
+      }
+    }
+    return ids
+  }
+
+  _countEdgesWithTypeFallback(edgeType) {
+    const srcVar = '__sombra_edge_src'
+    const dstVar = '__sombra_edge_dst'
+    const builder = new QueryBuilder(this, this._schema)
+    builder.match({ var: srcVar, label: null })
+    builder.where(edgeType, { var: dstVar, label: null })
+    const payload = this._execute(builder._build())
+    const rows = Array.isArray(payload?.rows) ? payload.rows : []
+    return rows.length
   }
 }
 

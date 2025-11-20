@@ -60,7 +60,7 @@
 sombra open graph.sombra --pragma stats
 sombra import graph.sombra --nodes people.csv --edges follows.csv --id-column id --src src --dst dst --type FOLLOWS --labels Person
 sombra export graph.sombra --nodes out_nodes.csv --edges out_edges.csv
-sombra vacuum graph.sombra --into compact.sombra
+sombra vacuum graph.sombra --replace --backup graph.sombra.bak
 sombra checkpoint graph.sombra --mode force
 sombra verify graph.sombra --level full
 sombra explain graph.sombra --query 'MATCH (a:User)-[:FOLLOWS]->(b:User) RETURN a,b'
@@ -182,11 +182,11 @@ sombra checkpoint DB --mode {force|best-effort}
 ### 3.3 VACUUM
 
 ```
-sombra vacuum DB --into compact.sombra [--analyze]
+sombra vacuum DB [--into compact.sombra | --replace [--backup old.sombra]] [--analyze]
 ```
 
 * Copy‑out: re‑encode and compact, rebuild freelist, optionally recompute histograms.
-* Produces a **new file**; doesn’t mutate original (safer).
+* Produces a **new file** unless `--replace` is passed; with `--replace` the CLI swaps the compacted copy into place and keeps the previous database as a backup (default `<DB>.bak`).
 
 ### 3.4 VERIFY
 

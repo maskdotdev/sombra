@@ -58,6 +58,8 @@ pub struct StorageProfileSnapshot {
     pub btree_leaf_rebalance_rebuilds: u64,
     /// Number of WAL write batches emitted via writev
     pub wal_coalesced_writes: u64,
+    /// Number of WAL segments reused/reclaimed
+    pub wal_reused_segments: u64,
     /// Bytes flushed via borrowed page images during commits
     pub pager_commit_borrowed_bytes: u64,
     /// Median WAL batch size (frames) since last snapshot
@@ -116,6 +118,7 @@ struct StorageProfileCounters {
     btree_leaf_rebalance_in_place: AtomicU64,
     btree_leaf_rebalance_rebuilds: AtomicU64,
     wal_coalesced_writes: AtomicU64,
+    wal_reused_segments: AtomicU64,
     pager_commit_borrowed_bytes: AtomicU64,
     btree_leaf_allocator_compactions: AtomicU64,
     btree_leaf_allocator_bytes_moved: AtomicU64,
@@ -287,6 +290,7 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         btree_leaf_rebalance_in_place: load(&counters.btree_leaf_rebalance_in_place),
         btree_leaf_rebalance_rebuilds: load(&counters.btree_leaf_rebalance_rebuilds),
         wal_coalesced_writes: load(&counters.wal_coalesced_writes),
+        wal_reused_segments: load(&counters.wal_reused_segments),
         pager_commit_borrowed_bytes: load(&counters.pager_commit_borrowed_bytes),
         wal_commit_group_p50: wal_p50,
         wal_commit_group_p95: wal_p95,
@@ -424,6 +428,18 @@ pub fn record_wal_coalesced_writes(count: u64) {
     if let Some(counters) = counters() {
         counters
             .wal_coalesced_writes
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records how many WAL segments were reclaimed for reuse.
+pub fn record_wal_reused_segments(count: u64) {
+    if count == 0 {
+        return;
+    }
+    if let Some(counters) = counters() {
+        counters
+            .wal_reused_segments
             .fetch_add(count, Ordering::Relaxed);
     }
 }

@@ -6,6 +6,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+#[cfg(not(feature = "bundled-dashboard"))]
+use axum::response::Html;
 #[cfg(feature = "bundled-dashboard")]
 use axum::{body::Body, http::Uri};
 use axum::{
@@ -18,8 +20,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-#[cfg(not(feature = "bundled-dashboard"))]
-use axum::response::Html;
 #[cfg(feature = "bundled-dashboard")]
 use bytes::Bytes;
 use hyper::Error as HyperError;

@@ -189,7 +189,7 @@ mod bench {
             };
             // Modify pager options through the DatabaseOptions to use the same types
             opts.pager.synchronous = synchronous;
-            opts.pager.wal_commit_coalesce_ms = 5;
+            opts.pager.group_commit_max_wait_ms = 5;
             opts.pager.cache_pages = 4096;
             let db = Database::open(&path, opts).expect("open database");
             db.seed_demo().expect("seed demo");
@@ -353,10 +353,7 @@ mod bench {
         fn read_user_by_name_op(&mut self) {
             let name = self.next_lookup_key();
             let spec = user_lookup_spec(name);
-            let result = self
-                .db
-                .execute(spec)
-                .expect("execute lookup query");
+            let result = self.db.execute(spec).expect("execute lookup query");
             let count = rows_len(&result);
             if count == 0 {
                 panic!("lookup query returned no rows");
@@ -525,10 +522,7 @@ mod bench {
 
         fn populate_users_for_read_bench(&mut self, target_count: usize) {
             // Check current user count
-            let result = self
-                .db
-                .execute(user_scan_spec())
-                .expect("count users");
+            let result = self.db.execute(user_scan_spec()).expect("count users");
             let current_count = rows_len(&result);
 
             if current_count >= target_count {
@@ -579,10 +573,10 @@ mod bench {
             }
         }
 
-    fn create_named_users(&mut self, count: usize, progress: Option<bool>) -> usize {
-        if count == 0 {
-            return 0;
-        }
+        fn create_named_users(&mut self, count: usize, progress: Option<bool>) -> usize {
+            if count == 0 {
+                return 0;
+            }
             let mut names = Vec::with_capacity(count);
             let ops = (0..count)
                 .map(|_| {

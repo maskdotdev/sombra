@@ -7,6 +7,12 @@ export interface ConnectOptions {
   commitCoalesceMs?: number
   commitMaxFrames?: number
   commitMaxCommits?: number
+  groupCommitMaxWriters?: number
+  groupCommitMaxFrames?: number
+  groupCommitMaxWaitMs?: number
+  asyncFsync?: boolean
+  walSegmentBytes?: number
+  walPreallocateSegments?: number
   autocheckpointMs?: number | null
   schema?: NodeSchema
 }
