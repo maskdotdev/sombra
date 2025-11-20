@@ -783,6 +783,7 @@ impl AsyncFsyncState {
 fn async_fsync_worker(
     wal: Arc<Wal>,
     cookie: Option<Arc<WalDurableCookie>>,
+    commit_table: Arc<Mutex<CommitTable>>,
     state_arc: Arc<Mutex<AsyncFsyncState>>,
     durable: Arc<AtomicU64>,
 ) {
@@ -808,6 +809,12 @@ fn async_fsync_worker(
                 state.scheduled = false;
                 return;
             }
+        }
+        if let Err(err) = commit_table.lock().mark_durable_up_to(target.0) {
+            let mut state = state_arc.lock();
+            state.last_error = Some(err);
+            state.scheduled = false;
+            return;
         }
         durable.fetch_max(target.0, AtomicOrdering::Release);
         let mut state = state_arc.lock();
@@ -2000,14 +2007,14 @@ impl Pager {
                 lsn.0
             );
             debug!(lsn = lsn.0, "pager.commit_txn.writer_lock_released");
+            self.finalize_commit(lsn)?;
+            self.record_committed_lsn(lsn);
             match synchronous {
                 Synchronous::Full if async_fsync => self.schedule_async_fsync(lsn)?,
                 Synchronous::Full => self.mark_commit_durable(lsn)?,
                 Synchronous::Normal => self.schedule_normal_sync(lsn)?,
-                Synchronous::Off => {}
+                Synchronous::Off => self.record_durable_state(lsn)?,
             }
-            self.finalize_commit(lsn)?;
-            self.record_committed_lsn(lsn);
             guard.committed = true;
             drop(guard);
             pager_test_log!("[pager.commit] borrowed path done lsn={}", lsn.0);
@@ -2073,18 +2080,18 @@ impl Pager {
             guard.reacquire_writer_lock()?;
             return Err(err);
         }
+        self.finalize_commit(lsn)?;
+        self.record_committed_lsn(lsn);
         match synchronous {
             Synchronous::Full if async_fsync => self.schedule_async_fsync(lsn)?,
             Synchronous::Full => self.mark_commit_durable(lsn)?,
             Synchronous::Normal => self.schedule_normal_sync(lsn)?,
-            Synchronous::Off => {}
+            Synchronous::Off => self.record_durable_state(lsn)?,
         }
         if !offsets.is_empty() {
             self.attach_version_offsets(&version_targets, &offsets);
             self.release_version_payloads_for_floor();
         }
-        self.finalize_commit(lsn)?;
-        self.record_committed_lsn(lsn);
         guard.committed = true;
         drop(guard);
         pager_test_log!("[pager.commit] commit complete lsn={}", lsn.0);
@@ -2324,16 +2331,29 @@ impl Pager {
         }
         let wal = Arc::clone(&self.wal);
         let durable = Arc::clone(&self.durable_lsn);
+        let wal_cookie = self.wal_cookie.clone();
+        let commit_table = Arc::clone(&self.commit_table);
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(NORMAL_SYNC_DELAY_MS));
-            let result = wal.sync();
+            let result = wal.sync().and_then(|_| {
+                let lsn = {
+                    let state = state_arc.lock();
+                    state.pending_lsn
+                };
+                if let Some(cookie) = wal_cookie.as_ref() {
+                    cookie.persist(lsn)?;
+                }
+                {
+                    let mut table = commit_table.lock();
+                    table.mark_durable_up_to(lsn.0)?;
+                }
+                durable.fetch_max(lsn.0, AtomicOrdering::Release);
+                Ok(())
+            });
             let mut state = state_arc.lock();
             state.scheduled = false;
             match result {
-                Ok(()) => {
-                    let lsn = state.pending_lsn;
-                    durable.fetch_max(lsn.0, AtomicOrdering::Release);
-                }
+                Ok(()) => {}
                 Err(err) => {
                     state.last_error = Some(err);
                 }
@@ -2370,7 +2390,10 @@ impl Pager {
             }
         }
         if spawn_worker {
-            thread::spawn(move || async_fsync_worker(wal, cookie, state_clone, durable));
+            let commit_table = Arc::clone(&self.commit_table);
+            thread::spawn(move || {
+                async_fsync_worker(wal, cookie, commit_table, state_clone, durable)
+            });
         }
         Ok(())
     }
@@ -2484,8 +2507,14 @@ impl Pager {
         Lsn(self.durable_lsn.load(AtomicOrdering::Acquire))
     }
 
-    fn mark_commit_durable(&self, lsn: Lsn) -> Result<()> {
+    fn record_durable_state(&self, lsn: Lsn) -> Result<()> {
         self.durable_lsn.fetch_max(lsn.0, AtomicOrdering::Release);
+        let mut table = self.commit_table.lock();
+        table.mark_durable_up_to(lsn.0)
+    }
+
+    fn mark_commit_durable(&self, lsn: Lsn) -> Result<()> {
+        self.record_durable_state(lsn)?;
         if let Some(cookie) = &self.wal_cookie {
             cookie.persist(lsn)?;
         }

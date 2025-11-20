@@ -92,6 +92,7 @@ pub struct MvccSnapshotPool {
 pub struct CommitTableReport {
     pub released_up_to: u64,
     pub oldest_visible: u64,
+    pub acked_not_durable: u64,
     pub entries: Vec<CommitEntryReport>,
     pub reader_snapshot: ReaderSnapshotReport,
 }
@@ -137,6 +138,8 @@ pub enum CommitStatusKind {
     Pending,
     /// Commit finished and is visible to readers.
     Committed,
+    /// Commit flushed to durable storage.
+    Durable,
 }
 
 impl From<CommitStatus> for CommitStatusKind {
@@ -203,6 +206,7 @@ fn commit_table_report(snapshot: CommitTableSnapshot) -> CommitTableReport {
     CommitTableReport {
         released_up_to: snapshot.released_up_to,
         oldest_visible: snapshot.oldest_visible,
+        acked_not_durable: snapshot.acked_not_durable,
         entries: snapshot
             .entries
             .into_iter()

@@ -696,10 +696,13 @@ impl Graph {
         let snapshot_pool = self.snapshot_pool.as_ref().map(|pool| pool.status());
         let vacuum_horizon = self.compute_vacuum_horizon();
         let vacuum_mode = self.select_vacuum_mode();
-        let acked_not_durable_commits = match (latest_committed_lsn, durable_lsn) {
-            (Some(latest), Some(durable)) => Some(latest.0.saturating_sub(durable.0)),
-            _ => None,
-        };
+        let acked_not_durable_commits = commit_table
+            .as_ref()
+            .map(|snapshot| snapshot.acked_not_durable)
+            .or_else(|| match (latest_committed_lsn, durable_lsn) {
+                (Some(latest), Some(durable)) => Some(latest.0.saturating_sub(durable.0)),
+                _ => None,
+            });
         if let Some(backlog) = acked_not_durable_commits {
             self.metrics.mvcc_commit_backlog(backlog);
         }

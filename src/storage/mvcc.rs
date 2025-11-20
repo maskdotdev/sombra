@@ -252,8 +252,10 @@ mod tests {
 pub enum CommitStatus {
     /// Commit ID has been handed out but not finished.
     Pending,
-    /// Commit finished and is safe for readers to observe.
+    /// Commit finished and is safe for readers to observe, but durability may still be pending.
     Committed,
+    /// Commit persisted durably (fsync complete or equivalent).
+    Durable,
 }
 
 #[derive(Clone, Debug)]
@@ -359,6 +361,8 @@ pub struct CommitTableSnapshot {
     pub released_up_to: CommitId,
     /// Smallest commit that must remain visible to readers.
     pub oldest_visible: CommitId,
+    /// Commits acknowledged but not yet durable.
+    pub acked_not_durable: u64,
     /// Outstanding commit entries that have not been released yet.
     pub entries: Vec<CommitEntrySnapshot>,
     /// Live reader statistics captured during the snapshot.
@@ -455,11 +459,28 @@ impl CommitTable {
             .iter_mut()
             .find(|entry| entry.id == id)
             .ok_or_else(|| SombraError::Invalid("unknown commit id"))?;
-        if entry.status == CommitStatus::Committed {
+        if entry.status == CommitStatus::Committed || entry.status == CommitStatus::Durable {
             return Err(SombraError::Invalid("commit already finalized"));
         }
         entry.status = CommitStatus::Committed;
         entry.committed_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Marks all commits up to and including `upto_id` as durable.
+    pub fn mark_durable_up_to(&mut self, upto_id: CommitId) -> Result<()> {
+        if upto_id <= self.released_up_to {
+            return Ok(());
+        }
+        for entry in self.entries.iter_mut() {
+            if entry.id > upto_id {
+                break;
+            }
+            if entry.status == CommitStatus::Pending {
+                return Err(SombraError::Invalid("commit not yet finalized"));
+            }
+            entry.status = CommitStatus::Durable;
+        }
         Ok(())
     }
 
@@ -545,10 +566,14 @@ impl CommitTable {
     /// Callers should advance this after checkpoints or GC reclaim version chains.
     pub fn release_committed(&mut self, upto_id: CommitId) {
         while let Some(front) = self.entries.front() {
-            if front.id > upto_id
-                || front.status != CommitStatus::Committed
-                || front.reader_refs > 0
-            {
+            if front.id > upto_id || front.reader_refs > 0 {
+                break;
+            }
+            match front.status {
+                CommitStatus::Committed | CommitStatus::Durable => {}
+                CommitStatus::Pending => break,
+            }
+            if front.status != CommitStatus::Durable {
                 break;
             }
             self.released_up_to = front.id;
@@ -574,7 +599,7 @@ impl CommitTable {
             .unwrap_or_else(Instant::now);
         let mut floor = self.released_up_to;
         for entry in self.entries.iter().rev() {
-            if entry.status != CommitStatus::Committed {
+            if entry.status == CommitStatus::Pending {
                 continue;
             }
             if let Some(committed_at) = entry.committed_at {
@@ -586,6 +611,14 @@ impl CommitTable {
         }
         let oldest = self.oldest_visible();
         floor.min(oldest)
+    }
+
+    /// Returns the number of commits that have finished but are not yet durable.
+    pub fn acked_not_durable(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter(|entry| entry.status == CommitStatus::Committed)
+            .count() as u64
     }
 
     /// Returns a snapshot describing currently active readers.
@@ -646,6 +679,7 @@ impl CommitTable {
         CommitTableSnapshot {
             released_up_to: self.released_up_to,
             oldest_visible: self.oldest_visible(),
+            acked_not_durable: self.acked_not_durable(),
             entries,
             reader_snapshot: self.reader_snapshot(now),
         }
@@ -667,9 +701,11 @@ mod commit_table_tests {
         table.promote_intent(intent2, 2).unwrap();
         assert_eq!(table.oldest_visible(), 1);
         table.mark_committed(1).unwrap();
+        table.mark_durable_up_to(1).unwrap();
         table.release_committed(1);
         assert_eq!(table.oldest_visible(), 2);
         table.mark_committed(2).unwrap();
+        table.mark_durable_up_to(2).unwrap();
         table.release_committed(2);
         assert_eq!(table.oldest_visible(), 2);
     }
@@ -745,6 +781,7 @@ mod commit_table_tests {
             .unwrap();
         assert_eq!(table.vacuum_horizon(Duration::from_millis(0)), 1);
         table.release_reader(reader);
+        table.mark_durable_up_to(1).unwrap();
         table.release_committed(1);
         assert_eq!(table.vacuum_horizon(Duration::from_millis(0)), 2);
     }
@@ -758,6 +795,7 @@ mod commit_table_tests {
         table.mark_committed(2).unwrap();
         let long_retention = table.vacuum_horizon(Duration::from_secs(60));
         assert_eq!(long_retention, 0);
+        table.mark_durable_up_to(2).unwrap();
         table.release_committed(2);
         let immediate = table.vacuum_horizon(Duration::from_millis(0));
         assert_eq!(immediate, 2);
@@ -823,6 +861,24 @@ mod commit_table_tests {
         assert!(pending.committed_ms_ago.is_none());
         assert_eq!(snapshot.reader_snapshot.active, 1);
         table.release_reader(reader);
+    }
+
+    #[test]
+    fn durable_marks_clear_backlog() {
+        let mut table = CommitTable::new(0);
+        table.reserve(1).unwrap();
+        table.mark_committed(1).unwrap();
+        table.reserve(2).unwrap();
+        assert_eq!(table.acked_not_durable(), 1);
+        table.mark_durable_up_to(1).unwrap();
+        assert_eq!(table.acked_not_durable(), 0);
+    }
+
+    #[test]
+    fn mark_durable_rejects_pending() {
+        let mut table = CommitTable::new(0);
+        table.reserve(1).unwrap();
+        assert!(table.mark_durable_up_to(1).is_err());
     }
 
     #[test]

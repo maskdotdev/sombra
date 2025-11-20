@@ -1427,6 +1427,10 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
                 [
                     ("released_up_to", format_count(table.released_up_to)),
                     ("oldest_visible", format_count(table.oldest_visible)),
+                    (
+                        "acked_not_durable",
+                        format_count(table.acked_not_durable),
+                    ),
                     ("entries", format_count(table.entries.len() as u64)),
                     ("active_readers", format_count(reader.active)),
                     (
@@ -1460,6 +1464,7 @@ fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {
                     let status = match entry.status {
                         sombra::admin::CommitStatusKind::Pending => "pending",
                         sombra::admin::CommitStatusKind::Committed => "committed",
+                        sombra::admin::CommitStatusKind::Durable => "durable",
                     };
                     let age = entry
                         .committed_ms_ago

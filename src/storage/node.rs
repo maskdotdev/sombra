@@ -303,6 +303,7 @@ mod tests {
             EncodeOpts::new(false),
             version,
             VersionPtr::null(),
+            None,
         )?;
         assert!(encoded.row_hash.is_none());
 
@@ -328,6 +329,7 @@ mod tests {
             EncodeOpts::new(true),
             version,
             VersionPtr::null(),
+            None,
         )?;
         let expected_hash = encoded.row_hash.expect("row hash present");
 
@@ -352,6 +354,7 @@ mod tests {
             EncodeOpts::new(false),
             version,
             VersionPtr::null(),
+            None,
         )?;
         assert_eq!(
             encoded.header.payload_len as usize,
@@ -408,6 +411,7 @@ mod tests {
                 EncodeOpts::new(append_hash),
                 version,
                 prev_ptr,
+                None,
             ).expect("encode succeeds");
             let decoded = decode(&encoded.bytes).expect("decode succeeds");
 
