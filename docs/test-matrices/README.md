@@ -22,7 +22,7 @@ Isolation & MVCC
 - No-wait/backoff fairness | TODO: contention test | Nightly | local | Gap
 
 Crash safety & storage
-- WAL replay after crash | `cargo test --test wal_crash_replay` | CI | local | Running
+- WAL replay after crash | `cargo test --test wal_crash_replay` (scripts/run-prod-sanity.sh) | CI | local | Running
 - Vacuum worker durability | `cargo test --test vacuum_worker` | CI | local | Running
 - Pager checkpoint E2E | `cargo test --test pager_stage3_end_to_end` | CI | local | Running
 - Power-fail/kill -9 loops | TODO: crash harness | Nightly | crash box | Gap
@@ -44,8 +44,8 @@ Replication & HA
 - Lag-induced snapshot expiration on replicas | TODO: targeted test | Nightly | multi-node env | Gap
 
 Backup & restore
-- Admin vacuum/backup flows | `cargo test --test admin_phase1` (checkpoint/vacuum/verify) | CI | local | Running
-- CLI admin commands (import/export/checkpoint/vacuum) | `cargo test --test cli_admin_commands` | CI | local | Running
+- Admin vacuum/backup flows | `cargo test --test admin_phase1` (checkpoint/vacuum/verify) (scripts/run-prod-sanity.sh) | CI | local | Running
+- CLI admin commands (import/export/checkpoint/vacuum) | `cargo test --test cli_admin_commands` (scripts/run-prod-sanity.sh) | CI | local | Running
 - Full backup + restore rehearsal | `sombra checkpoint <db>; sombra vacuum <db> --into <dst>; sombra verify <dst> --level full` | Weekly | staging env | Planned
 - PITR to arbitrary LSN | TODO: PITR harness | Weekly | staging env | Gap
 - Corrupted backup detection (checksum) | TODO: negative test | Weekly | staging env | Gap
@@ -56,8 +56,8 @@ Security
 - Tenant isolation (no cross-tenant leakage) | TODO: test | Nightly | local | Gap
 
 Graph-specific invariants
-- Graph storage regressions | `cargo test --tests` (storage_phase*, storage_stage7, catalog_dict) | CI | local | Running
-- Graph stress (mixed churn) | `cargo test --test storage_stress` | CI | local | Running
+- Graph storage regressions | `cargo test --tests` (storage_phase*, storage_stage7, catalog_dict) (scripts/run-prod-sanity.sh) | CI | local | Running
+- Graph stress (mixed churn) | `cargo test --test storage_stress` (scripts/run-prod-sanity.sh) | CI | local | Running
 - Supernode handling | TODO: targeted load | Weekly | soak box | Gap
 - Crash during adjacency update | TODO: crash harness | Weekly | crash box | Gap
 - Dangling edge detection/repair | TODO: checker test | CI | local | Gap

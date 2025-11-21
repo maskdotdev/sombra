@@ -7,6 +7,7 @@ Quick links
 - Tracker: docs/production-readiness.md (this file)
 - Runbooks index: docs/runbooks/README.md
 - Test matrices: docs/test-matrices/README.md
+- Prod sanity test runner: scripts/run-prod-sanity.sh
 - Key references: docs/mvcc-baseline.md, docs/mvcc-durability.md, docs/mvcc-optimization-plan.md, docs/dashboard-plan.md, docs/benchmarks.md
 
 Owner roster (fill in)
