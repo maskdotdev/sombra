@@ -27,6 +27,17 @@ struct LockState {
     checkpoint: bool,
 }
 
+/// Snapshot of lock state for observability.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct LockSnapshot {
+    /// Number of active readers.
+    pub readers: u32,
+    /// Whether the writer lock is held.
+    pub writer: bool,
+    /// Whether a checkpoint lock is held.
+    pub checkpoint: bool,
+}
+
 /// Guard representing a held reader lock.
 pub struct ReaderGuard {
     _guard: SlotGuard,
@@ -169,6 +180,16 @@ impl SingleWriter {
             checkpoint_guard: Some(checkpoint_guard),
             reader_block: Some(reader_guard),
         }))
+    }
+
+    /// Returns a snapshot of the current lock state.
+    pub fn snapshot(&self) -> LockSnapshot {
+        let state = self.inner.state.lock();
+        LockSnapshot {
+            readers: state.readers,
+            writer: state.writer,
+            checkpoint: state.checkpoint,
+        }
     }
 }
 

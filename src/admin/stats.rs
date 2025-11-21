@@ -60,6 +60,18 @@ pub struct PagerStatsSection {
     pub mvcc_reader_newest_snapshot: u64,
     /// Maximum reader age in milliseconds.
     pub mvcc_reader_max_age_ms: u64,
+    /// Maximum MVCC version chain length.
+    pub mvcc_max_chain_len: u64,
+    /// Pages with uncheckpointed overlays present.
+    pub mvcc_overlay_pages: u64,
+    /// Total overlay entries across pages.
+    pub mvcc_overlay_entries: u64,
+    /// Active reader locks in the file lock coordinator.
+    pub lock_readers: u32,
+    /// Whether the writer lock is held.
+    pub lock_writer: bool,
+    /// Whether the checkpoint lock is held.
+    pub lock_checkpoint: bool,
 }
 
 /// Write-ahead log (WAL) statistics.
@@ -177,6 +189,12 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
         mvcc_reader_oldest_snapshot: pager_counters.mvcc_reader_oldest_snapshot,
         mvcc_reader_newest_snapshot: pager_counters.mvcc_reader_newest_snapshot,
         mvcc_reader_max_age_ms: pager_counters.mvcc_reader_max_age_ms,
+        mvcc_max_chain_len: pager_counters.mvcc_max_chain_len,
+        mvcc_overlay_pages: pager_counters.mvcc_overlay_pages,
+        mvcc_overlay_entries: pager_counters.mvcc_overlay_entries,
+        lock_readers: pager_counters.lock_readers,
+        lock_writer: pager_counters.lock_writer,
+        lock_checkpoint: pager_counters.lock_checkpoint,
     };
 
     let wal_section = WalStatsSection {

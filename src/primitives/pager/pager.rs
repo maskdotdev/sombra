@@ -416,6 +416,18 @@ pub struct PagerStats {
     pub mvcc_reader_newest_snapshot: CommitId,
     /// Maximum observed reader age in milliseconds.
     pub mvcc_reader_max_age_ms: u64,
+    /// Maximum observed MVCC version chain length for any page.
+    pub mvcc_max_chain_len: u64,
+    /// Pages with uncheckpointed overlays present.
+    pub mvcc_overlay_pages: u64,
+    /// Total overlay entries across pages.
+    pub mvcc_overlay_entries: u64,
+    /// Active reader lock count (file lock coordinator).
+    pub lock_readers: u32,
+    /// Whether the writer lock is held.
+    pub lock_writer: bool,
+    /// Whether checkpoint lock is held.
+    pub lock_checkpoint: bool,
 }
 
 /// Context provided to background maintenance hooks after auto-checkpoints.
@@ -1199,6 +1211,21 @@ impl Pager {
         self.maybe_warn_slow_readers(newest_snapshot, &reader_snapshot);
         let state = self.inner.lock();
         let mut stats = state.stats.clone();
+        let lock_snapshot = self.locks.snapshot();
+        let (overlay_pages, overlay_entries) = {
+            let overlays = self.overlays.lock();
+            let pages = overlays.len() as u64;
+            let entries = overlays.values().map(|q| q.len() as u64).sum::<u64>();
+            (pages, entries)
+        };
+        let max_chain_len = {
+            let chains = self.version_chains.lock();
+            chains
+                .values()
+                .map(|entries| entries.len() as u64)
+                .max()
+                .unwrap_or(0)
+        };
         stats.mvcc_page_versions_total = self.mvcc_version_count.load(AtomicOrdering::Relaxed);
         stats.mvcc_pages_with_versions = self.mvcc_version_pages.load(AtomicOrdering::Relaxed);
         stats.mvcc_readers_active = reader_snapshot.active.max(active_total);
@@ -1209,6 +1236,12 @@ impl Pager {
         stats.mvcc_reader_newest_snapshot =
             reader_snapshot.newest_snapshot.unwrap_or(newest_snapshot);
         stats.mvcc_reader_max_age_ms = reader_snapshot.max_age_ms;
+        stats.mvcc_max_chain_len = max_chain_len;
+        stats.mvcc_overlay_pages = overlay_pages;
+        stats.mvcc_overlay_entries = overlay_entries;
+        stats.lock_readers = lock_snapshot.readers;
+        stats.lock_writer = lock_snapshot.writer;
+        stats.lock_checkpoint = lock_snapshot.checkpoint;
         stats
     }
 

@@ -25,6 +25,7 @@ Crash safety & storage
 - WAL replay after crash | `cargo test --test wal_crash_replay` (scripts/run-prod-sanity.sh) | CI | local | Running
 - Vacuum worker durability | `cargo test --test vacuum_worker` | CI | local | Running
 - Pager checkpoint E2E | `cargo test --test pager_stage3_end_to_end` | CI | local | Running
+- Kill/abort mid-commit recovery | `cargo test --test crash_kill_recovery` | CI | local | Running
 - Power-fail/kill -9 loops | TODO: crash harness | Nightly | crash box | Gap
 - Partial/truncated/corrupted WAL | TODO: WAL injector | Nightly | crash box | Gap
 - Torn-page injection | TODO: page mutator tool | Nightly | crash box | Gap
