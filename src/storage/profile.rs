@@ -46,6 +46,18 @@ pub struct StorageProfileSnapshot {
     pub pager_commit_p90_ns: u64,
     /// Approximate p99 pager commit latency (nanoseconds).
     pub pager_commit_p99_ns: u64,
+    /// Total nanoseconds spent starting reads (snapshot + registration).
+    pub mvcc_read_begin_ns: u64,
+    /// Number of read-begin operations measured.
+    pub mvcc_read_begin_count: u64,
+    /// Total nanoseconds spent starting writes (writer lock + setup).
+    pub mvcc_write_begin_ns: u64,
+    /// Number of write-begin operations measured.
+    pub mvcc_write_begin_count: u64,
+    /// Total nanoseconds spent committing (MVCC + pager).
+    pub mvcc_commit_ns: u64,
+    /// Number of commit operations measured.
+    pub mvcc_commit_count: u64,
     /// Number of reconstructed keys during leaf operations.
     pub btree_leaf_key_decodes: u64,
     /// Number of key comparisons performed in leaf searches.
@@ -138,6 +150,12 @@ struct StorageProfileCounters {
     btree_leaf_allocator_snapshot_reuse: AtomicU64,
     btree_leaf_allocator_snapshot_free_regions: AtomicU64,
     pager_commit_latency: LatencyHistogram,
+    mvcc_read_begin_ns: AtomicU64,
+    mvcc_read_begin_count: AtomicU64,
+    mvcc_write_begin_ns: AtomicU64,
+    mvcc_write_begin_count: AtomicU64,
+    mvcc_commit_ns: AtomicU64,
+    mvcc_commit_count: AtomicU64,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -327,6 +345,38 @@ pub fn record_profile_timer(kind: StorageProfileKind, start: Option<Instant>) {
     }
 }
 
+/// Records latency for beginning a read (snapshot acquisition + registration).
+pub fn record_mvcc_read_begin(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .mvcc_read_begin_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .mvcc_read_begin_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records latency for beginning a write (writer lock + setup).
+pub fn record_mvcc_write_begin(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .mvcc_write_begin_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .mvcc_write_begin_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records latency for committing a write (MVCC + pager).
+pub fn record_mvcc_commit(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters.mvcc_commit_ns.fetch_add(nanos, Ordering::Relaxed);
+        counters.mvcc_commit_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Records how many slots were scanned while building slot extents.
 pub fn record_btree_slot_extent_slots(count: u64) {
     if let Some(counters) = counters() {
@@ -371,6 +421,12 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         pager_commit_p50_ns: commit_p50_ns,
         pager_commit_p90_ns: commit_p90_ns,
         pager_commit_p99_ns: commit_p99_ns,
+        mvcc_read_begin_ns: load(&counters.mvcc_read_begin_ns),
+        mvcc_read_begin_count: load(&counters.mvcc_read_begin_count),
+        mvcc_write_begin_ns: load(&counters.mvcc_write_begin_ns),
+        mvcc_write_begin_count: load(&counters.mvcc_write_begin_count),
+        mvcc_commit_ns: load(&counters.mvcc_commit_ns),
+        mvcc_commit_count: load(&counters.mvcc_commit_count),
         btree_leaf_key_decodes: load(&counters.btree_leaf_key_decodes),
         btree_leaf_key_cmps: load(&counters.btree_leaf_key_cmps),
         btree_leaf_memcopy_bytes: load(&counters.btree_leaf_memcopy_bytes),

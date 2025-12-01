@@ -42,6 +42,7 @@ Workstreams & tasks
     - [x] Export exec latency percentiles (p50/p90/p99) from profiling (`SOMBRA_PROFILE=1`), still missing txn-level histograms and blocked/deadlock counters.
     - [x] Export storage profiling counters (pager commit/fsync/WAL bytes/frames, WAL batch sizes, allocator failures) via `/metrics` when profiling is enabled.
     - [x] Export pager commit latency percentiles (p50/p90/p99) via `/metrics` when profiling is enabled.
+    - [x] Export MVCC read/write/commit latency totals + counts via `/metrics` (profiling on by default).
   - [x] Health endpoints: `/health/live` (process/resources) and `/health/ready` (latency budget, WAL writable, checkpoint not stalled, replication lag under budget). Implemented as `/health`, `/health/live`, `/health/ready` with WAL dir writability, allocator errors, MVCC reader age checks.
   - [ ] Initial dashboards (optional for personal use): “Txn & Latency”, “Storage & WAL”, “Replication & GC” with alerts (WAL stall, checkpoint overrun, GC lag, replication lag, deadlock spike).
 - [ ] Test matrices & environments

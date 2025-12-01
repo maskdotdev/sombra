@@ -866,6 +866,48 @@ async fn metrics_handler(State(state): State<AppState>) -> Result<Response, AppE
         );
         push_metric(
             &mut body,
+            "sombra_mvcc_read_begin_ns_total",
+            "Total nanoseconds spent starting reads (snapshot acquisition + registration)",
+            "counter",
+            s.mvcc_read_begin_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_read_begin_count",
+            "Number of reads measured for start latency",
+            "counter",
+            s.mvcc_read_begin_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_write_begin_ns_total",
+            "Total nanoseconds spent starting writes (writer lock + setup)",
+            "counter",
+            s.mvcc_write_begin_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_write_begin_count",
+            "Number of writes measured for start latency",
+            "counter",
+            s.mvcc_write_begin_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_commit_ns_total",
+            "Total nanoseconds spent committing writes (MVCC + pager)",
+            "counter",
+            s.mvcc_commit_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_commit_count",
+            "Number of commits measured for latency",
+            "counter",
+            s.mvcc_commit_count,
+        );
+        push_metric(
+            &mut body,
             "sombra_storage_btree_allocator_failures_total",
             "Leaf allocator failures (any reason)",
             "counter",

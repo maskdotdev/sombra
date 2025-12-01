@@ -25,6 +25,7 @@ use crate::storage::index::{
     IndexRoots, IndexStore, IndexVacuumStats, LabelScan, PostingStream, TypeTag,
 };
 use crate::storage::vstore::VStore;
+use crate::storage::{record_mvcc_commit, record_mvcc_read_begin, record_mvcc_write_begin};
 use crate::types::{
     EdgeId, LabelId, Lsn, NodeId, PageId, PropId, Result, SombraError, TypeId, VRef,
 };
@@ -254,7 +255,7 @@ impl SnapshotPool {
         }
         drop(pool);
         self.metrics.snapshot_pool_miss();
-        let guard = self.store.begin_latest_committed_read()?;
+        let guard = self.begin_read_guard()?;
         Ok(SnapshotLease {
             pool: Some(self),
             snapshot: Some(PooledSnapshot {
@@ -772,9 +773,8 @@ impl Graph {
         if let Some(pool) = &self.snapshot_pool {
             pool.lease()
         } else {
-            self.store
-                .begin_latest_committed_read()
-                .map(SnapshotLease::direct)
+            let guard = self.begin_read_guard()?;
+            Ok(SnapshotLease::direct(guard))
         }
     }
 
@@ -892,6 +892,36 @@ impl Graph {
         snapshot.oldest_snapshot
     }
 
+    #[inline]
+    fn begin_read_guard(&self) -> Result<ReadGuard> {
+        let start = Instant::now();
+        let guard = self.begin_read_guard()?;
+        let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.metrics.mvcc_read_latency_ns(nanos);
+        record_mvcc_read_begin(nanos);
+        Ok(guard)
+    }
+
+    #[inline]
+    fn begin_write_guard(&self) -> Result<WriteGuard<'_>> {
+        let start = Instant::now();
+        let guard = self.store.begin_write()?;
+        let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.metrics.mvcc_write_latency_ns(nanos);
+        record_mvcc_write_begin(nanos);
+        Ok(guard)
+    }
+
+    #[inline]
+    fn commit_with_metrics(&self, write: WriteGuard<'_>) -> Result<Lsn> {
+        let start = Instant::now();
+        let lsn = self.store.commit(write)?;
+        let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.metrics.mvcc_commit_latency_ns(nanos);
+        record_mvcc_commit(nanos);
+        Ok(lsn)
+    }
+
     /// Returns the configured retention window for MVCC vacuum.
     pub fn vacuum_retention_window(&self) -> Duration {
         self.vacuum_cfg.retention_window
@@ -966,18 +996,18 @@ impl Graph {
         horizon: CommitId,
         limit: Option<usize>,
     ) -> Result<VersionVacuumStats> {
-        let mut write = self.store.begin_write()?;
+        let mut write = self.begin_write_guard()?;
         let stats = self.vacuum_version_log_with_write(&mut write, horizon, limit)?;
-        self.store.commit(write)?;
+        self.commit_with_metrics(write)?;
         Ok(stats)
     }
 
     /// Removes adjacency entries whose visibility ended before `horizon`.
     pub fn vacuum_adjacency(&self, horizon: CommitId) -> Result<AdjacencyVacuumStats> {
-        let mut write = self.store.begin_write()?;
+        let mut write = self.begin_write_guard()?;
         let fwd = Self::prune_versioned_vec_tree(&self.adj_fwd, &mut write, horizon)?;
         let rev = Self::prune_versioned_vec_tree(&self.adj_rev, &mut write, horizon)?;
-        self.store.commit(write)?;
+        self.commit_with_metrics(write)?;
         Ok(AdjacencyVacuumStats {
             fwd_entries_pruned: fwd,
             rev_entries_pruned: rev,
@@ -986,9 +1016,9 @@ impl Graph {
 
     /// Removes index entries whose visibility ended before `horizon`.
     pub fn vacuum_indexes(&self, horizon: CommitId) -> Result<IndexVacuumStats> {
-        let mut write = self.store.begin_write()?;
+        let mut write = self.begin_write_guard()?;
         let stats = self.indexes.vacuum(&mut write, horizon)?;
-        self.store.commit(write)?;
+        self.commit_with_metrics(write)?;
         Ok(stats)
     }
 
@@ -1018,12 +1048,12 @@ impl Graph {
         if self.vacuum_sched.running.get() {
             return Ok(None);
         }
-        let mut write = self.store.begin_write()?;
+        let mut write = self.begin_write_guard()?;
         let stats = self.vacuum_version_log_with_write(&mut write, horizon, Some(max_entries))?;
         if stats.entries_pruned > 0 {
             self.metrics.mvcc_micro_gc_trim(stats.entries_pruned, 0);
         }
-        self.store.commit(write)?;
+        self.commit_with_metrics(write)?;
         Ok(Some(stats))
     }
 
@@ -3617,7 +3647,7 @@ impl Graph {
     fn recompute_version_log_bytes(&self) -> Result<()> {
         let mut total_bytes = 0u64;
         let mut total_entries = 0u64;
-        let mut write = self.store.begin_write()?;
+        let mut write = self.begin_write_guard()?;
         self.version_log
             .for_each_with_write(&mut write, |_, bytes| {
                 total_bytes = total_bytes.saturating_add(bytes.len() as u64);

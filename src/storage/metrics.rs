@@ -100,6 +100,15 @@ pub trait StorageMetrics: Send + Sync {
 
     /// Records a bulk adjacency flush.
     fn adjacency_bulk_flush(&self, _inserts: usize, _removals: usize) {}
+
+    /// Records latency (nanoseconds) to begin a read (snapshot acquisition + MVCC registration).
+    fn mvcc_read_latency_ns(&self, _nanos: u64) {}
+
+    /// Records latency (nanoseconds) to acquire the writer lock and initialize a write txn.
+    fn mvcc_write_latency_ns(&self, _nanos: u64) {}
+
+    /// Records latency (nanoseconds) to durably commit a write txn (MVCC + pager).
+    fn mvcc_commit_latency_ns(&self, _nanos: u64) {}
 }
 
 /// A no-op implementation of [`StorageMetrics`] that discards all recorded metrics.
@@ -256,6 +265,19 @@ pub struct CounterMetrics {
 
     /// Bulk adjacency removals flushed.
     pub adjacency_bulk_removals: AtomicU64,
+
+    /// Total nanoseconds spent beginning reads.
+    pub mvcc_read_latency_ns: AtomicU64,
+    /// Number of recorded read-begin latencies.
+    pub mvcc_read_latency_count: AtomicU64,
+    /// Total nanoseconds spent beginning writes (acquiring writer lock/intents).
+    pub mvcc_write_latency_ns: AtomicU64,
+    /// Number of recorded write-begin latencies.
+    pub mvcc_write_latency_count: AtomicU64,
+    /// Total nanoseconds spent committing writes.
+    pub mvcc_commit_latency_ns: AtomicU64,
+    /// Number of recorded commit latencies.
+    pub mvcc_commit_latency_count: AtomicU64,
 }
 
 impl StorageMetrics for CounterMetrics {
@@ -444,6 +466,26 @@ impl StorageMetrics for CounterMetrics {
             self.adjacency_bulk_removals
                 .fetch_add(removals as u64, Ordering::Relaxed);
         }
+    }
+
+    fn mvcc_read_latency_ns(&self, nanos: u64) {
+        self.mvcc_read_latency_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.mvcc_read_latency_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mvcc_write_latency_ns(&self, nanos: u64) {
+        self.mvcc_write_latency_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.mvcc_write_latency_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mvcc_commit_latency_ns(&self, nanos: u64) {
+        self.mvcc_commit_latency_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.mvcc_commit_latency_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
