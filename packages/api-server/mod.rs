@@ -908,6 +908,55 @@ async fn metrics_handler(State(state): State<AppState>) -> Result<Response, AppE
         );
         push_metric(
             &mut body,
+            "sombra_mvcc_read_begin_p50_ns",
+            "Approximate p50 read-begin latency (ns)",
+            "gauge",
+            s.mvcc_read_begin_p50_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_read_begin_p90_ns",
+            "Approximate p90 read-begin latency (ns)",
+            "gauge",
+            s.mvcc_read_begin_p90_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_read_begin_p99_ns",
+            "Approximate p99 read-begin latency (ns)",
+            "gauge",
+            s.mvcc_read_begin_p99_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_write_begin_p50_ns",
+            "Approximate p50 write-begin latency (ns)",
+            "gauge",
+            s.mvcc_write_begin_p50_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_write_begin_p90_ns",
+            "Approximate p90 write-begin latency (ns)",
+            "gauge",
+            s.mvcc_write_begin_p90_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_write_begin_p99_ns",
+            "Approximate p99 write-begin latency (ns)",
+            "gauge",
+            s.mvcc_write_begin_p99_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_mvcc_write_lock_conflicts_total",
+            "Writer lock conflicts (writer already held)",
+            "counter",
+            s.mvcc_write_lock_conflicts,
+        );
+        push_metric(
+            &mut body,
             "sombra_storage_btree_allocator_failures_total",
             "Leaf allocator failures (any reason)",
             "counter",

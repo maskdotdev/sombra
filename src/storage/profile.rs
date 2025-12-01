@@ -54,10 +54,22 @@ pub struct StorageProfileSnapshot {
     pub mvcc_write_begin_ns: u64,
     /// Number of write-begin operations measured.
     pub mvcc_write_begin_count: u64,
+    /// Approximate p50 write-begin latency (nanoseconds).
+    pub mvcc_write_begin_p50_ns: u64,
+    /// Approximate p90 write-begin latency (nanoseconds).
+    pub mvcc_write_begin_p90_ns: u64,
+    /// Approximate p99 write-begin latency (nanoseconds).
+    pub mvcc_write_begin_p99_ns: u64,
     /// Total nanoseconds spent committing (MVCC + pager).
     pub mvcc_commit_ns: u64,
     /// Number of commit operations measured.
     pub mvcc_commit_count: u64,
+    /// Approximate p50 read-begin latency (nanoseconds).
+    pub mvcc_read_begin_p50_ns: u64,
+    /// Approximate p90 read-begin latency (nanoseconds).
+    pub mvcc_read_begin_p90_ns: u64,
+    /// Approximate p99 read-begin latency (nanoseconds).
+    pub mvcc_read_begin_p99_ns: u64,
     /// Number of reconstructed keys during leaf operations.
     pub btree_leaf_key_decodes: u64,
     /// Number of key comparisons performed in leaf searches.
@@ -154,8 +166,11 @@ struct StorageProfileCounters {
     mvcc_read_begin_count: AtomicU64,
     mvcc_write_begin_ns: AtomicU64,
     mvcc_write_begin_count: AtomicU64,
+    mvcc_write_begin_latency: LatencyHistogram,
     mvcc_commit_ns: AtomicU64,
     mvcc_commit_count: AtomicU64,
+    mvcc_read_begin_latency: LatencyHistogram,
+    mvcc_commit_latency: LatencyHistogram,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -354,6 +369,7 @@ pub fn record_mvcc_read_begin(nanos: u64) {
         counters
             .mvcc_read_begin_count
             .fetch_add(1, Ordering::Relaxed);
+        counters.mvcc_read_begin_latency.record_ns(nanos);
     }
 }
 
@@ -366,6 +382,7 @@ pub fn record_mvcc_write_begin(nanos: u64) {
         counters
             .mvcc_write_begin_count
             .fetch_add(1, Ordering::Relaxed);
+        counters.mvcc_write_begin_latency.record_ns(nanos);
     }
 }
 
@@ -399,6 +416,12 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
     let commit_p50_ns = counters.pager_commit_latency.percentile_ns(50.0, reset);
     let commit_p90_ns = counters.pager_commit_latency.percentile_ns(90.0, reset);
     let commit_p99_ns = counters.pager_commit_latency.percentile_ns(99.0, reset);
+    let read_begin_p50 = counters.mvcc_read_begin_latency.percentile_ns(50.0, reset);
+    let read_begin_p90 = counters.mvcc_read_begin_latency.percentile_ns(90.0, reset);
+    let read_begin_p99 = counters.mvcc_read_begin_latency.percentile_ns(99.0, reset);
+    let write_begin_p50 = counters.mvcc_write_begin_latency.percentile_ns(50.0, reset);
+    let write_begin_p90 = counters.mvcc_write_begin_latency.percentile_ns(90.0, reset);
+    let write_begin_p99 = counters.mvcc_write_begin_latency.percentile_ns(99.0, reset);
     let (wal_p50, wal_p95) = wal_sample_snapshot(reset);
     Some(StorageProfileSnapshot {
         prop_index_lookup_ns: load(&counters.prop_index_lookup_ns),
@@ -425,8 +448,14 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         mvcc_read_begin_count: load(&counters.mvcc_read_begin_count),
         mvcc_write_begin_ns: load(&counters.mvcc_write_begin_ns),
         mvcc_write_begin_count: load(&counters.mvcc_write_begin_count),
+        mvcc_write_begin_p50_ns: write_begin_p50,
+        mvcc_write_begin_p90_ns: write_begin_p90,
+        mvcc_write_begin_p99_ns: write_begin_p99,
         mvcc_commit_ns: load(&counters.mvcc_commit_ns),
         mvcc_commit_count: load(&counters.mvcc_commit_count),
+        mvcc_read_begin_p50_ns: read_begin_p50,
+        mvcc_read_begin_p90_ns: read_begin_p90,
+        mvcc_read_begin_p99_ns: read_begin_p99,
         btree_leaf_key_decodes: load(&counters.btree_leaf_key_decodes),
         btree_leaf_key_cmps: load(&counters.btree_leaf_key_cmps),
         btree_leaf_memcopy_bytes: load(&counters.btree_leaf_memcopy_bytes),

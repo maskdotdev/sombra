@@ -109,6 +109,9 @@ pub trait StorageMetrics: Send + Sync {
 
     /// Records latency (nanoseconds) to durably commit a write txn (MVCC + pager).
     fn mvcc_commit_latency_ns(&self, _nanos: u64) {}
+
+    /// Records that a write was blocked due to writer lock already held.
+    fn mvcc_write_lock_conflict(&self) {}
 }
 
 /// A no-op implementation of [`StorageMetrics`] that discards all recorded metrics.
@@ -278,6 +281,9 @@ pub struct CounterMetrics {
     pub mvcc_commit_latency_ns: AtomicU64,
     /// Number of recorded commit latencies.
     pub mvcc_commit_latency_count: AtomicU64,
+
+    /// Writer lock conflicts (writer already held).
+    pub mvcc_write_lock_conflicts: AtomicU64,
 }
 
 impl StorageMetrics for CounterMetrics {
@@ -485,6 +491,11 @@ impl StorageMetrics for CounterMetrics {
         self.mvcc_commit_latency_ns
             .fetch_add(nanos, Ordering::Relaxed);
         self.mvcc_commit_latency_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mvcc_write_lock_conflict(&self) {
+        self.mvcc_write_lock_conflicts
             .fetch_add(1, Ordering::Relaxed);
     }
 }
