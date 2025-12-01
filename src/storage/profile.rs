@@ -40,6 +40,12 @@ pub struct StorageProfileSnapshot {
     pub pager_commit_ns: u64,
     /// Number of measured pager commits.
     pub pager_commit_count: u64,
+    /// Approximate p50 pager commit latency (nanoseconds).
+    pub pager_commit_p50_ns: u64,
+    /// Approximate p90 pager commit latency (nanoseconds).
+    pub pager_commit_p90_ns: u64,
+    /// Approximate p99 pager commit latency (nanoseconds).
+    pub pager_commit_p99_ns: u64,
     /// Number of reconstructed keys during leaf operations.
     pub btree_leaf_key_decodes: u64,
     /// Number of key comparisons performed in leaf searches.
@@ -131,15 +137,92 @@ struct StorageProfileCounters {
     btree_leaf_allocator_build_free_regions: AtomicU64,
     btree_leaf_allocator_snapshot_reuse: AtomicU64,
     btree_leaf_allocator_snapshot_free_regions: AtomicU64,
+    pager_commit_latency: LatencyHistogram,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
 static PROFILE_COUNTERS: OnceLock<StorageProfileCounters> = OnceLock::new();
 static WAL_IO_SAMPLES: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 const WAL_SAMPLE_WINDOW: usize = 512;
+/// Latency buckets for pager commit duration (nanoseconds).
+const COMMIT_LATENCY_BUCKETS: &[u64] = &[
+    100_000,       // 100µs
+    250_000,       // 250µs
+    500_000,       // 500µs
+    1_000_000,     // 1ms
+    2_000_000,     // 2ms
+    5_000_000,     // 5ms
+    10_000_000,    // 10ms
+    20_000_000,    // 20ms
+    50_000_000,    // 50ms
+    100_000_000,   // 100ms
+    250_000_000,   // 250ms
+    500_000_000,   // 500ms
+    1_000_000_000, // 1s
+    2_000_000_000, // 2s
+    5_000_000_000, // 5s
+];
+
+#[derive(Debug)]
+struct LatencyHistogram {
+    counts: Vec<AtomicU64>,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            counts: COMMIT_LATENCY_BUCKETS
+                .iter()
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    fn record_ns(&self, value: u64) {
+        let idx = COMMIT_LATENCY_BUCKETS
+            .iter()
+            .position(|bucket| value <= *bucket)
+            .unwrap_or(COMMIT_LATENCY_BUCKETS.len() - 1);
+        self.counts[idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn percentile_ns(&self, percentile: f64, reset: bool) -> u64 {
+        let reader = |counter: &AtomicU64| {
+            if reset {
+                counter.swap(0, Ordering::Relaxed)
+            } else {
+                counter.load(Ordering::Relaxed)
+            }
+        };
+        let snapshot: Vec<u64> = self.counts.iter().map(reader).collect();
+        let total: u64 = snapshot.iter().sum();
+        if total == 0 {
+            return 0;
+        }
+        let target = ((percentile / 100.0) * total as f64).ceil() as u64;
+        let mut cumulative = 0;
+        for (idx, bucket) in COMMIT_LATENCY_BUCKETS.iter().enumerate() {
+            cumulative = cumulative.saturating_add(snapshot[idx]);
+            if cumulative >= target {
+                return *bucket;
+            }
+        }
+        *COMMIT_LATENCY_BUCKETS.last().unwrap_or(&0)
+    }
+}
 
 pub fn profiling_enabled() -> bool {
-    *PROFILE_ENABLED.get_or_init(|| std::env::var_os("SOMBRA_PROFILE").is_some())
+    *PROFILE_ENABLED.get_or_init(|| {
+        match std::env::var("SOMBRA_PROFILE") {
+            Ok(value) => {
+                let lowered = value.to_ascii_lowercase();
+                lowered != "0" && lowered != "false"
+            }
+            Err(_) => true, // default on
+        }
+    })
 }
 
 fn counters() -> Option<&'static StorageProfileCounters> {
@@ -239,6 +322,7 @@ pub fn record_profile_timer(kind: StorageProfileKind, start: Option<Instant>) {
         StorageProfileKind::PagerCommit => {
             counters.pager_commit_ns.fetch_add(nanos, Ordering::Relaxed);
             counters.pager_commit_count.fetch_add(1, Ordering::Relaxed);
+            counters.pager_commit_latency.record_ns(nanos);
         }
     }
 }
@@ -262,6 +346,9 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
             counter.load(Ordering::Relaxed)
         }
     };
+    let commit_p50_ns = counters.pager_commit_latency.percentile_ns(50.0, reset);
+    let commit_p90_ns = counters.pager_commit_latency.percentile_ns(90.0, reset);
+    let commit_p99_ns = counters.pager_commit_latency.percentile_ns(99.0, reset);
     let (wal_p50, wal_p95) = wal_sample_snapshot(reset);
     Some(StorageProfileSnapshot {
         prop_index_lookup_ns: load(&counters.prop_index_lookup_ns),
@@ -281,6 +368,9 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         btree_slot_extent_slots: load(&counters.btree_slot_extent_slots),
         pager_commit_ns: load(&counters.pager_commit_ns),
         pager_commit_count: load(&counters.pager_commit_count),
+        pager_commit_p50_ns: commit_p50_ns,
+        pager_commit_p90_ns: commit_p90_ns,
+        pager_commit_p99_ns: commit_p99_ns,
         btree_leaf_key_decodes: load(&counters.btree_leaf_key_decodes),
         btree_leaf_key_cmps: load(&counters.btree_leaf_key_cmps),
         btree_leaf_memcopy_bytes: load(&counters.btree_leaf_memcopy_bytes),

@@ -105,6 +105,12 @@ pub struct ProfileSnapshot {
     pub query_filter_ns: u64,
     /// Number of filter operations.
     pub query_filter_count: u64,
+    /// Approximate p50 exec latency (nanoseconds) across recorded operations.
+    pub exec_p50_ns: u64,
+    /// Approximate p90 exec latency (nanoseconds) across recorded operations.
+    pub exec_p90_ns: u64,
+    /// Approximate p99 exec latency (nanoseconds) across recorded operations.
+    pub exec_p99_ns: u64,
 }
 
 /// Neighbor entry returned by traversal helpers.
@@ -165,13 +171,94 @@ struct ProfileCounters {
     exec_count: AtomicU64,
     serde_ns: AtomicU64,
     serde_count: AtomicU64,
+    exec_latency: LatencyHistogram,
+}
+
+/// Predefined nanosecond buckets for execution latency percentiles.
+/// Buckets are coarse but cover common query latencies (<=10s).
+const EXEC_LATENCY_BUCKETS: &[u64] = &[
+    50_000,         // 50µs
+    100_000,        // 100µs
+    200_000,        // 200µs
+    500_000,        // 500µs
+    1_000_000,      // 1ms
+    2_000_000,      // 2ms
+    5_000_000,      // 5ms
+    10_000_000,     // 10ms
+    20_000_000,     // 20ms
+    50_000_000,     // 50ms
+    100_000_000,    // 100ms
+    200_000_000,    // 200ms
+    500_000_000,    // 500ms
+    1_000_000_000,  // 1s
+    2_000_000_000,  // 2s
+    5_000_000_000,  // 5s
+    10_000_000_000, // 10s
+];
+
+#[derive(Debug)]
+struct LatencyHistogram {
+    counts: Vec<AtomicU64>,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            counts: EXEC_LATENCY_BUCKETS
+                .iter()
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    fn record_ns(&self, value: u64) {
+        let idx = EXEC_LATENCY_BUCKETS
+            .iter()
+            .position(|bucket| value <= *bucket)
+            .unwrap_or(EXEC_LATENCY_BUCKETS.len() - 1);
+        self.counts[idx].fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn percentile_ns(&self, percentile: f64, reset: bool) -> u64 {
+        let reader = |counter: &AtomicU64| {
+            if reset {
+                counter.swap(0, AtomicOrdering::Relaxed)
+            } else {
+                counter.load(AtomicOrdering::Relaxed)
+            }
+        };
+        let mut snapshot: Vec<u64> = self.counts.iter().map(reader).collect();
+        let total: u64 = snapshot.iter().sum();
+        if total == 0 {
+            return 0;
+        }
+        let target = ((percentile / 100.0) * total as f64).ceil() as u64;
+        let mut cumulative = 0;
+        for (idx, bucket) in EXEC_LATENCY_BUCKETS.iter().enumerate() {
+            cumulative = cumulative.saturating_add(snapshot[idx]);
+            if cumulative >= target {
+                return *bucket;
+            }
+        }
+        *EXEC_LATENCY_BUCKETS.last().unwrap_or(&0)
+    }
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
 static PROFILE_COUNTERS: OnceLock<ProfileCounters> = OnceLock::new();
 
 fn profiling_enabled() -> bool {
-    *PROFILE_ENABLED.get_or_init(|| std::env::var_os("SOMBRA_PROFILE").is_some())
+    *PROFILE_ENABLED.get_or_init(|| {
+        match std::env::var("SOMBRA_PROFILE") {
+            Ok(value) => {
+                let lowered = value.to_ascii_lowercase();
+                lowered != "0" && lowered != "false"
+            }
+            Err(_) => true, // default on
+        }
+    })
 }
 
 fn profile_counters() -> Option<&'static ProfileCounters> {
@@ -198,6 +285,7 @@ fn record_profile_timer(kind: ProfileKind, start: Option<Instant>) {
         ProfileKind::Execute => {
             counters.exec_ns.fetch_add(nanos, AtomicOrdering::Relaxed);
             counters.exec_count.fetch_add(1, AtomicOrdering::Relaxed);
+            counters.exec_latency.record_ns(nanos);
         }
         ProfileKind::Serialize => {
             counters.serde_ns.fetch_add(nanos, AtomicOrdering::Relaxed);
@@ -219,6 +307,9 @@ pub fn profile_snapshot(reset: bool) -> Option<ProfileSnapshot> {
             counter.load(AtomicOrdering::Relaxed)
         }
     };
+    let exec_p50_ns = counters.exec_latency.percentile_ns(50.0, reset);
+    let exec_p90_ns = counters.exec_latency.percentile_ns(90.0, reset);
+    let exec_p99_ns = counters.exec_latency.percentile_ns(99.0, reset);
     let query = query_profile_snapshot(reset);
     let (
         query_read_guard_ns,
@@ -293,6 +384,9 @@ pub fn profile_snapshot(reset: bool) -> Option<ProfileSnapshot> {
         query_expand_count,
         query_filter_ns,
         query_filter_count,
+        exec_p50_ns,
+        exec_p90_ns,
+        exec_p99_ns,
     })
 }
 

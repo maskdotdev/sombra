@@ -2,9 +2,12 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use std::{
+    fmt::Write as _,
+    fs,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, OnceLock},
+    time::Instant,
 };
 
 #[cfg(not(feature = "bundled-dashboard"))]
@@ -28,6 +31,7 @@ use hyper::Error as HyperError;
 use include_dir::{include_dir, Dir, File};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
+use tempfile::Builder as TempFileBuilder;
 use thiserror::Error;
 use tokio::{net::TcpListener, task};
 use tower_http::{
@@ -39,6 +43,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::admin::{self, AdminOpenOptions, StatsReport};
 use crate::ffi::{self, DatabaseOptions};
+use crate::primitives::pager::MVCC_READER_WARN_THRESHOLD_MS;
+use crate::storage::storage_profile_snapshot;
 
 /// Runtime options used to boot the dashboard HTTP server.
 #[derive(Clone, Debug)]
@@ -184,6 +190,12 @@ pub async fn serve(options: DashboardOptions) -> Result<(), DashboardError> {
         allow_origins = ?state.allow_origins,
         "dashboard listening"
     );
+    tracing::warn!(
+        %addr,
+        read_only = state.read_only,
+        allow_origins = ?state.allow_origins,
+        "dashboard server runs without TLS/auth; intended for local use only"
+    );
 
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
@@ -196,6 +208,9 @@ fn build_router(state: AppState) -> Router {
 
     let mut router = Router::new()
         .route("/health", get(health_handler))
+        .route("/health/live", get(live_handler))
+        .route("/health/ready", get(ready_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/api/stats", get(stats_handler))
         .route("/api/query", post(query_handler))
         .route("/api/labels", get(labels_handler))
@@ -266,11 +281,623 @@ fn normalize_origin(origin: &str) -> Option<String> {
     Some(without_trailing_slash.to_string())
 }
 
-async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
+async fn live_handler(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         read_only: state.read_only,
     })
+}
+
+async fn health_handler(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
+    let report = evaluate_readiness(&state);
+    let status = if report.ok { "ok" } else { "error" };
+    let code = if report.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(HealthResponse {
+            status,
+            read_only: state.read_only,
+        }),
+    )
+}
+
+async fn ready_handler(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {
+    let report = evaluate_readiness(&state);
+    let status = if report.ok { "ok" } else { "error" };
+    let code = if report.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadyResponse {
+            status,
+            read_only: state.read_only,
+            checks: report.checks,
+        }),
+    )
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> Result<Response, AppError> {
+    let collect_start = Instant::now();
+    let path = state.db_path.clone();
+    let opts = state.open_opts.clone();
+    let report = task::spawn_blocking(move || admin::stats(path, &opts)).await??;
+    let collect_ms = collect_start.elapsed().as_millis();
+    let profile = ffi::profile_snapshot(false);
+    let storage_profile = crate::storage::storage_profile_snapshot(false);
+
+    let mut body = String::new();
+    // Server-level gauges.
+    push_metric(
+        &mut body,
+        "sombra_read_only",
+        "Whether the dashboard server is running in read-only mode (1=yes)",
+        "gauge",
+        if state.read_only { 1 } else { 0 },
+    );
+    push_metric(
+        &mut body,
+        "sombra_metrics_collect_ms",
+        "Time to collect metrics from admin::stats",
+        "gauge",
+        collect_ms,
+    );
+
+    // Pager stats.
+    push_metric(
+        &mut body,
+        "sombra_pager_cache_hits_total",
+        "Pager cache hits",
+        "counter",
+        report.pager.hits,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_cache_misses_total",
+        "Pager cache misses",
+        "counter",
+        report.pager.misses,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_cache_evictions_total",
+        "Pager cache evictions",
+        "counter",
+        report.pager.evictions,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_dirty_writebacks_total",
+        "Dirty pages written back",
+        "counter",
+        report.pager.dirty_writebacks,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_reader_begin_total",
+        "MVCC reader begin events",
+        "counter",
+        report.pager.mvcc_reader_begin_total,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_reader_end_total",
+        "MVCC reader end events",
+        "counter",
+        report.pager.mvcc_reader_end_total,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_last_checkpoint_lsn",
+        "Last checkpoint LSN",
+        "gauge",
+        report.pager.last_checkpoint_lsn,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_page_versions_total",
+        "Total MVCC page versions retained",
+        "gauge",
+        report.pager.mvcc_page_versions_total,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_pages_with_versions",
+        "Pages currently tracking historical versions",
+        "gauge",
+        report.pager.mvcc_pages_with_versions,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_readers_active",
+        "Active MVCC readers",
+        "gauge",
+        report.pager.mvcc_readers_active,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_reader_max_age_ms",
+        "Maximum observed MVCC reader age (ms)",
+        "gauge",
+        report.pager.mvcc_reader_max_age_ms,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_max_chain_len",
+        "Maximum MVCC version chain length",
+        "gauge",
+        report.pager.mvcc_max_chain_len,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_overlay_pages",
+        "Pages with uncheckpointed overlays",
+        "gauge",
+        report.pager.mvcc_overlay_pages,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_mvcc_overlay_entries",
+        "Overlay entries across pages",
+        "gauge",
+        report.pager.mvcc_overlay_entries,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_lock_readers",
+        "Active reader locks",
+        "gauge",
+        report.pager.lock_readers,
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_lock_writer",
+        "Writer lock held (1=yes)",
+        "gauge",
+        if report.pager.lock_writer { 1 } else { 0 },
+    );
+    push_metric(
+        &mut body,
+        "sombra_pager_lock_checkpoint",
+        "Checkpoint lock held (1=yes)",
+        "gauge",
+        if report.pager.lock_checkpoint { 1 } else { 0 },
+    );
+
+    // WAL stats.
+    push_metric(
+        &mut body,
+        "sombra_wal_size_bytes",
+        "Total size of WAL files",
+        "gauge",
+        report.wal.size_bytes,
+    );
+    push_metric(
+        &mut body,
+        "sombra_wal_last_checkpoint_lsn",
+        "Last checkpoint LSN observed by WAL",
+        "gauge",
+        report.wal.last_checkpoint_lsn,
+    );
+    push_metric(
+        &mut body,
+        "sombra_wal_segment_size_bytes",
+        "WAL segment size in bytes",
+        "gauge",
+        report.wal.segment_size_bytes,
+    );
+    push_metric(
+        &mut body,
+        "sombra_wal_preallocate_segments",
+        "Target number of preallocated WAL segments",
+        "gauge",
+        report.wal.preallocate_segments,
+    );
+    push_metric(
+        &mut body,
+        "sombra_wal_ready_segments",
+        "Segments ready for activation",
+        "gauge",
+        report.wal.ready_segments,
+    );
+    push_metric(
+        &mut body,
+        "sombra_wal_recycle_segments",
+        "Segments queued for recycling",
+        "gauge",
+        report.wal.recycle_segments,
+    );
+    push_metric(
+        &mut body,
+        "sombra_wal_allocation_error",
+        "Whether the WAL allocator has reported an error (1=yes)",
+        "gauge",
+        if report.wal.allocation_error.is_some() {
+            1
+        } else {
+            0
+        },
+    );
+
+    // Query profiling (if enabled via SOMBRA_PROFILE).
+    if let Some(p) = profile {
+        push_metric(
+            &mut body,
+            "sombra_query_plan_ns_total",
+            "Total nanoseconds spent planning queries",
+            "counter",
+            p.plan_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_plan_count_total",
+            "Query planning operations",
+            "counter",
+            p.plan_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_exec_ns_total",
+            "Total nanoseconds spent executing queries",
+            "counter",
+            p.exec_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_exec_count_total",
+            "Query execution operations",
+            "counter",
+            p.exec_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_serde_ns_total",
+            "Total nanoseconds spent serializing results",
+            "counter",
+            p.serde_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_serde_count_total",
+            "Result serialization operations",
+            "counter",
+            p.serde_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_read_guard_ns_total",
+            "Total nanoseconds spent acquiring read guards",
+            "counter",
+            p.query_read_guard_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_read_guard_count_total",
+            "Read guard acquisitions",
+            "counter",
+            p.query_read_guard_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_stream_build_ns_total",
+            "Total nanoseconds spent building query streams",
+            "counter",
+            p.query_stream_build_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_stream_build_count_total",
+            "Query stream builds",
+            "counter",
+            p.query_stream_build_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_stream_iter_ns_total",
+            "Total nanoseconds spent iterating query streams",
+            "counter",
+            p.query_stream_iter_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_stream_iter_count_total",
+            "Query stream iterations",
+            "counter",
+            p.query_stream_iter_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_ns_total",
+            "Total nanoseconds spent in property index ops",
+            "counter",
+            p.query_prop_index_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_count_total",
+            "Property index operations",
+            "counter",
+            p.query_prop_index_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_lookup_ns_total",
+            "Total nanoseconds spent in property index lookups",
+            "counter",
+            p.query_prop_index_lookup_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_lookup_count_total",
+            "Property index lookups",
+            "counter",
+            p.query_prop_index_lookup_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_encode_ns_total",
+            "Total nanoseconds spent encoding property index values",
+            "counter",
+            p.query_prop_index_encode_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_encode_count_total",
+            "Property index encodings",
+            "counter",
+            p.query_prop_index_encode_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_stream_build_ns_total",
+            "Total nanoseconds spent building property index streams",
+            "counter",
+            p.query_prop_index_stream_build_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_stream_build_count_total",
+            "Property index stream builds",
+            "counter",
+            p.query_prop_index_stream_build_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_stream_iter_ns_total",
+            "Total nanoseconds spent iterating property index streams",
+            "counter",
+            p.query_prop_index_stream_iter_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_prop_index_stream_iter_count_total",
+            "Property index stream iterations",
+            "counter",
+            p.query_prop_index_stream_iter_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_expand_ns_total",
+            "Total nanoseconds spent expanding graph edges",
+            "counter",
+            p.query_expand_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_expand_count_total",
+            "Graph edge expansions",
+            "counter",
+            p.query_expand_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_filter_ns_total",
+            "Total nanoseconds spent filtering results",
+            "counter",
+            p.query_filter_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_filter_count_total",
+            "Filter operations",
+            "counter",
+            p.query_filter_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_exec_p50_ns",
+            "Approximate p50 query execution latency (ns)",
+            "gauge",
+            p.exec_p50_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_exec_p90_ns",
+            "Approximate p90 query execution latency (ns)",
+            "gauge",
+            p.exec_p90_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_query_exec_p99_ns",
+            "Approximate p99 query execution latency (ns)",
+            "gauge",
+            p.exec_p99_ns,
+        );
+    }
+
+    // Storage stats.
+    push_metric(
+        &mut body,
+        "sombra_storage_next_node_id",
+        "Next available node id",
+        "gauge",
+        report.storage.next_node_id,
+    );
+    push_metric(
+        &mut body,
+        "sombra_storage_next_edge_id",
+        "Next available edge id",
+        "gauge",
+        report.storage.next_edge_id,
+    );
+    push_metric(
+        &mut body,
+        "sombra_storage_estimated_node_count",
+        "Estimated node count",
+        "gauge",
+        report.storage.estimated_node_count,
+    );
+    push_metric(
+        &mut body,
+        "sombra_storage_estimated_edge_count",
+        "Estimated edge count",
+        "gauge",
+        report.storage.estimated_edge_count,
+    );
+
+    // Filesystem stats.
+    push_metric(
+        &mut body,
+        "sombra_filesystem_db_size_bytes",
+        "Database file size in bytes",
+        "gauge",
+        report.filesystem.db_size_bytes,
+    );
+    push_metric(
+        &mut body,
+        "sombra_filesystem_wal_size_bytes",
+        "WAL size in bytes",
+        "gauge",
+        report.filesystem.wal_size_bytes,
+    );
+
+    // Storage profiling (if enabled via SOMBRA_PROFILE).
+    if let Some(s) = storage_profile {
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_commit_ns_total",
+            "Total nanoseconds spent committing through the pager",
+            "counter",
+            s.pager_commit_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_commit_count_total",
+            "Pager commit operations",
+            "counter",
+            s.pager_commit_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_commit_p50_ns",
+            "Approximate p50 pager commit latency (ns)",
+            "gauge",
+            s.pager_commit_p50_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_commit_p90_ns",
+            "Approximate p90 pager commit latency (ns)",
+            "gauge",
+            s.pager_commit_p90_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_commit_p99_ns",
+            "Approximate p99 pager commit latency (ns)",
+            "gauge",
+            s.pager_commit_p99_ns,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_fsync_count_total",
+            "Fsync calls issued by the pager",
+            "counter",
+            s.pager_fsync_count,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_wal_frames_total",
+            "WAL frames written",
+            "counter",
+            s.pager_wal_frames,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_pager_wal_bytes_total",
+            "WAL bytes appended",
+            "counter",
+            s.pager_wal_bytes,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_wal_coalesced_writes_total",
+            "Coalesced WAL write batches (writev)",
+            "counter",
+            s.wal_coalesced_writes,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_wal_reused_segments_total",
+            "WAL segments reused",
+            "counter",
+            s.wal_reused_segments,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_wal_commit_group_p50_frames",
+            "Median WAL commit batch size (frames)",
+            "gauge",
+            s.wal_commit_group_p50,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_wal_commit_group_p95_frames",
+            "95th percentile WAL commit batch size (frames)",
+            "gauge",
+            s.wal_commit_group_p95,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_btree_allocator_failures_total",
+            "Leaf allocator failures (any reason)",
+            "counter",
+            s.btree_leaf_allocator_failures,
+        );
+        push_metric(
+            &mut body,
+            "sombra_storage_btree_allocator_compactions_total",
+            "Leaf allocator compactions",
+            "counter",
+            s.btree_leaf_allocator_compactions,
+        );
+    }
+
+    let mut response = Response::new(body.into());
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    Ok(response)
+}
+
+fn push_metric<T: std::fmt::Display>(
+    buf: &mut String,
+    name: &str,
+    help: &str,
+    metric_type: &str,
+    value: T,
+) {
+    let _ = writeln!(buf, "# HELP {name} {help}");
+    let _ = writeln!(buf, "# TYPE {name} {metric_type}");
+    let _ = writeln!(buf, "{name} {value}");
 }
 
 #[cfg(not(feature = "bundled-dashboard"))]
@@ -439,6 +1066,198 @@ async fn query_handler(
 struct HealthResponse {
     status: &'static str,
     read_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadyResponse {
+    status: &'static str,
+    read_only: bool,
+    checks: Vec<HealthCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct HealthCheck {
+    name: &'static str,
+    ok: bool,
+    message: Option<String>,
+}
+
+struct ReadyReport {
+    ok: bool,
+    checks: Vec<HealthCheck>,
+}
+
+fn evaluate_readiness(state: &ServerState) -> ReadyReport {
+    let mut checks = Vec::new();
+
+    let db_exists = state.db_path.exists();
+    checks.push(HealthCheck {
+        name: "db_path_exists",
+        ok: db_exists,
+        message: if db_exists {
+            None
+        } else {
+            Some(format!(
+                "database path missing: {}",
+                state.db_path.display()
+            ))
+        },
+    });
+
+    let db_open_check = if db_exists {
+        match state.open_database() {
+            Ok(db) => {
+                drop(db);
+                HealthCheck {
+                    name: "db_open",
+                    ok: true,
+                    message: None,
+                }
+            }
+            Err(err) => HealthCheck {
+                name: "db_open",
+                ok: false,
+                message: Some(err.to_string()),
+            },
+        }
+    } else {
+        HealthCheck {
+            name: "db_open",
+            ok: false,
+            message: Some("database path missing".to_string()),
+        }
+    };
+
+    checks.push(db_open_check);
+
+    let stats_start = Instant::now();
+    match admin::stats(state.db_path.clone(), &state.open_opts) {
+        Ok(report) => {
+            checks.push(HealthCheck {
+                name: "stats",
+                ok: true,
+                message: None,
+            });
+
+            checks.push(HealthCheck {
+                name: "stats_latency_ms",
+                ok: true,
+                message: Some(format!("{}ms", stats_start.elapsed().as_millis())),
+            });
+
+            let wal_path = PathBuf::from(report.wal.path.clone());
+            let wal_exists = report.wal.exists;
+            checks.push(HealthCheck {
+                name: "wal_exists",
+                ok: wal_exists,
+                message: if wal_exists {
+                    None
+                } else {
+                    Some(format!("wal file missing: {}", wal_path.display()))
+                },
+            });
+
+            let wal_dir_check = wal_path
+                .parent()
+                .map(|dir| {
+                    let meta = fs::metadata(dir);
+                    let writable = meta.map(|m| !m.permissions().readonly()).unwrap_or(false);
+                    HealthCheck {
+                        name: "wal_dir_writable",
+                        ok: writable,
+                        message: if writable {
+                            None
+                        } else {
+                            Some(format!("wal directory not writable: {}", dir.display()))
+                        },
+                    }
+                })
+                .unwrap_or(HealthCheck {
+                    name: "wal_dir_writable",
+                    ok: false,
+                    message: Some("wal directory missing".to_string()),
+                });
+            checks.push(wal_dir_check);
+
+            let wal_dir_tempfile_check = wal_path
+                .parent()
+                .map(|dir| {
+                    if state.read_only {
+                        return HealthCheck {
+                            name: "wal_dir_tempfile",
+                            ok: true,
+                            message: Some("skipped (read_only mode)".to_string()),
+                        };
+                    }
+                    match TempFileBuilder::new()
+                        .prefix(".sombra-health")
+                        .tempfile_in(dir)
+                    {
+                        Ok(_) => HealthCheck {
+                            name: "wal_dir_tempfile",
+                            ok: true,
+                            message: None,
+                        },
+                        Err(err) => HealthCheck {
+                            name: "wal_dir_tempfile",
+                            ok: false,
+                            message: Some(format!("wal dir temp file failed: {err}")),
+                        },
+                    }
+                })
+                .unwrap_or(HealthCheck {
+                    name: "wal_dir_tempfile",
+                    ok: false,
+                    message: Some("wal directory missing".to_string()),
+                });
+            checks.push(wal_dir_tempfile_check);
+
+            if let Some(allocation_error) = report.wal.allocation_error {
+                checks.push(HealthCheck {
+                    name: "wal_allocation_error",
+                    ok: false,
+                    message: Some(allocation_error),
+                });
+            } else {
+                checks.push(HealthCheck {
+                    name: "wal_allocation_error",
+                    ok: true,
+                    message: None,
+                });
+            }
+
+            let reader_age_ms = report.pager.mvcc_reader_max_age_ms;
+            let reader_age_ok = reader_age_ms <= MVCC_READER_WARN_THRESHOLD_MS;
+            checks.push(HealthCheck {
+                name: "mvcc_reader_max_age_ms",
+                ok: reader_age_ok,
+                message: Some(format!(
+                    "max_age_ms={reader_age_ms} threshold_ms={}",
+                    MVCC_READER_WARN_THRESHOLD_MS
+                )),
+            });
+
+            checks.push(HealthCheck {
+                name: "last_checkpoint_lsn",
+                ok: true,
+                message: Some(format!(
+                    "last_checkpoint_lsn={}",
+                    report.pager.last_checkpoint_lsn
+                )),
+            });
+        }
+        Err(err) => {
+            checks.push(HealthCheck {
+                name: "stats",
+                ok: false,
+                message: Some(err.to_string()),
+            });
+        }
+    }
+
+    let ok = checks.iter().all(|check| check.ok);
+
+    ReadyReport { ok, checks }
 }
 
 #[derive(Debug, Error)]

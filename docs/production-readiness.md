@@ -7,17 +7,23 @@ Quick links
 - Tracker: docs/production-readiness.md (this file)
 - Runbooks index: docs/runbooks/README.md
 - Test matrices: docs/test-matrices/README.md
+- Decision log: docs/decisions/README.md
 - Prod sanity test runner: scripts/run-prod-sanity.sh
 - Key references: docs/mvcc-baseline.md, docs/mvcc-durability.md, docs/mvcc-optimization-plan.md, docs/dashboard-plan.md, docs/benchmarks.md
 
 Owner roster (fill in)
 | Area | DRI | Backup | Notes |
 | --- | --- | --- | --- |
-| Isolation / Txn / MVCC | | | |
-| Storage / IO / WAL / GC | | | |
-| Replication / Backup / HA | | | |
-| Security / Multi-tenancy | | | |
-| Observability / Operations | | | |
+| Isolation / Txn / MVCC | You | — | Solo owner; track backlog in this doc. |
+| Storage / IO / WAL / GC | You | — | Same owner; note risks in decision log. |
+| Replication / Backup / HA | You | — | Currently deferred; single-node only. |
+| Security / Multi-tenancy | You | — | Currently deferred; document gaps. |
+| Observability / Operations | You | — | Lightweight metrics/health only; no infra setup. |
+
+Decision cadence
+- Quick self-review weekly (15–30 minutes) to update checkboxes and risks.
+- Lightweight ADRs: one-page note per decision (why/what/scope/rollback) stored under `docs/decisions/` (link from this file).
+- Runbook + test-matrix updates are required with each change that affects behavior or coverage.
 
 Phase 1 (1–2 weeks): Scope, observability, test matrices
 --------------------------------------------------------
@@ -25,28 +31,32 @@ Goal
 - Align on what “prod-ready” means, who owns each area, and gain enough visibility and environments to harden safely.
 
 Workstreams & tasks
-- [ ] Ownership and docs
-  - [ ] Assign DRIs for isolation/txn engine, storage/IO/WAL/GC, replication/backup/HA, security/multi-tenancy, observability/operations.
-  - [ ] Create a prod-readiness doc index: master doc, per-area design docs, runbooks folder, test matrices folder, decision log (lightweight ADRs).
-  - [ ] Set decision cadence: weekly readiness review; rules for when an ADR is required.
+- [x] Ownership and docs
+  - [x] Assign DRIs for isolation/txn engine, storage/IO/WAL/GC, replication/backup/HA, security/multi-tenancy, observability/operations.
+  - [ ] Create a prod-readiness doc index: master doc, per-area design docs, runbooks folder, test matrices folder, decision log (lightweight ADRs). (Index + folders exist; need ADR log stub under `docs/decisions/`.)
+  - [x] Set decision cadence: weekly readiness review; rules for when an ADR is required.
 - [ ] Observability bootstrap
-  - [ ] Define minimal metrics: p50/p90/p99 for read/write/commit; active/blocked txns; deadlock count; WAL bytes/s; checkpoint duration; fsync/flush counts; GC debt or queue length; oldest active snapshot age; replication lag/apply delay.
-  - [ ] Implement missing metrics in txn/storage hot paths; export via standard stack.
-  - [ ] Health endpoints: liveness (process/resources) and readiness (serving within budget; WAL/storage/replication sanity checks).
-  - [ ] Initial dashboards: “Txn & Latency”, “Storage & WAL”, “Replication & GC”.
+  - [ ] Define minimal metrics: p50/p90/p99 for read/write/commit; active/blocked txns; deadlock count; WAL bytes/s; WAL coalesce lag; checkpoint duration/backlog; fsync/flush counts/errors; GC debt or queue length; oldest active snapshot age; replication lag/apply delay.
+  - [ ] Implement missing metrics in txn/storage hot paths; export via standard stack and Axum API server. Keep scope minimal for single-node: expose counters/histograms, skip external infra.
+    - [x] Export snapshot gauges via `/metrics` (pager cache hits/misses/evictions, WAL size/segments, MVCC reader age, overlay counts, storage sizes).
+    - [x] Export exec latency percentiles (p50/p90/p99) from profiling (`SOMBRA_PROFILE=1`), still missing txn-level histograms and blocked/deadlock counters.
+    - [x] Export storage profiling counters (pager commit/fsync/WAL bytes/frames, WAL batch sizes, allocator failures) via `/metrics` when profiling is enabled.
+    - [x] Export pager commit latency percentiles (p50/p90/p99) via `/metrics` when profiling is enabled.
+  - [x] Health endpoints: `/health/live` (process/resources) and `/health/ready` (latency budget, WAL writable, checkpoint not stalled, replication lag under budget). Implemented as `/health`, `/health/live`, `/health/ready` with WAL dir writability, allocator errors, MVCC reader age checks.
+  - [ ] Initial dashboards (optional for personal use): “Txn & Latency”, “Storage & WAL”, “Replication & GC” with alerts (WAL stall, checkpoint overrun, GC lag, replication lag, deadlock spike).
 - [ ] Test matrices & environments
-  - [ ] Draft test matrices for isolation/MVCC, crash safety/storage, GC/epochs, replication/HA, backup/restore, security, graph-specific invariants.
-  - [ ] Decide automation strategy: which suites run in CI vs nightly/soak.
-  - [ ] Stand up environments: single-node crash-test; multi-node replication + failure injection.
+  - [x] Draft test matrices for isolation/MVCC, crash safety/storage, GC/epochs, replication/HA, backup/restore, security, graph-specific invariants. (See `docs/test-matrices/README.md`.)
+  - [ ] Decide automation strategy: which suites run in CI vs nightly/soak (tag rows with cadence; add scheduler for nightly/weekly runs). For personal use, keep manual/nightly optional.
+  - [ ] Stand up environments: single-node crash-test (local ok); defer multi-node replication + failure injection until needed; soak box optional.
 - [ ] Filesystem baseline
   - [ ] Pick supported OS/filesystem matrix (tiered support).
   - [ ] Document expected fsync semantics and platform footguns.
   - [ ] Plan fio/disk characterization runs (seq/random throughput; fsync latency).
 
 Exit criteria
-- [ ] DRIs and decision rhythm documented.
+- [x] DRIs and decision rhythm documented.
 - [ ] Prod-readiness doc index and per-area skeletons exist.
-- [ ] Minimal metrics + health endpoints live; dashboards created.
+- [ ] Minimal metrics + health endpoints live; dashboards created. (Health endpoints + `/metrics` export are live; dashboards and latency histograms remain.)
 - [ ] Test matrices drafted; required environments identified/allocated.
 
 Phase 2 (2–4 weeks): Single-node correctness, safety, security, backup
@@ -69,8 +79,8 @@ Workstreams & tasks
   - [ ] GC logic: bounded version chains; predictable reclamation; secondary index vacuum/repair.
   - [ ] Tests: GC under long snapshots; safe-point advancement with lagging replicas; snapshot-too-old surfaced correctly.
 - [ ] Security & multi-tenancy (basics)
-  - [ ] TLS everywhere (client-server and server-server).
-  - [ ] Authentication: certs/passwords/tokens or pluggable auth; RBAC for common operations.
+  - [ ] TLS everywhere (client-server and server-server). (Deferred for local-only MVP dashboard; revisit post-MVP.)
+  - [ ] Authentication: certs/passwords/tokens or pluggable auth; RBAC for common operations. (Deferred for local-only MVP dashboard; revisit post-MVP.)
   - [ ] Tenant isolation foundations in code (no cross-tenant leakage; cache boundaries).
   - [ ] Tests: authz matrix; basic key/cert rotation drill.
 - [ ] Backup & restore automation
