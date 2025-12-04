@@ -255,7 +255,7 @@ impl SnapshotPool {
         }
         drop(pool);
         self.metrics.snapshot_pool_miss();
-        let guard = self.begin_read_guard()?;
+        let guard = self.store.begin_read()?;
         Ok(SnapshotLease {
             pool: Some(self),
             snapshot: Some(PooledSnapshot {
@@ -895,7 +895,7 @@ impl Graph {
     #[inline]
     fn begin_read_guard(&self) -> Result<ReadGuard> {
         let start = Instant::now();
-        let guard = self.begin_read_guard()?;
+        let guard = self.store.begin_read()?;
         let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         self.metrics.mvcc_read_latency_ns(nanos);
         record_mvcc_read_begin(nanos);

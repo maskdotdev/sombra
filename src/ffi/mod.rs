@@ -235,7 +235,7 @@ impl LatencyHistogram {
             return 0;
         }
         let target = ((percentile / 100.0) * total as f64).ceil() as u64;
-        let mut cumulative = 0;
+        let mut cumulative: u64 = 0;
         for (idx, bucket) in EXEC_LATENCY_BUCKETS.iter().enumerate() {
             cumulative = cumulative.saturating_add(snapshot[idx]);
             if cumulative >= target {

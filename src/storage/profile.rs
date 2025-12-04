@@ -118,6 +118,8 @@ pub struct StorageProfileSnapshot {
     pub btree_leaf_allocator_snapshot_reuse: u64,
     /// Total free-region entries observed when reusing snapshots.
     pub btree_leaf_allocator_snapshot_free_regions: u64,
+    /// Number of MVCC writer lock conflicts.
+    pub mvcc_write_lock_conflicts: u64,
 }
 
 #[derive(Default)]
@@ -171,6 +173,7 @@ struct StorageProfileCounters {
     mvcc_commit_count: AtomicU64,
     mvcc_read_begin_latency: LatencyHistogram,
     mvcc_commit_latency: LatencyHistogram,
+    mvcc_write_lock_conflicts: AtomicU64,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -235,7 +238,7 @@ impl LatencyHistogram {
             return 0;
         }
         let target = ((percentile / 100.0) * total as f64).ceil() as u64;
-        let mut cumulative = 0;
+        let mut cumulative: u64 = 0;
         for (idx, bucket) in COMMIT_LATENCY_BUCKETS.iter().enumerate() {
             cumulative = cumulative.saturating_add(snapshot[idx]);
             if cumulative >= target {
@@ -488,6 +491,7 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         btree_leaf_allocator_snapshot_free_regions: load(
             &counters.btree_leaf_allocator_snapshot_free_regions,
         ),
+        mvcc_write_lock_conflicts: load(&counters.mvcc_write_lock_conflicts),
     })
 }
 
