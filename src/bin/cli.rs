@@ -835,7 +835,6 @@ impl From<VerifyLevelArg> for VerifyLevel {
 
 #[tokio::main]
 async fn main() {
-    sombra::install_panic_hook();
     if let Err(err) = run().await {
         eprintln!("error: {err}");
         std::process::exit(1);
