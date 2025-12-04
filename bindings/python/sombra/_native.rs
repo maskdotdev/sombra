@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -60,7 +60,23 @@ impl Default for PyConnectOptions {
 
 #[pyclass(module = "sombra._native", unsendable)]
 pub struct DatabaseHandle {
-    inner: Arc<Database>,
+    inner: Mutex<Option<Arc<Database>>>,
+}
+
+impl DatabaseHandle {
+    /// Returns a reference to the inner database, or an error if closed.
+    fn with_db<F, T>(&self, f: F) -> PyResult<T>
+    where
+        F: FnOnce(&Arc<Database>) -> PyResult<T>,
+    {
+        let guard = self.inner.lock().map_err(|_| {
+            PyRuntimeError::new_err("[CLOSED] database lock poisoned")
+        })?;
+        match guard.as_ref() {
+            Some(db) => f(db),
+            None => Err(PyRuntimeError::new_err("[CLOSED] database is closed")),
+        }
+    }
 }
 
 #[pyclass(module = "sombra._native", unsendable)]
@@ -213,8 +229,26 @@ fn open_database(path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<Da
 
     let db = Database::open(path, db_opts).map_err(to_py_err)?;
     Ok(DatabaseHandle {
-        inner: Arc::new(db),
+        inner: Mutex::new(Some(Arc::new(db))),
     })
+}
+
+#[pyfunction]
+fn database_close(handle: &DatabaseHandle) -> PyResult<()> {
+    let mut guard = handle.inner.lock().map_err(|_| {
+        PyRuntimeError::new_err("[CLOSED] database lock poisoned")
+    })?;
+    // Take the database out, dropping it
+    let _ = guard.take();
+    Ok(())
+}
+
+#[pyfunction]
+fn database_is_closed(handle: &DatabaseHandle) -> PyResult<bool> {
+    let guard = handle.inner.lock().map_err(|_| {
+        PyRuntimeError::new_err("[CLOSED] database lock poisoned")
+    })?;
+    Ok(guard.is_none())
 }
 
 #[pyfunction]
@@ -224,8 +258,10 @@ fn database_execute(
     spec: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
     let value = any_to_value(spec)?;
-    let response = handle.inner.execute_json(&value).map_err(to_py_err)?;
-    value_to_py(py, response)
+    handle.with_db(|db| {
+        let response = db.execute_json(&value).map_err(to_py_err)?;
+        value_to_py(py, response)
+    })
 }
 
 #[pyfunction]
@@ -235,15 +271,19 @@ fn database_explain(
     spec: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
     let value = any_to_value(spec)?;
-    let explain = handle.inner.explain_json(&value).map_err(to_py_err)?;
-    value_to_py(py, explain)
+    handle.with_db(|db| {
+        let explain = db.explain_json(&value).map_err(to_py_err)?;
+        value_to_py(py, explain)
+    })
 }
 
 #[pyfunction]
 fn database_stream(handle: &DatabaseHandle, spec: &Bound<'_, PyAny>) -> PyResult<StreamHandle> {
     let value = any_to_value(spec)?;
-    let stream = handle.inner.stream_json(&value).map_err(to_py_err)?;
-    Ok(StreamHandle { inner: stream })
+    handle.with_db(|db| {
+        let stream = db.stream_json(&value).map_err(to_py_err)?;
+        Ok(StreamHandle { inner: stream })
+    })
 }
 
 #[pyfunction]
@@ -253,8 +293,10 @@ fn database_mutate(
     spec: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
     let value = any_to_value(spec)?;
-    let summary = handle.inner.mutate_json(&value).map_err(to_py_err)?;
-    value_to_py(py, summary)
+    handle.with_db(|db| {
+        let summary = db.mutate_json(&value).map_err(to_py_err)?;
+        value_to_py(py, summary)
+    })
 }
 
 #[pyfunction]
@@ -264,23 +306,25 @@ fn database_create(
     spec: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
     let value = any_to_value(spec)?;
-    let summary = handle.inner.create_json(&value).map_err(to_py_err)?;
-    value_to_py(py, summary)
+    handle.with_db(|db| {
+        let summary = db.create_json(&value).map_err(to_py_err)?;
+        value_to_py(py, summary)
+    })
 }
 
 #[pyfunction]
 fn database_intern(handle: &DatabaseHandle, name: &str) -> PyResult<u32> {
-    handle.inner.intern(name).map_err(to_py_err)
+    handle.with_db(|db| db.intern(name).map_err(to_py_err))
 }
 
 #[pyfunction]
 fn database_seed_demo(handle: &DatabaseHandle) -> PyResult<()> {
-    handle.inner.seed_demo().map_err(to_py_err)
+    handle.with_db(|db| db.seed_demo().map_err(to_py_err))
 }
 
 #[pyfunction]
 fn database_cancel_request(handle: &DatabaseHandle, request_id: &str) -> PyResult<bool> {
-    Ok(handle.inner.cancel_request(request_id))
+    handle.with_db(|db| Ok(db.cancel_request(request_id)))
 }
 
 #[pyfunction]
@@ -289,18 +333,17 @@ fn database_get_node(
     handle: &DatabaseHandle,
     node_id: u64,
 ) -> PyResult<Option<PyObject>> {
-    let record = handle
-        .inner
-        .get_node_record(node_id)
-        .map_err(to_py_err)?;
-    match record {
-        Some(node) => {
-            let value = serde_json::to_value(node)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            value_to_py(py, value).map(Some)
+    handle.with_db(|db| {
+        let record = db.get_node_record(node_id).map_err(to_py_err)?;
+        match record {
+            Some(node) => {
+                let value = serde_json::to_value(node)
+                    .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+                value_to_py(py, value).map(Some)
+            }
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    })
 }
 
 #[pyfunction]
@@ -309,42 +352,32 @@ fn database_get_edge(
     handle: &DatabaseHandle,
     edge_id: u64,
 ) -> PyResult<Option<PyObject>> {
-    let record = handle
-        .inner
-        .get_edge_record(edge_id)
-        .map_err(to_py_err)?;
-    match record {
-        Some(edge) => {
-            let value = serde_json::to_value(edge)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            value_to_py(py, value).map(Some)
+    handle.with_db(|db| {
+        let record = db.get_edge_record(edge_id).map_err(to_py_err)?;
+        match record {
+            Some(edge) => {
+                let value = serde_json::to_value(edge)
+                    .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+                value_to_py(py, value).map(Some)
+            }
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    })
 }
 
 #[pyfunction]
 fn database_count_nodes_with_label(handle: &DatabaseHandle, label: &str) -> PyResult<u64> {
-    handle
-        .inner
-        .count_nodes_with_label(label)
-        .map_err(to_py_err)
+    handle.with_db(|db| db.count_nodes_with_label(label).map_err(to_py_err))
 }
 
 #[pyfunction]
 fn database_count_edges_with_type(handle: &DatabaseHandle, ty: &str) -> PyResult<u64> {
-    handle
-        .inner
-        .count_edges_with_type(ty)
-        .map_err(to_py_err)
+    handle.with_db(|db| db.count_edges_with_type(ty).map_err(to_py_err))
 }
 
 #[pyfunction]
 fn database_list_nodes_with_label(handle: &DatabaseHandle, label: &str) -> PyResult<Vec<u64>> {
-    handle
-        .inner
-        .node_ids_with_label(label)
-        .map_err(to_py_err)
+    handle.with_db(|db| db.node_ids_with_label(label).map_err(to_py_err))
 }
 
 #[pyfunction]
@@ -355,24 +388,25 @@ fn database_neighbors(
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let parsed = parse_neighbor_options(options)?;
-    let neighbors = handle
-        .inner
-        .neighbors_with_options(
-            node_id,
-            parsed.direction,
-            parsed.edge_type.as_deref(),
-            parsed.distinct,
-        )
-        .map_err(to_py_err)?;
-    let list = PyList::empty_bound(py);
-    for entry in neighbors {
-        let row = PyDict::new_bound(py);
-        row.set_item("node_id", entry.node_id)?;
-        row.set_item("edge_id", entry.edge_id)?;
-        row.set_item("type_id", entry.type_id)?;
-        list.append(row)?;
-    }
-    Ok(list.into_py(py))
+    handle.with_db(|db| {
+        let neighbors = db
+            .neighbors_with_options(
+                node_id,
+                parsed.direction,
+                parsed.edge_type.as_deref(),
+                parsed.distinct,
+            )
+            .map_err(to_py_err)?;
+        let list = PyList::empty_bound(py);
+        for entry in neighbors {
+            let row = PyDict::new_bound(py);
+            row.set_item("node_id", entry.node_id)?;
+            row.set_item("edge_id", entry.edge_id)?;
+            row.set_item("type_id", entry.type_id)?;
+            list.append(row)?;
+        }
+        Ok(list.into_py(py))
+    })
 }
 
 #[pyfunction]
@@ -384,30 +418,33 @@ fn database_bfs_traversal(
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let parsed = parse_bfs_options(options)?;
-    let visits = handle
-        .inner
-        .bfs_traversal(
-            start_id,
-            parsed.direction,
-            max_depth,
-            parsed.edge_types.as_deref(),
-            parsed.max_results,
-        )
-        .map_err(to_py_err)?;
-    let list = PyList::empty_bound(py);
-    for visit in visits {
-        let row = PyDict::new_bound(py);
-        row.set_item("node_id", visit.node_id)?;
-        row.set_item("depth", visit.depth)?;
-        list.append(row)?;
-    }
-    Ok(list.into_py(py))
+    handle.with_db(|db| {
+        let visits = db
+            .bfs_traversal(
+                start_id,
+                parsed.direction,
+                max_depth,
+                parsed.edge_types.as_deref(),
+                parsed.max_results,
+            )
+            .map_err(to_py_err)?;
+        let list = PyList::empty_bound(py);
+        for visit in visits {
+            let row = PyDict::new_bound(py);
+            row.set_item("node_id", visit.node_id)?;
+            row.set_item("depth", visit.depth)?;
+            list.append(row)?;
+        }
+        Ok(list.into_py(py))
+    })
 }
 
 #[pyfunction]
 fn database_pragma_get(py: Python<'_>, handle: &DatabaseHandle, name: &str) -> PyResult<PyObject> {
-    let result = handle.inner.pragma(name, None).map_err(to_py_err)?;
-    value_to_py(py, result)
+    handle.with_db(|db| {
+        let result = db.pragma(name, None).map_err(to_py_err)?;
+        value_to_py(py, result)
+    })
 }
 
 #[pyfunction]
@@ -422,11 +459,10 @@ fn database_pragma_set(
     } else {
         any_to_value(value)?
     };
-    let result = handle
-        .inner
-        .pragma(name, Some(payload))
-        .map_err(to_py_err)?;
-    value_to_py(py, result)
+    handle.with_db(|db| {
+        let result = db.pragma(name, Some(payload)).map_err(to_py_err)?;
+        value_to_py(py, result)
+    })
 }
 
 #[pyfunction]
@@ -445,6 +481,8 @@ fn version() -> PyResult<&'static str> {
 #[pymodule]
 fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(open_database, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_close, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(database_is_closed, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_execute, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_explain, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_stream, m)?)?;
@@ -470,7 +508,9 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn to_py_err(err: FfiError) -> PyErr {
-    PyRuntimeError::new_err(err.to_string())
+    let code_name = err.code_name();
+    let message = err.to_string();
+    PyRuntimeError::new_err(format!("[{code_name}] {message}"))
 }
 
 fn parse_direction(value: Option<&str>) -> PyResult<Dir> {

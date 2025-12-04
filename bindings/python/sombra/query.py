@@ -5,10 +5,152 @@ from __future__ import annotations
 import base64
 import copy
 import math
+import re
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, Union
 
 from . import _native
+
+
+# Error code regex: [CODE_NAME] message
+_ERROR_CODE_REGEX = re.compile(r'^\[([A-Z_]+)\]\s*')
+
+
+class ErrorCode:
+    """Error codes returned by the Sombra database engine."""
+    UNKNOWN = "UNKNOWN"
+    MESSAGE = "MESSAGE"
+    ANALYZER = "ANALYZER"
+    JSON = "JSON"
+    IO = "IO"
+    CORRUPTION = "CORRUPTION"
+    CONFLICT = "CONFLICT"
+    SNAPSHOT_TOO_OLD = "SNAPSHOT_TOO_OLD"
+    CANCELLED = "CANCELLED"
+    INVALID_ARG = "INVALID_ARG"
+    NOT_FOUND = "NOT_FOUND"
+    CLOSED = "CLOSED"
+
+
+class SombraError(Exception):
+    """Base exception class for all Sombra database errors."""
+    
+    def __init__(self, message: str, code: str = ErrorCode.UNKNOWN):
+        super().__init__(message)
+        self.code = code
+
+
+class AnalyzerError(SombraError):
+    """Error raised when a query analysis fails."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.ANALYZER)
+
+
+class JsonError(SombraError):
+    """Error raised when JSON serialization/deserialization fails."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.JSON)
+
+
+class IoError(SombraError):
+    """Error raised when an I/O operation fails."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.IO)
+
+
+class CorruptionError(SombraError):
+    """Error raised when data corruption is detected."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.CORRUPTION)
+
+
+class ConflictError(SombraError):
+    """Error raised when a transaction conflict occurs (write-write conflict)."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.CONFLICT)
+
+
+class SnapshotTooOldError(SombraError):
+    """Error raised when a snapshot is too old for an MVCC read."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.SNAPSHOT_TOO_OLD)
+
+
+class CancelledError(SombraError):
+    """Error raised when an operation is cancelled."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.CANCELLED)
+
+
+class InvalidArgError(SombraError):
+    """Error raised when an invalid argument is provided."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.INVALID_ARG)
+
+
+class NotFoundError(SombraError):
+    """Error raised when a requested resource is not found."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.NOT_FOUND)
+
+
+class ClosedError(SombraError):
+    """Error raised when operations are attempted on a closed database."""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.CLOSED)
+
+
+# Map of error code strings to their corresponding exception classes
+_ERROR_CLASS_MAP: Dict[str, Type[SombraError]] = {
+    ErrorCode.UNKNOWN: SombraError,
+    ErrorCode.MESSAGE: SombraError,
+    ErrorCode.ANALYZER: AnalyzerError,
+    ErrorCode.JSON: JsonError,
+    ErrorCode.IO: IoError,
+    ErrorCode.CORRUPTION: CorruptionError,
+    ErrorCode.CONFLICT: ConflictError,
+    ErrorCode.SNAPSHOT_TOO_OLD: SnapshotTooOldError,
+    ErrorCode.CANCELLED: CancelledError,
+    ErrorCode.INVALID_ARG: InvalidArgError,
+    ErrorCode.NOT_FOUND: NotFoundError,
+    ErrorCode.CLOSED: ClosedError,
+}
+
+
+def wrap_native_error(err: BaseException) -> SombraError:
+    """Parse an error from the native layer and return a typed exception.
+    
+    Native errors have format: "[CODE_NAME] actual message"
+    
+    Args:
+        err: The exception from the native layer
+        
+    Returns:
+        A typed SombraError subclass instance
+    """
+    message = str(err)
+    match = _ERROR_CODE_REGEX.match(message)
+    
+    if match:
+        code = match.group(1)
+        clean_message = message[match.end():]
+        error_class = _ERROR_CLASS_MAP.get(code, SombraError)
+        return error_class(clean_message)
+    
+    # No code prefix, return as generic SombraError
+    if isinstance(err, SombraError):
+        return err
+    return SombraError(message, ErrorCode.UNKNOWN)
 
 
 class QueryResult(dict):
@@ -857,6 +999,7 @@ class CreateBuilder:
         return self
 
     def execute(self) -> Dict[str, Any]:
+        self._db._assert_open()
         self._ensure_mutable()
         self._sealed = True
         script_nodes: List[Dict[str, Any]] = []
@@ -905,6 +1048,7 @@ class Database:
     def __init__(self, handle: _native.DatabaseHandle):
         self._handle = handle
         self._schema: Optional[Dict[str, Dict[str, Any]]] = None
+        self._closed = False
 
     @classmethod
     def open(cls, path: str, **options: Any) -> "Database":
@@ -915,23 +1059,58 @@ class Database:
             db.with_schema(schema)
         return db
 
+    def close(self) -> None:
+        """Close the database, releasing all resources.
+        
+        After calling close(), all subsequent operations on this instance will fail.
+        Calling close() multiple times is safe (subsequent calls are no-ops).
+        """
+        if self._closed:
+            return
+        self._closed = True
+        _native.database_close(self._handle)
+
+    @property
+    def is_closed(self) -> bool:
+        """Returns True if the database has been closed."""
+        return self._closed
+
+    def _assert_open(self) -> None:
+        """Raises ClosedError if the database is closed."""
+        if self._closed:
+            raise ClosedError("database is closed")
+
+    def __enter__(self) -> "Database":
+        """Context manager entry - returns self."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Context manager exit - closes the database."""
+        self.close()
+
     def query(self) -> "QueryBuilder":
+        self._assert_open()
         return QueryBuilder(self)
 
     def create(self) -> "CreateBuilder":
+        self._assert_open()
         return CreateBuilder(self)
 
     def intern(self, name: str) -> int:
+        self._assert_open()
         return _native.database_intern(self._handle, name)
 
     def seed_demo(self) -> "Database":
+        self._assert_open()
         _native.database_seed_demo(self._handle)
         return self
 
     def mutate(self, script: Mapping[str, Any]) -> Dict[str, Any]:
+        self._assert_open()
         return _native.database_mutate(self._handle, script)
 
     def mutate_many(self, ops: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        self._assert_open()
         return self.mutate({"ops": [dict(op) for op in ops]})
 
     def mutate_batched(
@@ -940,6 +1119,7 @@ class Database:
         *,
         batch_size: int = 1024,
     ) -> Dict[str, Any]:
+        self._assert_open()
         if not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
         if isinstance(ops, (str, bytes)):
@@ -955,6 +1135,7 @@ class Database:
         return summary
 
     def transaction(self, fn: Callable[["_MutationBatch"], Any]) -> Tuple[Any, Dict[str, Any]]:
+        self._assert_open()
         batch = _MutationBatch()
         result = fn(batch)
         if hasattr(result, "__await__"):
@@ -964,11 +1145,13 @@ class Database:
         return result, summary
 
     def pragma(self, name: str, value: Any = _PRAGMA_SENTINEL) -> Any:
+        self._assert_open()
         if value is _PRAGMA_SENTINEL:
             return _native.database_pragma_get(self._handle, name)
         return _native.database_pragma_set(self._handle, name, value)
 
     def cancel_request(self, request_id: str) -> bool:
+        self._assert_open()
         if not isinstance(request_id, str) or not request_id.strip():
             raise ValueError("cancel_request requires a non-empty request id string")
         return _native.database_cancel_request(self._handle, request_id)
@@ -981,6 +1164,7 @@ class Database:
         edge_type: Optional[str] = None,
         distinct: bool = True,
     ) -> List[Dict[str, int]]:
+        self._assert_open()
         if not isinstance(node_id, int) or node_id < 0:
             raise ValueError("neighbors() requires a non-negative node id")
         if direction not in ("out", "in", "both"):
@@ -1001,6 +1185,7 @@ class Database:
         edge_types: Optional[Sequence[str]] = None,
         max_results: Optional[int] = None,
     ) -> List[Dict[str, int]]:
+        self._assert_open()
         if not isinstance(node_id, int) or node_id < 0:
             raise ValueError("bfs_traversal() requires a non-negative node id")
         if not isinstance(max_depth, int) or max_depth < 0:
@@ -1022,10 +1207,12 @@ class Database:
         return _native.database_bfs_traversal(self._handle, int(node_id), int(max_depth), options)
 
     def with_schema(self, schema: Optional[Mapping[str, Mapping[str, Any]]]) -> "Database":
+        self._assert_open()
         self._schema = _normalize_runtime_schema(schema)
         return self
 
     def get_node_record(self, node_id: int) -> Optional[Dict[str, Any]]:
+        self._assert_open()
         record = _native.database_get_node(self._handle, int(node_id))
         if record is None:
             return None
@@ -1034,6 +1221,7 @@ class Database:
         return record
 
     def get_edge_record(self, edge_id: int) -> Optional[Dict[str, Any]]:
+        self._assert_open()
         record = _native.database_get_edge(self._handle, int(edge_id))
         if record is None:
             return None
@@ -1042,16 +1230,19 @@ class Database:
         return record
 
     def count_nodes_with_label(self, label: str) -> int:
+        self._assert_open()
         if not isinstance(label, str) or not label.strip():
             raise ValueError("count_nodes_with_label requires a non-empty string label")
         return int(_native.database_count_nodes_with_label(self._handle, label))
 
     def count_edges_with_type(self, edge_type: str) -> int:
+        self._assert_open()
         if not isinstance(edge_type, str) or not edge_type.strip():
             raise ValueError("count_edges_with_type requires a non-empty edge type string")
         return int(_native.database_count_edges_with_type(self._handle, edge_type))
 
     def list_nodes_with_label(self, label: str) -> List[int]:
+        self._assert_open()
         if not isinstance(label, str) or not label.strip():
             raise ValueError("list_nodes_with_label requires a non-empty string label")
         values = _native.database_list_nodes_with_label(self._handle, label)
@@ -1062,6 +1253,7 @@ class Database:
         labels: Union[str, Sequence[str]],
         props: Optional[Mapping[str, Any]] = None,
     ) -> Optional[int]:
+        self._assert_open()
         label_list = [labels] if isinstance(labels, str) else list(labels)
         summary = self.mutate({"ops": [{"op": "createNode", "labels": label_list, "props": props or {}}]})
         created = summary.get("createdNodes") or []
@@ -1074,6 +1266,7 @@ class Database:
         set_props: Optional[Mapping[str, Any]] = None,
         unset: Optional[Sequence[str]] = None,
     ) -> "Database":
+        self._assert_open()
         self.mutate(
             {
                 "ops": [
@@ -1089,6 +1282,7 @@ class Database:
         return self
 
     def delete_node(self, node_id: int, cascade: bool = False) -> "Database":
+        self._assert_open()
         self.mutate({"ops": [{"op": "deleteNode", "id": int(node_id), "cascade": cascade}]})
         return self
 
@@ -1099,6 +1293,7 @@ class Database:
         ty: str,
         props: Optional[Mapping[str, Any]] = None,
     ) -> Optional[int]:
+        self._assert_open()
         summary = self.mutate(
             {
                 "ops": [
@@ -1116,18 +1311,22 @@ class Database:
         return int(created[-1]) if created else None
 
     def delete_edge(self, edge_id: int) -> "Database":
+        self._assert_open()
         self.mutate({"ops": [{"op": "deleteEdge", "id": int(edge_id)}]})
         return self
 
     def _execute(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        self._assert_open()
         payload = _native.database_execute(self._handle, spec)
         return _normalize_envelope(payload)
 
     def _explain(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        self._assert_open()
         payload = _native.database_explain(self._handle, spec)
         return _normalize_envelope(payload, expect_plan=True)
 
     def _stream(self, spec: Dict[str, Any]) -> _native.StreamHandle:
+        self._assert_open()
         return _native.database_stream(self._handle, spec)
 
 

@@ -17,6 +17,99 @@ export interface ConnectOptions {
   schema?: NodeSchema
 }
 
+// ============================================================================
+// Error Codes and Error Classes
+// ============================================================================
+
+/**
+ * Error codes returned by the Sombra database engine.
+ */
+export const ErrorCode: {
+  readonly UNKNOWN: 'UNKNOWN'
+  readonly MESSAGE: 'MESSAGE'
+  readonly ANALYZER: 'ANALYZER'
+  readonly JSON: 'JSON'
+  readonly IO: 'IO'
+  readonly CORRUPTION: 'CORRUPTION'
+  readonly CONFLICT: 'CONFLICT'
+  readonly SNAPSHOT_TOO_OLD: 'SNAPSHOT_TOO_OLD'
+  readonly CANCELLED: 'CANCELLED'
+  readonly INVALID_ARG: 'INVALID_ARG'
+  readonly NOT_FOUND: 'NOT_FOUND'
+  readonly CLOSED: 'CLOSED'
+}
+
+export type ErrorCodeType = typeof ErrorCode[keyof typeof ErrorCode]
+
+/**
+ * Base error class for all Sombra database errors.
+ */
+export class SombraError extends Error {
+  /** The error code identifying the type of error */
+  readonly code: ErrorCodeType
+  constructor(message: string, code?: ErrorCodeType)
+}
+
+/** Error thrown when a query analysis fails. */
+export class AnalyzerError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when JSON serialization/deserialization fails. */
+export class JsonError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when an I/O operation fails. */
+export class IoError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when data corruption is detected. */
+export class CorruptionError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when a transaction conflict occurs (write-write conflict). */
+export class ConflictError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when a snapshot is too old for an MVCC read. */
+export class SnapshotTooOldError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when an operation is cancelled. */
+export class CancelledError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when an invalid argument is provided. */
+export class InvalidArgError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when a requested resource is not found. */
+export class NotFoundError extends SombraError {
+  constructor(message: string)
+}
+
+/** Error thrown when operations are attempted on a closed database. */
+export class ClosedError extends SombraError {
+  constructor(message: string)
+}
+
+/**
+ * Parses an error message from the native layer and returns a typed error.
+ * Native errors have format: "[CODE_NAME] actual message"
+ */
+export function wrapNativeError(err: Error | string): SombraError
+
+// ============================================================================
+// Query Types
+// ============================================================================
+
 export type Direction = 'out' | 'in' | 'both'
 
 export interface NeighborQueryOptions {
@@ -338,6 +431,19 @@ export class QueryBuilder<
 
 export class Database<S extends NodeSchema = DefaultSchema> {
   static open<T extends NodeSchema = DefaultSchema>(path: string, options?: ConnectOptions | null): Database<T>
+  
+  /**
+   * Closes the database, releasing all resources.
+   * After calling close(), all subsequent operations on this instance will fail.
+   * Calling close() multiple times is safe (subsequent calls are no-ops).
+   */
+  close(): void
+  
+  /**
+   * Returns true if the database has been closed.
+   */
+  readonly isClosed: boolean
+  
   query(): QueryBuilder<S, {}, true>
   withSchema(schema: S | null): this
   create(): CreateBuilder

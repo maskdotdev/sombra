@@ -1,7 +1,7 @@
 #![deny(clippy::all)]
 
 use std::convert::TryFrom;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use napi::{bindgen_prelude::Result as NapiResult, Error as NapiError, Status};
 use napi_derive::napi;
@@ -47,14 +47,27 @@ pub struct ConnectOptions {
 
 #[napi]
 pub struct DatabaseHandle {
-  inner: Arc<Database>,
+  inner: Mutex<Option<Arc<Database>>>,
 }
 
 impl DatabaseHandle {
   fn new(db: Database) -> Self {
     Self {
-      inner: Arc::new(db),
+      inner: Mutex::new(Some(Arc::new(db))),
     }
+  }
+
+  fn with_db<T, F>(&self, f: F) -> NapiResult<T>
+  where
+    F: FnOnce(&Database) -> NapiResult<T>,
+  {
+    let guard = self.inner.lock().map_err(|_| {
+      NapiError::new(Status::GenericFailure, "database handle is poisoned")
+    })?;
+    let db = guard.as_ref().ok_or_else(|| {
+      NapiError::new(Status::GenericFailure, "database is closed")
+    })?;
+    f(db)
   }
 }
 
@@ -185,96 +198,96 @@ pub fn openDatabase(path: String, options: Option<ConnectOptions>) -> NapiResult
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseExecute(handle: &DatabaseHandle, spec: Value) -> NapiResult<Value> {
-  handle.inner.execute_json(&spec).map_err(to_napi_err)
+  handle.with_db(|db| db.execute_json(&spec).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseExplain(handle: &DatabaseHandle, spec: Value) -> NapiResult<Value> {
-  handle.inner.explain_json(&spec).map_err(to_napi_err)
+  handle.with_db(|db| db.explain_json(&spec).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseStream(handle: &DatabaseHandle, spec: Value) -> NapiResult<StreamHandle> {
-  let stream = handle.inner.stream_json(&spec).map_err(to_napi_err)?;
-  Ok(StreamHandle { inner: stream })
+  handle.with_db(|db| {
+    let stream = db.stream_json(&spec).map_err(to_napi_err)?;
+    Ok(StreamHandle { inner: stream })
+  })
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseMutate(handle: &DatabaseHandle, spec: Value) -> NapiResult<Value> {
-  handle.inner.mutate_json(&spec).map_err(to_napi_err)
+  handle.with_db(|db| db.mutate_json(&spec).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseCreate(handle: &DatabaseHandle, spec: Value) -> NapiResult<Value> {
-  handle.inner.create_json(&spec).map_err(to_napi_err)
+  handle.with_db(|db| db.create_json(&spec).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseIntern(handle: &DatabaseHandle, name: String) -> NapiResult<u32> {
-  handle.inner.intern(&name).map_err(to_napi_err)
+  handle.with_db(|db| db.intern(&name).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseSeedDemo(handle: &DatabaseHandle) -> NapiResult<()> {
-  handle.inner.seed_demo().map_err(to_napi_err)
+  handle.with_db(|db| db.seed_demo().map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databasePragmaGet(handle: &DatabaseHandle, name: String) -> NapiResult<Value> {
-  handle.inner.pragma(&name, None).map_err(to_napi_err)
+  handle.with_db(|db| db.pragma(&name, None).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databasePragmaSet(handle: &DatabaseHandle, name: String, value: Value) -> NapiResult<Value> {
-  handle.inner.pragma(&name, Some(value)).map_err(to_napi_err)
+  handle.with_db(|db| db.pragma(&name, Some(value)).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseCancelRequest(handle: &DatabaseHandle, request_id: String) -> NapiResult<bool> {
-  Ok(handle.inner.cancel_request(&request_id))
+  handle.with_db(|db| Ok(db.cancel_request(&request_id)))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseGetNode(handle: &DatabaseHandle, node_id: i64) -> NapiResult<Option<Value>> {
   let id = u64_from_js_id(node_id, "getNodeRecord")?;
-  let record = handle.inner.get_node_record(id).map_err(to_napi_err)?;
-  record.map(|node| to_json_value(node)).transpose()
+  handle.with_db(|db| {
+    let record = db.get_node_record(id).map_err(to_napi_err)?;
+    record.map(|node| to_json_value(node)).transpose()
+  })
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseGetEdge(handle: &DatabaseHandle, edge_id: i64) -> NapiResult<Option<Value>> {
   let id = u64_from_js_id(edge_id, "getEdgeRecord")?;
-  let record = handle.inner.get_edge_record(id).map_err(to_napi_err)?;
-  record.map(|edge| to_json_value(edge)).transpose()
+  handle.with_db(|db| {
+    let record = db.get_edge_record(id).map_err(to_napi_err)?;
+    record.map(|edge| to_json_value(edge)).transpose()
+  })
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseCountNodesWithLabel(handle: &DatabaseHandle, label: String) -> NapiResult<u64> {
-  handle
-    .inner
-    .count_nodes_with_label(&label)
-    .map_err(to_napi_err)
+  handle.with_db(|db| db.count_nodes_with_label(&label).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseCountEdgesWithType(handle: &DatabaseHandle, ty: String) -> NapiResult<u64> {
-  handle
-    .inner
-    .count_edges_with_type(&ty)
-    .map_err(to_napi_err)
+  handle.with_db(|db| db.count_edges_with_type(&ty).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
@@ -283,10 +296,7 @@ pub fn databaseListNodesWithLabel(
   handle: &DatabaseHandle,
   label: String,
 ) -> NapiResult<Vec<u64>> {
-  handle
-    .inner
-    .node_ids_with_label(&label)
-    .map_err(to_napi_err)
+  handle.with_db(|db| db.node_ids_with_label(&label).map_err(to_napi_err))
 }
 
 #[allow(non_snake_case)]
@@ -300,14 +310,15 @@ pub fn databaseNeighbors(
   let opts = options.unwrap_or_default();
   let dir = parse_direction(opts.direction.as_deref())?;
   let distinct = opts.distinct.unwrap_or(true);
-  let neighbors = handle
-    .inner
-    .neighbors_with_options(id, dir, opts.edge_type.as_deref(), distinct)
-    .map_err(to_napi_err)?;
-  neighbors
-    .into_iter()
-    .map(NeighborRecord::try_from)
-    .collect::<Result<Vec<_>, _>>()
+  handle.with_db(|db| {
+    let neighbors = db
+      .neighbors_with_options(id, dir, opts.edge_type.as_deref(), distinct)
+      .map_err(to_napi_err)?;
+    neighbors
+      .into_iter()
+      .map(NeighborRecord::try_from)
+      .collect::<Result<Vec<_>, _>>()
+  })
 }
 
 #[allow(non_snake_case)]
@@ -322,14 +333,34 @@ pub fn databaseBfsTraversal(
   let opts = options.unwrap_or_default();
   let dir = parse_direction(opts.direction.as_deref())?;
   let max_results = opts.max_results.map(|value| value as usize);
-  let visits = handle
-    .inner
-    .bfs_traversal(start, dir, max_depth, opts.edge_types.as_deref(), max_results)
-    .map_err(to_napi_err)?;
-  visits
-    .into_iter()
-    .map(BfsVisitRecord::try_from)
-    .collect::<Result<Vec<_>, _>>()
+  handle.with_db(|db| {
+    let visits = db
+      .bfs_traversal(start, dir, max_depth, opts.edge_types.as_deref(), max_results)
+      .map_err(to_napi_err)?;
+    visits
+      .into_iter()
+      .map(BfsVisitRecord::try_from)
+      .collect::<Result<Vec<_>, _>>()
+  })
+}
+
+/// Closes the database handle, releasing all resources.
+///
+/// After calling close(), all subsequent operations on this handle will fail
+/// with a "database is closed" error.
+#[allow(non_snake_case)]
+#[napi]
+pub fn databaseClose(handle: &DatabaseHandle) -> NapiResult<()> {
+  let mut guard = handle.inner.lock().map_err(|_| {
+    NapiError::new(Status::GenericFailure, "database handle is poisoned")
+  })?;
+  if guard.take().is_none() {
+    return Err(NapiError::new(
+      Status::GenericFailure,
+      "database is already closed",
+    ));
+  }
+  Ok(())
 }
 
 #[napi]
@@ -341,7 +372,10 @@ impl StreamHandle {
 }
 
 fn to_napi_err(err: FfiError) -> napi::Error {
-  napi::Error::from_reason(err.to_string())
+  // Include error code in the message for programmatic handling
+  let code_name = err.code_name();
+  let message = err.to_string();
+  napi::Error::new(Status::GenericFailure, format!("[{code_name}] {message}"))
 }
 
 fn to_json_value<T>(value: T) -> NapiResult<Value>

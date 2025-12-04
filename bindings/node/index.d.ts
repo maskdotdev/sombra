@@ -32,6 +32,7 @@ export interface ConnectOptions {
   groupCommitMaxFrames?: number
   groupCommitMaxWaitMs?: number
   asyncFsync?: boolean
+  asyncFsyncMaxWaitMs?: number
   walSegmentBytes?: number
   walPreallocateSegments?: number
   autocheckpointMs?: number
@@ -40,6 +41,14 @@ export interface ConnectOptions {
 export declare function databaseBfsTraversal(handle: DatabaseHandle, startId: number, maxDepth: number, options?: BfsTraversalOptions | undefined | null): NapiResult<Array<BfsVisitRecord>>
 
 export declare function databaseCancelRequest(handle: DatabaseHandle, requestId: string): NapiResult<boolean>
+
+/**
+ * Closes the database handle, releasing all resources.
+ *
+ * After calling close(), all subsequent operations on this handle will fail
+ * with a "database is closed" error.
+ */
+export declare function databaseClose(handle: DatabaseHandle): NapiResult<undefined>
 
 export declare function databaseCountEdgesWithType(handle: DatabaseHandle, ty: string): NapiResult<bigint>
 

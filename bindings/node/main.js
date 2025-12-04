@@ -12,6 +12,205 @@ const ISO_DATETIME_PREFIX = /^\d{4}-\d{2}-\d{2}T/
 const MIN_DATETIME_NS = BigInt(Date.UTC(1900, 0, 1, 0, 0, 0)) * NS_PER_MILLISECOND
 const MAX_DATETIME_NS = BigInt(Date.UTC(2100, 0, 1, 0, 0, 0)) * NS_PER_MILLISECOND
 
+// Error code regex: [CODE_NAME] message
+const ERROR_CODE_REGEX = /^\[([A-Z_]+)\]\s*/
+
+/**
+ * Error codes returned by the Sombra database engine.
+ * These match the ErrorCode enum in the FFI layer.
+ */
+const ErrorCode = Object.freeze({
+  UNKNOWN: 'UNKNOWN',
+  MESSAGE: 'MESSAGE',
+  ANALYZER: 'ANALYZER',
+  JSON: 'JSON',
+  IO: 'IO',
+  CORRUPTION: 'CORRUPTION',
+  CONFLICT: 'CONFLICT',
+  SNAPSHOT_TOO_OLD: 'SNAPSHOT_TOO_OLD',
+  CANCELLED: 'CANCELLED',
+  INVALID_ARG: 'INVALID_ARG',
+  NOT_FOUND: 'NOT_FOUND',
+  CLOSED: 'CLOSED',
+})
+
+/**
+ * Base error class for all Sombra database errors.
+ * 
+ * @example
+ * try {
+ *   db.query().nodes('User').execute();
+ * } catch (err) {
+ *   if (err instanceof SombraError) {
+ *     console.log(`Error code: ${err.code}`);
+ *   }
+ * }
+ */
+class SombraError extends Error {
+  /**
+   * Creates a new SombraError.
+   * @param {string} message - The error message
+   * @param {string} [code=ErrorCode.UNKNOWN] - The error code from ErrorCode constants
+   */
+  constructor(message, code = ErrorCode.UNKNOWN) {
+    super(message)
+    /** @type {string} */
+    this.name = 'SombraError'
+    /** @type {string} */
+    this.code = code
+    Error.captureStackTrace?.(this, this.constructor)
+  }
+}
+
+/**
+ * Error thrown when a query analysis fails.
+ */
+class AnalyzerError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.ANALYZER)
+    this.name = 'AnalyzerError'
+  }
+}
+
+/**
+ * Error thrown when JSON serialization/deserialization fails.
+ */
+class JsonError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.JSON)
+    this.name = 'JsonError'
+  }
+}
+
+/**
+ * Error thrown when an I/O operation fails.
+ */
+class IoError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.IO)
+    this.name = 'IoError'
+  }
+}
+
+/**
+ * Error thrown when data corruption is detected.
+ */
+class CorruptionError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.CORRUPTION)
+    this.name = 'CorruptionError'
+  }
+}
+
+/**
+ * Error thrown when a transaction conflict occurs (write-write conflict).
+ */
+class ConflictError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.CONFLICT)
+    this.name = 'ConflictError'
+  }
+}
+
+/**
+ * Error thrown when a snapshot is too old for an MVCC read.
+ */
+class SnapshotTooOldError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.SNAPSHOT_TOO_OLD)
+    this.name = 'SnapshotTooOldError'
+  }
+}
+
+/**
+ * Error thrown when an operation is cancelled.
+ */
+class CancelledError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.CANCELLED)
+    this.name = 'CancelledError'
+  }
+}
+
+/**
+ * Error thrown when an invalid argument is provided.
+ */
+class InvalidArgError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.INVALID_ARG)
+    this.name = 'InvalidArgError'
+  }
+}
+
+/**
+ * Error thrown when a requested resource is not found.
+ */
+class NotFoundError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.NOT_FOUND)
+    this.name = 'NotFoundError'
+  }
+}
+
+/**
+ * Error thrown when operations are attempted on a closed database.
+ */
+class ClosedError extends SombraError {
+  constructor(message) {
+    super(message, ErrorCode.CLOSED)
+    this.name = 'ClosedError'
+  }
+}
+
+/**
+ * Map of error code strings to their corresponding error classes.
+ */
+const ERROR_CLASS_MAP = {
+  [ErrorCode.UNKNOWN]: SombraError,
+  [ErrorCode.MESSAGE]: SombraError,
+  [ErrorCode.ANALYZER]: AnalyzerError,
+  [ErrorCode.JSON]: JsonError,
+  [ErrorCode.IO]: IoError,
+  [ErrorCode.CORRUPTION]: CorruptionError,
+  [ErrorCode.CONFLICT]: ConflictError,
+  [ErrorCode.SNAPSHOT_TOO_OLD]: SnapshotTooOldError,
+  [ErrorCode.CANCELLED]: CancelledError,
+  [ErrorCode.INVALID_ARG]: InvalidArgError,
+  [ErrorCode.NOT_FOUND]: NotFoundError,
+  [ErrorCode.CLOSED]: ClosedError,
+}
+
+/**
+ * Parses an error message from the native layer and returns a typed error.
+ * Native errors have format: "[CODE_NAME] actual message"
+ *
+ * @param {Error|string} err - The error from the native layer
+ * @returns {SombraError} A typed error instance (e.g., AnalyzerError, IoError, etc.)
+ * @example
+ * try {
+ *   nativeOperation();
+ * } catch (err) {
+ *   throw wrapNativeError(err);
+ * }
+ */
+function wrapNativeError(err) {
+  const message = err instanceof Error ? err.message : String(err)
+  const match = ERROR_CODE_REGEX.exec(message)
+
+  if (match) {
+    const code = match[1]
+    const cleanMessage = message.slice(match[0].length)
+    const ErrorClass = ERROR_CLASS_MAP[code] ?? SombraError
+    return new ErrorClass(cleanMessage, code)
+  }
+
+  // No code prefix, return as generic SombraError
+  if (err instanceof SombraError) {
+    return err
+  }
+  return new SombraError(message, ErrorCode.UNKNOWN)
+}
+
 function autoVarName(idx) {
   return `n${idx}`
 }
@@ -1314,6 +1513,7 @@ class CreateBuilder {
 
   execute() {
     this._ensureMutable()
+    this._db._assertOpen()
     this._sealed = true
     const script = {
       nodes: this._nodes.map((node) => {
@@ -1427,15 +1627,40 @@ function createSummaryWithAliasHelper(summary) {
   return result
 }
 
+/**
+ * Main database class for interacting with a Sombra graph database.
+ * 
+ * @example
+ * // Opening and using a database
+ * const db = Database.open('/path/to/db');
+ * db.seedDemo();
+ * const users = await db.query().nodes('User').execute();
+ * db.close();
+ * 
+ * @example
+ * // With schema validation
+ * const db = Database.open('/path/to/db', {
+ *   schema: { User: { name: { type: 'string' } } }
+ * });
+ */
 class Database {
   constructor(handle, schema = null) {
     this._handle = handle
     this._schema = null
+    /** @type {boolean} */
+    this._closed = false
     if (schema !== null && schema !== undefined) {
       this.withSchema(schema)
     }
   }
 
+  /**
+   * Opens a database at the specified path.
+   * @param {string} path - The path to the database file
+   * @param {object} [options] - Optional configuration
+   * @param {object} [options.schema] - Runtime schema for validation
+   * @returns {Database} A new Database instance
+   */
   static open(path, options) {
     let schema = null
     let connectOptions = options ?? undefined
@@ -1448,29 +1673,63 @@ class Database {
     return new Database(handle, schema)
   }
 
+  /**
+   * Closes the database, releasing all resources.
+   * After calling close(), all subsequent operations on this instance will fail.
+   * Calling close() multiple times is safe (subsequent calls are no-ops).
+   * @returns {void}
+   */
+  close() {
+    if (this._closed) {
+      return
+    }
+    this._closed = true
+    native.databaseClose(this._handle)
+  }
+
+  /**
+   * Returns true if the database has been closed.
+   * @type {boolean}
+   */
+  get isClosed() {
+    return this._closed
+  }
+
+  _assertOpen() {
+    if (this._closed) {
+      throw new ClosedError('database is closed')
+    }
+  }
+
   query() {
+    this._assertOpen()
     return new QueryBuilder(this, this._schema)
   }
 
   withSchema(schema) {
+    this._assertOpen()
     this._schema = normalizeRuntimeSchema(schema)
     return this
   }
 
   create() {
+    this._assertOpen()
     return new CreateBuilder(this)
   }
 
   intern(name) {
+    this._assertOpen()
     return native.databaseIntern(this._handle, name)
   }
 
   seedDemo() {
+    this._assertOpen()
     native.databaseSeedDemo(this._handle)
     return this
   }
 
   mutate(script) {
+    this._assertOpen()
     if (!script || typeof script !== 'object') {
       throw new TypeError('mutation script must be an object')
     }
@@ -1539,6 +1798,7 @@ class Database {
   }
 
   async transaction(fn) {
+    this._assertOpen()
     if (typeof fn !== 'function') {
       throw new TypeError('transaction requires a callback')
     }
@@ -1550,6 +1810,7 @@ class Database {
   }
 
   pragma(name, value) {
+    this._assertOpen()
     if (typeof name !== 'string') {
       throw new TypeError('pragma name must be a string')
     }
@@ -1560,6 +1821,7 @@ class Database {
   }
 
   cancelRequest(requestId) {
+    this._assertOpen()
     if (typeof requestId !== 'string' || requestId.trim() === '') {
       throw new TypeError('cancelRequest requires a non-empty request id string')
     }
@@ -1567,18 +1829,21 @@ class Database {
   }
 
   getNodeRecord(nodeId) {
+    this._assertOpen()
     const id = assertNodeId(nodeId, 'getNodeRecord')
     const record = native.databaseGetNode(this._handle, id)
     return record ?? null
   }
 
   getEdgeRecord(edgeId) {
+    this._assertOpen()
     const id = assertEdgeId(edgeId, 'getEdgeRecord')
     const record = native.databaseGetEdge(this._handle, id)
     return record ?? null
   }
 
   countNodesWithLabel(label) {
+    this._assertOpen()
     const normalized = assertLabel(label, 'countNodesWithLabel')
     if (typeof native.databaseCountNodesWithLabel === 'function') {
       return native.databaseCountNodesWithLabel(this._handle, normalized)
@@ -1587,6 +1852,7 @@ class Database {
   }
 
   countEdgesWithType(edgeType) {
+    this._assertOpen()
     const normalized = assertEdgeType(edgeType, 'countEdgesWithType')
     if (typeof native.databaseCountEdgesWithType === 'function') {
       return native.databaseCountEdgesWithType(this._handle, normalized)
@@ -1595,6 +1861,7 @@ class Database {
   }
 
   listNodesWithLabel(label) {
+    this._assertOpen()
     const normalized = assertLabel(label, 'listNodesWithLabel')
     if (typeof native.databaseListNodesWithLabel === 'function') {
       return normalizeIdList(
@@ -1606,6 +1873,7 @@ class Database {
   }
 
   neighbors(nodeId, options) {
+    this._assertOpen()
     const id = assertNodeId(nodeId, 'neighbors')
     if (options !== undefined && (options === null || typeof options !== 'object')) {
       throw new TypeError('neighbors() options must be an object when provided')
@@ -1614,6 +1882,7 @@ class Database {
   }
 
   getOutgoingNeighbors(nodeId, edgeType, distinct = true) {
+    this._assertOpen()
     if (typeof distinct !== 'boolean') {
       throw new TypeError('distinct must be a boolean')
     }
@@ -1628,6 +1897,7 @@ class Database {
   }
 
   getIncomingNeighbors(nodeId, edgeType, distinct = true) {
+    this._assertOpen()
     if (typeof distinct !== 'boolean') {
       throw new TypeError('distinct must be a boolean')
     }
@@ -1642,6 +1912,7 @@ class Database {
   }
 
   bfsTraversal(nodeId, maxDepth, options) {
+    this._assertOpen()
     const id = assertNodeId(nodeId, 'bfsTraversal')
     if (!Number.isInteger(maxDepth) || maxDepth < 0) {
       throw new TypeError('bfsTraversal requires a non-negative integer maxDepth')
@@ -1653,15 +1924,18 @@ class Database {
   }
 
   _execute(spec) {
+    this._assertOpen()
     return native.databaseExecute(this._handle, spec)
   }
 
   _explain(spec) {
+    this._assertOpen()
     const payload = native.databaseExplain(this._handle, spec)
     return normalizeExplainPayload(payload)
   }
 
   _stream(spec) {
+    this._assertOpen()
     return native.databaseStream(this._handle, spec)
   }
 
@@ -1698,12 +1972,16 @@ function openDatabase(path, options) {
 }
 
 module.exports = {
+  // Classes
   Database,
   PredicateBuilder,
   QueryBuilder,
   NodeScope,
+  // Database factory
   openDatabase,
+  // Native module access
   native,
+  // Expression helpers
   and: andExpr,
   or: orExpr,
   not: notExpr,
@@ -1718,6 +1996,21 @@ module.exports = {
   exists: existsExpr,
   isNull: isNullExpr,
   isNotNull: isNotNullExpr,
+  // Error types
+  ErrorCode,
+  SombraError,
+  AnalyzerError,
+  JsonError,
+  IoError,
+  CorruptionError,
+  ConflictError,
+  SnapshotTooOldError,
+  CancelledError,
+  InvalidArgError,
+  NotFoundError,
+  ClosedError,
+  // Error utilities
+  wrapNativeError,
 }
 
 function assertNodeId(nodeId, ctx) {

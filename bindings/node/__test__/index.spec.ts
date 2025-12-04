@@ -3,7 +3,23 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { Database, eq } from '..'
+import {
+  Database,
+  eq,
+  ErrorCode,
+  SombraError,
+  AnalyzerError,
+  JsonError,
+  IoError,
+  CorruptionError,
+  ConflictError,
+  SnapshotTooOldError,
+  CancelledError,
+  InvalidArgError,
+  NotFoundError,
+  ClosedError,
+  wrapNativeError,
+} from '..'
 import { runFluentQueryExample } from '../examples/fluent_query'
 import { reopenAndLogExample } from '../examples/reopen'
 
@@ -235,4 +251,262 @@ test('reopen example loads nodes and edges from an existing database', async (t)
   const summary = await reopenAndLogExample(dbPath)
   t.true(summary.nodes.length > 0)
   t.true(summary.edges.length > 0)
+})
+
+// ============================================================================
+// Database Lifecycle Tests
+// ============================================================================
+
+test('close() marks database as closed', (t) => {
+  const db = Database.open(tempPath())
+  t.false(db.isClosed)
+  db.close()
+  t.true(db.isClosed)
+})
+
+test('close() is idempotent', (t) => {
+  const db = Database.open(tempPath())
+  db.close()
+  t.notThrows(() => db.close())
+  t.notThrows(() => db.close())
+  t.true(db.isClosed)
+})
+
+test('operations on closed database throw ClosedError', (t) => {
+  const db = Database.open(tempPath())
+  db.close()
+
+  const err1 = t.throws(() => db.seedDemo())
+  t.true(err1 instanceof ClosedError)
+  t.is(err1?.message, 'database is closed')
+
+  const err2 = t.throws(() => db.query())
+  t.true(err2 instanceof ClosedError)
+
+  const err3 = t.throws(() => db.create())
+  t.true(err3 instanceof ClosedError)
+
+  const err4 = t.throws(() => db.mutate({ ops: [] }))
+  t.true(err4 instanceof ClosedError)
+
+  const err5 = t.throws(() => db.pragma('synchronous'))
+  t.true(err5 instanceof ClosedError)
+})
+
+test('create builder execute throws on closed database', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.create()
+  builder.node('User', { name: 'Test' })
+  db.close()
+
+  const err = t.throws(() => builder.execute())
+  t.true(err instanceof ClosedError)
+  t.is(err?.message, 'database is closed')
+})
+
+// ============================================================================
+// Error Code Tests
+// ============================================================================
+
+test('ErrorCode constants are defined', (t) => {
+  t.is(ErrorCode.UNKNOWN, 'UNKNOWN')
+  t.is(ErrorCode.MESSAGE, 'MESSAGE')
+  t.is(ErrorCode.ANALYZER, 'ANALYZER')
+  t.is(ErrorCode.JSON, 'JSON')
+  t.is(ErrorCode.IO, 'IO')
+  t.is(ErrorCode.CORRUPTION, 'CORRUPTION')
+  t.is(ErrorCode.CONFLICT, 'CONFLICT')
+  t.is(ErrorCode.SNAPSHOT_TOO_OLD, 'SNAPSHOT_TOO_OLD')
+  t.is(ErrorCode.CANCELLED, 'CANCELLED')
+  t.is(ErrorCode.INVALID_ARG, 'INVALID_ARG')
+  t.is(ErrorCode.NOT_FOUND, 'NOT_FOUND')
+  t.is(ErrorCode.CLOSED, 'CLOSED')
+})
+
+// ============================================================================
+// Error Class Hierarchy Tests
+// ============================================================================
+
+test('SombraError has correct defaults', (t) => {
+  const err = new SombraError('test message')
+  t.is(err.message, 'test message')
+  t.is(err.code, ErrorCode.UNKNOWN)
+  t.is(err.name, 'SombraError')
+  t.true(err instanceof Error)
+})
+
+test('SombraError accepts custom code', (t) => {
+  const err = new SombraError('test', ErrorCode.IO)
+  t.is(err.code, ErrorCode.IO)
+})
+
+test('AnalyzerError has correct code', (t) => {
+  const err = new AnalyzerError('bad query')
+  t.is(err.code, ErrorCode.ANALYZER)
+  t.is(err.name, 'AnalyzerError')
+  t.true(err instanceof SombraError)
+  t.true(err instanceof Error)
+})
+
+test('JsonError has correct code', (t) => {
+  const err = new JsonError('parse failed')
+  t.is(err.code, ErrorCode.JSON)
+  t.is(err.name, 'JsonError')
+  t.true(err instanceof SombraError)
+})
+
+test('IoError has correct code', (t) => {
+  const err = new IoError('disk error')
+  t.is(err.code, ErrorCode.IO)
+  t.is(err.name, 'IoError')
+  t.true(err instanceof SombraError)
+})
+
+test('CorruptionError has correct code', (t) => {
+  const err = new CorruptionError('data corrupt')
+  t.is(err.code, ErrorCode.CORRUPTION)
+  t.is(err.name, 'CorruptionError')
+  t.true(err instanceof SombraError)
+})
+
+test('ConflictError has correct code', (t) => {
+  const err = new ConflictError('write conflict')
+  t.is(err.code, ErrorCode.CONFLICT)
+  t.is(err.name, 'ConflictError')
+  t.true(err instanceof SombraError)
+})
+
+test('SnapshotTooOldError has correct code', (t) => {
+  const err = new SnapshotTooOldError('snapshot evicted')
+  t.is(err.code, ErrorCode.SNAPSHOT_TOO_OLD)
+  t.is(err.name, 'SnapshotTooOldError')
+  t.true(err instanceof SombraError)
+})
+
+test('CancelledError has correct code', (t) => {
+  const err = new CancelledError('request cancelled')
+  t.is(err.code, ErrorCode.CANCELLED)
+  t.is(err.name, 'CancelledError')
+  t.true(err instanceof SombraError)
+})
+
+test('InvalidArgError has correct code', (t) => {
+  const err = new InvalidArgError('bad argument')
+  t.is(err.code, ErrorCode.INVALID_ARG)
+  t.is(err.name, 'InvalidArgError')
+  t.true(err instanceof SombraError)
+})
+
+test('NotFoundError has correct code', (t) => {
+  const err = new NotFoundError('not found')
+  t.is(err.code, ErrorCode.NOT_FOUND)
+  t.is(err.name, 'NotFoundError')
+  t.true(err instanceof SombraError)
+})
+
+test('ClosedError has correct code', (t) => {
+  const err = new ClosedError('db closed')
+  t.is(err.code, ErrorCode.CLOSED)
+  t.is(err.name, 'ClosedError')
+  t.true(err instanceof SombraError)
+})
+
+// ============================================================================
+// wrapNativeError Tests
+// ============================================================================
+
+test('wrapNativeError parses [ANALYZER] prefix', (t) => {
+  const err = wrapNativeError(new Error('[ANALYZER] invalid syntax'))
+  t.true(err instanceof AnalyzerError)
+  t.is(err.code, ErrorCode.ANALYZER)
+  t.is(err.message, 'invalid syntax')
+})
+
+test('wrapNativeError parses [IO] prefix', (t) => {
+  const err = wrapNativeError(new Error('[IO] file not found'))
+  t.true(err instanceof IoError)
+  t.is(err.code, ErrorCode.IO)
+  t.is(err.message, 'file not found')
+})
+
+test('wrapNativeError parses [CORRUPTION] prefix', (t) => {
+  const err = wrapNativeError(new Error('[CORRUPTION] page checksum mismatch'))
+  t.true(err instanceof CorruptionError)
+  t.is(err.code, ErrorCode.CORRUPTION)
+  t.is(err.message, 'page checksum mismatch')
+})
+
+test('wrapNativeError parses [CONFLICT] prefix', (t) => {
+  const err = wrapNativeError(new Error('[CONFLICT] write-write conflict'))
+  t.true(err instanceof ConflictError)
+  t.is(err.code, ErrorCode.CONFLICT)
+  t.is(err.message, 'write-write conflict')
+})
+
+test('wrapNativeError parses [SNAPSHOT_TOO_OLD] prefix', (t) => {
+  const err = wrapNativeError(new Error('[SNAPSHOT_TOO_OLD] reader evicted'))
+  t.true(err instanceof SnapshotTooOldError)
+  t.is(err.code, ErrorCode.SNAPSHOT_TOO_OLD)
+  t.is(err.message, 'reader evicted')
+})
+
+test('wrapNativeError parses [CANCELLED] prefix', (t) => {
+  const err = wrapNativeError(new Error('[CANCELLED] operation cancelled'))
+  t.true(err instanceof CancelledError)
+  t.is(err.code, ErrorCode.CANCELLED)
+  t.is(err.message, 'operation cancelled')
+})
+
+test('wrapNativeError parses [INVALID_ARG] prefix', (t) => {
+  const err = wrapNativeError(new Error('[INVALID_ARG] bad parameter'))
+  t.true(err instanceof InvalidArgError)
+  t.is(err.code, ErrorCode.INVALID_ARG)
+  t.is(err.message, 'bad parameter')
+})
+
+test('wrapNativeError parses [NOT_FOUND] prefix', (t) => {
+  const err = wrapNativeError(new Error('[NOT_FOUND] node does not exist'))
+  t.true(err instanceof NotFoundError)
+  t.is(err.code, ErrorCode.NOT_FOUND)
+  t.is(err.message, 'node does not exist')
+})
+
+test('wrapNativeError parses [CLOSED] prefix', (t) => {
+  const err = wrapNativeError(new Error('[CLOSED] database closed'))
+  t.true(err instanceof ClosedError)
+  t.is(err.code, ErrorCode.CLOSED)
+  t.is(err.message, 'database closed')
+})
+
+test('wrapNativeError parses [JSON] prefix', (t) => {
+  const err = wrapNativeError(new Error('[JSON] invalid json'))
+  t.true(err instanceof JsonError)
+  t.is(err.code, ErrorCode.JSON)
+  t.is(err.message, 'invalid json')
+})
+
+test('wrapNativeError returns SombraError for unknown code', (t) => {
+  const err = wrapNativeError(new Error('[UNKNOWN] something went wrong'))
+  t.true(err instanceof SombraError)
+  t.is(err.code, ErrorCode.UNKNOWN)
+  t.is(err.message, 'something went wrong')
+})
+
+test('wrapNativeError returns SombraError for unprefixed message', (t) => {
+  const err = wrapNativeError(new Error('no prefix here'))
+  t.true(err instanceof SombraError)
+  t.is(err.code, ErrorCode.UNKNOWN)
+  t.is(err.message, 'no prefix here')
+})
+
+test('wrapNativeError handles string input', (t) => {
+  const err = wrapNativeError('[ANALYZER] string error')
+  t.true(err instanceof AnalyzerError)
+  t.is(err.message, 'string error')
+})
+
+test('wrapNativeError preserves existing SombraError', (t) => {
+  const original = new IoError('already typed')
+  const wrapped = wrapNativeError(original)
+  t.is(wrapped, original)
 })

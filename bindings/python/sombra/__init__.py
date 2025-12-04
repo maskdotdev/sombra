@@ -2,7 +2,27 @@
 
 from . import typed
 from ._native import version as _native_version
-from .query import CreateBuilder, Database, QueryBuilder, QueryResult, open_database
+from .query import (
+    CreateBuilder,
+    Database,
+    QueryBuilder,
+    QueryResult,
+    open_database,
+    # Error types
+    ErrorCode,
+    SombraError,
+    AnalyzerError,
+    JsonError,
+    IoError,
+    CorruptionError,
+    ConflictError,
+    SnapshotTooOldError,
+    CancelledError,
+    InvalidArgError,
+    NotFoundError,
+    ClosedError,
+    wrap_native_error,
+)
 
 __all__ = [
     "version",
@@ -12,6 +32,20 @@ __all__ = [
     "QueryResult",
     "open_database",
     "typed",
+    # Error types
+    "ErrorCode",
+    "SombraError",
+    "AnalyzerError",
+    "JsonError",
+    "IoError",
+    "CorruptionError",
+    "ConflictError",
+    "SnapshotTooOldError",
+    "CancelledError",
+    "InvalidArgError",
+    "NotFoundError",
+    "ClosedError",
+    "wrap_native_error",
 ]
 
 

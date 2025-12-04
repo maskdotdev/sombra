@@ -396,6 +396,56 @@ enum ProfileKind {
     Serialize,
 }
 
+/// Error codes for FFI operations, useful for programmatic error handling in bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ErrorCode {
+    /// Unknown or unclassified error.
+    Unknown = 0,
+    /// Generic FFI message error.
+    Message = 1,
+    /// Query analyzer error.
+    Analyzer = 2,
+    /// JSON serialization/deserialization error.
+    Json = 3,
+    /// I/O error from the core engine.
+    Io = 10,
+    /// Corruption detected in storage.
+    Corruption = 11,
+    /// Transaction conflict (write-write conflict).
+    Conflict = 12,
+    /// Snapshot too old for MVCC read.
+    SnapshotTooOld = 13,
+    /// Operation was cancelled.
+    Cancelled = 14,
+    /// Invalid argument provided.
+    InvalidArg = 15,
+    /// Resource not found.
+    NotFound = 16,
+    /// Database is closed.
+    Closed = 17,
+}
+
+impl ErrorCode {
+    /// Returns the string name of this error code.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::Unknown => "UNKNOWN",
+            ErrorCode::Message => "MESSAGE",
+            ErrorCode::Analyzer => "ANALYZER",
+            ErrorCode::Json => "JSON",
+            ErrorCode::Io => "IO",
+            ErrorCode::Corruption => "CORRUPTION",
+            ErrorCode::Conflict => "CONFLICT",
+            ErrorCode::SnapshotTooOld => "SNAPSHOT_TOO_OLD",
+            ErrorCode::Cancelled => "CANCELLED",
+            ErrorCode::InvalidArg => "INVALID_ARG",
+            ErrorCode::NotFound => "NOT_FOUND",
+            ErrorCode::Closed => "CLOSED",
+        }
+    }
+}
+
 /// Errors that can occur during FFI operations.
 ///
 /// Encompasses errors from message creation, core database operations, and JSON serialization.
@@ -413,6 +463,36 @@ pub enum FfiError {
     /// A JSON serialization/deserialization error.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl FfiError {
+    /// Returns the error code for this error.
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            FfiError::Message(_) => ErrorCode::Message,
+            FfiError::Analyzer(_) => ErrorCode::Analyzer,
+            FfiError::Json(_) => ErrorCode::Json,
+            FfiError::Core(err) => match err {
+                SombraError::Io(_) => ErrorCode::Io,
+                SombraError::Corruption(_) => ErrorCode::Corruption,
+                SombraError::Conflict(_) => ErrorCode::Conflict,
+                SombraError::SnapshotTooOld(_) => ErrorCode::SnapshotTooOld,
+                SombraError::Cancelled => ErrorCode::Cancelled,
+                SombraError::Invalid(_) | SombraError::InvalidOwned(_) => ErrorCode::InvalidArg,
+                SombraError::NotFound => ErrorCode::NotFound,
+            },
+        }
+    }
+
+    /// Returns the numeric error code value.
+    pub fn code_value(&self) -> u32 {
+        self.code() as u32
+    }
+
+    /// Returns the string name of the error code.
+    pub fn code_name(&self) -> &'static str {
+        self.code().as_str()
+    }
 }
 
 /// Configuration options for opening a Sombra database via FFI.
@@ -619,6 +699,29 @@ impl Database {
             executor,
             cancellations,
         })
+    }
+
+    /// Closes the database, releasing all resources.
+    ///
+    /// This method consumes the `Database` instance and ensures all internal
+    /// resources are properly cleaned up. Any pending operations will complete
+    /// before the database is closed.
+    ///
+    /// Note: This is typically called automatically when the `Database` is dropped,
+    /// but calling it explicitly provides a clear point of cleanup and allows
+    /// handling any errors that might occur during shutdown.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = Database::open("my.db", DatabaseOptions::default())?;
+    /// // ... use the database ...
+    /// db.close(); // Explicitly close when done
+    /// ```
+    pub fn close(self) {
+        // Dropping self will release all Arc references.
+        // The underlying resources are cleaned up when the last reference is dropped.
+        drop(self);
     }
 
     /// Executes a JSON-serialized query specification and returns all results.

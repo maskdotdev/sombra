@@ -4,8 +4,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from sombra import Database
-from sombra.query import _literal_value, eq
+from sombra.query import (
+    _literal_value,
+    eq,
+    ErrorCode,
+    SombraError,
+    AnalyzerError,
+    JsonError,
+    IoError,
+    CorruptionError,
+    ConflictError,
+    SnapshotTooOldError,
+    CancelledError,
+    InvalidArgError,
+    NotFoundError,
+    ClosedError,
+    wrap_native_error,
+)
 
 
 def temp_db_path() -> str:
@@ -202,3 +220,269 @@ def test_runtime_schema_validation_rejects_unknown_property() -> None:
         assert "Unknown property 'bogus'" in str(exc)
     else:
         raise AssertionError("expected ValueError for invalid projection property")
+
+
+# ============================================================================
+# Database Lifecycle Tests
+# ============================================================================
+
+
+def test_close_marks_database_as_closed() -> None:
+    db = Database.open(temp_db_path())
+    assert db.is_closed is False
+    db.close()
+    assert db.is_closed is True
+
+
+def test_close_is_idempotent() -> None:
+    db = Database.open(temp_db_path())
+    db.close()
+    db.close()  # Should not raise
+    db.close()
+    assert db.is_closed is True
+
+
+def test_operations_on_closed_database_raise_error() -> None:
+    db = Database.open(temp_db_path())
+    db.close()
+
+    with pytest.raises(ClosedError, match="database is closed"):
+        db.seed_demo()
+
+    with pytest.raises(ClosedError, match="database is closed"):
+        db.query()
+
+    with pytest.raises(ClosedError, match="database is closed"):
+        db.create()
+
+    with pytest.raises(ClosedError, match="database is closed"):
+        db.mutate({"ops": []})
+
+    with pytest.raises(ClosedError, match="database is closed"):
+        db.pragma("synchronous")
+
+
+def test_create_builder_execute_on_closed_db() -> None:
+    db = Database.open(temp_db_path())
+    builder = db.create()
+    builder.node("User", {"name": "Test"})
+    db.close()
+
+    with pytest.raises(ClosedError, match="database is closed"):
+        builder.execute()
+
+
+def test_context_manager_closes_database() -> None:
+    path = temp_db_path()
+    with Database.open(path) as db:
+        assert db.is_closed is False
+        db.seed_demo()
+        rows = db.query().nodes("User").execute()
+        assert len(rows) >= 1
+    # After exiting, database should be closed
+    assert db.is_closed is True
+
+
+def test_context_manager_closes_on_exception() -> None:
+    path = temp_db_path()
+    db = None
+    try:
+        with Database.open(path) as db:
+            db.seed_demo()
+            raise ValueError("intentional error")
+    except ValueError:
+        pass
+    assert db is not None
+    assert db.is_closed is True
+
+
+# ============================================================================
+# Error Code Tests
+# ============================================================================
+
+
+def test_error_code_constants_defined() -> None:
+    assert ErrorCode.UNKNOWN == "UNKNOWN"
+    assert ErrorCode.MESSAGE == "MESSAGE"
+    assert ErrorCode.ANALYZER == "ANALYZER"
+    assert ErrorCode.JSON == "JSON"
+    assert ErrorCode.IO == "IO"
+    assert ErrorCode.CORRUPTION == "CORRUPTION"
+    assert ErrorCode.CONFLICT == "CONFLICT"
+    assert ErrorCode.SNAPSHOT_TOO_OLD == "SNAPSHOT_TOO_OLD"
+    assert ErrorCode.CANCELLED == "CANCELLED"
+    assert ErrorCode.INVALID_ARG == "INVALID_ARG"
+    assert ErrorCode.NOT_FOUND == "NOT_FOUND"
+    assert ErrorCode.CLOSED == "CLOSED"
+
+
+# ============================================================================
+# Error Class Hierarchy Tests
+# ============================================================================
+
+
+def test_sombra_error_defaults() -> None:
+    err = SombraError("test message")
+    assert str(err) == "test message"
+    assert err.code == ErrorCode.UNKNOWN
+    assert isinstance(err, Exception)
+
+
+def test_sombra_error_custom_code() -> None:
+    err = SombraError("test", ErrorCode.IO)
+    assert err.code == ErrorCode.IO
+
+
+def test_analyzer_error_code() -> None:
+    err = AnalyzerError("bad query")
+    assert err.code == ErrorCode.ANALYZER
+    assert isinstance(err, SombraError)
+
+
+def test_json_error_code() -> None:
+    err = JsonError("parse failed")
+    assert err.code == ErrorCode.JSON
+    assert isinstance(err, SombraError)
+
+
+def test_io_error_code() -> None:
+    err = IoError("disk error")
+    assert err.code == ErrorCode.IO
+    assert isinstance(err, SombraError)
+
+
+def test_corruption_error_code() -> None:
+    err = CorruptionError("data corrupt")
+    assert err.code == ErrorCode.CORRUPTION
+    assert isinstance(err, SombraError)
+
+
+def test_conflict_error_code() -> None:
+    err = ConflictError("write conflict")
+    assert err.code == ErrorCode.CONFLICT
+    assert isinstance(err, SombraError)
+
+
+def test_snapshot_too_old_error_code() -> None:
+    err = SnapshotTooOldError("snapshot evicted")
+    assert err.code == ErrorCode.SNAPSHOT_TOO_OLD
+    assert isinstance(err, SombraError)
+
+
+def test_cancelled_error_code() -> None:
+    err = CancelledError("request cancelled")
+    assert err.code == ErrorCode.CANCELLED
+    assert isinstance(err, SombraError)
+
+
+def test_invalid_arg_error_code() -> None:
+    err = InvalidArgError("bad argument")
+    assert err.code == ErrorCode.INVALID_ARG
+    assert isinstance(err, SombraError)
+
+
+def test_not_found_error_code() -> None:
+    err = NotFoundError("not found")
+    assert err.code == ErrorCode.NOT_FOUND
+    assert isinstance(err, SombraError)
+
+
+def test_closed_error_code() -> None:
+    err = ClosedError("db closed")
+    assert err.code == ErrorCode.CLOSED
+    assert isinstance(err, SombraError)
+
+
+# ============================================================================
+# wrap_native_error Tests
+# ============================================================================
+
+
+def test_wrap_native_error_parses_analyzer() -> None:
+    err = wrap_native_error(RuntimeError("[ANALYZER] invalid syntax"))
+    assert isinstance(err, AnalyzerError)
+    assert err.code == ErrorCode.ANALYZER
+    assert str(err) == "invalid syntax"
+
+
+def test_wrap_native_error_parses_io() -> None:
+    err = wrap_native_error(RuntimeError("[IO] file not found"))
+    assert isinstance(err, IoError)
+    assert err.code == ErrorCode.IO
+    assert str(err) == "file not found"
+
+
+def test_wrap_native_error_parses_corruption() -> None:
+    err = wrap_native_error(RuntimeError("[CORRUPTION] page checksum mismatch"))
+    assert isinstance(err, CorruptionError)
+    assert err.code == ErrorCode.CORRUPTION
+    assert str(err) == "page checksum mismatch"
+
+
+def test_wrap_native_error_parses_conflict() -> None:
+    err = wrap_native_error(RuntimeError("[CONFLICT] write-write conflict"))
+    assert isinstance(err, ConflictError)
+    assert err.code == ErrorCode.CONFLICT
+    assert str(err) == "write-write conflict"
+
+
+def test_wrap_native_error_parses_snapshot_too_old() -> None:
+    err = wrap_native_error(RuntimeError("[SNAPSHOT_TOO_OLD] reader evicted"))
+    assert isinstance(err, SnapshotTooOldError)
+    assert err.code == ErrorCode.SNAPSHOT_TOO_OLD
+    assert str(err) == "reader evicted"
+
+
+def test_wrap_native_error_parses_cancelled() -> None:
+    err = wrap_native_error(RuntimeError("[CANCELLED] operation cancelled"))
+    assert isinstance(err, CancelledError)
+    assert err.code == ErrorCode.CANCELLED
+    assert str(err) == "operation cancelled"
+
+
+def test_wrap_native_error_parses_invalid_arg() -> None:
+    err = wrap_native_error(RuntimeError("[INVALID_ARG] bad parameter"))
+    assert isinstance(err, InvalidArgError)
+    assert err.code == ErrorCode.INVALID_ARG
+    assert str(err) == "bad parameter"
+
+
+def test_wrap_native_error_parses_not_found() -> None:
+    err = wrap_native_error(RuntimeError("[NOT_FOUND] node does not exist"))
+    assert isinstance(err, NotFoundError)
+    assert err.code == ErrorCode.NOT_FOUND
+    assert str(err) == "node does not exist"
+
+
+def test_wrap_native_error_parses_closed() -> None:
+    err = wrap_native_error(RuntimeError("[CLOSED] database closed"))
+    assert isinstance(err, ClosedError)
+    assert err.code == ErrorCode.CLOSED
+    assert str(err) == "database closed"
+
+
+def test_wrap_native_error_parses_json() -> None:
+    err = wrap_native_error(RuntimeError("[JSON] invalid json"))
+    assert isinstance(err, JsonError)
+    assert err.code == ErrorCode.JSON
+    assert str(err) == "invalid json"
+
+
+def test_wrap_native_error_unknown_code() -> None:
+    err = wrap_native_error(RuntimeError("[UNKNOWN] something went wrong"))
+    assert isinstance(err, SombraError)
+    assert err.code == ErrorCode.UNKNOWN
+    assert str(err) == "something went wrong"
+
+
+def test_wrap_native_error_no_prefix() -> None:
+    err = wrap_native_error(RuntimeError("no prefix here"))
+    assert isinstance(err, SombraError)
+    assert err.code == ErrorCode.UNKNOWN
+    assert str(err) == "no prefix here"
+
+
+def test_wrap_native_error_preserves_sombra_error() -> None:
+    original = IoError("already typed")
+    wrapped = wrap_native_error(original)
+    assert wrapped is original

@@ -576,6 +576,7 @@ module.exports.DatabaseHandle = nativeBinding.DatabaseHandle
 module.exports.StreamHandle = nativeBinding.StreamHandle
 module.exports.databaseBfsTraversal = nativeBinding.databaseBfsTraversal
 module.exports.databaseCancelRequest = nativeBinding.databaseCancelRequest
+module.exports.databaseClose = nativeBinding.databaseClose
 module.exports.databaseCountEdgesWithType = nativeBinding.databaseCountEdgesWithType
 module.exports.databaseCountNodesWithLabel = nativeBinding.databaseCountNodesWithLabel
 module.exports.databaseCreate = nativeBinding.databaseCreate
