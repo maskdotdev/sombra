@@ -74,6 +74,18 @@ path = "tests/integration/vacuum_worker.rs"
 name = "crash_kill_recovery"
 path = "tests/integration/crash_kill_recovery.rs"
 
+[[test]]
+name = "mvcc_concurrent_stress"
+path = "tests/integration/mvcc_concurrent_stress.rs"
+
+[[test]]
+name = "mvcc_isolation_anomalies"
+path = "tests/integration/mvcc_isolation_anomalies.rs"
+
+[[test]]
+name = "mvcc_reader_timeout"
+path = "tests/integration/mvcc_reader_timeout.rs"
+
 [features]
 default = ["bundled-dashboard"]
 bundled-dashboard = ["include_dir", "mime_guess"]

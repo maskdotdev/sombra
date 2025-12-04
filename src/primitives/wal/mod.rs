@@ -1832,6 +1832,8 @@ fn clone_error(err: &SombraError) -> SombraError {
         SombraError::InvalidOwned(msg) => SombraError::InvalidOwned(msg.clone()),
         SombraError::NotFound => SombraError::NotFound,
         SombraError::Cancelled => SombraError::Cancelled,
+        SombraError::SnapshotTooOld(msg) => SombraError::SnapshotTooOld(msg.clone()),
+        SombraError::Conflict(msg) => SombraError::Conflict(msg.clone()),
     }
 }
 

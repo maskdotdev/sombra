@@ -38,8 +38,9 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{
-    CommitId, CommitTable, CommitTableSnapshot, VersionCodecConfig, VersionHeader, VersionLogEntry,
-    VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+    CommitId, CommitTable, CommitTableSnapshot, ReaderTimeoutActions, VersionCodecConfig,
+    VersionHeader, VersionLogEntry, VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX,
+    VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
 use super::node::{
@@ -3853,8 +3854,40 @@ impl Drop for Graph {
 
 impl BackgroundMaintainer for Graph {
     fn run_background_maint(&self, _ctx: &AutockptContext) {
+        self.enforce_reader_timeouts();
         self.drive_micro_gc(MicroGcTrigger::PostCommit);
         self.maybe_background_vacuum(VacuumTrigger::Timer);
+    }
+}
+
+impl Graph {
+    /// Evicts readers that have exceeded the configured timeout and emits warnings when appropriate.
+    fn enforce_reader_timeouts(&self) {
+        let timeout = self.vacuum_cfg.reader_timeout;
+        if timeout == Duration::MAX {
+            return;
+        }
+        let warn_pct = self.vacuum_cfg.reader_timeout_warn_threshold_pct;
+        let Some(table) = &self.commit_table else {
+            return;
+        };
+        let actions: ReaderTimeoutActions = {
+            let mut guard = table.lock();
+            guard.collect_reader_timeouts(timeout, warn_pct, Instant::now())
+        };
+        for warning in actions.warnings {
+            self.metrics.mvcc_reader_timeout_warning(
+                warning.reader_id,
+                warning.age_ms,
+                warning.timeout_ms,
+            );
+        }
+        for eviction in actions.evictions {
+            if let Some(flag) = eviction.evicted_flag.upgrade() {
+                flag.store(true, AtomicOrdering::Release);
+            }
+            self.metrics.mvcc_reader_evicted();
+        }
     }
 }
 
@@ -4910,6 +4943,8 @@ mod vacuum_background_tests {
             max_pages_per_pass: 32,
             max_millis_per_pass: 50,
             index_cleanup: true,
+            reader_timeout: Duration::MAX,
+            reader_timeout_warn_threshold_pct: 0,
         };
         let (_tmpdir, pager, graph) = setup_graph(cfg.clone());
         create_and_delete_node(&pager, &graph)?;
@@ -4935,6 +4970,8 @@ mod vacuum_background_tests {
             max_pages_per_pass: 16,
             max_millis_per_pass: 10,
             index_cleanup: true,
+            reader_timeout: Duration::MAX,
+            reader_timeout_warn_threshold_pct: 0,
         };
         let (_tmpdir, pager, graph) = setup_graph(cfg.clone());
         let mut write = pager.begin_write()?;
@@ -4977,6 +5014,8 @@ mod vacuum_background_tests {
             max_pages_per_pass: 16,
             max_millis_per_pass: 10,
             index_cleanup: true,
+            reader_timeout: Duration::MAX,
+            reader_timeout_warn_threshold_pct: 0,
         };
         let (_tmpdir, _pager, graph) = setup_graph(cfg);
         assert_eq!(graph.vacuum_retention_window(), retention);

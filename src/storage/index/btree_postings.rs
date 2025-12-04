@@ -59,7 +59,9 @@ impl BTreePostings {
     ) -> Result<()> {
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         let key = Self::make_key(prefix, node);
         let value = self.versioned_unit(tx, false, commit);
         tree.put(tx, &key, &value)
@@ -71,7 +73,9 @@ impl BTreePostings {
     {
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         tree.put_many(tx, items)
     }
 
@@ -94,7 +98,9 @@ impl BTreePostings {
         }
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         let key = Self::make_key(prefix, node);
         if tree.get_with_write(tx, &key)?.is_none() {
             return Err(SombraError::Corruption(
@@ -111,7 +117,9 @@ impl BTreePostings {
         }
         self.ensure_tree_read()?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         let mut lower = prefix.to_vec();
         lower.extend_from_slice(&0u64.to_be_bytes());
         let mut upper = prefix.to_vec();
@@ -148,7 +156,9 @@ impl BTreePostings {
         }
         self.ensure_tree_read()?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         let lower = make_btree_lower_bound(label, prop, start);
         let upper = make_btree_upper_bound(label, prop, end);
         let snapshot = snapshot_commit(tx);
@@ -229,7 +239,9 @@ impl BTreePostings {
         }
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         let label_bytes = label.0.to_be_bytes();
         let prop_bytes = prop.0.to_be_bytes();
         let mut keys = Vec::new();
@@ -251,7 +263,9 @@ impl BTreePostings {
         }
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("btree postings initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("btree postings tree missing"));
+        };
         prune_versioned_tree(tree, tx, horizon)
     }
 
@@ -283,9 +297,8 @@ impl BTreePostings {
 
     fn borrow_tree(&self) -> Result<Ref<'_, BTree<Vec<u8>, VersionedValue<Unit>>>> {
         self.ensure_tree_read()?;
-        Ok(Ref::map(self.tree.borrow(), |opt| {
-            opt.as_ref().expect("btree postings initialised")
-        }))
+        Ref::filter_map(self.tree.borrow(), |opt| opt.as_ref())
+            .map_err(|_| SombraError::Corruption("btree postings tree missing"))
     }
 
     fn collect_stream_keys(

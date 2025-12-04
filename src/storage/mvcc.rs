@@ -3,6 +3,7 @@ use crate::types::{Result, SombraError};
 use snap::raw::{Decoder, Encoder};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::TryFrom;
+use std::sync::{atomic::AtomicBool, Weak};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -271,6 +272,8 @@ struct ActiveReader {
     snapshot: CommitId,
     begin_instant: Instant,
     thread_id: ThreadId,
+    source: CommitReaderSource,
+    evicted_flag: Weak<AtomicBool>,
 }
 
 const MAX_SLOW_READER_SAMPLES: usize = 4;
@@ -339,6 +342,39 @@ pub struct ReaderSnapshotEntry {
     pub age_ms: u64,
     /// Thread identifier associated with the reader, when available.
     pub thread_id: ThreadId,
+}
+
+/// Warning emitted when a reader approaches the timeout threshold.
+#[derive(Clone, Debug)]
+pub struct ReaderTimeoutWarning {
+    /// Unique reader identifier.
+    pub reader_id: ReaderId,
+    /// Current age of the reader in milliseconds.
+    pub age_ms: u64,
+    /// Configured timeout in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// Details captured when a reader is evicted for exceeding the timeout.
+#[derive(Clone, Debug)]
+pub struct ReaderTimeoutEviction {
+    /// Unique reader identifier.
+    pub reader_id: ReaderId,
+    /// Age of the reader at eviction time (milliseconds).
+    pub age_ms: u64,
+    /// Configured timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Flag associated with the reader to mark it as evicted.
+    pub evicted_flag: Weak<AtomicBool>,
+}
+
+/// Aggregated results of reader timeout handling.
+#[derive(Clone, Debug, Default)]
+pub struct ReaderTimeoutActions {
+    /// Readers that crossed the warning threshold.
+    pub warnings: Vec<ReaderTimeoutWarning>,
+    /// Readers evicted after exceeding the timeout.
+    pub evictions: Vec<ReaderTimeoutEviction>,
 }
 
 /// Summary of a single commit tracked inside the commit table.
@@ -490,6 +526,7 @@ impl CommitTable {
         snapshot: CommitId,
         now: Instant,
         thread_id: ThreadId,
+        evicted_flag: Weak<AtomicBool>,
     ) -> Result<CommitReader> {
         if snapshot <= self.released_up_to {
             let counter = self.reader_floor.entry(snapshot).or_insert(0);
@@ -504,6 +541,8 @@ impl CommitTable {
                     snapshot,
                     begin_instant: now,
                     thread_id,
+                    source: CommitReaderSource::Floor,
+                    evicted_flag: evicted_flag.clone(),
                 },
             );
             return Ok(CommitReader::new(id, snapshot, CommitReaderSource::Floor));
@@ -524,6 +563,8 @@ impl CommitTable {
                 snapshot,
                 begin_instant: now,
                 thread_id,
+                source: CommitReaderSource::Entry,
+                evicted_flag,
             },
         );
         Ok(CommitReader::new(id, snapshot, CommitReaderSource::Entry))
@@ -660,6 +701,79 @@ impl CommitTable {
         snapshot
     }
 
+    /// Identifies readers that have exceeded timeout thresholds and evicts them.
+    ///
+    /// Returns both warning candidates (age beyond the warning percentage) and
+    /// readers that were forcibly evicted after surpassing the configured timeout.
+    pub fn collect_reader_timeouts(
+        &mut self,
+        timeout: Duration,
+        warn_threshold_pct: u8,
+        now: Instant,
+    ) -> ReaderTimeoutActions {
+        let mut actions = ReaderTimeoutActions::default();
+        if timeout == Duration::MAX {
+            return actions;
+        }
+        let timeout_ms = timeout.as_millis().min(u64::MAX as u128) as u64;
+        let warn_threshold_ms = if warn_threshold_pct == 0 {
+            None
+        } else {
+            Some(timeout_ms.saturating_mul(warn_threshold_pct as u64) / 100)
+        };
+
+        let mut expired: Vec<(ReaderId, u64)> = Vec::new();
+        for (&reader_id, info) in self.readers.iter() {
+            let age_ms = now
+                .saturating_duration_since(info.begin_instant)
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            if let Some(threshold) = warn_threshold_ms {
+                if age_ms >= threshold {
+                    actions.warnings.push(ReaderTimeoutWarning {
+                        reader_id,
+                        age_ms,
+                        timeout_ms,
+                    });
+                }
+            }
+            if age_ms >= timeout_ms {
+                expired.push((reader_id, age_ms));
+            }
+        }
+
+        for (reader_id, age_ms) in expired {
+            if let Some(info) = self.readers.remove(&reader_id) {
+                match info.source {
+                    CommitReaderSource::Floor => {
+                        if let Some(counter) = self.reader_floor.get_mut(&info.snapshot) {
+                            if *counter > 1 {
+                                *counter -= 1;
+                            } else {
+                                self.reader_floor.remove(&info.snapshot);
+                            }
+                        }
+                    }
+                    CommitReaderSource::Entry => {
+                        if let Some(entry) =
+                            self.entries.iter_mut().find(|e| e.id == info.snapshot)
+                        {
+                            entry.reader_refs = entry.reader_refs.saturating_sub(1);
+                        }
+                    }
+                }
+                actions.evictions.push(ReaderTimeoutEviction {
+                    reader_id,
+                    age_ms,
+                    timeout_ms,
+                    evicted_flag: info.evicted_flag.clone(),
+                });
+            }
+        }
+
+        actions
+    }
+
     /// Captures a diagnostic snapshot of the commit table state.
     pub fn snapshot(&self, now: Instant) -> CommitTableSnapshot {
         let entries = self
@@ -726,7 +840,7 @@ mod commit_table_tests {
         let mut table = CommitTable::new(0);
         // Snapshot at released commit pins floor.
         let reader = table
-            .register_reader(0, Instant::now(), thread::current().id())
+            .register_reader(0, Instant::now(), thread::current().id(), Weak::new())
             .unwrap();
         assert_eq!(table.oldest_visible(), 0);
         // New commits still see oldest floor commit.
@@ -743,7 +857,7 @@ mod commit_table_tests {
         table.reserve(1).unwrap();
         table.mark_committed(1).unwrap();
         let reader = table
-            .register_reader(1, Instant::now(), thread::current().id())
+            .register_reader(1, Instant::now(), thread::current().id(), Weak::new())
             .unwrap();
         table.release_committed(1);
         // Entry remains because reader is active.
@@ -757,10 +871,10 @@ mod commit_table_tests {
     fn multiple_floor_readers_share_same_commit() {
         let mut table = CommitTable::new(5);
         let r1 = table
-            .register_reader(5, Instant::now(), thread::current().id())
+            .register_reader(5, Instant::now(), thread::current().id(), Weak::new())
             .unwrap();
         let r2 = table
-            .register_reader(5, Instant::now(), thread::current().id())
+            .register_reader(5, Instant::now(), thread::current().id(), Weak::new())
             .unwrap();
         assert_eq!(table.oldest_visible(), 5);
         table.release_reader(r1);
@@ -777,7 +891,7 @@ mod commit_table_tests {
         table.reserve(2).unwrap();
         table.mark_committed(2).unwrap();
         let reader = table
-            .register_reader(1, Instant::now(), thread::current().id())
+            .register_reader(1, Instant::now(), thread::current().id(), Weak::new())
             .unwrap();
         assert_eq!(table.vacuum_horizon(Duration::from_millis(0)), 1);
         table.release_reader(reader);
@@ -809,7 +923,7 @@ mod commit_table_tests {
         let now = Instant::now();
         let old_start = now - Duration::from_millis(25);
         let reader = table
-            .register_reader(1, old_start, thread::current().id())
+            .register_reader(1, old_start, thread::current().id(), Weak::new())
             .unwrap();
         let snapshot = table.reader_snapshot(now);
         assert_eq!(snapshot.active, 1);
@@ -837,7 +951,7 @@ mod commit_table_tests {
         table.mark_committed(1).unwrap();
         table.promote_intent(intent2, 2).unwrap();
         let reader = table
-            .register_reader(2, Instant::now(), thread::current().id())
+            .register_reader(2, Instant::now(), thread::current().id(), Weak::new())
             .unwrap();
         let now = Instant::now();
         let snapshot = table.snapshot(now);

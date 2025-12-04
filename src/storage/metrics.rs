@@ -112,6 +112,17 @@ pub trait StorageMetrics: Send + Sync {
 
     /// Records that a write was blocked due to writer lock already held.
     fn mvcc_write_lock_conflict(&self) {}
+
+    /// Records that a reader was forcibly evicted due to timeout.
+    fn mvcc_reader_evicted(&self) {}
+
+    /// Records a warning for a reader approaching its timeout threshold.
+    ///
+    /// # Parameters
+    /// * `reader_id` - The ID of the reader approaching timeout
+    /// * `age_ms` - Current age of the reader in milliseconds
+    /// * `timeout_ms` - Configured timeout threshold in milliseconds
+    fn mvcc_reader_timeout_warning(&self, _reader_id: u32, _age_ms: u64, _timeout_ms: u64) {}
 }
 
 /// A no-op implementation of [`StorageMetrics`] that discards all recorded metrics.
@@ -284,6 +295,12 @@ pub struct CounterMetrics {
 
     /// Writer lock conflicts (writer already held).
     pub mvcc_write_lock_conflicts: AtomicU64,
+
+    /// Total readers evicted due to timeout.
+    pub mvcc_readers_evicted: AtomicU64,
+
+    /// Total reader timeout warnings issued.
+    pub mvcc_reader_timeout_warnings: AtomicU64,
 }
 
 impl StorageMetrics for CounterMetrics {
@@ -496,6 +513,15 @@ impl StorageMetrics for CounterMetrics {
 
     fn mvcc_write_lock_conflict(&self) {
         self.mvcc_write_lock_conflicts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mvcc_reader_evicted(&self) {
+        self.mvcc_readers_evicted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mvcc_reader_timeout_warning(&self, _reader_id: u32, _age_ms: u64, _timeout_ms: u64) {
+        self.mvcc_reader_timeout_warnings
             .fetch_add(1, Ordering::Relaxed);
     }
 }

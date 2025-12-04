@@ -208,6 +208,13 @@ pub struct VacuumCfg {
     pub max_millis_per_pass: u64,
     /// Whether the pass should also clean secondary indexes.
     pub index_cleanup: bool,
+    /// Maximum age for readers before they are considered stale.
+    /// Readers older than this may be forcibly invalidated.
+    /// Set to `Duration::MAX` to disable timeout enforcement.
+    pub reader_timeout: Duration,
+    /// Percentage (0-100) of `reader_timeout` at which to emit warnings.
+    /// Set to 0 to disable warnings.
+    pub reader_timeout_warn_threshold_pct: u8,
 }
 
 impl Default for VacuumCfg {
@@ -220,6 +227,8 @@ impl Default for VacuumCfg {
             max_pages_per_pass: 128,
             max_millis_per_pass: 50,
             index_cleanup: true,
+            reader_timeout: Duration::from_secs(30 * 60), // 30 minutes
+            reader_timeout_warn_threshold_pct: 80,
         }
     }
 }

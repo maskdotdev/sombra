@@ -120,8 +120,8 @@ impl SingleWriter {
 
     /// Acquires the writer lock, blocking until available.
     ///
-    /// Only one writer can hold the lock at a time. Returns an error if the writer
-    /// lock is already held by the current process.
+    /// Only one writer can hold the lock at a time. Returns a `Conflict` error if
+    /// the writer lock is already held by the current process.
     pub fn acquire_writer(&self) -> Result<WriterGuard> {
         loop {
             let mut state = self.inner.state.lock();
@@ -131,7 +131,9 @@ impl SingleWriter {
                 continue;
             }
             if state.writer {
-                return Err(SombraError::Invalid("writer lock already held"));
+                return Err(SombraError::Conflict(
+                    "writer lock already held by this process".into(),
+                ));
             }
             state.writer = true;
             break;
@@ -144,6 +146,33 @@ impl SingleWriter {
         Ok(WriterGuard {
             _guard: SlotGuard::new(self.inner.clone(), Slot::Writer),
         })
+    }
+
+    /// Attempts to acquire the writer lock without blocking.
+    ///
+    /// Returns `Ok(Some(guard))` if the lock was acquired, `Ok(None)` if the lock
+    /// is held by another process, or `Err(Conflict)` if the lock is already held
+    /// by this process (which would indicate a programming error).
+    pub fn try_acquire_writer(&self) -> Result<Option<WriterGuard>> {
+        {
+            let mut state = self.inner.state.lock();
+            if state.checkpoint {
+                return Ok(None);
+            }
+            if state.writer {
+                return Err(SombraError::Conflict(
+                    "writer lock already held by this process".into(),
+                ));
+            }
+            state.writer = true;
+        }
+        if !try_lock_slot(&self.inner.file, Slot::Writer)? {
+            self.inner.state.lock().writer = false;
+            return Ok(None);
+        }
+        Ok(Some(WriterGuard {
+            _guard: SlotGuard::new(self.inner.clone(), Slot::Writer),
+        }))
     }
 
     /// Attempts to acquire a checkpoint lock without blocking.
@@ -516,7 +545,7 @@ mod tests {
         let handle = thread::spawn(move || loop {
             match manager_clone.acquire_writer() {
                 Ok(inner) => return inner,
-                Err(SombraError::Invalid("writer lock already held")) => {
+                Err(SombraError::Conflict(msg)) if msg.contains("writer lock already held") => {
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 }

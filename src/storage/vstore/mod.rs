@@ -432,7 +432,7 @@ impl VStore {
                 oldest_reader = self.oldest_reader_commit(),
                 "vstore.defer_free"
             );
-            self.enqueue_deferred(vref);
+            self.enqueue_deferred(vref)?;
         }
         Ok(())
     }
@@ -449,17 +449,24 @@ impl VStore {
         Self::normalize_commit(owner_commit) <= Self::normalize_commit(self.oldest_reader_commit())
     }
 
-    fn enqueue_deferred(&self, vref: VRef) {
-        let mut queue = self.deferred.lock().expect("vstore.deferred poisoned");
+    fn enqueue_deferred(&self, vref: VRef) -> Result<()> {
+        let mut queue = self
+            .deferred
+            .lock()
+            .map_err(|_| SombraError::Invalid("vstore.deferred lock poisoned"))?;
         queue.push_back(vref);
+        Ok(())
     }
 
     fn drain_deferred_ready(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
         loop {
             let candidate = {
-                let mut queue = self.deferred.lock().expect("vstore.deferred poisoned");
+                let mut queue = self
+                    .deferred
+                    .lock()
+                    .map_err(|_| SombraError::Invalid("vstore.deferred lock poisoned"))?;
                 if queue.is_empty() {
-                    None
+                    Ok(None)
                 } else {
                     let len = queue.len();
                     let mut ready = None;
@@ -473,9 +480,9 @@ impl VStore {
                             }
                         }
                     }
-                    ready
+                    Ok(ready)
                 }
-            };
+            }?;
             match candidate {
                 Some(vref) => self.free_chain(tx, vref)?,
                 None => return Ok(()),

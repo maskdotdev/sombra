@@ -643,7 +643,10 @@ pub fn record_wal_io_group_sample(len: u64) {
     let Some(samples) = wal_samples() else {
         return;
     };
-    let mut guard = samples.lock().expect("wal sample mutex poisoned");
+    let Ok(mut guard) = samples.lock() else {
+        tracing::warn!("wal sample mutex poisoned; dropping sample");
+        return;
+    };
     if guard.len() >= WAL_SAMPLE_WINDOW {
         guard.pop_front();
     }
@@ -660,7 +663,10 @@ fn wal_sample_snapshot(reset: bool) -> (u64, u64) {
     let Some(samples) = WAL_IO_SAMPLES.get() else {
         return (0, 0);
     };
-    let mut guard = samples.lock().expect("wal sample mutex poisoned");
+    let Ok(mut guard) = samples.lock() else {
+        tracing::warn!("wal sample mutex poisoned; reporting zeros");
+        return (0, 0);
+    };
     if guard.is_empty() {
         if reset {
             guard.clear();

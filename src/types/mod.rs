@@ -79,6 +79,12 @@ pub enum SombraError {
     /// Query was cancelled before completion.
     #[error("query cancelled")]
     Cancelled,
+    /// Reader snapshot expired due to timeout (evicted by vacuum).
+    #[error("snapshot too old: {0}")]
+    SnapshotTooOld(String),
+    /// Write-write conflict detected during commit.
+    #[error("write conflict: {0}")]
+    Conflict(String),
 }
 
 /// Result type for Sombra operations using [`SombraError`].

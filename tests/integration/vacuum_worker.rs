@@ -20,6 +20,8 @@ fn small_vacuum_cfg(interval: Duration, high_water_bytes: u64) -> VacuumCfg {
         max_pages_per_pass: 64,
         max_millis_per_pass: 100,
         index_cleanup: true,
+        reader_timeout: Duration::MAX,
+        reader_timeout_warn_threshold_pct: 0,
     }
 }
 

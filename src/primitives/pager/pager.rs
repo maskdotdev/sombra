@@ -2948,9 +2948,15 @@ impl Pager {
             }
             ReadConsistency::LatestCommitted => self.latest_committed_lsn(),
         };
+        let evicted = Arc::new(AtomicBool::new(false));
         let commit_reader = {
             let mut table = self.commit_table.lock();
-            match table.register_reader(snapshot_lsn.0, Instant::now(), thread::current().id()) {
+            match table.register_reader(
+                snapshot_lsn.0,
+                Instant::now(),
+                thread::current().id(),
+                Arc::downgrade(&evicted),
+            ) {
                 Ok(reader) => reader,
                 Err(err) => {
                     drop(lock);
@@ -2966,7 +2972,7 @@ impl Pager {
             commit_table: Arc::clone(&self.commit_table),
             commit_reader,
             _metrics: metrics_handle,
-            evicted: Arc::new(AtomicBool::new(false)),
+            evicted,
         })
     }
 

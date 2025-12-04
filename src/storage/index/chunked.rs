@@ -49,7 +49,9 @@ impl ChunkedIndex {
     ) -> Result<()> {
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
         let key = Self::make_key(prefix, SEGMENT_PRIMARY);
         let mut segment = match tree.get_with_write(tx, &key)? {
             Some(bytes) => Segment::decode(&bytes.value)?,
@@ -78,7 +80,9 @@ impl ChunkedIndex {
         }
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
         let key = Self::make_key(prefix, SEGMENT_PRIMARY);
         let Some(bytes) = tree.get_with_write(tx, &key)? else {
             return Err(SombraError::Corruption("chunked postings segment missing"));
@@ -98,7 +102,9 @@ impl ChunkedIndex {
         }
         self.ensure_tree_read()?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
         let mut out = Vec::new();
         let mut lower = prefix.to_vec();
         lower.extend_from_slice(&SEGMENT_PRIMARY.to_be_bytes());
@@ -137,7 +143,9 @@ impl ChunkedIndex {
         }
         self.ensure_tree_read()?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
 
         let lower = make_chunk_lower_bound(label, prop, start);
         let upper = make_chunk_upper_bound(label, prop, end);
@@ -231,7 +239,9 @@ impl ChunkedIndex {
         }
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
         let label_bytes = label.0.to_be_bytes();
         let prop_bytes = prop.0.to_be_bytes();
         let mut keys = Vec::new();
@@ -253,7 +263,9 @@ impl ChunkedIndex {
         }
         self.ensure_tree_with_write(tx)?;
         let tree_ref = self.tree.borrow();
-        let tree = tree_ref.as_ref().expect("chunked index tree initialised");
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
         prune_versioned_tree(tree, tx, horizon)
     }
 
@@ -285,9 +297,8 @@ impl ChunkedIndex {
 
     fn borrow_tree(&self) -> Result<Ref<'_, BTree<Vec<u8>, VersionedValue<Vec<u8>>>>> {
         self.ensure_tree_read()?;
-        Ok(Ref::map(self.tree.borrow(), |opt| {
-            opt.as_ref().expect("chunked index tree initialised")
-        }))
+        Ref::filter_map(self.tree.borrow(), |opt| opt.as_ref())
+            .map_err(|_| SombraError::Corruption("chunked postings tree missing"))
     }
 
     fn collect_stream_keys(
