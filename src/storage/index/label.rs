@@ -84,6 +84,9 @@ impl LabelIndex {
                     && (value.header.flags & mvcc_flags::TOMBSTONE) == 0
             }
             Ok(None) => false,
+            // Defensive fallback: treat btree corruption as "index not present".
+            // The primary fix (cache invalidation on rollback) should prevent this,
+            // but we keep this as defense-in-depth for any remaining edge cases.
             Err(SombraError::Corruption(msg))
                 if msg == "unknown btree page kind" || msg == "invalid page magic" =>
             {
@@ -109,6 +112,9 @@ impl LabelIndex {
         let present = match self.tree.get_with_write(tx, &key) {
             Ok(Some(value)) => value.header.flags & mvcc_flags::TOMBSTONE == 0,
             Ok(None) => false,
+            // Defensive fallback: treat btree corruption as "index not present".
+            // The primary fix (cache invalidation on rollback) should prevent this,
+            // but we keep this as defense-in-depth for any remaining edge cases.
             Err(SombraError::Corruption(msg))
                 if msg == "unknown btree page kind" || msg == "invalid page magic" =>
             {

@@ -578,6 +578,7 @@ pub struct ReadGuard {
     commit_table: Arc<Mutex<CommitTable>>,
     commit_reader: CommitReader,
     _metrics: ReaderMetricsHandle,
+    evicted: Arc<AtomicBool>,
 }
 
 /// Guard for a write transaction, tracking modifications and state for rollback.
@@ -631,6 +632,40 @@ impl ReadGuard {
     /// Indicates which consistency mode was requested.
     pub fn consistency(&self) -> ReadConsistency {
         self.consistency
+    }
+
+    /// Returns `true` if this reader has been evicted due to timeout.
+    ///
+    /// Evicted readers can no longer safely read data as their snapshot
+    /// may have been reclaimed by vacuum.
+    pub fn is_evicted(&self) -> bool {
+        self.evicted.load(AtomicOrdering::Acquire)
+    }
+
+    /// Validates that this reader is still active and has not been evicted.
+    ///
+    /// Returns `Ok(())` if the reader is valid, or `Err(SombraError::SnapshotTooOld)`
+    /// if the reader has been evicted due to timeout.
+    pub fn validate(&self) -> Result<()> {
+        if self.evicted.load(AtomicOrdering::Acquire) {
+            return Err(SombraError::SnapshotTooOld(
+                "reader snapshot expired due to timeout".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Marks this reader as evicted.
+    ///
+    /// This is typically called by the vacuum process when a reader exceeds
+    /// the configured timeout threshold.
+    pub(crate) fn mark_evicted(&self) {
+        self.evicted.store(true, AtomicOrdering::Release);
+    }
+
+    /// Returns a weak reference to the evicted flag for external eviction.
+    pub(crate) fn evicted_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.evicted)
     }
 }
 
@@ -1607,7 +1642,7 @@ impl Pager {
         guard: &mut WriteGuard<'_>,
         id: PageId,
     ) -> Result<PageMut<'_>> {
-        let (idx, buf_arc) = {
+        let (idx, buf_arc, should_save_version) = {
             let mut inner = self.inner.lock();
             let (idx, hit) = self.lookup_or_load_frame(&mut inner, id)?;
             if hit {
@@ -1615,13 +1650,22 @@ impl Pager {
             } else {
                 inner.stats.misses += 1;
             }
+            let is_newly_allocated = guard.allocated_pages.contains(&id);
+            // Determine if we need to save a version chain entry for this page.
+            // We only save if:
+            // 1. This is the first modification to this page in this transaction
+            // 2. The page is not newly allocated (has committed data)
+            // 3. The page is not already dirty (has committed data in buffer)
+            let should_save_version = !guard.original_pages.contains_key(&id)
+                && !is_newly_allocated
+                && !inner.frames[idx].dirty;
             {
                 let frame = &mut inner.frames[idx];
                 frame.reference = true;
                 frame.pin_count += 1;
                 frame.dirty = true;
                 frame.needs_refresh = false;
-                if guard.allocated_pages.contains(&id) {
+                if is_newly_allocated {
                     frame.newly_allocated = true;
                 }
             }
@@ -1631,8 +1675,22 @@ impl Pager {
             });
             guard.dirty_pages.insert(id);
             let arc = inner.frames[idx].buf.clone();
-            (idx, arc)
+            (idx, arc, should_save_version)
         };
+
+        // Save the committed version to the version chain so concurrent readers
+        // can access the pre-modification state. This is critical for MVCC isolation:
+        // readers at the current committed LSN should see the committed data, not
+        // uncommitted modifications.
+        if should_save_version {
+            if let Some(original_data) = guard.original_pages.get(&id) {
+                let committed_lsn = self.latest_committed_lsn();
+                let data = Arc::<[u8]>::from(original_data.as_slice());
+                let mut chains = self.version_chains.lock();
+                self.insert_version_chain_locked(&mut chains, id, committed_lsn, None, Some(data));
+            }
+        }
+
         let guard_buf = buf_arc.write_arc();
         Ok(PageMut {
             id,
@@ -1765,16 +1823,21 @@ impl Pager {
         inner.freelist_pages = guard.freelist_pages_snapshot.clone();
         inner.pending_free = guard.pending_free_snapshot.clone();
         inner.meta_dirty = guard.meta_dirty_snapshot;
-        for (page_id, data) in guard.original_pages.iter() {
+
+        // Restore original page data for modified pages. The version chain entries
+        // created during the write transaction will allow concurrent readers to see
+        // the pre-modification state. After rollback, we restore the buffer contents
+        // so future readers see the correct committed data.
+        for (page_id, original_data) in guard.original_pages.iter() {
             if let Some(&idx) = inner.page_table.get(page_id) {
                 {
                     let mut buf = inner.frames[idx].buf.write();
-                    buf.copy_from_slice(data);
+                    buf.copy_from_slice(original_data);
                 }
                 inner.frames[idx].dirty = false;
                 inner.frames[idx].pending_checkpoint = false;
                 inner.frames[idx].newly_allocated = false;
-                inner.frames[idx].needs_refresh = true;
+                // Don't set needs_refresh - the buffer now has correct committed data
             }
         }
         Ok(())
@@ -2654,6 +2717,11 @@ impl Pager {
                 return;
             }
             if last.lsn.0 == lsn.0 {
+                // Don't replace an entry that has wal_offset with one that doesn't.
+                // The wal_offset is important for rehydrating versions from WAL.
+                if last.wal_offset.is_some() && wal_offset.is_none() {
+                    return;
+                }
                 chain.pop_back();
                 self.mvcc_version_count
                     .fetch_sub(1, AtomicOrdering::Relaxed);
@@ -2898,6 +2966,7 @@ impl Pager {
             commit_table: Arc::clone(&self.commit_table),
             commit_reader,
             _metrics: metrics_handle,
+            evicted: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -2947,12 +3016,13 @@ impl PageStore for Pager {
     fn get_page(&self, guard: &ReadGuard, id: PageId) -> Result<PageRef> {
         let mut cached: Option<Arc<[u8]>> = None;
         let mut refresh_idx: Option<usize> = None;
+        let mut has_uncommitted = false;
         let snapshot_lsn = guard.snapshot_lsn;
         let (salt, page_size, last_checkpoint_lsn) = {
             let mut inner = self.inner.lock();
             if let Some(&idx) = inner.page_table.get(&id) {
                 let frame = &inner.frames[idx];
-                let has_uncommitted = frame.dirty && !frame.newly_allocated;
+                has_uncommitted = frame.dirty && !frame.newly_allocated;
                 let needs_refresh = frame.needs_refresh;
                 let snapshot_is_checkpoint = snapshot_lsn == inner.meta.last_checkpoint_lsn;
                 let pending_checkpoint = frame.pending_checkpoint;
@@ -2983,6 +3053,19 @@ impl PageStore for Pager {
             snapshot_lsn.0 >= last_checkpoint_lsn.0,
             "snapshot regressed while reader active"
         );
+
+        // For pages with uncommitted modifications, first try the version chain.
+        // This handles the case where a reader at the current committed LSN needs
+        // to see the pre-modification state while a write transaction is in progress.
+        if has_uncommitted {
+            if let Some(version_data) = self.version_page_for_snapshot(id, snapshot_lsn) {
+                return Ok(PageRef {
+                    id,
+                    data: version_data,
+                });
+            }
+        }
+
         let mut buf = vec![0u8; self.page_size];
         let verify_crc = self.checksum_verify_on_read.load(AtomicOrdering::Relaxed);
         let read_result = self

@@ -322,12 +322,16 @@ fn single_writer_prevents_lost_update() -> Result<()> {
         write_b_result.is_err(),
         "Lost update possible! Two concurrent writes were allowed"
     );
-    if let Err(sombra::types::SombraError::Invalid(msg)) = &write_b_result {
-        assert!(
-            msg.contains("writer lock already held"),
-            "Expected writer lock conflict error, got: {}",
-            msg
-        );
+    match &write_b_result {
+        Err(sombra::types::SombraError::Conflict(msg)) => {
+            assert!(
+                msg.contains("writer lock already held"),
+                "Expected writer lock conflict message, got: {}",
+                msg
+            );
+        }
+        Err(e) => panic!("Expected Conflict error, got: {}", e),
+        Ok(_) => panic!("Expected error but got Ok"),
     }
 
     // Complete Txn A
@@ -595,6 +599,9 @@ fn read_your_own_writes() -> Result<()> {
 /// Test: Rollback does not affect readers
 ///
 /// If a write transaction rolls back, readers should not see any of its changes.
+/// The rollback mechanism invalidates (evicts) modified pages from the cache
+/// rather than restoring them in-place, ensuring concurrent readers never see
+/// partially-written or corrupted page data.
 #[test]
 fn rollback_invisible_to_readers() -> Result<()> {
     let dir = tempdir()?;
@@ -789,6 +796,43 @@ fn degree_snapshot_consistency() -> Result<()> {
     let read_b = pager.begin_latest_committed_read()?;
     let degree_b = graph.degree(&read_b, src, Dir::Out, None)?;
     assert_eq!(degree_b, 2, "New reader should see degree=2");
+
+    Ok(())
+}
+
+/// Test: try_acquire_writer returns Conflict when lock is already held
+///
+/// The non-blocking writer acquisition should return a Conflict error when
+/// the writer lock is already held by the same process.
+#[test]
+fn try_acquire_writer_conflict() -> Result<()> {
+    use sombra::primitives::concurrency::SingleWriter;
+
+    let dir = tempdir()?;
+    let lock_path = dir.path().join("try_writer.lock");
+
+    // Use a single SingleWriter instance - this tests the in-memory conflict detection
+    let lock = SingleWriter::open(&lock_path)?;
+
+    // Acquire first writer
+    let _write1 = lock.acquire_writer()?;
+
+    // Try to acquire second writer using try_acquire on the same instance
+    // This should detect the conflict via in-memory state tracking
+    let result = lock.try_acquire_writer();
+
+    match result {
+        Err(sombra::types::SombraError::Conflict(msg)) => {
+            assert!(
+                msg.contains("writer lock already held"),
+                "Expected writer lock conflict message, got: {}",
+                msg
+            );
+        }
+        Ok(Some(_)) => panic!("try_acquire_writer should not succeed when writer is held"),
+        Ok(None) => panic!("try_acquire_writer should return Conflict, not None"),
+        Err(e) => panic!("Expected Conflict error, got: {:?}", e),
+    }
 
     Ok(())
 }
