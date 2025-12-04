@@ -460,7 +460,7 @@ impl VStore {
 
     fn drain_deferred_ready(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
         loop {
-            let candidate = {
+            let candidate: Result<Option<VRef>> = {
                 let mut queue = self
                     .deferred
                     .lock()
@@ -482,7 +482,8 @@ impl VStore {
                     }
                     Ok(ready)
                 }
-            }?;
+            };
+            let candidate = candidate?;
             match candidate {
                 Some(vref) => self.free_chain(tx, vref)?,
                 None => return Ok(()),

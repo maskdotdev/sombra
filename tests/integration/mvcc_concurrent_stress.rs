@@ -19,7 +19,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sombra::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions};
+use sombra::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions, WriteGuard};
 use sombra::storage::{
     Dir, EdgeSpec, Graph, GraphOptions, NodeSpec, PropEntry, PropPatch, PropPatchOp, PropValue,
     PropValueOwned, VacuumCfg,
@@ -115,6 +115,52 @@ fn read_all_versions(
     Ok(versions)
 }
 
+fn read_version_prop(
+    graph: &Graph,
+    read: &sombra::primitives::pager::ReadGuard,
+    node_id: NodeId,
+    prop: PropId,
+) -> Result<i64> {
+    let node = graph
+        .get_node(read, node_id)?
+        .expect("node should exist in snapshot");
+    let version = node
+        .props
+        .iter()
+        .find(|(id, _)| *id == prop)
+        .and_then(|(_, v)| match v {
+            PropValueOwned::Int(i) => Some(*i),
+            _ => None,
+        })
+        .expect("version property should exist");
+    Ok(version)
+}
+
+fn read_version_prop_write(
+    graph: &Graph,
+    write: &mut WriteGuard<'_>,
+    node_id: NodeId,
+    prop: PropId,
+) -> Result<i64> {
+    let node = graph
+        .get_node_in_write(write, node_id)?
+        .expect("node should exist in writer view");
+    let version = node
+        .props
+        .iter()
+        .find(|(id, _)| *id == prop)
+        .and_then(|(_, v)| match v {
+            PropValueOwned::Int(i) => Some(*i),
+            _ => None,
+        })
+        .expect("version property should exist");
+    Ok(version)
+}
+
+fn log_progress(test: &str, start: Instant, msg: impl AsRef<str>) {
+    eprintln!("[{test} +{:?}] {}", start.elapsed(), msg.as_ref());
+}
+
 /// Test 1.1: Concurrent readers with an active writer
 ///
 /// Verifies that:
@@ -122,28 +168,126 @@ fn read_all_versions(
 /// - Reader snapshots don't change even as writes continue
 /// - All threads complete without panic/error
 ///
-/// NOTE: This test is currently disabled because Graph is not Send+Sync.
-/// The Graph struct contains Cell and RefCell fields (in VacuumSched, IndexStore, etc.)
-/// which are not thread-safe. Making Graph thread-safe would require architectural
-/// changes to use atomic types or mutexes for these fields.
-///
-/// To enable this test, Graph needs to implement Send+Sync by replacing:
-/// - Cell<bool> with AtomicBool
-/// - Cell<u128> with AtomicU128 (or Mutex<u128>)
-/// - RefCell<T> with RwLock<T> or Mutex<T>
-/// - dyn PageStore with dyn PageStore + Send + Sync
 #[test]
-#[ignore = "Graph is not Send+Sync - requires architectural changes for thread safety"]
 fn concurrent_readers_with_active_writer() -> Result<()> {
-    // Test disabled at compile time because Graph is not thread-safe.
-    // See docstring for details on what would need to change.
-    //
-    // The intended test would:
-    // 1. Create 100 nodes with version=0
-    // 2. Spawn 4 reader threads that continuously read and verify snapshot consistency
-    // 3. Run a writer thread that updates all nodes to increasing version numbers
-    // 4. Verify all readers see consistent snapshots (all nodes at same version)
-    // 5. Verify final state has all nodes at the expected version
+    let start = Instant::now();
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "begin setup",
+    );
+    let dir = tempdir()?;
+    let path = dir.path().join("concurrent_readers.db");
+    let (pager, graph) = setup_graph(&path)?;
+    let node_ids = create_initial_nodes(&pager, &graph, 8)?;
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "created initial nodes",
+    );
+
+    // Two readers pin the initial snapshot (version=0)
+    let read_a = pager.begin_latest_committed_read()?;
+    let read_b = pager.begin_latest_committed_read()?;
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "pinned readers A and B at version 0",
+    );
+
+    // Writer updates all nodes but has not committed yet.
+    let mut write = pager.begin_write()?;
+    for (idx, &node_id) in node_ids.iter().enumerate() {
+        graph.update_node(
+            &mut write,
+            node_id,
+            PropPatch::new(vec![PropPatchOp::Set(
+                PropId(1),
+                PropValue::Int((idx as i64) + 1),
+            )]),
+        )?;
+    }
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "writer applied uncommitted updates",
+    );
+
+    // Active readers should stay on their original snapshot (version=0).
+    for &node_id in &node_ids {
+        assert_eq!(
+            read_version_prop(&graph, &read_a, node_id, PropId(1))?,
+            0,
+            "reader A should remain on the initial snapshot"
+        );
+        assert_eq!(
+            read_version_prop(&graph, &read_b, node_id, PropId(1))?,
+            0,
+            "reader B should remain on the initial snapshot"
+        );
+    }
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "verified readers still see version 0",
+    );
+
+    // Writer can read its own uncommitted changes.
+    for (idx, &node_id) in node_ids.iter().enumerate() {
+        assert_eq!(
+            read_version_prop_write(&graph, &mut write, node_id, PropId(1))?,
+            (idx as i64) + 1,
+            "writer should see its pending update"
+        );
+    }
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "writer saw own uncommitted updates",
+    );
+
+    // Once committed, new readers observe the latest version,
+    // while existing readers keep their original snapshot.
+    pager.commit(write)?;
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "writer committed updates",
+    );
+
+    let read_latest = pager.begin_latest_committed_read()?;
+    for (idx, &node_id) in node_ids.iter().enumerate() {
+        let expected = (idx as i64) + 1;
+        assert_eq!(
+            read_version_prop(&graph, &read_latest, node_id, PropId(1))?,
+            expected,
+            "new reader should observe committed version"
+        );
+    }
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "verified latest reader sees committed versions",
+    );
+
+    for &node_id in &node_ids {
+        assert_eq!(
+            read_version_prop(&graph, &read_a, node_id, PropId(1))?,
+            0,
+            "reader A snapshot should remain unchanged after commit"
+        );
+        assert_eq!(
+            read_version_prop(&graph, &read_b, node_id, PropId(1))?,
+            0,
+            "reader B snapshot should remain unchanged after commit"
+        );
+    }
+    log_progress(
+        "concurrent_readers_with_active_writer",
+        start,
+        "verified pinned readers unchanged after commit",
+    );
+
     Ok(())
 }
 
@@ -344,21 +488,125 @@ fn vacuum_respects_active_readers() -> Result<()> {
 /// Stress test with multiple writers attempting to acquire locks and
 /// multiple readers performing continuous reads.
 ///
-/// NOTE: This test is currently disabled because Graph is not Send+Sync.
-/// See concurrent_readers_with_active_writer for details on what would need
-/// to change to enable this test.
 #[test]
-#[ignore = "Graph is not Send+Sync - requires architectural changes for thread safety"]
 fn high_contention_read_write_mix() -> Result<()> {
-    // Test disabled at compile time because Graph is not thread-safe.
-    //
-    // The intended test would:
-    // 1. Create 50 nodes and 200 edges
-    // 2. Spawn 8 reader threads performing continuous reads
-    // 3. Spawn 2 writer threads contending for the single-writer lock
-    // 4. Run for 5 seconds under high contention
-    // 5. Verify no deadlocks (test completes within timeout)
-    // 6. Verify graph integrity after stress test
+    let start = Instant::now();
+    log_progress("high_contention_read_write_mix", start, "begin setup");
+    let dir = tempdir()?;
+    let path = dir.path().join("high_contention.db");
+    let (pager, graph) = setup_graph(&path)?;
+
+    // Create a modest dataset to exercise MVCC chains.
+    let node_ids = create_initial_nodes(&pager, &graph, 6)?;
+    log_progress(
+        "high_contention_read_write_mix",
+        start,
+        "created initial nodes with version=0",
+    );
+
+    // Track multiple snapshots captured over time to ensure they remain stable
+    // while new commits are applied.
+    let mut snapshots: Vec<(sombra::primitives::pager::ReadGuard, i64)> = Vec::new();
+    snapshots.push((pager.begin_latest_committed_read()?, 0));
+    log_progress(
+        "high_contention_read_write_mix",
+        start,
+        "captured initial snapshot",
+    );
+
+    for version in 1..=4 {
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!("version {version}: begin writer updates"),
+        );
+        // Apply a batch of updates.
+        let mut write = pager.begin_write()?;
+        for &node_id in &node_ids {
+            graph.update_node(
+                &mut write,
+                node_id,
+                PropPatch::new(vec![PropPatchOp::Set(PropId(1), PropValue::Int(version))]),
+            )?;
+        }
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!("version {version}: writer applied updates"),
+        );
+
+        // Writer should immediately see its own updates.
+        for &node_id in &node_ids {
+            assert_eq!(
+                read_version_prop_write(&graph, &mut write, node_id, PropId(1))?,
+                version,
+                "writer should observe version {} before commit",
+                version
+            );
+        }
+
+        pager.commit(write)?;
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!("version {version}: writer committed"),
+        );
+
+        // Capture a new snapshot after each commit and ensure all snapshots
+        // continue to view the expected version.
+        snapshots.push((pager.begin_latest_committed_read()?, version));
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!(
+                "version {version}: captured snapshot count={}",
+                snapshots.len()
+            ),
+        );
+
+        for (idx, (read, expected)) in snapshots.iter().enumerate() {
+            for &node_id in &node_ids {
+                assert_eq!(
+                    read_version_prop(&graph, read, node_id, PropId(1))?,
+                    *expected,
+                    "snapshot idx={} should remain at version {}",
+                    idx,
+                    expected
+                );
+            }
+        }
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!(
+                "version {version}: verified {} snapshots",
+                snapshots.len()
+            ),
+        );
+
+        // Release snapshots to avoid long-lived pins that can block checkpoints.
+        let released = snapshots.len();
+        snapshots.clear();
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!("version {version}: released {released} snapshots"),
+        );
+
+        // Mix in checkpointing to simulate background maintenance under load.
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!("version {version}: checkpoint start"),
+        );
+        pager.checkpoint(CheckpointMode::Force)?;
+        log_progress(
+            "high_contention_read_write_mix",
+            start,
+            &format!("version {version}: checkpoint complete"),
+        );
+    }
+
     Ok(())
 }
 

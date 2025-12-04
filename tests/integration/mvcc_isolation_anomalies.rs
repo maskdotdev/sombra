@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use sombra::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions};
+use sombra::primitives::pager::{CheckpointMode, PageStore, Pager, PagerOptions, WriteGuard};
 use sombra::storage::{
     EdgeSpec, Graph, GraphOptions, NodeSpec, PropEntry, PropPatch, PropPatchOp, PropValue,
     PropValueOwned,
@@ -40,6 +40,25 @@ fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Arc<Graph>)> {
 /// Helper to read a node's integer property value.
 fn read_int_prop(graph: &Graph, read: &sombra::primitives::pager::ReadGuard, node_id: NodeId, prop_id: PropId) -> Result<Option<i64>> {
     Ok(graph.get_node(read, node_id)?.and_then(|node| {
+        node.props
+            .iter()
+            .find(|(id, _)| *id == prop_id)
+            .and_then(|(_, v)| match v {
+                PropValueOwned::Int(i) => Some(*i),
+                _ => None,
+            })
+    }))
+}
+
+/// Helper to read a node's integer property value from a write transaction
+/// (including uncommitted changes).
+fn read_int_prop_write(
+    graph: &Graph,
+    write: &mut WriteGuard<'_>,
+    node_id: NodeId,
+    prop_id: PropId,
+) -> Result<Option<i64>> {
+    Ok(graph.get_node_in_write(write, node_id)?.and_then(|node| {
         node.props
             .iter()
             .find(|(id, _)| *id == prop_id)
@@ -546,13 +565,7 @@ fn read_only_anomaly_not_applicable() {
 /// Test: Read-your-own-writes within a transaction
 ///
 /// A transaction should be able to read data it has written, even before commit.
-///
-/// NOTE: This test is currently ignored because the pager does not yet support
-/// read-your-own-writes (no `as_read()` method on WriteGuard). This feature
-/// would require significant infrastructure to properly implement MVCC visibility
-/// for uncommitted writes within the same transaction.
 #[test]
-#[ignore = "read-your-own-writes not yet implemented - requires WriteGuard::as_read()"]
 fn read_your_own_writes() -> Result<()> {
     let dir = tempdir()?;
     let path = dir.path().join("ryow.db");
@@ -569,10 +582,13 @@ fn read_your_own_writes() -> Result<()> {
         },
     )?;
 
-    // TODO: Read own write (within same transaction) - requires as_read()
-    // let read_guard = write.as_read();
-    // let value = read_int_prop(&graph, &read_guard, node_id, PropId(1))?;
-    // assert_eq!(value, Some(100), "Should be able to read own uncommitted write");
+    // Read own write (within same transaction)
+    let value = read_int_prop_write(&graph, &mut write, node_id, PropId(1))?;
+    assert_eq!(
+        value,
+        Some(100),
+        "Writer should see its own uncommitted insert"
+    );
 
     // Update the node
     graph.update_node(
@@ -581,10 +597,13 @@ fn read_your_own_writes() -> Result<()> {
         PropPatch::new(vec![PropPatchOp::Set(PropId(1), PropValue::Int(200))]),
     )?;
 
-    // TODO: Read updated value - requires as_read()
-    // let read_guard = write.as_read();
-    // let value = read_int_prop(&graph, &read_guard, node_id, PropId(1))?;
-    // assert_eq!(value, Some(200), "Should see own updated value");
+    // Read updated value before commit
+    let value = read_int_prop_write(&graph, &mut write, node_id, PropId(1))?;
+    assert_eq!(
+        value,
+        Some(200),
+        "Writer should see its own uncommitted update"
+    );
 
     pager.commit(write)?;
 

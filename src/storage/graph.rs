@@ -1900,6 +1900,31 @@ impl Graph {
         }))
     }
 
+    /// Retrieves node data using an active write transaction.
+    ///
+    /// This surfaces pending versions created by the current writer so that
+    /// write transactions can read their own uncommitted changes.
+    pub fn get_node_in_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        id: NodeId,
+    ) -> Result<Option<NodeData>> {
+        let Some(bytes) = self.nodes.get_with_write(tx, &id.0)? else {
+            return Ok(None);
+        };
+        let versioned = node::decode(&bytes)?;
+        if versioned.header.is_tombstone() {
+            return Ok(None);
+        }
+        let row = versioned.row;
+        let prop_bytes = self.read_node_prop_bytes_with_write(tx, &row.props)?;
+        let props = self.materialize_props_owned_with_write(tx, &prop_bytes)?;
+        Ok(Some(NodeData {
+            labels: row.labels,
+            props,
+        }))
+    }
+
     /// Scans and returns all nodes in the graph.
     pub fn scan_all_nodes(&self, tx: &ReadGuard) -> Result<Vec<(NodeId, NodeData)>> {
         let mut cursor = self.nodes.range(tx, Bound::Unbounded, Bound::Unbounded)?;
