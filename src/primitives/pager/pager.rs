@@ -3059,7 +3059,7 @@ impl PageStore for Pager {
     }
 
     fn begin_read(&self) -> Result<ReadGuard> {
-        self.begin_read_consistency(ReadConsistency::Checkpoint)
+        self.begin_read_consistency(ReadConsistency::LatestCommitted)
     }
 
     fn begin_latest_committed_read(&self) -> Result<ReadGuard> {
@@ -3355,7 +3355,7 @@ mod tests {
             page_mut.data_mut()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4].copy_from_slice(b"NEW1");
         }
 
-        let read_during_txn = pager.begin_read()?;
+        let read_during_txn = pager.begin_checkpoint_read()?;
         let snapshot = pager.get_page(&read_during_txn, page)?;
         assert_eq!(
             &snapshot.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4],
@@ -3366,7 +3366,7 @@ mod tests {
 
         pager.commit(write)?;
 
-        let read_after_commit = pager.begin_read()?;
+        let read_after_commit = pager.begin_checkpoint_read()?;
         let snapshot_after_commit = pager.get_page(&read_after_commit, page)?;
         assert_eq!(
             &snapshot_after_commit.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4],
@@ -3377,7 +3377,7 @@ mod tests {
 
         pager.checkpoint(CheckpointMode::Force)?;
 
-        let read_post_checkpoint = pager.begin_read()?;
+        let read_post_checkpoint = pager.begin_checkpoint_read()?;
         let snapshot_after_checkpoint = pager.get_page(&read_post_checkpoint, page)?;
         assert_eq!(
             &snapshot_after_checkpoint.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4],
@@ -3421,7 +3421,7 @@ mod tests {
         }
 
         // Checkpoint-scoped read should still see the checkpoint image.
-        let checkpoint_read = pager.begin_read()?;
+        let checkpoint_read = pager.begin_checkpoint_read()?;
         let checkpoint_page = pager.get_page(&checkpoint_read, page)?;
         assert_eq!(
             &checkpoint_page.data()[PAGE_HDR_LEN..PAGE_HDR_LEN + 4],

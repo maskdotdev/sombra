@@ -67,14 +67,15 @@ fn stage3_end_to_end_snapshot_and_recovery() -> Result<()> {
     assert_eq!(read_payload(&pager, &read_guard, target)?, vec![0; 4]);
     drop(read_guard);
 
-    let pre_checkpoint = pager.begin_read()?;
+    // Checkpoint-scoped read should still see old data until checkpoint runs
+    let pre_checkpoint = pager.begin_checkpoint_read()?;
     assert_eq!(read_payload(&pager, &pre_checkpoint, target)?, vec![0; 4]);
     drop(pre_checkpoint);
 
     pager.checkpoint(CheckpointMode::Force)?;
     assert!(pager.last_checkpoint_lsn() >= lsn);
 
-    let post_checkpoint = pager.begin_read()?;
+    let post_checkpoint = pager.begin_checkpoint_read()?;
     assert_eq!(read_payload(&pager, &post_checkpoint, target)?, b"EDIT");
     drop(post_checkpoint);
 
