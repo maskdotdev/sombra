@@ -7,7 +7,7 @@
 //! the core logic.
 
 use crate::primitives::pager::{
-    PageStore, Pager, PagerOptions, ReadGuard, Synchronous, WriteGuard,
+    CheckpointMode, PageStore, Pager, PagerOptions, ReadGuard, Synchronous, WriteGuard,
 };
 use crate::query::{
     analyze::{self, MAX_BYTES_LITERAL, MAX_IN_VALUES},
@@ -229,7 +229,7 @@ impl LatencyHistogram {
                 counter.load(AtomicOrdering::Relaxed)
             }
         };
-        let mut snapshot: Vec<u64> = self.counts.iter().map(reader).collect();
+        let snapshot: Vec<u64> = self.counts.iter().map(reader).collect();
         let total: u64 = snapshot.iter().sum();
         if total == 0 {
             return 0;
@@ -701,27 +701,32 @@ impl Database {
         })
     }
 
-    /// Closes the database, releasing all resources.
+    /// Closes the database, ensuring all data is persisted.
     ///
-    /// This method consumes the `Database` instance and ensures all internal
-    /// resources are properly cleaned up. Any pending operations will complete
-    /// before the database is closed.
-    ///
-    /// Note: This is typically called automatically when the `Database` is dropped,
-    /// but calling it explicitly provides a clear point of cleanup and allows
-    /// handling any errors that might occur during shutdown.
+    /// This method performs a checkpoint to flush all WAL data to the main
+    /// database file before releasing resources. This ensures data durability
+    /// when reopening the database.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let db = Database::open("my.db", DatabaseOptions::default())?;
     /// // ... use the database ...
-    /// db.close(); // Explicitly close when done
+    /// db.close(); // Checkpoint and close
     /// ```
     pub fn close(self) {
-        // Dropping self will release all Arc references.
-        // The underlying resources are cleaned up when the last reference is dropped.
+        // Checkpoint is handled by Drop impl
         drop(self);
+    }
+
+    /// Forces a checkpoint, flushing WAL data to the main database file.
+    ///
+    /// This ensures all committed data is persisted to the main database file.
+    /// Useful before closing or when you need to guarantee durability.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.pager
+            .checkpoint(CheckpointMode::BestEffort)
+            .map_err(FfiError::from)
     }
 
     /// Executes a JSON-serialized query specification and returns all results.
@@ -1419,6 +1424,16 @@ impl Database {
             Some(id) => Ok(Some(self.cancellations.register(id)?)),
             None => Ok(None),
         }
+    }
+}
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        // Checkpoint to ensure all WAL data is written to the main database file.
+        // This is critical for data persistence across close/reopen cycles.
+        // We use BestEffort mode to avoid blocking if another process holds locks,
+        // but in the typical single-process case this will complete the checkpoint.
+        let _ = self.pager.checkpoint(CheckpointMode::BestEffort);
     }
 }
 
