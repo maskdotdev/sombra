@@ -153,6 +153,14 @@ def wrap_native_error(err: BaseException) -> SombraError:
     return SombraError(message, ErrorCode.UNKNOWN)
 
 
+def _wrap_native_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Invoke a native function and re-raise with typed errors."""
+    try:
+        return fn(*args, **kwargs)
+    except BaseException as err:  # noqa: BLE001 - surface native error codes
+        raise wrap_native_error(err)
+
+
 class QueryResult(dict):
     """Envelope returned by execute()/explain() with convenience helpers."""
 
@@ -551,15 +559,47 @@ class _MutationBatch:
 class _QueryStream:
     def __init__(self, handle: _native.StreamHandle):
         self._handle = handle
+        self._closed = False
 
     def __aiter__(self) -> "_QueryStream":
         return self
 
     async def __anext__(self) -> Any:
-        value = _native.stream_next(self._handle)
+        if self._closed:
+            raise StopAsyncIteration
+        value = _wrap_native_call(_native.stream_next, self._handle)
         if value is None:
+            self.close()
             raise StopAsyncIteration
         return value
+
+    async def __aenter__(self) -> "_QueryStream":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_fn = getattr(_native, "stream_close", None)
+        if close_fn is None:
+            return
+        try:
+            _wrap_native_call(close_fn, self._handle)
+        except BaseException as err:  # noqa: BLE001 - propagate typed native errors
+            raise wrap_native_error(err)
+
+    def __del__(self) -> None:
+        if not self._closed:
+            try:
+                close_fn = getattr(_native, "stream_close", None)
+                if close_fn is not None:
+                    _wrap_native_call(close_fn, self._handle)
+            except BaseException:
+                pass
+            self._closed = True
 
 
 class _PredicateBuilder:
@@ -1021,7 +1061,7 @@ class CreateBuilder:
             "nodes": script_nodes,
             "edges": script_edges,
         }
-        summary = _native.database_create(self._db._handle, script)
+        summary = _wrap_native_call(_native.database_create, self._db._handle, script)
         return CreateSummaryResult(summary)
 
     def _encode_ref(self, value: Union[_CreateHandle, str, int]) -> Dict[str, Any]:
@@ -1053,7 +1093,7 @@ class Database:
     @classmethod
     def open(cls, path: str, **options: Any) -> "Database":
         schema = options.pop("schema", None)
-        handle = _native.open_database(path, options or None)
+        handle = _wrap_native_call(_native.open_database, path, options or None)
         db = cls(handle)
         if schema is not None:
             db.with_schema(schema)
@@ -1067,8 +1107,8 @@ class Database:
         """
         if self._closed:
             return
+        _wrap_native_call(_native.database_close, self._handle)
         self._closed = True
-        _native.database_close(self._handle)
 
     @property
     def is_closed(self) -> bool:
@@ -1098,16 +1138,16 @@ class Database:
 
     def intern(self, name: str) -> int:
         self._assert_open()
-        return _native.database_intern(self._handle, name)
+        return _wrap_native_call(_native.database_intern, self._handle, name)
 
     def seed_demo(self) -> "Database":
         self._assert_open()
-        _native.database_seed_demo(self._handle)
+        _wrap_native_call(_native.database_seed_demo, self._handle)
         return self
 
     def mutate(self, script: Mapping[str, Any]) -> Dict[str, Any]:
         self._assert_open()
-        return _native.database_mutate(self._handle, script)
+        return _wrap_native_call(_native.database_mutate, self._handle, script)
 
     def mutate_many(self, ops: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         self._assert_open()
@@ -1147,14 +1187,14 @@ class Database:
     def pragma(self, name: str, value: Any = _PRAGMA_SENTINEL) -> Any:
         self._assert_open()
         if value is _PRAGMA_SENTINEL:
-            return _native.database_pragma_get(self._handle, name)
-        return _native.database_pragma_set(self._handle, name, value)
+            return _wrap_native_call(_native.database_pragma_get, self._handle, name)
+        return _wrap_native_call(_native.database_pragma_set, self._handle, name, value)
 
     def cancel_request(self, request_id: str) -> bool:
         self._assert_open()
         if not isinstance(request_id, str) or not request_id.strip():
             raise ValueError("cancel_request requires a non-empty request id string")
-        return _native.database_cancel_request(self._handle, request_id)
+        return _wrap_native_call(_native.database_cancel_request, self._handle, request_id)
 
     def neighbors(
         self,
@@ -1174,7 +1214,7 @@ class Database:
             if not isinstance(edge_type, str) or not edge_type.strip():
                 raise ValueError("edge_type must be a non-empty string when provided")
             options["edge_type"] = edge_type
-        return _native.database_neighbors(self._handle, int(node_id), options)
+        return _wrap_native_call(_native.database_neighbors, self._handle, int(node_id), options)
 
     def bfs_traversal(
         self,
@@ -1204,7 +1244,9 @@ class Database:
             if not isinstance(max_results, int) or max_results <= 0:
                 raise ValueError("max_results must be a positive integer when provided")
             options["max_results"] = max_results
-        return _native.database_bfs_traversal(self._handle, int(node_id), int(max_depth), options)
+        return _wrap_native_call(
+            _native.database_bfs_traversal, self._handle, int(node_id), int(max_depth), options
+        )
 
     def with_schema(self, schema: Optional[Mapping[str, Mapping[str, Any]]]) -> "Database":
         self._assert_open()
@@ -1213,7 +1255,7 @@ class Database:
 
     def get_node_record(self, node_id: int) -> Optional[Dict[str, Any]]:
         self._assert_open()
-        record = _native.database_get_node(self._handle, int(node_id))
+        record = _wrap_native_call(_native.database_get_node, self._handle, int(node_id))
         if record is None:
             return None
         if not isinstance(record, dict):
@@ -1222,7 +1264,7 @@ class Database:
 
     def get_edge_record(self, edge_id: int) -> Optional[Dict[str, Any]]:
         self._assert_open()
-        record = _native.database_get_edge(self._handle, int(edge_id))
+        record = _wrap_native_call(_native.database_get_edge, self._handle, int(edge_id))
         if record is None:
             return None
         if not isinstance(record, dict):
@@ -1233,19 +1275,19 @@ class Database:
         self._assert_open()
         if not isinstance(label, str) or not label.strip():
             raise ValueError("count_nodes_with_label requires a non-empty string label")
-        return int(_native.database_count_nodes_with_label(self._handle, label))
+        return int(_wrap_native_call(_native.database_count_nodes_with_label, self._handle, label))
 
     def count_edges_with_type(self, edge_type: str) -> int:
         self._assert_open()
         if not isinstance(edge_type, str) or not edge_type.strip():
             raise ValueError("count_edges_with_type requires a non-empty edge type string")
-        return int(_native.database_count_edges_with_type(self._handle, edge_type))
+        return int(_wrap_native_call(_native.database_count_edges_with_type, self._handle, edge_type))
 
     def list_nodes_with_label(self, label: str) -> List[int]:
         self._assert_open()
         if not isinstance(label, str) or not label.strip():
             raise ValueError("list_nodes_with_label requires a non-empty string label")
-        values = _native.database_list_nodes_with_label(self._handle, label)
+        values = _wrap_native_call(_native.database_list_nodes_with_label, self._handle, label)
         return [int(value) for value in values]
 
     def create_node(
@@ -1317,17 +1359,17 @@ class Database:
 
     def _execute(self, spec: Dict[str, Any]) -> Dict[str, Any]:
         self._assert_open()
-        payload = _native.database_execute(self._handle, spec)
+        payload = _wrap_native_call(_native.database_execute, self._handle, spec)
         return _normalize_envelope(payload)
 
     def _explain(self, spec: Dict[str, Any]) -> Dict[str, Any]:
         self._assert_open()
-        payload = _native.database_explain(self._handle, spec)
+        payload = _wrap_native_call(_native.database_explain, self._handle, spec)
         return _normalize_envelope(payload, expect_plan=True)
 
     def _stream(self, spec: Dict[str, Any]) -> _native.StreamHandle:
         self._assert_open()
-        return _native.database_stream(self._handle, spec)
+        return _wrap_native_call(_native.database_stream, self._handle, spec)
 
 
 def open_database(path: str, **options: Any) -> Database:
@@ -1627,17 +1669,3 @@ def _datetime_to_ns(value: datetime) -> int:
     total_seconds = delta.days * 86_400 + delta.seconds
     nanos = total_seconds * _NANOS_PER_SECOND + delta.microseconds * 1_000
     return nanos
-class QueryResult(dict):
-    """Envelope returned by execute/explain with helper accessors."""
-
-    def rows(self) -> List[Dict[str, Any]]:
-        rows = self.get("rows") or []
-        if not isinstance(rows, list):
-            raise TypeError("expected 'rows' to be a list")
-        return rows
-
-    def request_id(self) -> Optional[str]:
-        rid = self.get("request_id")
-        if rid is not None and not isinstance(rid, str):
-            raise TypeError("request_id must be a string when present")
-        return rid

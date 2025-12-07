@@ -2,11 +2,12 @@ import asyncio
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
 from sombra import Database
+import sombra.query as query
 from sombra.query import (
     _literal_value,
     eq,
@@ -74,6 +75,21 @@ def test_stream_iterates_results() -> None:
     assert all("n0" in row and isinstance(row["n0"], dict) for row in rows)
 
 
+def test_stream_close_stops_iteration() -> None:
+    db = Database.open(temp_db_path())
+    db.seed_demo()
+
+    async def run() -> None:
+        stream = db.query().nodes("User").stream()
+        first = await stream.__anext__()
+        assert "n0" in first
+        stream.close()
+        with pytest.raises(StopAsyncIteration):
+            await stream.__anext__()
+
+    asyncio.run(run())
+
+
 def test_explain_plan_shape() -> None:
     db = Database.open(temp_db_path())
     db.seed_demo()
@@ -124,6 +140,26 @@ def test_mutate_batched_chunks_ops() -> None:
     summary = db.mutate_batched(ops, batch_size=2)
     created = summary.get("createdNodes") or []
     assert len(created) == 3
+
+
+def test_parallel_read_and_write_share_single_handle() -> None:
+    db = Database.open(temp_db_path())
+    db.seed_demo()
+
+    async def run() -> tuple[list[dict[str, Any]], Optional[int]]:
+        async def do_read() -> list[dict[str, Any]]:
+            await asyncio.sleep(0)
+            return db.query().nodes("User").execute()
+
+        async def do_write() -> Optional[int]:
+            await asyncio.sleep(0)
+            return db.create_node("User", {"name": "Concurrent"})
+
+        return await asyncio.gather(do_read(), do_write())
+
+    rows, new_id = asyncio.run(run())
+    assert isinstance(rows, list)
+    assert new_id is None or isinstance(new_id, int)
 
 
 def test_create_builder_handle_refs() -> None:
@@ -294,6 +330,31 @@ def test_context_manager_closes_on_exception() -> None:
         pass
     assert db is not None
     assert db.is_closed is True
+
+
+def test_native_errors_are_wrapped(monkeypatch: Any) -> None:
+    db = Database.open(temp_db_path())
+
+    def boom_execute(handle: Any, spec: Any) -> Any:
+        raise RuntimeError("[IO] boom")
+
+    monkeypatch.setattr(query._native, "database_execute", boom_execute)
+    with pytest.raises(IoError):
+        db.query().nodes("User").execute()
+
+    def boom_mutate(handle: Any, script: Any) -> Any:
+        raise RuntimeError("[CONFLICT] nope")
+
+    monkeypatch.setattr(query._native, "database_mutate", boom_mutate)
+    with pytest.raises(ConflictError):
+        db.create_node("User", {"name": "x"})
+
+    def boom_stream(handle: Any, spec: Any) -> Any:
+        raise RuntimeError("[CORRUPTION] broken")
+
+    monkeypatch.setattr(query._native, "database_stream", boom_stream)
+    with pytest.raises(CorruptionError):
+        db.query().nodes("User").stream()
 
 
 # ============================================================================
