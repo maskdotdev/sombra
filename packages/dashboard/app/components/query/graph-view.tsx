@@ -4,6 +4,7 @@ import { ActivityIcon, Maximize2Icon, Share2Icon, XIcon } from "lucide-react"
 import { GraphCanvas, type GraphCanvasProps } from "./graph-canvas"
 import { deriveNodeLabel, isGraphEntity } from "./graph-types"
 import type { GraphEdgeDatum, GraphEntity, GraphNodeDatum } from "./graph-types"
+import { PropertyValue } from "./property-value"
 import { Badge } from "../ui/badge"
 import { Button } from "../ui/button"
 import {
@@ -292,43 +293,205 @@ function NodeDetails({ node }: { node: GraphNodeDatum | null }) {
   }
 
   const entries = Object.entries(node.props)
+  
+  // Categorize properties for better display
+  const identityProps: [string, unknown][] = []
+  const locationProps: [string, unknown][] = []
+  const codeProps: [string, unknown][] = []
+  const metadataProps: [string, unknown][] = []
+  const otherProps: [string, unknown][] = []
+  
+  const identityKeys = ['name', 'id', 'kind', 'type', 'visibility', 'language']
+  const locationKeys = ['filePath', 'path', 'file', 'startLine', 'endLine', 'start_line', 'end_line', 'line', 'column']
+  const codeKeys = ['codeText', 'code', 'source', 'sourceCode', 'content', 'body', 'snippet']
+  const metadataKeys = ['metadata', 'props', 'attributes', 'data']
+  
+  for (const [key, value] of entries) {
+    const lowerKey = key.toLowerCase()
+    if (identityKeys.some(k => lowerKey === k.toLowerCase())) {
+      identityProps.push([key, value])
+    } else if (locationKeys.some(k => lowerKey === k.toLowerCase())) {
+      locationProps.push([key, value])
+    } else if (codeKeys.some(k => lowerKey.includes(k.toLowerCase()))) {
+      codeProps.push([key, value])
+    } else if (metadataKeys.some(k => lowerKey === k.toLowerCase())) {
+      metadataProps.push([key, value])
+    } else {
+      otherProps.push([key, value])
+    }
+  }
+
+  // Extract key info for header
+  const name = node.props.name as string | undefined
+  const filePath = node.props.filePath as string | undefined
+  const startLine = node.props.startLine as number | undefined
+  const endLine = node.props.endLine as number | undefined
+  const language = node.props.language as string | undefined
 
   return (
-    <div className="border rounded-xl bg-muted/10 p-4 text-sm space-y-3 h-full">
-      <div>
-        <p className="text-xs uppercase tracking-wide text-muted-foreground">Node</p>
-        <p className="text-lg font-semibold leading-tight">{node.label}</p>
-        <p className="text-muted-foreground text-xs">id {node.id}</p>
-      </div>
-      {node.labels.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {node.labels.map((label) => (
-            <Badge key={label} variant="outline">
-              {label}
+    <div className="border rounded-xl bg-muted/10 text-sm h-full overflow-auto max-h-[600px]">
+      {/* Header section */}
+      <div className="p-4 border-b bg-muted/20">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-lg font-semibold leading-tight truncate" title={node.label}>
+              {name || node.label}
+            </p>
+            <p className="text-muted-foreground text-xs">ID: {node.id}</p>
+          </div>
+          {language && (
+            <Badge variant="secondary" className="text-[0.6rem] uppercase shrink-0">
+              {language}
             </Badge>
-          ))}
+          )}
         </div>
-      )}
-      {entries.length === 0 ? (
-        <p className="text-muted-foreground">No properties returned for this node.</p>
-      ) : (
-        <div className="space-y-2">
-          {entries.map(([key, value]) => (
-            <div key={key}>
-              <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">{key}</p>
-              <p className="font-mono text-xs break-words">
-                {typeof value === "string" ||
-                typeof value === "number" ||
-                typeof value === "boolean"
-                  ? String(value)
-                  : JSON.stringify(value)}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
+        
+        {/* Labels */}
+        {node.labels.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {node.labels.map((label) => (
+              <Badge key={label} variant="outline" className="text-xs">
+                {label}
+              </Badge>
+            ))}
+          </div>
+        )}
+        
+        {/* File location */}
+        {filePath && (
+          <div className="mt-2 text-xs text-muted-foreground font-mono truncate" title={filePath}>
+            {shortenPath(filePath)}
+            {startLine && (
+              <span className="text-foreground/70">
+                :{startLine}{endLine && endLine !== startLine ? `-${endLine}` : ''}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+      
+      {/* Properties sections */}
+      <div className="p-4 space-y-4">
+        {entries.length === 0 ? (
+          <p className="text-muted-foreground">No properties returned for this node.</p>
+        ) : (
+          <>
+            {/* Code section - prioritized */}
+            {codeProps.length > 0 && (
+              <PropertySection title="Code">
+                {codeProps.map(([key, value]) => (
+                  <PropertyItem key={key} propKey={key} value={value} />
+                ))}
+              </PropertySection>
+            )}
+            
+            {/* Identity properties */}
+            {identityProps.length > 0 && (
+              <PropertySection title="Details">
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                  {identityProps.map(([key, value]) => (
+                    <PropertyItemCompact key={key} propKey={key} value={value} />
+                  ))}
+                </div>
+              </PropertySection>
+            )}
+            
+            {/* Location properties (if not shown in header) */}
+            {locationProps.filter(([k]) => !['filePath', 'startLine', 'endLine'].includes(k)).length > 0 && (
+              <PropertySection title="Location">
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                  {locationProps
+                    .filter(([k]) => !['filePath', 'startLine', 'endLine'].includes(k))
+                    .map(([key, value]) => (
+                      <PropertyItemCompact key={key} propKey={key} value={value} />
+                    ))}
+                </div>
+              </PropertySection>
+            )}
+            
+            {/* Metadata section */}
+            {metadataProps.length > 0 && (
+              <PropertySection title="Metadata">
+                {metadataProps.map(([key, value]) => (
+                  <PropertyItem key={key} propKey={key} value={value} />
+                ))}
+              </PropertySection>
+            )}
+            
+            {/* Other properties */}
+            {otherProps.length > 0 && (
+              <PropertySection title="Other Properties">
+                {otherProps.map(([key, value]) => (
+                  <PropertyItem key={key} propKey={key} value={value} />
+                ))}
+              </PropertySection>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
+}
+
+function PropertySection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground font-medium border-b border-border/50 pb-1">
+        {title}
+      </p>
+      {children}
+    </div>
+  )
+}
+
+function PropertyItem({ propKey, value }: { propKey: string; value: unknown }) {
+  return (
+    <div>
+      <p className="text-[0.65rem] uppercase tracking-wide text-muted-foreground mb-1">{formatPropKey(propKey)}</p>
+      <PropertyValue value={value} propertyKey={propKey} />
+    </div>
+  )
+}
+
+function PropertyItemCompact({ propKey, value }: { propKey: string; value: unknown }) {
+  // For simple values, show inline
+  if (value === null || value === undefined) {
+    return (
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[0.65rem] text-muted-foreground">{formatPropKey(propKey)}:</span>
+        <span className="text-xs italic text-muted-foreground">null</span>
+      </div>
+    )
+  }
+  
+  if (typeof value === 'boolean' || typeof value === 'number' || (typeof value === 'string' && value.length < 50)) {
+    return (
+      <div className="flex items-baseline gap-1.5 min-w-0">
+        <span className="text-[0.65rem] text-muted-foreground shrink-0">{formatPropKey(propKey)}:</span>
+        <span className="text-xs font-mono truncate" title={String(value)}>
+          {typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)}
+        </span>
+      </div>
+    )
+  }
+  
+  // For complex values, use full PropertyItem
+  return <PropertyItem propKey={propKey} value={value} />
+}
+
+function formatPropKey(key: string): string {
+  // Convert camelCase to Title Case with spaces
+  return key
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^./, str => str.toUpperCase())
+    .trim()
+}
+
+function shortenPath(path: string): string {
+  // Show last 3 path segments
+  const parts = path.split('/')
+  if (parts.length <= 4) return path
+  return '.../' + parts.slice(-3).join('/')
 }
 
 function Field({
