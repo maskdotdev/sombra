@@ -155,3 +155,89 @@ fn randomized_graph_stress_and_recovery() -> Result<()> {
 
     Ok(())
 }
+
+/// Regression test for cumulative write buffer exhaustion bug.
+///
+/// With a small page cache and disabled autocheckpoint, repeated writes would
+/// eventually fail with "no eviction candidate available" when the accumulated
+/// WAL data exceeded a threshold (~35KB in the original report).
+///
+/// The root cause was that without checkpointing, overlays and version chains
+/// accumulated indefinitely, and certain B-tree split patterns could temporarily
+/// pin multiple frames during a single operation.
+#[test]
+fn small_cache_cumulative_writes_no_checkpoint() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("small_cache.db");
+
+    // Create pager with small cache and disabled autocheckpoint.
+    // 8 pages @ 8KB = 64KB cache, which should exercise the eviction logic
+    // while still being large enough for basic B-tree operations.
+    let options = PagerOptions {
+        page_size: 8192,
+        cache_pages: 8,
+        autocheckpoint_pages: usize::MAX,
+        ..PagerOptions::default()
+    };
+    let pager = Arc::new(Pager::create(&path, options)?);
+    let store: Arc<dyn PageStore> = pager.clone();
+    let graph = Graph::open(GraphOptions::new(store))?;
+
+    // Write all nodes in a SINGLE transaction
+    let target_count = 512u64;
+    let mut write = pager.begin_write()?;
+    for i in 0..target_count {
+        let _node = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[LabelId(1)],
+                props: &[
+                    PropEntry::new(PropId(1), PropValue::Int(i as i64)),
+                    PropEntry::new(PropId(2), PropValue::Str(&format!("node_{}", i))),
+                ],
+            },
+        )?;
+    }
+    pager.commit(write)?;
+
+    // Verify we can still read back - just do a quick sanity check.
+    let read = pager.begin_read()?;
+    
+    // First check: directly get each node by ID
+    let mut found_by_id = 0u64;
+    for i in 1..=target_count {
+        if graph.get_node(&read, NodeId(i))?.is_some() {
+            found_by_id += 1;
+        }
+    }
+    assert_eq!(found_by_id, target_count, "get_node should find all nodes");
+    
+    // Second check: scan_all_nodes should return all nodes
+    let all_scanned = graph.scan_all_nodes(&read)?;
+    assert_eq!(
+        all_scanned.len() as u64, target_count,
+        "scan_all_nodes should return all nodes"
+    );
+    
+    // Third check: nodes_with_label should return all nodes (they all have LabelId(1))
+    let label_nodes = graph.nodes_with_label(&read, LabelId(1))?;
+    assert_eq!(
+        label_nodes.len() as u64, target_count,
+        "nodes_with_label should return all nodes with label 1"
+    );
+    
+    // Fourth check: count_nodes_with_label should match
+    let label_count = graph.count_nodes_with_label(&read, LabelId(1))?;
+    assert_eq!(
+        label_count, target_count,
+        "count_nodes_with_label should return the correct count"
+    );
+
+    // Drop the read guard before checkpoint (checkpoint waits for readers)
+    drop(read);
+    
+    // Checkpoint should still work after all these writes.
+    pager.checkpoint(CheckpointMode::Force)?;
+
+    Ok(())
+}
