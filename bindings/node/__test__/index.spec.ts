@@ -305,6 +305,135 @@ test('create builder execute throws on closed database', (t) => {
 })
 
 // ============================================================================
+// Persistence Tests
+// ============================================================================
+
+test('data persists after explicit close() and reopen', async (t) => {
+  const dbPath = tempPath()
+
+  // Create database, seed data, verify it exists
+  const db1 = Database.open(dbPath)
+  db1.seedDemo()
+
+  const beforeClose = await db1.query().nodes('User').execute()
+  t.is(beforeClose.length, 3, 'should have 3 users before close')
+
+  // Explicitly close the database
+  db1.close()
+
+  // Reopen and verify data persisted
+  const db2 = Database.open(dbPath, { createIfMissing: false })
+
+  const afterReopen = await db2.query().nodes('User').execute()
+  t.is(afterReopen.length, 3, 'should still have 3 users after reopen')
+
+  db2.close()
+})
+
+test('node properties persist after close and reopen', async (t) => {
+  const dbPath = tempPath()
+
+  // Create database with custom data
+  const db1 = Database.open(dbPath)
+  db1.seedDemo()
+
+  // Get original names
+  const originalRows = await db1.query().nodes('User').execute()
+  const originalNames = originalRows.map((r: { n0?: { props?: { name?: string } } }) =>
+    r.n0?.props?.name
+  ).sort()
+
+  db1.close()
+
+  // Reopen and verify properties
+  const db2 = Database.open(dbPath, { createIfMissing: false })
+  const reopenedRows = await db2.query().nodes('User').execute()
+  const reopenedNames = reopenedRows.map((r: { n0?: { props?: { name?: string } } }) =>
+    r.n0?.props?.name
+  ).sort()
+
+  t.deepEqual(reopenedNames, originalNames, 'property values should match after reopen')
+  t.true(reopenedNames.includes('Ada'))
+  t.true(reopenedNames.includes('Grace'))
+  t.true(reopenedNames.includes('Alan'))
+
+  db2.close()
+})
+
+test('edges persist after close and reopen', async (t) => {
+  const dbPath = tempPath()
+
+  // Create database with edges
+  const db1 = Database.open(dbPath)
+  db1.seedDemo()
+
+  const edgesBefore = await db1.query()
+    .match('User')
+    .where('FOLLOWS', 'User')
+    .select(['n0', 'n1'])
+    .execute()
+  t.true(edgesBefore.length > 0, 'should have edges before close')
+
+  db1.close()
+
+  // Reopen and verify edges
+  const db2 = Database.open(dbPath, { createIfMissing: false })
+  const edgesAfter = await db2.query()
+    .match('User')
+    .where('FOLLOWS', 'User')
+    .select(['n0', 'n1'])
+    .execute()
+
+  t.is(edgesAfter.length, edgesBefore.length, 'edge count should match after reopen')
+
+  db2.close()
+})
+
+test('multiple close/reopen cycles preserve data', async (t) => {
+  const dbPath = tempPath()
+
+  // First session - create data
+  const db1 = Database.open(dbPath)
+  db1.seedDemo()
+  const count1 = (await db1.query().nodes('User').execute()).length
+  t.is(count1, 3)
+  db1.close()
+
+  // Second session - verify and close
+  const db2 = Database.open(dbPath, { createIfMissing: false })
+  const count2 = (await db2.query().nodes('User').execute()).length
+  t.is(count2, 3, 'data should persist after first reopen')
+  db2.close()
+
+  // Third session - verify again
+  const db3 = Database.open(dbPath, { createIfMissing: false })
+  const count3 = (await db3.query().nodes('User').execute()).length
+  t.is(count3, 3, 'data should persist after second reopen')
+  db3.close()
+})
+
+test('custom created nodes persist after close', async (t) => {
+  const dbPath = tempPath()
+
+  // Create database and add custom nodes
+  const db1 = Database.open(dbPath)
+  const result = db1.create()
+    .node('Person', { name: 'John', age: 30 })
+    .node('Person', { name: 'Jane', age: 25 })
+    .execute()
+
+  t.is(result.nodes.length, 2, 'should create 2 nodes')
+  db1.close()
+
+  // Reopen and verify
+  const db2 = Database.open(dbPath, { createIfMissing: false })
+  const persons = await db2.query().nodes('Person').execute()
+  t.is(persons.length, 2, 'custom nodes should persist after reopen')
+
+  db2.close()
+})
+
+// ============================================================================
 // Error Code Tests
 // ============================================================================
 

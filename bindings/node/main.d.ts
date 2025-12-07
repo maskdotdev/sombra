@@ -178,7 +178,12 @@ export interface PredicateBetweenOptions {
   inclusive?: [boolean, boolean]
 }
 
-export type QueryStream<T = Record<string, any>> = AsyncIterable<T>
+export interface QueryStream<T = Record<string, any>> extends AsyncIterable<T> {
+  close(): void
+  return?(value?: unknown): Promise<IteratorResult<T>>
+  [Symbol.dispose]?(): void
+  [Symbol.asyncDispose]?(): Promise<void>
+}
 export interface QueryResultMeta<Row = Record<string, any>> {
   rows: Array<Row>
   request_id: string | null
@@ -438,6 +443,8 @@ export class Database<S extends NodeSchema = DefaultSchema> {
    * Calling close() multiple times is safe (subsequent calls are no-ops).
    */
   close(): void
+  [Symbol.dispose]?(): void
+  [Symbol.asyncDispose]?(): Promise<void>
   
   /**
    * Returns true if the database has been closed.
@@ -477,3 +484,6 @@ export class Database<S extends NodeSchema = DefaultSchema> {
 export function openDatabase<S extends NodeSchema = DefaultSchema>(path: string, options?: ConnectOptions | null): Database<S>
 
 export const native: typeof import('./index.js')
+
+// Typed facade (higher-level, schema-aware API)
+export { SombraDB } from './typed'

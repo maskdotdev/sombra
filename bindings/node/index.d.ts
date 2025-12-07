@@ -6,6 +6,7 @@ export declare class DatabaseHandle {
 
 export declare class StreamHandle {
   next(): NapiResult<any | undefined | null>
+  close(): NapiResult<undefined>
 }
 
 export interface BfsTraversalOptions {

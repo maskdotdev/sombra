@@ -211,6 +211,14 @@ function wrapNativeError(err) {
   return new SombraError(message, ErrorCode.UNKNOWN)
 }
 
+function callNative(fn, ...args) {
+  try {
+    return fn(...args)
+  } catch (err) {
+    throw wrapNativeError(err)
+  }
+}
+
 function autoVarName(idx) {
   return `n${idx}`
 }
@@ -662,6 +670,7 @@ class MutationBatch {
 class QueryStream {
   constructor(handle) {
     this._handle = handle
+    this._closed = false
   }
 
   [Symbol.asyncIterator]() {
@@ -669,11 +678,30 @@ class QueryStream {
   }
 
   async next() {
-    const value = this._handle.next()
+    if (this._closed) {
+      return { done: true, value: undefined }
+    }
+    const value = callNative(this._handle.next.bind(this._handle))
     if (value === undefined || value === null) {
+      this.close()
       return { done: true, value: undefined }
     }
     return { done: false, value }
+  }
+
+  async return() {
+    this.close()
+    return { done: true, value: undefined }
+  }
+
+  close() {
+    if (this._closed) {
+      return
+    }
+    this._closed = true
+    if (typeof this._handle.close === 'function') {
+      callNative(this._handle.close.bind(this._handle))
+    }
   }
 }
 
@@ -1533,7 +1561,7 @@ class CreateBuilder {
         props: cloneSpec(edge.props),
       })),
     }
-    const summary = native.databaseCreate(this._db._handle, script)
+    const summary = callNative(native.databaseCreate, this._db._handle, script)
     return createSummaryWithAliasHelper(summary)
   }
 
@@ -1669,7 +1697,7 @@ class Database {
       schema = schemaValue ?? null
       connectOptions = Object.keys(rest).length > 0 ? rest : undefined
     }
-    const handle = native.openDatabase(path, connectOptions ?? undefined)
+    const handle = callNative(native.openDatabase, path, connectOptions ?? undefined)
     return new Database(handle, schema)
   }
 
@@ -1683,8 +1711,8 @@ class Database {
     if (this._closed) {
       return
     }
+    callNative(native.databaseClose, this._handle)
     this._closed = true
-    native.databaseClose(this._handle)
   }
 
   /**
@@ -1719,12 +1747,12 @@ class Database {
 
   intern(name) {
     this._assertOpen()
-    return native.databaseIntern(this._handle, name)
+    return callNative(native.databaseIntern, this._handle, name)
   }
 
   seedDemo() {
     this._assertOpen()
-    native.databaseSeedDemo(this._handle)
+    callNative(native.databaseSeedDemo, this._handle)
     return this
   }
 
@@ -1736,7 +1764,7 @@ class Database {
     if (!Array.isArray(script.ops)) {
       throw new TypeError('mutation script requires an ops array')
     }
-    return native.databaseMutate(this._handle, script)
+    return callNative(native.databaseMutate, this._handle, script)
   }
 
   createNode(labels, props = {}) {
@@ -1815,9 +1843,9 @@ class Database {
       throw new TypeError('pragma name must be a string')
     }
     if (arguments.length < 2) {
-      return native.databasePragmaGet(this._handle, name)
+      return callNative(native.databasePragmaGet, this._handle, name)
     }
-    return native.databasePragmaSet(this._handle, name, value)
+    return callNative(native.databasePragmaSet, this._handle, name, value)
   }
 
   cancelRequest(requestId) {
@@ -1825,20 +1853,20 @@ class Database {
     if (typeof requestId !== 'string' || requestId.trim() === '') {
       throw new TypeError('cancelRequest requires a non-empty request id string')
     }
-    return native.databaseCancelRequest(this._handle, requestId)
+    return callNative(native.databaseCancelRequest, this._handle, requestId)
   }
 
   getNodeRecord(nodeId) {
     this._assertOpen()
     const id = assertNodeId(nodeId, 'getNodeRecord')
-    const record = native.databaseGetNode(this._handle, id)
+    const record = callNative(native.databaseGetNode, this._handle, id)
     return record ?? null
   }
 
   getEdgeRecord(edgeId) {
     this._assertOpen()
     const id = assertEdgeId(edgeId, 'getEdgeRecord')
-    const record = native.databaseGetEdge(this._handle, id)
+    const record = callNative(native.databaseGetEdge, this._handle, id)
     return record ?? null
   }
 
@@ -1846,7 +1874,7 @@ class Database {
     this._assertOpen()
     const normalized = assertLabel(label, 'countNodesWithLabel')
     if (typeof native.databaseCountNodesWithLabel === 'function') {
-      return native.databaseCountNodesWithLabel(this._handle, normalized)
+      return callNative(native.databaseCountNodesWithLabel, this._handle, normalized)
     }
     return this.listNodesWithLabel(normalized).length
   }
@@ -1855,7 +1883,7 @@ class Database {
     this._assertOpen()
     const normalized = assertEdgeType(edgeType, 'countEdgesWithType')
     if (typeof native.databaseCountEdgesWithType === 'function') {
-      return native.databaseCountEdgesWithType(this._handle, normalized)
+      return callNative(native.databaseCountEdgesWithType, this._handle, normalized)
     }
     return this._countEdgesWithTypeFallback(normalized)
   }
@@ -1865,7 +1893,7 @@ class Database {
     const normalized = assertLabel(label, 'listNodesWithLabel')
     if (typeof native.databaseListNodesWithLabel === 'function') {
       return normalizeIdList(
-        native.databaseListNodesWithLabel(this._handle, normalized),
+        callNative(native.databaseListNodesWithLabel, this._handle, normalized),
         'listNodesWithLabel result',
       )
     }
@@ -1878,7 +1906,7 @@ class Database {
     if (options !== undefined && (options === null || typeof options !== 'object')) {
       throw new TypeError('neighbors() options must be an object when provided')
     }
-    return native.databaseNeighbors(this._handle, id, options ?? undefined)
+    return callNative(native.databaseNeighbors, this._handle, id, options ?? undefined)
   }
 
   getOutgoingNeighbors(nodeId, edgeType, distinct = true) {
@@ -1920,23 +1948,23 @@ class Database {
     if (options !== undefined && (options === null || typeof options !== 'object')) {
       throw new TypeError('bfsTraversal options must be an object when provided')
     }
-    return native.databaseBfsTraversal(this._handle, id, maxDepth, options ?? undefined)
+    return callNative(native.databaseBfsTraversal, this._handle, id, maxDepth, options ?? undefined)
   }
 
   _execute(spec) {
     this._assertOpen()
-    return native.databaseExecute(this._handle, spec)
+    return callNative(native.databaseExecute, this._handle, spec)
   }
 
   _explain(spec) {
     this._assertOpen()
-    const payload = native.databaseExplain(this._handle, spec)
+    const payload = callNative(native.databaseExplain, this._handle, spec)
     return normalizeExplainPayload(payload)
   }
 
   _stream(spec) {
     this._assertOpen()
-    return native.databaseStream(this._handle, spec)
+    return callNative(native.databaseStream, this._handle, spec)
   }
 
   _listNodesWithLabelFallback(label) {
@@ -1964,6 +1992,24 @@ class Database {
     const payload = this._execute(builder._build())
     const rows = Array.isArray(payload?.rows) ? payload.rows : []
     return rows.length
+  }
+}
+
+if (typeof Symbol.dispose === 'symbol') {
+  Database.prototype[Symbol.dispose] = function disposeDatabase() {
+    this.close()
+  }
+  QueryStream.prototype[Symbol.dispose] = function disposeStream() {
+    this.close()
+  }
+}
+
+if (typeof Symbol.asyncDispose === 'symbol') {
+  Database.prototype[Symbol.asyncDispose] = async function asyncDisposeDatabase() {
+    this.close()
+  }
+  QueryStream.prototype[Symbol.asyncDispose] = async function asyncDisposeStream() {
+    this.close()
   }
 }
 
@@ -2012,6 +2058,14 @@ module.exports = {
   // Error utilities
   wrapNativeError,
 }
+
+// Lazy getter to expose the typed facade without creating a hard circular dependency.
+Object.defineProperty(module.exports, 'SombraDB', {
+  enumerable: true,
+  get() {
+    return require('./typed.js').SombraDB
+  },
+})
 
 function assertNodeId(nodeId, ctx) {
   if (typeof nodeId !== 'number' || !Number.isInteger(nodeId) || nodeId < 0) {
