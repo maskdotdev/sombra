@@ -1,7 +1,7 @@
-import { type ComponentType, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { useLoaderData } from "react-router";
-import { ChevronDownIcon } from "lucide-react";
+import { type ComponentProps, type ComponentType, type FormEvent, useCallback, useEffect, useState } from "react";
 import { GraphView } from "../components/query/graph-view";
+import type { GraphCanvasProps } from "../components/query/graph-canvas";
+import { QueryBuilder } from "../components/query/query-builder";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -12,23 +12,25 @@ import {
     CardHeader,
     CardTitle,
 } from "../components/ui/card";
-import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Slider } from "../components/ui/slider";
 import { Textarea } from "../components/ui/textarea";
-import { ensureLabelIndexes, executeQuery, fetchLabelSamples } from "../lib/api";
-import { createAutoGraphSpec, DEMO_FOLLOWS_QUERY } from "../lib/query-presets";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
+import { executeQuery, fetchFullGraph, type FullGraphResponse } from "../lib/api";
+import { DEMO_FOLLOWS_QUERY } from "../lib/query-presets";
 import { extractRows, type QueryRow } from "../lib/query-utils";
+
+type GraphViewProps = Omit<ComponentProps<typeof GraphView>, "GraphRenderer">;
+type GraphRendererComponent = ComponentType<GraphCanvasProps>;
 
 const INITIAL_ROW_LIMIT = 250;
 const MIN_ROW_LIMIT = 25;
 const MAX_ROW_LIMIT = 1_000;
 
-type GraphRendererComponent = ComponentType<{ rows: QueryRow[] }>;
+type GraphComponentType = ComponentType<{ rows: QueryRow[] }>;
 
 type GraphExplorerPageProps = {
-    GraphComponent?: GraphRendererComponent;
+    GraphComponent?: GraphComponentType;
 };
 
 type QueryRunMetadata = {
@@ -36,12 +38,51 @@ type QueryRunMetadata = {
     truncated: boolean;
     rowCount: number;
     executedAt: string;
-    mode: "auto" | "manual";
 };
 
-export async function loader() {
-    const labels = await fetchLabelSamples();
-    return { labels };
+/**
+ * GraphView wrapper that loads reagraph as the default renderer.
+ * Falls back to a placeholder while loading.
+ */
+function GraphViewWithReagraph(props: GraphViewProps) {
+    const [GraphRenderer, setGraphRenderer] = useState<GraphRendererComponent | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        void import("../components/query/reagraph-canvas")
+            .then((module) => {
+                if (!cancelled) {
+                    setGraphRenderer(() => module.ReagraphCanvas);
+                }
+            })
+            .catch((error) => {
+                console.error("Failed to load Reagraph renderer", error);
+                if (!cancelled) {
+                    setLoadError(error instanceof Error ? error.message : String(error));
+                }
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const ActiveRenderer: GraphRendererComponent =
+        GraphRenderer ??
+        (({ height = 540 }) => (
+            <div
+                className="flex h-full w-full items-center justify-center rounded-2xl border bg-muted/30 text-sm text-muted-foreground"
+                style={{ height }}
+            >
+                {loadError ? (
+                    <span>Failed to load graph renderer. Please refresh.</span>
+                ) : (
+                    <span>Loading graph renderer…</span>
+                )}
+            </div>
+        ));
+
+    return <GraphView {...props} GraphRenderer={ActiveRenderer} />;
 }
 
 export function meta() {
@@ -49,49 +90,64 @@ export function meta() {
         { title: "Graph Explorer · Sombra" },
         {
             name: "description",
-            content: "Visualize database rows as a graph without overwhelming the browser.",
+            content: "Visualize database rows as a WebGL-powered graph without overwhelming the browser.",
         },
     ];
 }
 
 export default function GraphExplorer() {
-    return <GraphExplorerPage />;
+    return <GraphExplorerPage GraphComponent={GraphViewWithReagraph} />;
 }
 
-export function GraphExplorerPage({ GraphComponent = GraphView }: GraphExplorerPageProps) {
-    const { labels: knownLabels } = useLoaderData<typeof loader>();
-    const defaultLabel = knownLabels[0]?.name ?? "";
-    const hasLabels = knownLabels.length > 0;
-    const labelSuggestions = useMemo(() => knownLabels.slice(0, 6), [knownLabels]);
-    const [hasBootstrapped, setBootstrapped] = useState(false);
-    const [manualPayload, setManualPayload] = useState(() => JSON.stringify(DEMO_FOLLOWS_QUERY, null, 2));
+export function GraphExplorerPage({ GraphComponent = GraphViewWithReagraph }: GraphExplorerPageProps) {
+    const [queryMode, setQueryMode] = useState<"visual" | "json">("visual");
+    const [queryPayload, setQueryPayload] = useState(() => JSON.stringify(DEMO_FOLLOWS_QUERY, null, 2));
+    const [builderQuery, setBuilderQuery] = useState<unknown>(null);
     const [rowLimit, setRowLimit] = useState(INITIAL_ROW_LIMIT);
     const [rows, setRows] = useState<QueryRow[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [lastRun, setLastRun] = useState<QueryRunMetadata | null>(null);
-    const [activeMode, setActiveMode] = useState<"auto" | "manual">("auto");
-    const [autoFilters, setAutoFilters] = useState({
-        sourceLabel: defaultLabel,
-        targetLabel: defaultLabel,
-        edgeType: "",
-        direction: "out" as "out" | "in" | "both",
-    });
+    const [fullGraph, setFullGraph] = useState<FullGraphResponse | null>(null);
+    const [isLoadingFullGraph, setIsLoadingFullGraph] = useState(true);
 
+    // Load full graph on mount
     useEffect(() => {
-        if (!defaultLabel) {
-            return;
-        }
-        setAutoFilters((prev) => {
-            if (prev.sourceLabel || prev.targetLabel) {
-                return prev;
-            }
-            return { ...prev, sourceLabel: defaultLabel, targetLabel: defaultLabel };
-        });
-    }, [defaultLabel]);
+        let cancelled = false;
+        setIsLoadingFullGraph(true);
+        fetchFullGraph()
+            .then((data) => {
+                if (!cancelled) {
+                    setFullGraph(data);
+                    // Convert to rows format for GraphView compatibility
+                    const graphRows = convertFullGraphToRows(data);
+                    setRows(graphRows);
+                    setLastRun({
+                        limit: graphRows.length,
+                        truncated: false,
+                        rowCount: graphRows.length,
+                        executedAt: new Date().toISOString(),
+                    });
+                }
+            })
+            .catch((err) => {
+                if (!cancelled) {
+                    console.error("Failed to load full graph:", err);
+                    setError(err instanceof Error ? err.message : String(err));
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setIsLoadingFullGraph(false);
+                }
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const fetchGraph = useCallback(
-        async (spec: unknown, mode: "auto" | "manual") => {
+        async (spec: unknown) => {
             setIsLoading(true);
             setError(null);
             try {
@@ -99,13 +155,11 @@ export function GraphExplorerPage({ GraphComponent = GraphView }: GraphExplorerP
                 const parsedRows = extractRows(response) ?? [];
                 const metadata = parseLimitMetadata(response);
                 setRows(parsedRows);
-                setActiveMode(mode);
                 setLastRun({
                     limit: metadata.limit ?? rowLimit,
                     truncated: metadata.truncated,
                     rowCount: parsedRows.length,
                     executedAt: new Date().toISOString(),
-                    mode,
                 });
             } catch (err) {
                 setRows([]);
@@ -118,65 +172,40 @@ export function GraphExplorerPage({ GraphComponent = GraphView }: GraphExplorerP
         [rowLimit],
     );
 
-    const autoSpec = useMemo(() => {
-        if (!autoFilters.sourceLabel.trim() || !autoFilters.targetLabel.trim()) {
-            return null;
-        }
-        try {
-            return createAutoGraphSpec(autoFilters);
-        } catch {
-            return null;
-        }
-    }, [autoFilters]);
-
-    const selectedLabels = useMemo(() => {
-        const trimmed = [autoFilters.sourceLabel, autoFilters.targetLabel]
-            .map((label) => label.trim())
-            .filter((label) => label.length > 0);
-        return Array.from(new Set(trimmed));
-    }, [autoFilters.sourceLabel, autoFilters.targetLabel]);
-
-    const runAutoQuery = useCallback(async () => {
-        if (!autoSpec || selectedLabels.length === 0) {
-            setError("Provide both source and target labels to sample nodes.");
-            return;
-        }
-        try {
-            await ensureLabelIndexes(selectedLabels);
-        } catch (err) {
-            console.warn("Unable to build label indexes (continuing with fallback):", err);
-        }
-        await fetchGraph(autoSpec, "auto");
-    }, [autoSpec, fetchGraph, selectedLabels]);
-
-    const runManualQuery = useCallback(
+    const runJsonQuery = useCallback(
         async (event: FormEvent<HTMLFormElement>) => {
             event.preventDefault();
             try {
-                const parsed = JSON.parse(manualPayload);
-                await fetchGraph(parsed, "manual");
+                const parsed = JSON.parse(queryPayload);
+                await fetchGraph(parsed);
             } catch (err) {
                 setError(err instanceof Error ? err.message : String(err));
             }
         },
-        [fetchGraph, manualPayload],
+        [fetchGraph, queryPayload],
     );
 
-    const canAutoSample = Boolean(autoSpec && selectedLabels.length > 0);
-    useEffect(() => {
-        if (hasBootstrapped || !canAutoSample) {
+    const runVisualQuery = useCallback(async () => {
+        if (!builderQuery) {
+            setError("No query defined. Add at least one node.");
             return;
         }
-        setBootstrapped(true);
-        void runAutoQuery();
-    }, [canAutoSample, hasBootstrapped, runAutoQuery]);
+        await fetchGraph(builderQuery);
+    }, [fetchGraph, builderQuery]);
 
-    const resetAutoFilters = () => {
-        setAutoFilters({ sourceLabel: defaultLabel, targetLabel: defaultLabel, edgeType: "", direction: "out" });
-    };
+    const handleBuilderChange = useCallback((query: unknown) => {
+        setBuilderQuery(query);
+    }, []);
 
-    const resetManual = () => {
-        setManualPayload(JSON.stringify(DEMO_FOLLOWS_QUERY, null, 2));
+    const copyToJson = useCallback(() => {
+        if (builderQuery) {
+            setQueryPayload(JSON.stringify(builderQuery, null, 2));
+            setQueryMode("json");
+        }
+    }, [builderQuery]);
+
+    const resetQuery = () => {
+        setQueryPayload(JSON.stringify(DEMO_FOLLOWS_QUERY, null, 2));
     };
 
     return (
@@ -185,151 +214,107 @@ export function GraphExplorerPage({ GraphComponent = GraphView }: GraphExplorerP
                 <Badge variant="secondary" className="uppercase tracking-wide">
                     Graph explorer
                 </Badge>
-                <h1 className="text-3xl font-semibold">Visualize relationships safely</h1>
+                <h1 className="text-3xl font-semibold">Visualize relationships</h1>
                 <p className="text-muted-foreground max-w-3xl">
-                    Pull a manageable slice of the database, render it as a graph, then iterate on the query without
-                    freezing the browser. Increase the row limit once you are happy with the layout.
+                    {fullGraph ? (
+                        <>Loaded {fullGraph.nodes.length} nodes and {fullGraph.edges.length} edges. Use the query tools below to filter, or explore the full graph.</>
+                    ) : isLoadingFullGraph ? (
+                        <>Loading full graph from database...</>
+                    ) : (
+                        <>Query the database and render the results as an interactive graph.</>
+                    )}
                 </p>
             </header>
 
             <section className="space-y-6">
                 <Card>
                     <CardHeader>
-                        <CardTitle>Automatic sample</CardTitle>
+                        <CardTitle>Query</CardTitle>
                         <CardDescription>
-                            Pick simple filters and we&apos;ll stream a capped slice ({MAX_ROW_LIMIT} rows max) the moment you load this page.
+                            Build a query visually or write JSON directly.
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-5">
-                        {!hasLabels && (
-                            <Alert>
-                                <AlertTitle>No labels detected</AlertTitle>
-                                <AlertDescription>
-                                    Load or import data into the connected database, then refresh this page to visualize the graph.
-                                </AlertDescription>
-                            </Alert>
-                        )}
-                        <div className="grid gap-4 lg:grid-cols-3">
-                            <Field label="Source label">
-                                <Input
-                                    placeholder="User"
-                                    value={autoFilters.sourceLabel}
-                                    onChange={(event) =>
-                                        setAutoFilters((prev) => ({ ...prev, sourceLabel: event.target.value }))
-                                    }
-                                />
-                            </Field>
-                            <Field label="Target label">
-                                <Input
-                                    placeholder="User"
-                                    value={autoFilters.targetLabel}
-                                    onChange={(event) =>
-                                        setAutoFilters((prev) => ({ ...prev, targetLabel: event.target.value }))
-                                    }
-                                />
-                            </Field>
-                            <Field label="Edge type">
-                                <Input
-                                    placeholder="FOLLOWS"
-                                    value={autoFilters.edgeType}
-                                    onChange={(event) =>
-                                        setAutoFilters((prev) => ({ ...prev, edgeType: event.target.value }))
-                                    }
-                                />
-                            </Field>
-                        </div>
-                        {labelSuggestions.length > 0 && (
-                            <p className="text-xs text-muted-foreground">
-                                Suggestions:{" "}
-                                {labelSuggestions.map((label, idx) => (
-                                    <span key={label.name}>
-                                        <button
-                                            type="button"
-                                            className="underline-offset-2 hover:underline"
-                                            onClick={() =>
-                                                setAutoFilters((prev) => ({
-                                                    ...prev,
-                                                    sourceLabel: label.name,
-                                                    targetLabel: label.name,
-                                                }))
-                                            }
-                                        >
-                                            {label.name} ({label.count})
-                                        </button>
-                                        {idx < labelSuggestions.length - 1 ? ", " : ""}
-                                    </span>
-                                ))}
-                            </p>
-                        )}
+                        <Tabs value={queryMode} onValueChange={(v) => setQueryMode(v as "visual" | "json")}>
+                            <TabsList className="mb-4">
+                                <TabsTrigger value="visual">Visual Builder</TabsTrigger>
+                                <TabsTrigger value="json">JSON</TabsTrigger>
+                            </TabsList>
 
-                        <div className="grid gap-4 lg:grid-cols-3 lg:items-end">
-                            <Field label="Direction">
-                                <Select
-                                    value={autoFilters.direction}
-                                    onValueChange={(value: "out" | "in" | "both") =>
-                                        setAutoFilters((prev) => ({ ...prev, direction: value }))
-                                    }
-                                >
-                                    <SelectTrigger>
-                                        <SelectValue placeholder="Direction" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        <SelectItem value="out">Outgoing</SelectItem>
-                                        <SelectItem value="in">Incoming</SelectItem>
-                                        <SelectItem value="both">Both directions</SelectItem>
-                                    </SelectContent>
-                                </Select>
-                            </Field>
-                            <Field label={`Row limit (${rowLimit})`}>
-                                <Slider
-                                    value={[rowLimit]}
-                                    min={MIN_ROW_LIMIT}
-                                    max={MAX_ROW_LIMIT}
-                                    step={25}
-                                    onValueChange={(value) => setRowLimit(value[0] ?? INITIAL_ROW_LIMIT)}
-                                />
-                                <p className="text-xs text-muted-foreground pt-1">
-                                    Higher limits reveal more of the graph but may slow the force simulation.
-                                </p>
-                            </Field>
-                            <div className="flex flex-wrap gap-3">
-                                <Button onClick={runAutoQuery} disabled={isLoading}>
-                                    {isLoading && activeMode === "auto" ? "Sampling…" : "Refresh sample"}
-                                </Button>
-                                <Button variant="ghost" disabled={isLoading} onClick={resetAutoFilters}>
-                                    Reset filters
-                                </Button>
-                            </div>
-                        </div>
+                            <TabsContent value="visual" className="space-y-4">
+                                <QueryBuilder onQueryChange={handleBuilderChange} />
+                                
+                                {builderQuery && (
+                                    <details className="text-sm">
+                                        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                                            Preview generated JSON
+                                        </summary>
+                                        <pre className="mt-2 p-3 rounded-md bg-muted font-mono text-xs overflow-auto max-h-48">
+                                            {JSON.stringify(builderQuery, null, 2)}
+                                        </pre>
+                                    </details>
+                                )}
 
-                        <details className="overflow-hidden rounded-lg border bg-muted/30">
-                            <summary className="flex cursor-pointer items-center justify-between px-4 py-2 text-sm font-medium">
-                                <span>Need a bespoke query?</span>
-                                <ChevronDownIcon className="size-4" />
-                            </summary>
-                            <div className="space-y-3 border-t px-4 py-4 text-sm">
-                                <p className="text-muted-foreground">
-                                    Paste any JSON spec and we&apos;ll still stream a capped subset so your browser stays responsive.
-                                </p>
-                                <form className="space-y-3" onSubmit={runManualQuery}>
-                                    <Textarea
-                                        value={manualPayload}
-                                        onChange={(event) => setManualPayload(event.target.value)}
-                                        rows={8}
-                                        className="font-mono text-xs"
-                                        spellCheck={false}
-                                    />
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                                    <div className="space-y-2 sm:w-64">
+                                        <Label className="text-sm text-muted-foreground">
+                                            Row limit ({rowLimit})
+                                        </Label>
+                                        <Slider
+                                            value={[rowLimit]}
+                                            min={MIN_ROW_LIMIT}
+                                            max={MAX_ROW_LIMIT}
+                                            step={25}
+                                            onValueChange={(value) => setRowLimit(value[0] ?? INITIAL_ROW_LIMIT)}
+                                        />
+                                    </div>
                                     <div className="flex flex-wrap gap-3">
-                                        <Button type="submit" disabled={isLoading}>
-                                            {isLoading && activeMode === "manual" ? "Running…" : "Run custom query"}
+                                        <Button type="button" onClick={runVisualQuery} disabled={isLoading}>
+                                            {isLoading ? "Running..." : "Run query"}
                                         </Button>
-                                        <Button type="button" variant="ghost" disabled={isLoading} onClick={resetManual}>
-                                            Reset spec
+                                        <Button type="button" variant="outline" onClick={copyToJson}>
+                                            Copy to JSON
                                         </Button>
                                     </div>
+                                </div>
+                            </TabsContent>
+
+                            <TabsContent value="json" className="space-y-4">
+                                <form className="space-y-4" onSubmit={runJsonQuery}>
+                                    <Textarea
+                                        value={queryPayload}
+                                        onChange={(event) => setQueryPayload(event.target.value)}
+                                        rows={10}
+                                        className="font-mono text-xs"
+                                        spellCheck={false}
+                                        placeholder='{"match": [{"node": "n", "labels": ["Person"]}], "return": ["n"]}'
+                                    />
+                                    
+                                    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                                        <div className="space-y-2 sm:w-64">
+                                            <Label className="text-sm text-muted-foreground">
+                                                Row limit ({rowLimit})
+                                            </Label>
+                                            <Slider
+                                                value={[rowLimit]}
+                                                min={MIN_ROW_LIMIT}
+                                                max={MAX_ROW_LIMIT}
+                                                step={25}
+                                                onValueChange={(value) => setRowLimit(value[0] ?? INITIAL_ROW_LIMIT)}
+                                            />
+                                        </div>
+                                        <div className="flex flex-wrap gap-3">
+                                            <Button type="submit" disabled={isLoading}>
+                                                {isLoading ? "Running..." : "Run query"}
+                                            </Button>
+                                            <Button type="button" variant="ghost" disabled={isLoading} onClick={resetQuery}>
+                                                Reset
+                                            </Button>
+                                        </div>
+                                    </div>
                                 </form>
-                            </div>
-                        </details>
+                            </TabsContent>
+                        </Tabs>
 
                         {error && (
                             <Alert variant="destructive">
@@ -341,8 +326,7 @@ export function GraphExplorerPage({ GraphComponent = GraphView }: GraphExplorerP
                         {lastRun && (
                             <div className="flex flex-col gap-1 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
                                 <span>
-                                    {lastRun.mode === "auto" ? "Automatic sample" : "Manual spec"} loaded {lastRun.rowCount} row
-                                    {lastRun.rowCount === 1 ? "" : "s"} (limit {lastRun.limit}).
+                                    Loaded {lastRun.rowCount} row{lastRun.rowCount === 1 ? "" : "s"} (limit {lastRun.limit})
                                 </span>
                                 <span>Last run {new Date(lastRun.executedAt).toLocaleTimeString()}</span>
                             </div>
@@ -352,21 +336,27 @@ export function GraphExplorerPage({ GraphComponent = GraphView }: GraphExplorerP
                             <Alert>
                                 <AlertTitle>Result truncated</AlertTitle>
                                 <AlertDescription>
-                                    Only the first {lastRun.limit} rows were streamed to keep the page responsive. Increase the limit when
-                                    you&apos;re ready for a larger slice.
+                                    Only the first {lastRun.limit} rows were returned. Increase the limit to see more.
                                 </AlertDescription>
                             </Alert>
                         )}
                     </CardContent>
                 </Card>
 
-                {rows.length > 0 ? (
+                {isLoadingFullGraph ? (
+                    <Card className="border-dashed">
+                        <CardHeader>
+                            <CardTitle>Loading graph...</CardTitle>
+                            <CardDescription>Fetching all nodes and edges from the database.</CardDescription>
+                        </CardHeader>
+                    </Card>
+                ) : rows.length > 0 ? (
                     <GraphComponent rows={rows} />
                 ) : (
                     <Card className="border-dashed">
                         <CardHeader>
                             <CardTitle>No graph rendered yet</CardTitle>
-                            <CardDescription>Run a query above to fetch a subset of nodes and edges.</CardDescription>
+                            <CardDescription>Run a query above to fetch nodes and edges.</CardDescription>
                         </CardHeader>
                     </Card>
                 )}
@@ -388,11 +378,61 @@ function parseLimitMetadata(value: unknown): { limit: number | null; truncated: 
     return { limit, truncated };
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-    return (
-        <div className="space-y-2">
-            <Label className="text-sm text-muted-foreground">{label}</Label>
-            {children}
-        </div>
-    );
+/**
+ * Convert the full graph response into QueryRow[] format that GraphView expects.
+ * Each edge becomes a row with source node (a) and target node (b).
+ */
+function convertFullGraphToRows(graph: FullGraphResponse): QueryRow[] {
+    // Build a map of node IDs to nodes for quick lookup
+    const nodeMap = new Map<number, FullGraphResponse["nodes"][0]>();
+    for (const node of graph.nodes) {
+        nodeMap.set(node._id, node);
+    }
+
+    // Convert each edge to a row with source and target nodes
+    const rows: QueryRow[] = [];
+    for (const edge of graph.edges) {
+        const sourceNode = nodeMap.get(edge._source);
+        const targetNode = nodeMap.get(edge._target);
+        if (sourceNode && targetNode) {
+            rows.push({
+                a: {
+                    _id: sourceNode._id,
+                    labels: sourceNode._labels,
+                    props: Object.fromEntries(
+                        Object.entries(sourceNode).filter(([k]) => !k.startsWith("_"))
+                    ),
+                },
+                b: {
+                    _id: targetNode._id,
+                    labels: targetNode._labels,
+                    props: Object.fromEntries(
+                        Object.entries(targetNode).filter(([k]) => !k.startsWith("_"))
+                    ),
+                },
+            });
+        }
+    }
+
+    // If there are isolated nodes (no edges), add them as single-node rows
+    const connectedNodeIds = new Set<number>();
+    for (const edge of graph.edges) {
+        connectedNodeIds.add(edge._source);
+        connectedNodeIds.add(edge._target);
+    }
+    for (const node of graph.nodes) {
+        if (!connectedNodeIds.has(node._id)) {
+            rows.push({
+                a: {
+                    _id: node._id,
+                    labels: node._labels,
+                    props: Object.fromEntries(
+                        Object.entries(node).filter(([k]) => !k.startsWith("_"))
+                    ),
+                },
+            });
+        }
+    }
+
+    return rows;
 }
