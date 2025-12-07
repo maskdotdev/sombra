@@ -172,6 +172,7 @@ struct StorageProfileCounters {
     mvcc_commit_ns: AtomicU64,
     mvcc_commit_count: AtomicU64,
     mvcc_read_begin_latency: LatencyHistogram,
+    #[allow(dead_code)]
     mvcc_commit_latency: LatencyHistogram,
     mvcc_write_lock_conflicts: AtomicU64,
 }
