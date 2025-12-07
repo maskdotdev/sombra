@@ -21,6 +21,7 @@ import {
 } from "d3"
 
 import type { GraphEdgeDatum, GraphNodeDatum } from "./graph-types"
+import { PropertyValue } from "./property-value"
 
 type ForceNode = GraphNodeDatum & {
   x?: number
@@ -810,13 +811,7 @@ export function GraphCanvas({
               .map(([key, value]) => (
                 <div key={key}>
                   <p className="text-[0.6rem] uppercase tracking-wide text-slate-400">{key}</p>
-                  <p className="truncate font-mono text-[0.65rem]">
-                    {typeof value === "string" ||
-                    typeof value === "number" ||
-                    typeof value === "boolean"
-                      ? String(value)
-                      : JSON.stringify(value)}
-                  </p>
+                  <PropertyValue value={value} propertyKey={key} compact />
                 </div>
               ))}
           </div>
