@@ -659,11 +659,13 @@ impl ReadGuard {
     ///
     /// This is typically called by the vacuum process when a reader exceeds
     /// the configured timeout threshold.
+    #[allow(dead_code)]
     pub(crate) fn mark_evicted(&self) {
         self.evicted.store(true, AtomicOrdering::Release);
     }
 
     /// Returns a weak reference to the evicted flag for external eviction.
+    #[allow(dead_code)]
     pub(crate) fn evicted_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.evicted)
     }
@@ -1367,6 +1369,18 @@ impl Pager {
             inner.set_frame_state(idx, FrameState::Cold);
         }
         self.adjust_cold_balance(inner);
+
+        // First, check if we have overlay data for this page (committed to WAL
+        // but not yet checkpointed). This handles the case where a page was
+        // evicted from the cache after being committed.
+        let latest_lsn = self.latest_committed_lsn();
+        if let Some(overlay_data) = self.overlay_from_cache(page_id, latest_lsn) {
+            let mut guard = inner.frames[idx].buf.write();
+            guard[..overlay_data.len()].copy_from_slice(&overlay_data);
+            return Ok(());
+        }
+
+        // No overlay found - read from disk as usual.
         let mut guard = inner.frames[idx].buf.write();
         guard.fill(0);
         let result = self
@@ -1853,6 +1867,9 @@ impl Pager {
 
     fn run_clock(&self, inner: &mut PagerInner) -> Result<()> {
         let len = inner.frames.len();
+        // First pass: standard clock algorithm
+        // Note: We NEVER evict dirty frames because they contain uncommitted data
+        // that the active write transaction needs for commit.
         for _ in 0..len * 4 {
             let idx = inner.clock_hand_cold;
             inner.clock_hand_cold = (inner.clock_hand_cold + 1) % len;
@@ -1861,7 +1878,7 @@ impl Pager {
             let mut evict = false;
             {
                 let frame = &mut inner.frames[idx];
-                if frame.id.is_none() || frame.pin_count > 0 {
+                if frame.id.is_none() || frame.pin_count > 0 || frame.dirty {
                     continue;
                 }
                 match frame.state {
@@ -1896,6 +1913,59 @@ impl Pager {
                 return Ok(());
             }
         }
+
+        // Second pass: force demote Hot frames to Cold (ignoring target_cold limit)
+        // This handles the case where all frames are Hot with reference=false but
+        // cold_count >= target_cold, preventing normal demotion.
+        for _ in 0..len * 2 {
+            let idx = inner.clock_hand_cold;
+            inner.clock_hand_cold = (inner.clock_hand_cold + 1) % len;
+            let frame = &mut inner.frames[idx];
+            if frame.id.is_none() || frame.pin_count > 0 || frame.dirty {
+                continue;
+            }
+            if frame.state == FrameState::Hot && !frame.reference {
+                // Force demote to Cold
+                inner.set_frame_state(idx, FrameState::Cold);
+            }
+        }
+
+        // Third pass: now try to find a Cold frame to evict
+        for _ in 0..len {
+            let idx = inner.clock_hand_cold;
+            inner.clock_hand_cold = (inner.clock_hand_cold + 1) % len;
+            let frame = &inner.frames[idx];
+            if frame.id.is_none() || frame.pin_count > 0 || frame.dirty {
+                continue;
+            }
+            if frame.state == FrameState::Cold && !frame.reference {
+                self.evict_frame(inner, idx)?;
+                return Ok(());
+            }
+        }
+
+        // Fourth pass: If all frames are dirty or pinned (common during large write
+        // transactions), dynamically expand the cache by adding a new frame.
+        // This allows transactions that modify many pages to proceed without failing.
+        // The cache will naturally shrink back during checkpoint when dirty pages are
+        // flushed to disk and become evictable.
+        let all_dirty_or_pinned = inner.frames.iter().all(|f| {
+            f.id.is_some() && (f.dirty || f.pin_count > 0)
+        });
+        if all_dirty_or_pinned {
+            let new_frame = Frame::new(self.page_size);
+            let new_idx = inner.frames.len();
+            inner.frames.push(new_frame);
+            // Set the new frame to Cold state (it will be filled immediately)
+            inner.set_frame_state(new_idx, FrameState::Cold);
+            pager_test_log!(
+                "[pager.run_clock] expanded cache from {} to {} frames (all dirty/pinned)",
+                len,
+                inner.frames.len()
+            );
+            return Ok(());
+        }
+
         Err(SombraError::Invalid("no eviction candidate available"))
     }
 
@@ -3113,8 +3183,11 @@ impl PageStore for Pager {
                 }
             }
         }
-        let latest_committed = self.latest_committed_lsn();
-        if snapshot_lsn.0 < latest_committed.0 && snapshot_lsn.0 > last_checkpoint_lsn.0 {
+        let _latest_committed = self.latest_committed_lsn();
+        // Check overlay for pages committed to WAL but not yet checkpointed.
+        // This handles the case where a page was evicted from cache after commit.
+        // We need overlay data when our snapshot is newer than the last checkpoint.
+        if snapshot_lsn.0 > last_checkpoint_lsn.0 {
             if let Some(overlay) =
                 self.overlay_page_for_snapshot(id, last_checkpoint_lsn, snapshot_lsn)?
             {
