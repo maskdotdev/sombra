@@ -73,7 +73,7 @@ impl DatabaseHandle {
 
 #[napi]
 pub struct StreamHandle {
-  inner: QueryStream,
+  inner: Mutex<Option<QueryStream>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -212,7 +212,9 @@ pub fn databaseExplain(handle: &DatabaseHandle, spec: Value) -> NapiResult<Value
 pub fn databaseStream(handle: &DatabaseHandle, spec: Value) -> NapiResult<StreamHandle> {
   handle.with_db(|db| {
     let stream = db.stream_json(&spec).map_err(to_napi_err)?;
-    Ok(StreamHandle { inner: stream })
+    Ok(StreamHandle {
+      inner: Mutex::new(Some(stream)),
+    })
   })
 }
 
@@ -367,7 +369,22 @@ pub fn databaseClose(handle: &DatabaseHandle) -> NapiResult<()> {
 impl StreamHandle {
   #[napi]
   pub fn next(&self) -> NapiResult<Option<Value>> {
-    self.inner.next().map_err(to_napi_err)
+    let mut guard = self.inner.lock().map_err(|_| {
+      NapiError::new(Status::GenericFailure, "[CLOSED] stream handle is poisoned")
+    })?;
+    let stream = guard
+      .as_mut()
+      .ok_or_else(|| NapiError::new(Status::GenericFailure, "[CLOSED] stream is closed"))?;
+    stream.next().map_err(to_napi_err)
+  }
+
+  #[napi]
+  pub fn close(&self) -> NapiResult<()> {
+    let mut guard = self.inner.lock().map_err(|_| {
+      NapiError::new(Status::GenericFailure, "[CLOSED] stream handle is poisoned")
+    })?;
+    guard.take();
+    Ok(())
   }
 }
 

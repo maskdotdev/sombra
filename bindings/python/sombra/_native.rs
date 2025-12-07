@@ -81,7 +81,7 @@ impl DatabaseHandle {
 
 #[pyclass(module = "sombra._native", unsendable)]
 pub struct StreamHandle {
-    inner: QueryStream,
+    inner: Mutex<Option<QueryStream>>,
 }
 
 struct ParsedNeighborOptions {
@@ -282,7 +282,9 @@ fn database_stream(handle: &DatabaseHandle, spec: &Bound<'_, PyAny>) -> PyResult
     let value = any_to_value(spec)?;
     handle.with_db(|db| {
         let stream = db.stream_json(&value).map_err(to_py_err)?;
-        Ok(StreamHandle { inner: stream })
+        Ok(StreamHandle {
+            inner: Mutex::new(Some(stream)),
+        })
     })
 }
 
@@ -467,10 +469,25 @@ fn database_pragma_set(
 
 #[pyfunction]
 fn stream_next(py: Python<'_>, handle: &StreamHandle) -> PyResult<Option<PyObject>> {
-    match handle.inner.next().map_err(to_py_err)? {
+    let mut guard = handle.inner.lock().map_err(|_| {
+        PyRuntimeError::new_err("[CLOSED] stream handle lock poisoned")
+    })?;
+    let stream = guard
+        .as_mut()
+        .ok_or_else(|| PyRuntimeError::new_err("[CLOSED] stream is closed"))?;
+    match stream.next().map_err(to_py_err)? {
         Some(value) => value_to_py(py, value).map(Some),
         None => Ok(None),
     }
+}
+
+#[pyfunction]
+fn stream_close(handle: &StreamHandle) -> PyResult<()> {
+    let mut guard = handle.inner.lock().map_err(|_| {
+        PyRuntimeError::new_err("[CLOSED] stream handle lock poisoned")
+    })?;
+    guard.take();
+    Ok(())
 }
 
 #[pyfunction]
@@ -500,6 +517,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(database_neighbors, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_bfs_traversal, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(stream_next, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(stream_close, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(database_seed_demo, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(version, m)?)?;
     m.add_class::<DatabaseHandle>()?;
