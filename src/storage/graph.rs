@@ -4910,7 +4910,8 @@ struct FallbackLabelScan {
 impl PostingStream for FallbackLabelScan {
     fn next_batch(&mut self, out: &mut Vec<NodeId>, max: usize) -> Result<bool> {
         if max == 0 {
-            return Ok(self.pos >= self.nodes.len());
+            // Return true if more data remains, false if exhausted
+            return Ok(self.pos < self.nodes.len());
         }
         let mut produced = 0;
         while self.pos < self.nodes.len() && produced < max {
@@ -4918,7 +4919,8 @@ impl PostingStream for FallbackLabelScan {
             self.pos += 1;
             produced += 1;
         }
-        Ok(self.pos >= self.nodes.len())
+        // Return true if more data remains, false if exhausted
+        Ok(self.pos < self.nodes.len())
     }
 }
 
