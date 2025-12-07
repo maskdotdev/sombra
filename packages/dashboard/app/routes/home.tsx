@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
-import { Link, useLoaderData } from "react-router";
-import { executeQuery, fetchHealth, fetchStats } from "../lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router";
+import { executeQuery, fetchHealth, fetchStats, type HealthStatus, type StatsReport } from "../lib/api";
 import { cn } from "../lib/utils";
 import { Badge } from "../components/ui/badge";
 import {
@@ -23,16 +23,8 @@ import { Button } from "../components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { useForm } from "react-hook-form";
 import { DEMO_FOLLOWS_QUERY } from "../lib/query-presets";
-import { extractRows, formatCell } from "../lib/query-utils";
-
-export async function loader() {
-  const [health, stats] = await Promise.all([fetchHealth(), fetchStats()]);
-  return {
-    health,
-    stats,
-    fetchedAt: new Date().toISOString(),
-  };
-}
+import { extractRows } from "../lib/query-utils";
+import { PropertyValueCell } from "../components/query/property-value";
 
 export function meta() {
   return [
@@ -45,13 +37,49 @@ export function meta() {
 }
 
 export default function Home() {
-  const { health, stats, fetchedAt } = useLoaderData<typeof loader>();
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [stats, setStats] = useState<StatsReport | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([fetchHealth(), fetchStats()])
+      .then(([h, s]) => {
+        setHealth(h);
+        setStats(s);
+        setFetchedAt(new Date().toISOString());
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setLoading(false));
+  }, []);
+
   const formatter = new Intl.NumberFormat();
   const bytesFormatter = new Intl.NumberFormat(undefined, {
     style: "unit",
     unit: "byte",
     unitDisplay: "narrow",
   });
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <p className="text-muted-foreground">Loading dashboard...</p>
+      </div>
+    );
+  }
+
+  if (error || !health || !stats) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Alert variant="destructive" className="max-w-md">
+          <AlertTitle>Failed to load dashboard</AlertTitle>
+          <AlertDescription>{error ?? "Unknown error"}</AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   const isEmptyDataset = stats.storage.estimated_node_count === 0;
 
   return (
@@ -70,7 +98,7 @@ export default function Home() {
             {health.status}
           </Badge>
           <span className="text-muted-foreground text-sm">
-            Last refreshed {new Date(fetchedAt).toLocaleTimeString()}
+            Last refreshed {fetchedAt ? new Date(fetchedAt).toLocaleTimeString() : "—"}
           </span>
         </div>
         <h1 className="text-3xl font-semibold">Database Overview</h1>
@@ -357,7 +385,7 @@ function QueryConsole() {
                     <TableRow key={idx}>
                       {tableColumns.map((column) => (
                         <TableCell key={column} className="font-mono text-xs">
-                          {formatCell(row[column])}
+                          <PropertyValueCell value={row[column]} propertyKey={column} />
                         </TableCell>
                       ))}
                     </TableRow>
