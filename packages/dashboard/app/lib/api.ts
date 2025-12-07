@@ -80,7 +80,11 @@ export type LabelSummary = {
 };
 
 export async function fetchHealth(): Promise<HealthStatus> {
-  return request("/health");
+  // Health endpoint may return 503 when checks fail, but still has valid JSON
+  const response = await fetch(makeUrl("/health", API_BASE), {
+    headers: { Accept: "application/json" },
+  });
+  return (await response.json()) as HealthStatus;
 }
 
 export async function fetchStats(): Promise<StatsReport> {
@@ -126,4 +130,27 @@ export async function executeQuery(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+export type GraphNode = {
+  _id: number;
+  _labels?: string[];
+  [key: string]: unknown;
+};
+
+export type GraphEdge = {
+  _id: number;
+  _label?: string;
+  _source: number;
+  _target: number;
+  [key: string]: unknown;
+};
+
+export type FullGraphResponse = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
+
+export async function fetchFullGraph(): Promise<FullGraphResponse> {
+  return request("/api/graph/full");
 }
