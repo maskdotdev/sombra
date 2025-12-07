@@ -12,7 +12,7 @@ Sombra is a single-file property graph database inspired by SQLite’s architect
 ## Features
 
 ### Core Features
-- **Property Graph Model** with labels, typed properties, and dictionary-backed IDs, plus helpers to build and mutate graphs transactionally through the FFI `Database` and fluent builders.
+- **Property Graph Model** with labels, typed properties, and dictionary-backed IDs, plus helpers to build and mutate graphs transactionally through the FFI `Database` and fluent builders. Property values are scalars only (`null/bool/int/float/string/bytes/datetime`); nested objects/arrays aren’t supported—serialize them to JSON/bytes if you need to store structured payloads.
 - **Single-File Storage** that mirrors SQLite’s layout: a pager (`src/primitives/pager`) manages 8 KiB pages, dictionaries, adjacency tables, property/value stores, and WAL files next to the `.sombra` database.
 - **Stage 8 Query Planner & Executor** (`src/query`) exposes AST + logical/physical plans, JSON specs, streaming iterators, and explain plans with literal redaction for query inspection.
 - **CLI & Admin Toolkit** (`src/bin/cli.rs`) ships `stats`, `checkpoint`, `vacuum`, `verify`, `import`, `export`, `seed-demo`, and the experimental `dashboard` server with JSON output via `--format json`.

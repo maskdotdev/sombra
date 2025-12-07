@@ -2,7 +2,9 @@
 
 Python bindings for the Sombra graph database. The package exposes the Stage 8
 fluent query builder together with lightweight CRUD helpers that forward to the
-Rust planner/executor through `pyo3`.
+Rust planner/executor through `pyo3`. Native failures are surfaced as typed
+exceptions (see `wrap_native_error`), and both `Database` and query streams
+provide context managers to ensure handles are released promptly.
 
 ## Typed facade
 
@@ -62,6 +64,14 @@ print(payload.request_id(), len(payload.rows()))
 user_id = db.create_node("User", {"name": "New User"})
 db.update_node(user_id, set_props={"bio": "updated"})
 db.delete_node(user_id, cascade=True)
+
+# Clean up native handles explicitly or via context managers
+db.close()
+
+async def stream_users() -> None:
+    async with db.query().nodes("User").stream() as stream:
+        async for row in stream:
+            print(row["n0"])
 ```
 
 Run the end-to-end example in `examples/crud.py` to see the workflow in action:

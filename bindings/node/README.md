@@ -1,8 +1,6 @@
 # `sombradb` for Node.js
 
-> ⚠️ **Alpha warning:** the JavaScript/TypeScript bindings track the rapidly evolving Sombra core. Expect sharp edges, breaking API changes between minor versions, and limited platform coverage (currently macOS/Linux on x64 and arm64 with Node 18+).
-
-The package ships a fluent graph query builder, transactional CRUD helpers, and typed schema support via the same execution engine that powers the Rust CLI. Everything runs in-process—no daemon to manage—so you can embed Sombra anywhere you can run Node.
+The package ships a fluent graph query builder, transactional CRUD helpers, and typed schema support via the same execution engine that powers the Rust CLI. Everything runs in-process—no daemon to manage—so you can embed Sombra anywhere you can run Node 18+ (prebuilt binaries for macOS/Linux on x64 and arm64).
 
 ## Installation
 
@@ -40,6 +38,8 @@ db.deleteNode(createdId, true)
 - `Database.open(path, options?)` boots the embedded engine. Pass `':memory:'` for ephemeral work or a file path for persistence.
 - `seedDemo()` materialises a tiny sample graph so you can explore the query surface immediately.
 - `execute(true)` returns `{ rows, request_id, features }` when you need metadata; omit the flag for a plain row array.
+- `Database` implements `close()` plus `Symbol.dispose`/`Symbol.asyncDispose`, and `QueryStream` exposes `close()`/`return()` so you can use `using` or `for await` without leaking native handles.
+- All native failures are surfaced as typed `SombraError` subclasses (e.g. `IoError`, `ConflictError`) with stable `code` fields for programmatic handling.
 
 ## Query builder at a glance
 
