@@ -1,6 +1,6 @@
 {
   "name": "sombradb",
-  "version": "0.6.2",
+  "version": "0.7.2",
   "description": "A high-performance graph database with ACID transactions",
   "main": "main.js",
   "types": "main.d.ts",
@@ -37,7 +37,7 @@
     ]
   },
   "engines": {
-    "node": ">= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0"
+    "node": ">=18"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
@@ -111,9 +111,9 @@
   },
   "packageManager": "bun@1.3.0",
   "optionalDependencies": {
-    "sombradb-win32-x64-msvc": "0.6.1",
-    "sombradb-darwin-x64": "0.6.1",
-    "sombradb-linux-x64-gnu": "0.6.1",
-    "sombradb-darwin-arm64": "0.6.1"
+    "sombradb-win32-x64-msvc": "0.7.2",
+    "sombradb-darwin-x64": "0.7.2",
+    "sombradb-linux-x64-gnu": "0.7.2",
+    "sombradb-darwin-arm64": "0.7.2"
   }
 }

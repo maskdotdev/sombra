@@ -1,6 +1,6 @@
 {
   "name": "sombra-cli",
-  "version": "0.3.6",
+  "version": "0.3.10",
   "description": "Prebuilt distribution of the Sombra database CLI",
   "license": "MIT",
   "bin": {

@@ -27,7 +27,15 @@ async function main() {
     return
   }
 
+  // Check if binary is already bundled in dist/
   const target = resolveTarget()
+  const distDir = path.resolve(__dirname, '..', 'dist')
+  const bundledBinary = path.join(distDir, target.binaryName)
+  if (fs.existsSync(bundledBinary)) {
+    console.log(`[sombra-cli] binary already bundled at ${bundledBinary}, skipping download`)
+    return
+  }
+
   const version = process.env.SOMBRA_CLI_VERSION || pkg.version
   const url = buildDownloadUrl(version, target)
 
