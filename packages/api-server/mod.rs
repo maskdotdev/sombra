@@ -44,7 +44,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 use crate::admin::{self, AdminOpenOptions, StatsReport};
 use crate::ffi::{self, DatabaseOptions};
 use crate::primitives::pager::MVCC_READER_WARN_THRESHOLD_MS;
-use crate::storage::storage_profile_snapshot;
+
 
 /// Runtime options used to boot the dashboard HTTP server.
 #[derive(Clone, Debug)]
@@ -214,7 +214,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/stats", get(stats_handler))
         .route("/api/query", post(query_handler))
         .route("/api/labels", get(labels_handler))
-        .route("/api/labels/indexes", post(ensure_label_indexes_handler));
+        .route("/api/labels/indexes", post(ensure_label_indexes_handler))
+        .route("/api/graph/full", get(full_graph_handler));
 
     match state.asset_mode.clone() {
         AssetMode::Filesystem(dir) => {
@@ -1151,6 +1152,97 @@ async fn query_handler(
     }
     let result = db.execute_json(&payload)?;
     Ok(Json(result))
+}
+
+/// Returns all nodes and edges in the database as a compact JSON payload.
+/// Response format: `{ nodes: [...], edges: [...] }`
+async fn full_graph_handler(
+    State(state): State<AppState>,
+) -> Result<Json<FullGraphResponse>, AppError> {
+    let db = state.open_database()?;
+
+    // First, get all labels to query by
+    let labels = db.sample_labels(10_000, 1000).map_err(|err| {
+        tracing::error!(?err, "label sampling for full graph failed");
+        err
+    })?;
+
+    let mut all_nodes = Vec::new();
+    let mut seen_node_ids = std::collections::HashSet::new();
+
+    // Query nodes for each label
+    for (label, _count) in &labels {
+        let nodes_query = serde_json::json!({
+            "$schemaVersion": 1,
+            "matches": [{"var": "n", "label": label}],
+            "edges": [],
+            "projections": [{"kind": "var", "var": "n"}],
+            "distinct": false
+        });
+        let nodes_stream = db.stream_json(&nodes_query)?;
+        while let Some(row) = nodes_stream.next()? {
+            if let Value::Object(map) = row {
+                if let Some(node) = map.get("n") {
+                    if let Some(id) = node.get("_id").and_then(|v| v.as_u64()) {
+                        if seen_node_ids.insert(id) {
+                            all_nodes.push(node.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Query edges for each pair of labels
+    let mut all_edges = Vec::new();
+    let mut seen_edges = std::collections::HashSet::new();
+    
+    for (source_label, _) in &labels {
+        for (target_label, _) in &labels {
+            let edges_query = serde_json::json!({
+                "$schemaVersion": 1,
+                "matches": [
+                    {"var": "a", "label": source_label},
+                    {"var": "b", "label": target_label}
+                ],
+                "edges": [
+                    {"from": "a", "to": "b", "direction": "out"}
+                ],
+                "projections": [
+                    {"kind": "var", "var": "a"},
+                    {"kind": "var", "var": "b"}
+                ],
+                "distinct": false
+            });
+            let edges_stream = db.stream_json(&edges_query)?;
+            while let Some(row) = edges_stream.next()? {
+                if let Value::Object(map) = row {
+                    if let (Some(Value::Object(a)), Some(Value::Object(b))) =
+                        (map.get("a"), map.get("b"))
+                    {
+                        let source_id = a.get("_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let target_id = b.get("_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let edge_key = (source_id, target_id);
+                        if seen_edges.insert(edge_key) {
+                            let mut edge_obj = serde_json::Map::new();
+                            edge_obj.insert("_id".to_string(), Value::Number((seen_edges.len() as u64).into()));
+                            edge_obj.insert("_source".to_string(), Value::Number(source_id.into()));
+                            edge_obj.insert("_target".to_string(), Value::Number(target_id.into()));
+                            all_edges.push(Value::Object(edge_obj));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(FullGraphResponse { nodes: all_nodes, edges: all_edges }))
+}
+
+#[derive(Debug, Serialize)]
+struct FullGraphResponse {
+    nodes: Vec<Value>,
+    edges: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
