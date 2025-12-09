@@ -167,8 +167,10 @@ impl CliConfig {
                 source,
             })?;
         }
-        let serialized = toml::to_string_pretty(&self.data)
-            .map_err(|source| ConfigError::Serialize { source })?;
+        let serialized =
+            toml::to_string_pretty(&self.data).map_err(|source| ConfigError::Serialize {
+                source: Box::new(source),
+            })?;
         fs::write(&target, serialized).map_err(|source| ConfigError::Write {
             path: target.clone(),
             source,
@@ -214,7 +216,7 @@ fn read_file(path: &Path) -> Result<RawConfig, ConfigError> {
     })?;
     toml::from_str(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
-        source,
+        source: Box::new(source),
     })
 }
 
@@ -348,10 +350,14 @@ pub enum ConfigError {
     #[error("failed to parse CLI config {path}: {source}")]
     Parse {
         path: PathBuf,
-        source: toml::de::Error,
+        #[source]
+        source: Box<toml::de::Error>,
     },
     #[error("failed to serialize CLI config: {source}")]
-    Serialize { source: toml::ser::Error },
+    Serialize {
+        #[source]
+        source: Box<toml::ser::Error>,
+    },
     #[error("failed to write CLI config {path}: {source}")]
     Write {
         path: PathBuf,
