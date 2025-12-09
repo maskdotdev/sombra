@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sombra"
-version = "0.3.7"
+version = "0.3.8"
 description = "Python bindings for the Sombra graph database."
 readme = "README.md"
 requires-python = ">=3.8"
