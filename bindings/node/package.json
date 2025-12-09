@@ -1,6 +1,6 @@
 {
   "name": "sombradb",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "A high-performance graph database with ACID transactions",
   "main": "main.js",
   "types": "main.d.ts",
