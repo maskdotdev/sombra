@@ -1415,8 +1415,7 @@ fn evaluate_readiness(state: &ServerState) -> ReadyReport {
                 name: "mvcc_reader_max_age_ms",
                 ok: reader_age_ok,
                 message: Some(format!(
-                    "max_age_ms={reader_age_ms} threshold_ms={}",
-                    MVCC_READER_WARN_THRESHOLD_MS
+                    "max_age_ms={reader_age_ms} threshold_ms={MVCC_READER_WARN_THRESHOLD_MS}"
                 )),
             });
 

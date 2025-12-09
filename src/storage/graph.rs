@@ -3513,7 +3513,7 @@ impl Graph {
         #[cfg(not(feature = "degree-cache"))]
         {
             let _ = (tx, node, dir, ty);
-            return Ok(false);
+            Ok(false)
         }
     }
     fn count_adjacent_edges(

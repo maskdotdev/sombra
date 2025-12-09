@@ -22,7 +22,7 @@ fn main() {
 
     let tmpdir = TempDir::new().expect("tempdir");
     let db_path = tmpdir.path().join("bench.sombra");
-    println!("📂 temp db: {:?}", db_path);
+    println!("📂 temp db: {db_path:?}");
 
     let mut opts = DatabaseOptions {
         create_if_missing: true,
@@ -50,7 +50,7 @@ fn main() {
 
     // Create nodes AND edges in a single transaction (like Node.js benchmark)
     // Using create_json which accepts handles for edges
-    println!("Creating {} nodes and {} edges in single transaction...", node_count, edge_count);
+    println!("Creating {node_count} nodes and {edge_count} edges in single transaction...");
     let write_start = Instant::now();
     
     // Build JSON spec like Node.js does
@@ -104,7 +104,7 @@ fn main() {
     println!("create total: {:.1} ms", write_time.as_secs_f64() * 1000.0);
 
     // Random reads using get_node
-    println!("Running {} reads...", read_count);
+    println!("Running {read_count} reads...");
     let read_start = Instant::now();
     
     let mut total_props = 0usize;
