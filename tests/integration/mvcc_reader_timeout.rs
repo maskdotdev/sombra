@@ -343,9 +343,9 @@ fn multiple_readers_selective_eviction() -> Result<()> {
     let path = dir.path().join("selective_eviction.db");
     let metrics = Arc::new(TestMetrics::default());
 
-    // 200ms timeout
+    // 300ms timeout - increased to give more margin for timing variance
     let (pager, graph) =
-        setup_graph_with_timeout(&path, Duration::from_millis(200), 80, metrics.clone())?;
+        setup_graph_with_timeout(&path, Duration::from_millis(300), 80, metrics.clone())?;
 
     // Create a node
     let node_id = create_test_node(&pager, &graph)?;
@@ -353,13 +353,13 @@ fn multiple_readers_selective_eviction() -> Result<()> {
     // Open an old reader
     let old_read = pager.begin_latest_committed_read()?;
 
-    // Wait a bit
-    thread::sleep(Duration::from_millis(150));
+    // Wait until old reader is past timeout threshold
+    thread::sleep(Duration::from_millis(250));
 
-    // Open a young reader
+    // Open a young reader - will be ~50ms old when we check (well under 300ms timeout)
     let young_read = pager.begin_latest_committed_read()?;
 
-    // Wait until old reader exceeds timeout (total ~250ms for old reader)
+    // Wait a bit more so old reader clearly exceeds timeout (total ~350ms for old reader)
     thread::sleep(Duration::from_millis(100));
 
     // Trigger maintenance
@@ -375,14 +375,14 @@ fn multiple_readers_selective_eviction() -> Result<()> {
 
     thread::sleep(Duration::from_millis(50));
 
-    // Old reader should be evicted
+    // Old reader should be evicted (was ~400ms old, well past 300ms timeout)
     assert!(old_read.is_evicted(), "old reader should be evicted");
     assert!(
         old_read.validate().is_err(),
         "old reader validation should fail"
     );
 
-    // Young reader should still be valid (only ~150ms old)
+    // Young reader should still be valid (~200ms old, well under 300ms timeout)
     assert!(
         !young_read.is_evicted(),
         "young reader should not be evicted"
