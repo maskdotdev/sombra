@@ -80,6 +80,25 @@ Run the end-to-end example in `examples/crud.py` to see the workflow in action:
 python examples/crud.py
 ```
 
+## Performance
+
+The Python bindings have minimal overhead compared to the Rust core (~3-5%). Benchmark results on a typical developer machine:
+
+| Operation | Throughput |
+|-----------|------------|
+| Node + edge creation | ~9,000 ops/sec |
+| Point reads | ~20,000 reads/sec |
+
+**Tips for optimal performance:**
+
+1. **Use the builder for bulk operations** – `db.create()` batches all nodes and edges into a single transaction, which is significantly faster than individual `create_node`/`create_edge` calls.
+
+2. **Use release builds** – If building from source, always use `maturin develop --release`. Debug builds are significantly slower.
+
+3. **Tune synchronous mode** – For write-heavy workloads where durability can be relaxed, set `synchronous="normal"` in options. The default `"full"` ensures every commit is fsync'd.
+
+4. **Use direct lookups when possible** – `db.get_node_record(id)` is faster than running a query for single-node fetches.
+
 ## Benchmarks
 
 `benchmarks/crud.py` performs simple create/read/update/delete micro-benchmarks
@@ -87,6 +106,12 @@ against a throwaway database:
 
 ```bash
 python benchmarks/crud.py
+```
+
+`benchmarks/realistic_bench.py` runs a larger benchmark comparable to the Node.js and Rust benchmarks:
+
+```bash
+python benchmarks/realistic_bench.py
 ```
 
 Predicate builders accept timezone-aware `datetime` objects directly and reject naive datetimes so callers do not need to juggle epochs. Property projections (`{"var": "a", "prop": "name", "as": "alias"}`) return scalar columns when you only need a subset of properties.
