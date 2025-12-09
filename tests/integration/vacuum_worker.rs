@@ -66,6 +66,11 @@ fn background_vacuum_runs_with_timer() -> Result<()> {
             panic!("vacuum worker did not run in time");
         }
         std::thread::sleep(Duration::from_millis(25));
+        // Issue a commit to give the background vacuum a chance to run.
+        // The timer-based vacuum only fires when a commit occurs after the
+        // configured interval has elapsed.
+        let write = pager.begin_write()?;
+        pager.commit(write)?;
     }
 }
 

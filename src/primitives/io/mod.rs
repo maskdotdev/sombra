@@ -138,6 +138,7 @@ pub mod stdio_unix {
 }
 
 #[cfg(windows)]
+/// Windows-specific file I/O operations using Windows APIs.
 pub mod stdio_win {
     use std::{
         fs::{File, OpenOptions},
@@ -150,6 +151,7 @@ pub mod stdio_win {
 
     use super::StdFileIo;
 
+    /// Opens a file in read-write mode with creation support (Windows).
     pub fn open_rw(path: impl AsRef<Path>) -> Result<StdFileIo> {
         let file = OpenOptions::new()
             .read(true)
@@ -161,6 +163,7 @@ pub mod stdio_win {
         Ok(StdFileIo::new(file))
     }
 
+    /// Reads exact number of bytes at offset using Windows seek_read semantics.
     pub fn read_exact(file: &File, mut off: u64, mut dst: &mut [u8]) -> io::Result<()> {
         while !dst.is_empty() {
             let read = file.seek_read(dst, off)?;
@@ -177,6 +180,7 @@ pub mod stdio_win {
         Ok(())
     }
 
+    /// Writes all bytes at offset using Windows seek_write semantics.
     pub fn write_all(file: &File, mut off: u64, mut src: &[u8]) -> io::Result<()> {
         while !src.is_empty() {
             let written = file.seek_write(src, off)?;
