@@ -343,9 +343,9 @@ fn multiple_readers_selective_eviction() -> Result<()> {
     let path = dir.path().join("selective_eviction.db");
     let metrics = Arc::new(TestMetrics::default());
 
-    // 200ms timeout
+    // Use 500ms timeout with generous margins for slow CI environments
     let (pager, graph) =
-        setup_graph_with_timeout(&path, Duration::from_millis(200), 80, metrics.clone())?;
+        setup_graph_with_timeout(&path, Duration::from_millis(500), 80, metrics.clone())?;
 
     // Create a node
     let node_id = create_test_node(&pager, &graph)?;
@@ -353,16 +353,13 @@ fn multiple_readers_selective_eviction() -> Result<()> {
     // Open an old reader
     let old_read = pager.begin_latest_committed_read()?;
 
-    // Wait a bit
-    thread::sleep(Duration::from_millis(150));
+    // Wait until old reader clearly exceeds timeout (~600ms, well past 500ms)
+    thread::sleep(Duration::from_millis(600));
 
-    // Open a young reader
+    // Open a young reader right before triggering maintenance
     let young_read = pager.begin_latest_committed_read()?;
 
-    // Wait until old reader exceeds timeout (total ~250ms for old reader)
-    thread::sleep(Duration::from_millis(100));
-
-    // Trigger maintenance
+    // Trigger maintenance immediately - young reader is only milliseconds old
     let mut write = pager.begin_write()?;
     graph.create_node(
         &mut write,
@@ -373,16 +370,17 @@ fn multiple_readers_selective_eviction() -> Result<()> {
     )?;
     pager.commit(write)?;
 
-    thread::sleep(Duration::from_millis(50));
+    // Brief wait for background maintenance to process
+    thread::sleep(Duration::from_millis(100));
 
-    // Old reader should be evicted
+    // Old reader should be evicted (~700ms old, well past 500ms timeout)
     assert!(old_read.is_evicted(), "old reader should be evicted");
     assert!(
         old_read.validate().is_err(),
         "old reader validation should fail"
     );
 
-    // Young reader should still be valid (only ~150ms old)
+    // Young reader should still be valid (~100ms old, well under 500ms timeout)
     assert!(
         !young_read.is_evicted(),
         "young reader should not be evicted"

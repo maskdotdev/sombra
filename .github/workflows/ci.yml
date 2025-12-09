@@ -130,6 +130,7 @@ jobs:
       - name: Build bindings
         run: cd bindings/node && ${{ matrix.build }}
       - name: List build artifacts
+        shell: bash
         run: |
           cd bindings/node
           ls -la *.node 2>/dev/null || true
