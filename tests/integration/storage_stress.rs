@@ -193,7 +193,7 @@ fn small_cache_cumulative_writes_no_checkpoint() -> Result<()> {
                 labels: &[LabelId(1)],
                 props: &[
                     PropEntry::new(PropId(1), PropValue::Int(i as i64)),
-                    PropEntry::new(PropId(2), PropValue::Str(&format!("node_{}", i))),
+                    PropEntry::new(PropId(2), PropValue::Str(&format!("node_{i}"))),
                 ],
             },
         )?;

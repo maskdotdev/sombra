@@ -143,7 +143,7 @@ fn reader_timeout_eviction() -> Result<()> {
     assert!(validation_result.is_err(), "validation should fail");
     match validation_result {
         Err(SombraError::SnapshotTooOld(_)) => {}
-        Err(other) => panic!("expected SnapshotTooOld, got {:?}", other),
+        Err(other) => panic!("expected SnapshotTooOld, got {other:?}"),
         Ok(()) => panic!("expected error, got Ok"),
     }
 

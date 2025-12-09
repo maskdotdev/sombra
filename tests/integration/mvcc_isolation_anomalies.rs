@@ -345,11 +345,10 @@ fn single_writer_prevents_lost_update() -> Result<()> {
         Err(sombra::types::SombraError::Conflict(msg)) => {
             assert!(
                 msg.contains("writer lock already held"),
-                "Expected writer lock conflict message, got: {}",
-                msg
+                "Expected writer lock conflict message, got: {msg}"
             );
         }
-        Err(e) => panic!("Expected Conflict error, got: {}", e),
+        Err(e) => panic!("Expected Conflict error, got: {e}"),
         Ok(_) => panic!("Expected error but got Ok"),
     }
 
@@ -844,13 +843,12 @@ fn try_acquire_writer_conflict() -> Result<()> {
         Err(sombra::types::SombraError::Conflict(msg)) => {
             assert!(
                 msg.contains("writer lock already held"),
-                "Expected writer lock conflict message, got: {}",
-                msg
+                "Expected writer lock conflict message, got: {msg}"
             );
         }
         Ok(Some(_)) => panic!("try_acquire_writer should not succeed when writer is held"),
         Ok(None) => panic!("try_acquire_writer should return Conflict, not None"),
-        Err(e) => panic!("Expected Conflict error, got: {:?}", e),
+        Err(e) => panic!("Expected Conflict error, got: {e:?}"),
     }
 
     Ok(())

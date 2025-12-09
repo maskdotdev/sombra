@@ -518,7 +518,7 @@ fn high_contention_read_write_mix() -> Result<()> {
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!("version {version}: begin writer updates"),
+            format!("version {version}: begin writer updates"),
         );
         // Apply a batch of updates.
         let mut write = pager.begin_write()?;
@@ -532,7 +532,7 @@ fn high_contention_read_write_mix() -> Result<()> {
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!("version {version}: writer applied updates"),
+            format!("version {version}: writer applied updates"),
         );
 
         // Writer should immediately see its own updates.
@@ -540,8 +540,7 @@ fn high_contention_read_write_mix() -> Result<()> {
             assert_eq!(
                 read_version_prop_write(&graph, &mut write, node_id, PropId(1))?,
                 version,
-                "writer should observe version {} before commit",
-                version
+                "writer should observe version {version} before commit"
             );
         }
 
@@ -549,7 +548,7 @@ fn high_contention_read_write_mix() -> Result<()> {
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!("version {version}: writer committed"),
+            format!("version {version}: writer committed"),
         );
 
         // Capture a new snapshot after each commit and ensure all snapshots
@@ -558,7 +557,7 @@ fn high_contention_read_write_mix() -> Result<()> {
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!(
+            format!(
                 "version {version}: captured snapshot count={}",
                 snapshots.len()
             ),
@@ -569,16 +568,14 @@ fn high_contention_read_write_mix() -> Result<()> {
                 assert_eq!(
                     read_version_prop(&graph, read, node_id, PropId(1))?,
                     *expected,
-                    "snapshot idx={} should remain at version {}",
-                    idx,
-                    expected
+                    "snapshot idx={idx} should remain at version {expected}"
                 );
             }
         }
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!(
+            format!(
                 "version {version}: verified {} snapshots",
                 snapshots.len()
             ),
@@ -590,20 +587,20 @@ fn high_contention_read_write_mix() -> Result<()> {
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!("version {version}: released {released} snapshots"),
+            format!("version {version}: released {released} snapshots"),
         );
 
         // Mix in checkpointing to simulate background maintenance under load.
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!("version {version}: checkpoint start"),
+            format!("version {version}: checkpoint start"),
         );
         pager.checkpoint(CheckpointMode::Force)?;
         log_progress(
             "high_contention_read_write_mix",
             start,
-            &format!("version {version}: checkpoint complete"),
+            format!("version {version}: checkpoint complete"),
         );
     }
 
@@ -653,7 +650,7 @@ fn multiple_readers_same_snapshot() -> Result<()> {
                 _ => None,
             })
             .expect("version property should exist");
-        assert_eq!(version, 0, "Reader {} should see version=0", i);
+        assert_eq!(version, 0, "Reader {i} should see version=0");
     }
 
     Ok(())
@@ -679,7 +676,7 @@ fn rapid_snapshot_churn() -> Result<()> {
 
         // Verify we can read
         let node = graph.get_node(&read, node_ids[0])?;
-        assert!(node.is_some(), "Node should exist at iteration {}", i);
+        assert!(node.is_some(), "Node should exist at iteration {i}");
 
         // Snapshot is dropped here
     }

@@ -24,8 +24,10 @@ fn kill_during_commit_recovers() -> Result<()> {
     assert!(!child_status.success(), "child should abort");
 
     // Recovery: open the database and verify the page contents written by the child.
-    let mut opts = PagerOptions::default();
-    opts.synchronous = Synchronous::Normal;
+    let opts = PagerOptions {
+        synchronous: Synchronous::Normal,
+        ..PagerOptions::default()
+    };
     let pager = Pager::open(&db_path, opts)?;
     let read_guard = pager.begin_read()?;
     let page_ref = pager.get_page(&read_guard, PageId(1))?;
@@ -39,8 +41,10 @@ fn kill_during_commit_recovers() -> Result<()> {
 fn crash_child_kill_after_commit() -> Result<()> {
     let path = std::env::var("SOMBRA_CRASH_DB_PATH").expect("missing SOMBRA_CRASH_DB_PATH");
     let db_path = std::path::PathBuf::from(path);
-    let mut opts = PagerOptions::default();
-    opts.synchronous = Synchronous::Normal;
+    let opts = PagerOptions {
+        synchronous: Synchronous::Normal,
+        ..PagerOptions::default()
+    };
     let pager = Pager::create(&db_path, opts)?;
     let meta = pager.meta()?;
     let mut write = pager.begin_write()?;
