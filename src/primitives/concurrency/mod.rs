@@ -405,9 +405,9 @@ mod unix {
         let fd = file.as_raw_fd();
         let mut flock = libc::flock {
             l_type: if exclusive {
-                libc::F_WRLCK as i16
+                libc::F_WRLCK as _
             } else {
-                libc::F_RDLCK as i16
+                libc::F_RDLCK as _
             },
             l_whence: libc::SEEK_SET as _,
             l_start: start as libc::off_t,
@@ -436,7 +436,7 @@ mod unix {
     pub fn unlock_region(file: &Arc<File>, start: u64, len: u64) -> io::Result<()> {
         let fd = file.as_raw_fd();
         let mut flock = libc::flock {
-            l_type: libc::F_UNLCK as i16,
+            l_type: libc::F_UNLCK as _,
             l_whence: libc::SEEK_SET as _,
             l_start: start as libc::off_t,
             l_len: len as libc::off_t,

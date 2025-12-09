@@ -1,4 +1,5 @@
 #![deny(clippy::all)]
+#![allow(clippy::arc_with_non_send_sync)]
 
 use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
@@ -258,7 +259,7 @@ pub fn databaseGetNode(handle: &DatabaseHandle, node_id: i64) -> NapiResult<Opti
   let id = u64_from_js_id(node_id, "getNodeRecord")?;
   handle.with_db(|db| {
     let record = db.get_node_record(id).map_err(to_napi_err)?;
-    record.map(|node| to_json_value(node)).transpose()
+    record.map(to_json_value).transpose()
   })
 }
 
@@ -268,7 +269,7 @@ pub fn databaseGetEdge(handle: &DatabaseHandle, edge_id: i64) -> NapiResult<Opti
   let id = u64_from_js_id(edge_id, "getEdgeRecord")?;
   handle.with_db(|db| {
     let record = db.get_edge_record(id).map_err(to_napi_err)?;
-    record.map(|edge| to_json_value(edge)).transpose()
+    record.map(to_json_value).transpose()
   })
 }
 

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::arc_with_non_send_sync)]
 
 use std::sync::{Arc, Mutex};
 
@@ -539,9 +540,11 @@ fn parse_direction(value: Option<&str>) -> PyResult<Dir> {
 }
 
 fn parse_neighbor_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<ParsedNeighborOptions> {
-    let mut parsed = ParsedNeighborOptions::default();
-    parsed.direction = Dir::Out;
-    parsed.distinct = true;
+    let mut parsed = ParsedNeighborOptions {
+        direction: Dir::Out,
+        distinct: true,
+        ..Default::default()
+    };
     if let Some(dict) = options {
         if let Some(value) = dict.get_item("direction")? {
             let dir = value.extract::<String>()?;
@@ -572,8 +575,10 @@ fn parse_neighbor_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<Parse
 }
 
 fn parse_bfs_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<ParsedBfsOptions> {
-    let mut parsed = ParsedBfsOptions::default();
-    parsed.direction = Dir::Out;
+    let mut parsed = ParsedBfsOptions {
+        direction: Dir::Out,
+        ..Default::default()
+    };
     if let Some(dict) = options {
         if let Some(value) = dict.get_item("direction")? {
             let dir = value.extract::<String>()?;
