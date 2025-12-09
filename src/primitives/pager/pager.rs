@@ -1949,9 +1949,10 @@ impl Pager {
         // This allows transactions that modify many pages to proceed without failing.
         // The cache will naturally shrink back during checkpoint when dirty pages are
         // flushed to disk and become evictable.
-        let all_dirty_or_pinned = inner.frames.iter().all(|f| {
-            f.id.is_some() && (f.dirty || f.pin_count > 0)
-        });
+        let all_dirty_or_pinned = inner
+            .frames
+            .iter()
+            .all(|f| f.id.is_some() && (f.dirty || f.pin_count > 0));
         if all_dirty_or_pinned {
             let new_frame = Frame::new(self.page_size);
             let new_idx = inner.frames.len();

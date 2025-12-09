@@ -45,7 +45,6 @@ use crate::admin::{self, AdminOpenOptions, StatsReport};
 use crate::ffi::{self, DatabaseOptions};
 use crate::primitives::pager::MVCC_READER_WARN_THRESHOLD_MS;
 
-
 /// Runtime options used to boot the dashboard HTTP server.
 #[derive(Clone, Debug)]
 pub struct DashboardOptions {
@@ -1196,7 +1195,7 @@ async fn full_graph_handler(
     // Query edges for each pair of labels
     let mut all_edges = Vec::new();
     let mut seen_edges = std::collections::HashSet::new();
-    
+
     for (source_label, _) in &labels {
         for (target_label, _) in &labels {
             let edges_query = serde_json::json!({
@@ -1225,7 +1224,10 @@ async fn full_graph_handler(
                         let edge_key = (source_id, target_id);
                         if seen_edges.insert(edge_key) {
                             let mut edge_obj = serde_json::Map::new();
-                            edge_obj.insert("_id".to_string(), Value::Number((seen_edges.len() as u64).into()));
+                            edge_obj.insert(
+                                "_id".to_string(),
+                                Value::Number((seen_edges.len() as u64).into()),
+                            );
                             edge_obj.insert("_source".to_string(), Value::Number(source_id.into()));
                             edge_obj.insert("_target".to_string(), Value::Number(target_id.into()));
                             all_edges.push(Value::Object(edge_obj));
@@ -1236,7 +1238,10 @@ async fn full_graph_handler(
         }
     }
 
-    Ok(Json(FullGraphResponse { nodes: all_nodes, edges: all_edges }))
+    Ok(Json(FullGraphResponse {
+        nodes: all_nodes,
+        edges: all_edges,
+    }))
 }
 
 #[derive(Debug, Serialize)]

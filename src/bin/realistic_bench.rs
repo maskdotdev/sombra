@@ -41,7 +41,7 @@ fn main() {
         "export function qux() { return true; }",
         "const quux = (x, y) => x + y;",
     ];
-    
+
     let metadata = [
         r#"{"type": "function", "exported": true}"#,
         r#"{"type": "variable", "exported": false}"#,
@@ -52,7 +52,7 @@ fn main() {
     // Using create_json which accepts handles for edges
     println!("Creating {node_count} nodes and {edge_count} edges in single transaction...");
     let write_start = Instant::now();
-    
+
     // Build JSON spec like Node.js does
     let nodes: Vec<serde_json::Value> = (0..node_count)
         .map(|i| {
@@ -70,7 +70,7 @@ fn main() {
             })
         })
         .collect();
-    
+
     let edges: Vec<serde_json::Value> = (0..edge_count)
         .map(|i| {
             let src_handle = i % node_count;
@@ -86,12 +86,12 @@ fn main() {
             })
         })
         .collect();
-    
+
     let spec = serde_json::json!({
         "nodes": nodes,
         "edges": edges,
     });
-    
+
     let result = db.create_json(&spec).expect("create nodes and edges");
     let node_ids: Vec<u64> = result["nodes"]
         .as_array()
@@ -99,33 +99,62 @@ fn main() {
         .iter()
         .map(|v| v.as_u64().expect("node id"))
         .collect();
-    
+
     let write_time = write_start.elapsed();
     println!("create total: {:.1} ms", write_time.as_secs_f64() * 1000.0);
 
     // Random reads using get_node
     println!("Running {read_count} reads...");
     let read_start = Instant::now();
-    
+
     let mut total_props = 0usize;
     let mut first_20_times = Vec::new();
     for i in 0..read_count {
         let id = node_ids[(i * 17) % node_ids.len()];
         let single_start = Instant::now();
-        let node = db.get_node_record(id).expect("get node").expect("node exists");
+        let node = db
+            .get_node_record(id)
+            .expect("get node")
+            .expect("node exists");
         total_props += node.properties.len(); // Force reading the data
         if i < 20 {
             first_20_times.push(single_start.elapsed());
         }
     }
-    
+
     let read_time = read_start.elapsed();
-    println!("random reads: {:.1} ms (total props read: {})", read_time.as_secs_f64() * 1000.0, total_props);
-    println!("First 20 read times (µs): {:?}", first_20_times.iter().map(|d| d.as_micros()).collect::<Vec<_>>());
+    println!(
+        "random reads: {:.1} ms (total props read: {})",
+        read_time.as_secs_f64() * 1000.0,
+        total_props
+    );
+    println!(
+        "First 20 read times (µs): {:?}",
+        first_20_times
+            .iter()
+            .map(|d| d.as_micros())
+            .collect::<Vec<_>>()
+    );
 
     println!("\n📊 Benchmark Summary (Rust Core):");
-    println!("- Nodes: {} ({:.0} nodes/sec)", node_count, node_count as f64 / write_time.as_secs_f64());
-    println!("- Edges: {} ({:.0} edges/sec)", edge_count, edge_count as f64 / write_time.as_secs_f64());
-    println!("- Reads: {} ({:.1}ms, {:.0} reads/sec)", read_count, read_time.as_secs_f64() * 1000.0, read_count as f64 / read_time.as_secs_f64());
-    println!("- Total write time: {:.1}ms", write_time.as_secs_f64() * 1000.0);
+    println!(
+        "- Nodes: {} ({:.0} nodes/sec)",
+        node_count,
+        node_count as f64 / write_time.as_secs_f64()
+    );
+    println!(
+        "- Edges: {} ({:.0} edges/sec)",
+        edge_count,
+        edge_count as f64 / write_time.as_secs_f64()
+    );
+    println!(
+        "- Reads: {} ({:.1}ms, {:.0} reads/sec)",
+        read_count,
+        read_time.as_secs_f64() * 1000.0,
+        read_count as f64 / read_time.as_secs_f64()
+    );
+    println!(
+        "- Total write time: {:.1}ms",
+        write_time.as_secs_f64() * 1000.0
+    );
 }

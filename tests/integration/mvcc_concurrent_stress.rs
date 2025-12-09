@@ -68,11 +68,7 @@ fn small_vacuum_cfg() -> VacuumCfg {
 }
 
 /// Creates initial nodes with a `version` property set to 0.
-fn create_initial_nodes(
-    pager: &Pager,
-    graph: &Graph,
-    count: usize,
-) -> Result<Vec<NodeId>> {
+fn create_initial_nodes(pager: &Pager, graph: &Graph, count: usize) -> Result<Vec<NodeId>> {
     let mut node_ids = Vec::with_capacity(count);
     let mut write = pager.begin_write()?;
     for _ in 0..count {
@@ -92,11 +88,7 @@ fn create_initial_nodes(
 
 /// Reads all nodes and extracts their version property values.
 #[allow(dead_code)] // Kept for future use when Graph becomes Send+Sync
-fn read_all_versions(
-    pager: &Pager,
-    graph: &Graph,
-    node_ids: &[NodeId],
-) -> Result<Vec<i64>> {
+fn read_all_versions(pager: &Pager, graph: &Graph, node_ids: &[NodeId]) -> Result<Vec<i64>> {
     let read = pager.begin_latest_committed_read()?;
     let mut versions = Vec::with_capacity(node_ids.len());
     for &node_id in node_ids {
@@ -339,7 +331,9 @@ fn snapshot_stability_under_concurrent_writes() -> Result<()> {
 
     // Verify Reader A sees version=0 for all nodes
     for &node_id in &node_ids {
-        let node = graph.get_node(&read_a, node_id)?.expect("node should exist");
+        let node = graph
+            .get_node(&read_a, node_id)?
+            .expect("node should exist");
         let version = node
             .props
             .iter()
@@ -354,7 +348,9 @@ fn snapshot_stability_under_concurrent_writes() -> Result<()> {
 
     // Verify Reader B sees version=1 for all nodes
     for &node_id in &node_ids {
-        let node = graph.get_node(&read_b, node_id)?.expect("node should exist");
+        let node = graph
+            .get_node(&read_b, node_id)?
+            .expect("node should exist");
         let version = node
             .props
             .iter()
@@ -370,7 +366,9 @@ fn snapshot_stability_under_concurrent_writes() -> Result<()> {
     // Verify new reader sees version=2
     let read_c = pager.begin_latest_committed_read()?;
     for &node_id in &node_ids {
-        let node = graph.get_node(&read_c, node_id)?.expect("node should exist");
+        let node = graph
+            .get_node(&read_c, node_id)?
+            .expect("node should exist");
         let version = node
             .props
             .iter()
@@ -575,10 +573,7 @@ fn high_contention_read_write_mix() -> Result<()> {
         log_progress(
             "high_contention_read_write_mix",
             start,
-            format!(
-                "version {version}: verified {} snapshots",
-                snapshots.len()
-            ),
+            format!("version {version}: verified {} snapshots", snapshots.len()),
         );
 
         // Release snapshots to avoid long-lived pins that can block checkpoints.
@@ -640,7 +635,9 @@ fn multiple_readers_same_snapshot() -> Result<()> {
 
     // All original readers should still see version=0
     for (i, read) in readers.iter().enumerate() {
-        let node = graph.get_node(read, node_ids[0])?.expect("node should exist");
+        let node = graph
+            .get_node(read, node_ids[0])?
+            .expect("node should exist");
         let version = node
             .props
             .iter()

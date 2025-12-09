@@ -755,8 +755,7 @@ impl CommitTable {
                         }
                     }
                     CommitReaderSource::Entry => {
-                        if let Some(entry) =
-                            self.entries.iter_mut().find(|e| e.id == info.snapshot)
+                        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == info.snapshot)
                         {
                             entry.reader_refs = entry.reader_refs.saturating_sub(1);
                         }

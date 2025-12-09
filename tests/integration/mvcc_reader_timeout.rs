@@ -218,7 +218,10 @@ fn reader_approaching_timeout_warning() -> Result<()> {
 
     // Now eviction should have occurred
     let evicted = metrics.reader_evicted.load(Ordering::Relaxed);
-    assert!(evicted > 0, "reader should be evicted after exceeding timeout");
+    assert!(
+        evicted > 0,
+        "reader should be evicted after exceeding timeout"
+    );
 
     Ok(())
 }
@@ -233,12 +236,8 @@ fn reader_within_timeout_not_evicted() -> Result<()> {
     let metrics = Arc::new(TestMetrics::default());
 
     // Use a longer timeout (1 second)
-    let (pager, graph) = setup_graph_with_timeout(
-        &path,
-        Duration::from_secs(1),
-        80,
-        metrics.clone(),
-    )?;
+    let (pager, graph) =
+        setup_graph_with_timeout(&path, Duration::from_secs(1), 80, metrics.clone())?;
 
     // Create a node
     let node_id = create_test_node(&pager, &graph)?;
@@ -314,7 +313,10 @@ fn reader_timeout_disabled() -> Result<()> {
     thread::sleep(Duration::from_millis(50));
 
     // Reader should still be valid (timeout disabled)
-    assert!(read.validate().is_ok(), "reader should be valid with timeout disabled");
+    assert!(
+        read.validate().is_ok(),
+        "reader should be valid with timeout disabled"
+    );
     assert!(!read.is_evicted(), "reader should not be evicted");
 
     // Should still be able to read
@@ -323,7 +325,10 @@ fn reader_timeout_disabled() -> Result<()> {
 
     // No evictions
     let evicted = metrics.reader_evicted.load(Ordering::Relaxed);
-    assert_eq!(evicted, 0, "no readers should be evicted when timeout disabled");
+    assert_eq!(
+        evicted, 0,
+        "no readers should be evicted when timeout disabled"
+    );
 
     Ok(())
 }
@@ -339,12 +344,8 @@ fn multiple_readers_selective_eviction() -> Result<()> {
     let metrics = Arc::new(TestMetrics::default());
 
     // 200ms timeout
-    let (pager, graph) = setup_graph_with_timeout(
-        &path,
-        Duration::from_millis(200),
-        80,
-        metrics.clone(),
-    )?;
+    let (pager, graph) =
+        setup_graph_with_timeout(&path, Duration::from_millis(200), 80, metrics.clone())?;
 
     // Create a node
     let node_id = create_test_node(&pager, &graph)?;
@@ -376,11 +377,20 @@ fn multiple_readers_selective_eviction() -> Result<()> {
 
     // Old reader should be evicted
     assert!(old_read.is_evicted(), "old reader should be evicted");
-    assert!(old_read.validate().is_err(), "old reader validation should fail");
+    assert!(
+        old_read.validate().is_err(),
+        "old reader validation should fail"
+    );
 
     // Young reader should still be valid (only ~150ms old)
-    assert!(!young_read.is_evicted(), "young reader should not be evicted");
-    assert!(young_read.validate().is_ok(), "young reader should still be valid");
+    assert!(
+        !young_read.is_evicted(),
+        "young reader should not be evicted"
+    );
+    assert!(
+        young_read.validate().is_ok(),
+        "young reader should still be valid"
+    );
 
     // Young reader should still work
     let node = graph.get_node(&young_read, node_id)?;

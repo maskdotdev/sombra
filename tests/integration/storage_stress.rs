@@ -202,7 +202,7 @@ fn small_cache_cumulative_writes_no_checkpoint() -> Result<()> {
 
     // Verify we can still read back - just do a quick sanity check.
     let read = pager.begin_read()?;
-    
+
     // First check: directly get each node by ID
     let mut found_by_id = 0u64;
     for i in 1..=target_count {
@@ -211,21 +211,23 @@ fn small_cache_cumulative_writes_no_checkpoint() -> Result<()> {
         }
     }
     assert_eq!(found_by_id, target_count, "get_node should find all nodes");
-    
+
     // Second check: scan_all_nodes should return all nodes
     let all_scanned = graph.scan_all_nodes(&read)?;
     assert_eq!(
-        all_scanned.len() as u64, target_count,
+        all_scanned.len() as u64,
+        target_count,
         "scan_all_nodes should return all nodes"
     );
-    
+
     // Third check: nodes_with_label should return all nodes (they all have LabelId(1))
     let label_nodes = graph.nodes_with_label(&read, LabelId(1))?;
     assert_eq!(
-        label_nodes.len() as u64, target_count,
+        label_nodes.len() as u64,
+        target_count,
         "nodes_with_label should return all nodes with label 1"
     );
-    
+
     // Fourth check: count_nodes_with_label should match
     let label_count = graph.count_nodes_with_label(&read, LabelId(1))?;
     assert_eq!(
@@ -235,7 +237,7 @@ fn small_cache_cumulative_writes_no_checkpoint() -> Result<()> {
 
     // Drop the read guard before checkpoint (checkpoint waits for readers)
     drop(read);
-    
+
     // Checkpoint should still work after all these writes.
     pager.checkpoint(CheckpointMode::Force)?;
 

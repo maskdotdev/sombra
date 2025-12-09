@@ -38,7 +38,12 @@ fn setup_graph(path: &std::path::Path) -> Result<(Arc<Pager>, Arc<Graph>)> {
 }
 
 /// Helper to read a node's integer property value.
-fn read_int_prop(graph: &Graph, read: &sombra::primitives::pager::ReadGuard, node_id: NodeId, prop_id: PropId) -> Result<Option<i64>> {
+fn read_int_prop(
+    graph: &Graph,
+    read: &sombra::primitives::pager::ReadGuard,
+    node_id: NodeId,
+    prop_id: PropId,
+) -> Result<Option<i64>> {
     Ok(graph.get_node(read, node_id)?.and_then(|node| {
         node.props
             .iter()
@@ -274,10 +279,7 @@ fn si_prevents_phantom_read() -> Result<()> {
     // New transaction should see it
     let read_b = pager.begin_latest_committed_read()?;
     let new_node = graph.get_node(&read_b, new_node_id)?;
-    assert!(
-        new_node.is_some(),
-        "New reader should see committed node"
-    );
+    assert!(new_node.is_some(), "New reader should see committed node");
 
     Ok(())
 }
