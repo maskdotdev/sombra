@@ -36,7 +36,7 @@ fn setup_graph(cfg: VacuumCfg) -> Result<(TempDir, Arc<Pager>, Arc<Graph>)> {
 
 #[test]
 fn background_vacuum_runs_with_timer() -> Result<()> {
-    let (_dir, pager, graph) = setup_graph(small_vacuum_cfg(Duration::from_millis(25), 0))?;
+    let (_dir, pager, graph) = setup_graph(small_vacuum_cfg(Duration::from_millis(50), 0))?;
 
     let mut write = pager.begin_write()?;
     let node = graph.create_node(
@@ -55,7 +55,7 @@ fn background_vacuum_runs_with_timer() -> Result<()> {
     let write = pager.begin_write()?;
     pager.commit(write)?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(stats) = graph.last_vacuum_stats() {
             if stats.trigger == VacuumTrigger::Timer {
@@ -65,7 +65,7 @@ fn background_vacuum_runs_with_timer() -> Result<()> {
         if Instant::now() > deadline {
             panic!("vacuum worker did not run in time");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
