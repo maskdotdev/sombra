@@ -61,12 +61,13 @@ impl DatabaseHandle {
   where
     F: FnOnce(&Database) -> NapiResult<T>,
   {
-    let guard = self.inner.lock().map_err(|_| {
-      NapiError::new(Status::GenericFailure, "database handle is poisoned")
-    })?;
-    let db = guard.as_ref().ok_or_else(|| {
-      NapiError::new(Status::GenericFailure, "database is closed")
-    })?;
+    let guard = self
+      .inner
+      .lock()
+      .map_err(|_| NapiError::new(Status::GenericFailure, "database handle is poisoned"))?;
+    let db = guard
+      .as_ref()
+      .ok_or_else(|| NapiError::new(Status::GenericFailure, "database is closed"))?;
     f(db)
   }
 }
@@ -150,22 +151,13 @@ pub fn openDatabase(path: String, options: Option<ConnectOptions>) -> NapiResult
   if let Some(mode) = opts.synchronous.as_deref() {
     pager_opts.synchronous = parse_synchronous(mode)?;
   }
-  if let Some(ms) = opts
-    .group_commit_max_wait_ms
-    .or(opts.commit_coalesce_ms)
-  {
+  if let Some(ms) = opts.group_commit_max_wait_ms.or(opts.commit_coalesce_ms) {
     pager_opts.group_commit_max_wait_ms = ms as u64;
   }
-  if let Some(frames) = opts
-    .group_commit_max_frames
-    .or(opts.commit_max_frames)
-  {
+  if let Some(frames) = opts.group_commit_max_frames.or(opts.commit_max_frames) {
     pager_opts.group_commit_max_frames = frames as usize;
   }
-  if let Some(commits) = opts
-    .group_commit_max_writers
-    .or(opts.commit_max_commits)
-  {
+  if let Some(commits) = opts.group_commit_max_writers.or(opts.commit_max_commits) {
     pager_opts.group_commit_max_writers = commits as usize;
   }
   if let Some(async_fsync) = opts.async_fsync {
@@ -294,10 +286,7 @@ pub fn databaseCountEdgesWithType(handle: &DatabaseHandle, ty: String) -> NapiRe
 
 #[allow(non_snake_case)]
 #[napi]
-pub fn databaseListNodesWithLabel(
-  handle: &DatabaseHandle,
-  label: String,
-) -> NapiResult<Vec<u64>> {
+pub fn databaseListNodesWithLabel(handle: &DatabaseHandle, label: String) -> NapiResult<Vec<u64>> {
   handle.with_db(|db| db.node_ids_with_label(&label).map_err(to_napi_err))
 }
 
@@ -337,7 +326,13 @@ pub fn databaseBfsTraversal(
   let max_results = opts.max_results.map(|value| value as usize);
   handle.with_db(|db| {
     let visits = db
-      .bfs_traversal(start, dir, max_depth, opts.edge_types.as_deref(), max_results)
+      .bfs_traversal(
+        start,
+        dir,
+        max_depth,
+        opts.edge_types.as_deref(),
+        max_results,
+      )
       .map_err(to_napi_err)?;
     visits
       .into_iter()
@@ -353,9 +348,10 @@ pub fn databaseBfsTraversal(
 #[allow(non_snake_case)]
 #[napi]
 pub fn databaseClose(handle: &DatabaseHandle) -> NapiResult<()> {
-  let mut guard = handle.inner.lock().map_err(|_| {
-    NapiError::new(Status::GenericFailure, "database handle is poisoned")
-  })?;
+  let mut guard = handle
+    .inner
+    .lock()
+    .map_err(|_| NapiError::new(Status::GenericFailure, "database handle is poisoned"))?;
   if guard.take().is_none() {
     return Err(NapiError::new(
       Status::GenericFailure,
@@ -369,9 +365,10 @@ pub fn databaseClose(handle: &DatabaseHandle) -> NapiResult<()> {
 impl StreamHandle {
   #[napi]
   pub fn next(&self) -> NapiResult<Option<Value>> {
-    let mut guard = self.inner.lock().map_err(|_| {
-      NapiError::new(Status::GenericFailure, "[CLOSED] stream handle is poisoned")
-    })?;
+    let mut guard = self
+      .inner
+      .lock()
+      .map_err(|_| NapiError::new(Status::GenericFailure, "[CLOSED] stream handle is poisoned"))?;
     let stream = guard
       .as_mut()
       .ok_or_else(|| NapiError::new(Status::GenericFailure, "[CLOSED] stream is closed"))?;
@@ -380,9 +377,10 @@ impl StreamHandle {
 
   #[napi]
   pub fn close(&self) -> NapiResult<()> {
-    let mut guard = self.inner.lock().map_err(|_| {
-      NapiError::new(Status::GenericFailure, "[CLOSED] stream handle is poisoned")
-    })?;
+    let mut guard = self
+      .inner
+      .lock()
+      .map_err(|_| NapiError::new(Status::GenericFailure, "[CLOSED] stream handle is poisoned"))?;
     guard.take();
     Ok(())
   }

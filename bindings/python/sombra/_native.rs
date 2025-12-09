@@ -69,9 +69,10 @@ impl DatabaseHandle {
     where
         F: FnOnce(&Arc<Database>) -> PyResult<T>,
     {
-        let guard = self.inner.lock().map_err(|_| {
-            PyRuntimeError::new_err("[CLOSED] database lock poisoned")
-        })?;
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("[CLOSED] database lock poisoned"))?;
         match guard.as_ref() {
             Some(db) => f(db),
             None => Err(PyRuntimeError::new_err("[CLOSED] database is closed")),
@@ -186,22 +187,13 @@ fn open_database(path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<Da
     if let Some(mode) = opts.synchronous {
         pager.synchronous = mode;
     }
-    if let Some(ms) = opts
-        .group_commit_max_wait_ms
-        .or(opts.commit_coalesce_ms)
-    {
+    if let Some(ms) = opts.group_commit_max_wait_ms.or(opts.commit_coalesce_ms) {
         pager.group_commit_max_wait_ms = ms as u64;
     }
-    if let Some(frames) = opts
-        .group_commit_max_frames
-        .or(opts.commit_max_frames)
-    {
+    if let Some(frames) = opts.group_commit_max_frames.or(opts.commit_max_frames) {
         pager.group_commit_max_frames = frames as usize;
     }
-    if let Some(commits) = opts
-        .group_commit_max_writers
-        .or(opts.commit_max_commits)
-    {
+    if let Some(commits) = opts.group_commit_max_writers.or(opts.commit_max_commits) {
         pager.group_commit_max_writers = commits as usize;
     }
     if let Some(async_fsync) = opts.async_fsync {
@@ -235,9 +227,10 @@ fn open_database(path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<Da
 
 #[pyfunction]
 fn database_close(handle: &DatabaseHandle) -> PyResult<()> {
-    let mut guard = handle.inner.lock().map_err(|_| {
-        PyRuntimeError::new_err("[CLOSED] database lock poisoned")
-    })?;
+    let mut guard = handle
+        .inner
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("[CLOSED] database lock poisoned"))?;
     // Take the database out, dropping it
     let _ = guard.take();
     Ok(())
@@ -245,9 +238,10 @@ fn database_close(handle: &DatabaseHandle) -> PyResult<()> {
 
 #[pyfunction]
 fn database_is_closed(handle: &DatabaseHandle) -> PyResult<bool> {
-    let guard = handle.inner.lock().map_err(|_| {
-        PyRuntimeError::new_err("[CLOSED] database lock poisoned")
-    })?;
+    let guard = handle
+        .inner
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("[CLOSED] database lock poisoned"))?;
     Ok(guard.is_none())
 }
 
@@ -469,9 +463,10 @@ fn database_pragma_set(
 
 #[pyfunction]
 fn stream_next(py: Python<'_>, handle: &StreamHandle) -> PyResult<Option<PyObject>> {
-    let mut guard = handle.inner.lock().map_err(|_| {
-        PyRuntimeError::new_err("[CLOSED] stream handle lock poisoned")
-    })?;
+    let mut guard = handle
+        .inner
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("[CLOSED] stream handle lock poisoned"))?;
     let stream = guard
         .as_mut()
         .ok_or_else(|| PyRuntimeError::new_err("[CLOSED] stream is closed"))?;
@@ -483,9 +478,10 @@ fn stream_next(py: Python<'_>, handle: &StreamHandle) -> PyResult<Option<PyObjec
 
 #[pyfunction]
 fn stream_close(handle: &StreamHandle) -> PyResult<()> {
-    let mut guard = handle.inner.lock().map_err(|_| {
-        PyRuntimeError::new_err("[CLOSED] stream handle lock poisoned")
-    })?;
+    let mut guard = handle
+        .inner
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("[CLOSED] stream handle lock poisoned"))?;
     guard.take();
     Ok(())
 }
@@ -542,9 +538,7 @@ fn parse_direction(value: Option<&str>) -> PyResult<Dir> {
     }
 }
 
-fn parse_neighbor_options(
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<ParsedNeighborOptions> {
+fn parse_neighbor_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<ParsedNeighborOptions> {
     let mut parsed = ParsedNeighborOptions::default();
     parsed.direction = Dir::Out;
     parsed.distinct = true;
@@ -556,13 +550,17 @@ fn parse_neighbor_options(
         if let Some(value) = dict.get_item("edge_type")? {
             let ty = value.extract::<String>()?;
             if ty.trim().is_empty() {
-                return Err(PyRuntimeError::new_err("edge_type must be a non-empty string"));
+                return Err(PyRuntimeError::new_err(
+                    "edge_type must be a non-empty string",
+                ));
             }
             parsed.edge_type = Some(ty);
         } else if let Some(value) = dict.get_item("edgeType")? {
             let ty = value.extract::<String>()?;
             if ty.trim().is_empty() {
-                return Err(PyRuntimeError::new_err("edgeType must be a non-empty string"));
+                return Err(PyRuntimeError::new_err(
+                    "edgeType must be a non-empty string",
+                ));
             }
             parsed.edge_type = Some(ty);
         }
