@@ -472,8 +472,8 @@ mod windows {
         unsafe {
             let handle = file.as_raw_handle();
             let mut overlapped: OVERLAPPED = zeroed();
-            overlapped.Offset = start as u32;
-            overlapped.OffsetHigh = (start >> 32) as u32;
+            overlapped.Anonymous.Anonymous.Offset = start as u32;
+            overlapped.Anonymous.Anonymous.OffsetHigh = (start >> 32) as u32;
             let mut flags = 0;
             if exclusive {
                 flags |= LOCKFILE_EXCLUSIVE_LOCK;
@@ -488,7 +488,9 @@ mod windows {
                 Ok(true)
             } else {
                 let err = io::Error::last_os_error();
-                if !blocking && matches!(err.raw_os_error(), Some(ERROR_LOCK_VIOLATION)) {
+                if !blocking
+                    && matches!(err.raw_os_error(), Some(e) if e == ERROR_LOCK_VIOLATION as i32)
+                {
                     Ok(false)
                 } else {
                     Err(err)
@@ -501,8 +503,8 @@ mod windows {
         unsafe {
             let handle = file.as_raw_handle();
             let mut overlapped: OVERLAPPED = zeroed();
-            overlapped.Offset = start as u32;
-            overlapped.OffsetHigh = (start >> 32) as u32;
+            overlapped.Anonymous.Anonymous.Offset = start as u32;
+            overlapped.Anonymous.Anonymous.OffsetHigh = (start >> 32) as u32;
             let low = len as u32;
             let high = (len >> 32) as u32;
             let res = UnlockFileEx(handle as isize, 0, low, high, &mut overlapped);
