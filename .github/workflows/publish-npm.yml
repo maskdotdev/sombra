@@ -59,13 +59,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: bindings/node/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.0"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
       - name: Install dependencies
-        run: cd bindings/node && npm ci
+        run: cd bindings/node && bun install --frozen-lockfile
       - name: Build bindings
         run: cd bindings/node && ${{ matrix.settings.build }}
       - name: Inspect build output
@@ -104,10 +105,11 @@ jobs:
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
-          cache: npm
-          cache-dependency-path: bindings/node/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.0"
       - name: Install dependencies
-        run: cd bindings/node && npm ci
+        run: cd bindings/node && bun install --frozen-lockfile
       - name: Prepare npm dirs
         run: cd bindings/node && npx napi create-npm-dirs
       - uses: actions/download-artifact@v4
