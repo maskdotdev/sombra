@@ -4,10 +4,22 @@ import { Terminal, Code2 } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { LanguageSelector } from "@/components/language-selector"
 import { CodeExample } from "@/components/code-example"
+import { TableOfContents } from "@/components/table-of-contents"
 import { SiteHeader } from "@/components/site-header"
 import { Suspense } from "react"
 
 export default function APIReferencePage() {
+  const tocItems = [
+    { label: "overview", href: "#overview", description: "Page layout and language selector" },
+    { label: "query methods", href: "#query-methods", description: "Match, traverse, aggregate, and paginate" },
+    { label: "create methods", href: "#create-methods", description: "Create nodes, edges, and batches" },
+    { label: "update methods", href: "#update-methods", description: "Set, merge, and patch data" },
+    { label: "delete methods", href: "#delete-methods", description: "Remove nodes, edges, and relationships" },
+    { label: "path methods", href: "#path-methods", description: "Shortest paths and traversal helpers" },
+    { label: "schema & indexes", href: "#schema-index", description: "Schemas, validation, and indexing" },
+    { label: "utility methods", href: "#utility-methods", description: "Transactions, subscriptions, and tools" },
+  ]
+
   return (
     <main className="min-h-screen bg-background">
       {/* Site Header */}
@@ -18,7 +30,7 @@ export default function APIReferencePage() {
       {/* API Reference Content */}
       <section className="container mx-auto px-4 py-20">
         <div className="max-w-6xl mx-auto">
-          <div className="mb-16 flex items-start justify-between gap-8">
+          <div className="mb-16 flex items-start justify-between gap-8" id="overview">
             <div>
               <div className="flex items-center gap-3 mb-4">
                 <Code2 className="w-8 h-8 text-primary" />
@@ -31,8 +43,10 @@ export default function APIReferencePage() {
             </Suspense>
           </div>
 
-          {/* Query Methods */}
-          <div className="mb-16">
+          <div className="grid gap-10 lg:grid-cols-[1fr_320px]">
+            <div className="order-2 lg:order-1 space-y-16">
+              {/* Query Methods */}
+          <div className="space-y-8" id="query-methods">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">query methods</h2>
 
             <div className="space-y-8">
@@ -184,8 +198,8 @@ export default function APIReferencePage() {
             </div>
           </div>
 
-          {/* Create Methods */}
-          <div className="mb-16">
+              {/* Create Methods */}
+              <div className="space-y-8" id="create-methods">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">create methods</h2>
 
             <div className="space-y-8">
@@ -241,8 +255,8 @@ await db.batchCreate('User', users, {
             </div>
           </div>
 
-          {/* Update Methods */}
-          <div className="mb-16">
+              {/* Update Methods */}
+              <div className="space-y-8" id="update-methods">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">update methods</h2>
 
             <div className="space-y-8">
@@ -295,8 +309,8 @@ console.log(\`Updated \${updated} users\`)`}</code>
             </div>
           </div>
 
-          {/* Delete Methods */}
-          <div className="mb-16">
+              {/* Delete Methods */}
+              <div className="space-y-8" id="delete-methods">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">delete methods</h2>
 
             <div className="space-y-8">
@@ -330,8 +344,8 @@ await db.delete()
             </div>
           </div>
 
-          {/* Path Methods */}
-          <div className="mb-16">
+              {/* Path Methods */}
+              <div className="space-y-8" id="path-methods">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">path methods</h2>
 
             <div className="space-y-8">
@@ -384,8 +398,8 @@ console.log(\`Found \${paths.length} paths\`)`}</code>
             </div>
           </div>
 
-          {/* Schema & Index Methods */}
-          <div className="mb-16">
+              {/* Schema & Index Methods */}
+              <div className="space-y-8" id="schema-index">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">schema & index methods</h2>
 
             <div className="space-y-8">
@@ -441,8 +455,8 @@ await db.createIndex('Post', 'content', {
             </div>
           </div>
 
-          {/* Utility Methods */}
-          <div>
+              {/* Utility Methods */}
+              <div className="space-y-8" id="utility-methods">
             <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">utility methods</h2>
 
             <div className="space-y-8">
@@ -497,7 +511,12 @@ subscription.unsubscribe()`}</code>
               </Card>
             </div>
           </div>
+
+          <aside className="order-1 lg:order-2 lg:sticky lg:top-28 h-fit">
+            <TableOfContents items={tocItems} eyebrow="api" title="api map" />
+          </aside>
         </div>
+      </div>
       </section>
 
       {/* Footer */}
@@ -509,13 +528,13 @@ subscription.unsubscribe()`}</code>
               <span className="text-sm text-muted-foreground">sombra © 2025</span>
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://github.com/sombra-db/sombra" className="hover:text-foreground transition-colors">
                 github
               </a>
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://twitter.com/sombradb" className="hover:text-foreground transition-colors">
                 twitter
               </a>
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://discord.gg/sombra" className="hover:text-foreground transition-colors">
                 discord
               </a>
             </div>

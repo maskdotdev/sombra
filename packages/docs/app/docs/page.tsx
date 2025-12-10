@@ -1,15 +1,44 @@
 "use client"
 
-import { Terminal, Book, Database, GitBranch } from "lucide-react"
+import { Terminal, Book, Database, GitBranch, Settings, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import Link from "next/link"
 import { LanguageSelector } from "@/components/language-selector"
 import { CodeExample } from "@/components/code-example"
+import { TableOfContents } from "@/components/table-of-contents"
 import { SiteHeader } from "@/components/site-header"
 import { Suspense } from "react"
 
 export default function DocsPage() {
+  const tocItems = [
+    {
+      label: "overview",
+      href: "#overview",
+      description: "What this guide covers at a glance",
+    },
+    {
+      label: "getting started",
+      href: "#getting-started",
+      description: "Install, init the database, and create your first graph",
+    },
+    {
+      label: "core concepts",
+      href: "#core-concepts",
+      description: "Nodes, traversals, indexes, transactions, and filters",
+    },
+    {
+      label: "advanced topics",
+      href: "#advanced-topics",
+      description: "Schemas, subscriptions, distributed queries, performance tuning",
+    },
+    {
+      label: "next steps",
+      href: "#next-steps",
+      description: "API reference and curated examples",
+    },
+  ]
+
   return (
     <main className="min-h-screen bg-background">
       <Suspense fallback={<div className="border-b border-border h-16" />}>
@@ -19,7 +48,7 @@ export default function DocsPage() {
       {/* Documentation Content */}
       <section className="container mx-auto px-4 py-20">
         <div className="max-w-6xl mx-auto">
-          <div className="mb-16 flex items-start justify-between gap-8">
+          <div className="mb-16 flex items-start justify-between gap-8" id="overview">
             <div>
               <h1 className="text-4xl font-bold mb-4">documentation</h1>
               <p className="text-lg text-muted-foreground">Everything you need to master Sombra graph database</p>
@@ -29,40 +58,42 @@ export default function DocsPage() {
             </Suspense>
           </div>
 
-          {/* Getting Started */}
-          <div className="mb-20">
-            <div className="flex items-center gap-2 mb-8">
-              <GitBranch className="w-6 h-6 text-primary" />
-              <h2 className="text-3xl font-bold">getting started</h2>
-            </div>
-            <Card className="p-8 bg-card border-border">
-              <div className="space-y-8">
-                <CodeExample
-                  label="1. install sombra"
-                  examples={{
-                    typescript: `$ npm install @sombra/core`,
-                    python: `$ pip install sombra`,
-                    go: `$ go get github.com/sombra/sombra-go`,
-                    rust: `$ cargo add sombra`,
-                  }}
-                />
+          <div className="grid gap-10 lg:grid-cols-[1fr_320px]">
+            <div className="order-2 lg:order-1 space-y-20">
+              {/* Getting Started */}
+              <div className="space-y-8" id="getting-started">
+                <div className="flex items-center gap-2 mb-8">
+                  <GitBranch className="w-6 h-6 text-primary" />
+                  <h2 className="text-3xl font-bold">getting started</h2>
+                </div>
+                <Card className="p-8 bg-card border-border">
+                  <div className="space-y-8">
+                    <CodeExample
+                      label="1. install sombra"
+                      examples={{
+                        typescript: "$ npm install @sombra/core",
+                        python: "$ pip install sombra",
+                        go: "$ go get github.com/sombra/sombra-go",
+                        rust: "$ cargo add sombra",
+                      }}
+                    />
 
-                <CodeExample
-                  label="2. initialize database"
-                  examples={{
-                    typescript: `import { Sombra } from '@sombra/core'
+                    <CodeExample
+                      label="2. initialize database"
+                      examples={{
+                        typescript: `import { Sombra } from '@sombra/core'
 
 const db = new Sombra({
   url: 'sombra://localhost:7687',
   auth: { username: 'admin', password: 'secret' }
 })`,
-                    python: `from sombra import Sombra
+                        python: `from sombra import Sombra
 
 db = Sombra(
     url='sombra://localhost:7687',
     auth={'username': 'admin', 'password': 'secret'}
 )`,
-                    go: `package main
+                        go: `package main
 
 import "github.com/sombra/sombra-go"
 
@@ -73,7 +104,7 @@ db, err := sombra.New(sombra.Config{
         Password: "secret",
     },
 })`,
-                    rust: `use sombra::Sombra;
+                        rust: `use sombra::Sombra;
 
 let db = Sombra::new(Config {
     url: "sombra://localhost:7687",
@@ -82,13 +113,13 @@ let db = Sombra::new(Config {
         password: "secret",
     },
 })?;`,
-                  }}
-                />
+                      }}
+                    />
 
-                <CodeExample
-                  label="3. create your first nodes"
-                  examples={{
-                    typescript: `await db.create()
+                    <CodeExample
+                      label="3. create your first nodes"
+                      examples={{
+                        typescript: `await db.create()
   .node('User', { 
     id: 'u1', 
     name: 'alice',
@@ -100,7 +131,7 @@ let db = Sombra::new(Config {
     email: 'bob@example.com' 
   })
   .execute()`,
-                    python: `await db.create() \\
+                        python: `await db.create() \\
     .node('User', {
         'id': 'u1',
         'name': 'alice',
@@ -112,7 +143,7 @@ let db = Sombra::new(Config {
         'email': 'bob@example.com'
     }) \\
     .execute()`,
-                    go: `err := db.Create().
+                        go: `err := db.Create().
     Node("User", map[string]interface{}{
         "id":    "u1",
         "name":  "alice",
@@ -124,7 +155,7 @@ let db = Sombra::new(Config {
         "email": "bob@example.com",
     }).
     Execute()`,
-                    rust: `db.create()
+                        rust: `db.create()
     .node("User", json!({
         "id": "u1",
         "name": "alice",
@@ -137,60 +168,60 @@ let db = Sombra::new(Config {
     }))
     .execute()
     .await?;`,
-                  }}
-                />
+                      }}
+                    />
 
-                <CodeExample
-                  label="4. create relationships"
-                  examples={{
-                    typescript: `await db.create()
+                    <CodeExample
+                      label="4. create relationships"
+                      examples={{
+                        typescript: `await db.create()
   .edge('User', { id: 'u1' }, 'FOLLOWS', 'User', { id: 'u2' }, {
     since: '2025-01-01'
   })
   .execute()`,
-                    python: `await db.create() \\
+                        python: `await db.create() \\
     .edge('User', {'id': 'u1'}, 'FOLLOWS', 'User', {'id': 'u2'}, {
         'since': '2025-01-01'
     }) \\
     .execute()`,
-                    go: `err := db.Create().
+                        go: `err := db.Create().
     Edge("User", map[string]interface{}{"id": "u1"},
          "FOLLOWS",
          "User", map[string]interface{}{"id": "u2"},
          map[string]interface{}{"since": "2025-01-01"}).
     Execute()`,
-                    rust: `db.create()
+                        rust: `db.create()
     .edge("User", json!({"id": "u1"}),
           "FOLLOWS",
           "User", json!({"id": "u2"}),
           json!({"since": "2025-01-01"}))
     .execute()
     .await?;`,
-                  }}
-                />
+                      }}
+                    />
 
-                <CodeExample
-                  label="5. query your graph"
-                  examples={{
-                    typescript: `const followers = await db.query()
+                    <CodeExample
+                      label="5. query your graph"
+                      examples={{
+                        typescript: `const followers = await db.query()
   .match('User', { id: 'u2' })
   .traverse('FOLLOWS', { direction: 'inbound' })
   .return('*')
 
 console.log(followers) // [{ id: 'u1', name: 'alice', ... }]`,
-                    python: `followers = await db.query() \\
+                        python: `followers = await db.query() \\
     .match('User', {'id': 'u2'}) \\
     .traverse('FOLLOWS', {'direction': 'inbound'}) \\
     .return_all()
 
 print(followers)  # [{'id': 'u1', 'name': 'alice', ...}]`,
-                    go: `followers, err := db.Query().
+                        go: `followers, err := db.Query().
     Match("User", map[string]interface{}{"id": "u2"}).
     Traverse("FOLLOWS", TraverseOpts{Direction: "inbound"}).
     Return("*")
 
 fmt.Println(followers) // [{id:u1 name:alice ...}]`,
-                    rust: `let followers = db.query()
+                        rust: `let followers = db.query()
     .match_node("User", json!({"id": "u2"}))
     .traverse("FOLLOWS", TraverseOpts {
         direction: Direction::Inbound,
@@ -200,26 +231,60 @@ fmt.Println(followers) // [{id:u1 name:alice ...}]`,
     .await?;
 
 println!("{:?}", followers); // [User { id: "u1", name: "alice", ... }]`,
-                  }}
-                />
+                      }}
+                    />
 
-                <div className="pt-6 border-t border-border">
-                  <p className="text-sm text-muted-foreground mb-4">
-                    You're now ready to build with Sombra! Continue reading to learn about core concepts and advanced
-                    features.
-                  </p>
-                </div>
+                    <div className="pt-6 border-t border-border">
+                      <p className="text-sm text-muted-foreground mb-4">
+                        You're now ready to build with Sombra! Continue reading to learn about core concepts and
+                        advanced features.
+                      </p>
+                    </div>
+                  </div>
+                </Card>
               </div>
-            </Card>
-          </div>
 
-          {/* Core Concepts */}
-          <div className="mb-20">
+              {/* Core Concepts */}
+              <div className="space-y-8" id="core-concepts">
             <div className="flex items-center gap-2 mb-8">
               <Book className="w-6 h-6 text-primary" />
               <h2 className="text-3xl font-bold">core concepts</h2>
             </div>
             <div className="grid md:grid-cols-2 gap-6">
+              <Card className="p-6 bg-card border-border flex flex-col">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Settings className="w-5 h-5 text-primary" />
+                    <h3 className="text-xl font-bold text-foreground">configuration</h3>
+                  </div>
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Learn how to configure Sombra for different workloads, including MVCC, WAL, and performance tuning.
+                  </p>
+                </div>
+                <Button variant="outline" className="w-full mt-4" asChild>
+                  <Link href="/docs/configuration">
+                    read guide <ArrowRight className="w-4 h-4 ml-2" />
+                  </Link>
+                </Button>
+              </Card>
+
+              <Card className="p-6 bg-card border-border flex flex-col">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Terminal className="w-5 h-5 text-primary" />
+                    <h3 className="text-xl font-bold text-foreground">cli reference</h3>
+                  </div>
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Master the command line interface. Manage databases, inspect WAL files, and handle profiles.
+                  </p>
+                </div>
+                <Button variant="outline" className="w-full mt-4" asChild>
+                  <Link href="/docs/cli">
+                    view reference <ArrowRight className="w-4 h-4 ml-2" />
+                  </Link>
+                </Button>
+              </Card>
+              
               <Card className="p-6 bg-card border-border">
                 <h3 className="text-xl font-bold mb-3 text-foreground">nodes & edges</h3>
                 <p className="text-sm text-muted-foreground mb-4">
@@ -442,8 +507,8 @@ const categories = await db.query()
             </div>
           </div>
 
-          {/* Advanced Topics */}
-          <div className="mb-20">
+              {/* Advanced Topics */}
+              <div className="space-y-8" id="advanced-topics">
             <div className="flex items-center gap-2 mb-8">
               <Database className="w-6 h-6 text-primary" />
               <h2 className="text-3xl font-bold">advanced topics</h2>
@@ -621,26 +686,33 @@ await db.batchUpdate('User',
             </div>
           </div>
 
-          {/* Next Steps */}
-          <div>
-            <Card className="p-8 bg-secondary border-border">
-              <h2 className="text-2xl font-bold mb-4">next steps</h2>
-              <p className="text-muted-foreground mb-6">
-                Now that you understand the core concepts, explore the API reference for detailed method documentation.
-              </p>
-              <div className="flex gap-4">
-                <Button className="bg-primary text-primary-foreground hover:bg-primary/90" asChild>
-                  <Link href="/api-reference">view api reference</Link>
-                </Button>
-                <Button
-                  variant="outline"
-                  className="border-border text-foreground hover:bg-muted bg-transparent"
-                  asChild
-                >
-                  <Link href="/examples">browse examples</Link>
-                </Button>
+              {/* Next Steps */}
+              <div id="next-steps">
+                <Card className="p-8 bg-secondary border-border">
+                  <h2 className="text-2xl font-bold mb-4">next steps</h2>
+                  <p className="text-muted-foreground mb-6">
+                    Now that you understand the core concepts, explore the API reference for detailed method
+                    documentation.
+                  </p>
+                  <div className="flex gap-4">
+                    <Button className="bg-primary text-primary-foreground hover:bg-primary/90" asChild>
+                      <Link href="/api-reference">view api reference</Link>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="border-border text-foreground hover:bg-muted bg-transparent"
+                      asChild
+                    >
+                      <Link href="/examples">browse examples</Link>
+                    </Button>
+                  </div>
+                </Card>
               </div>
-            </Card>
+            </div>
+
+            <aside className="order-1 lg:order-2 lg:sticky lg:top-28 h-fit">
+              <TableOfContents items={tocItems} />
+            </aside>
           </div>
         </div>
       </section>
@@ -654,13 +726,13 @@ await db.batchUpdate('User',
               <span className="text-sm text-muted-foreground">sombra © 2025</span>
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://github.com/sombra-db/sombra" className="hover:text-foreground transition-colors">
                 github
               </a>
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://twitter.com/sombradb" className="hover:text-foreground transition-colors">
                 twitter
               </a>
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://discord.gg/sombra" className="hover:text-foreground transition-colors">
                 discord
               </a>
             </div>
