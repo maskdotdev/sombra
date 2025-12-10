@@ -28,7 +28,7 @@ use crate::primitives::{
     },
 };
 use crate::storage::{
-    profile_scope, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
+    profile_scope, record_commit_phases, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
     record_pager_wal_frames, CommitId, CommitReader, CommitTable, IntentId, ReaderSnapshot,
     StorageProfileKind,
 };
@@ -86,6 +86,17 @@ pub struct PagerOptions {
     pub wal_segment_size_bytes: u64,
     /// Number of WAL segments to preallocate ahead of time.
     pub wal_preallocate_segments: u32,
+    /// Enable direct commit path when no contention detected.
+    pub direct_commit_enabled: bool,
+    /// Delay window in microseconds for coalescing fsyncs in direct commit path.
+    /// Set to 0 (default) for best single-threaded performance. Higher values
+    /// (e.g., 100-1000) can improve throughput under high concurrency by batching
+    /// multiple fsyncs together.
+    pub direct_fsync_delay_us: u64,
+    /// Use full fsync (F_FULLFSYNC on macOS) for true durability.
+    /// When false on macOS, uses regular fsync which is ~10x faster but doesn't
+    /// guarantee durability on power failure. Has no effect on other platforms.
+    pub fullfsync: bool,
 }
 
 struct PendingWalFrame {
@@ -213,6 +224,9 @@ impl Default for PagerOptions {
             async_fsync_max_wait_ms: 0,
             wal_segment_size_bytes: 64 * 1024 * 1024,
             wal_preallocate_segments: 0,
+            direct_commit_enabled: true,
+            direct_fsync_delay_us: 0, // No delay for single-threaded performance
+            fullfsync: true,          // Default to true for maximum durability
         }
     }
 }
@@ -1086,6 +1100,7 @@ impl Pager {
         );
         wal_options.segment_size_bytes = options.wal_segment_size_bytes;
         wal_options.preallocate_segments = options.wal_preallocate_segments;
+        wal_options.fullfsync = options.fullfsync;
         let wal = Wal::open(&wal_dir, wal_options)?;
         let wal_cookie = if options.async_fsync {
             Some(Arc::new(WalDurableCookie::new(wal_cookie_path(path))))
@@ -1862,6 +1877,8 @@ impl Pager {
             max_batch_commits: options.group_commit_max_writers,
             max_batch_frames: options.group_commit_max_frames,
             max_batch_wait: Duration::from_millis(options.group_commit_max_wait_ms),
+            direct_commit_enabled: options.direct_commit_enabled,
+            direct_fsync_delay: Duration::from_micros(options.direct_fsync_delay_us),
         }
     }
 
@@ -2037,6 +2054,7 @@ impl Pager {
 
     fn commit_txn(&self, mut guard: WriteGuard<'_>) -> Result<Lsn> {
         let _scope = profile_scope(StorageProfileKind::PagerCommit);
+        let frame_build_start = std::time::Instant::now();
         let mut inner = self.inner.lock();
         let (lsn, newly_reserved) = match guard.commit_lsn {
             Some(lsn) => (lsn, false),
@@ -2166,7 +2184,8 @@ impl Pager {
                 frames = wal_frames.len(),
                 "pager.commit_txn.borrowed_flush_start"
             );
-            let offsets = self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
+            let frame_build_ns = frame_build_start.elapsed().as_nanos() as u64;
+            let (offsets, wal_write_ns, fsync_ns) = self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
             if !offsets.is_empty() {
                 self.attach_version_offsets(&version_targets, &offsets);
                 self.release_version_payloads_for_floor();
@@ -2187,6 +2206,7 @@ impl Pager {
                 lsn.0
             );
             debug!(lsn = lsn.0, "pager.commit_txn.writer_lock_released");
+            let finalize_start = std::time::Instant::now();
             self.finalize_commit(lsn)?;
             self.record_committed_lsn(lsn);
             match synchronous {
@@ -2195,6 +2215,8 @@ impl Pager {
                 Synchronous::Normal => self.schedule_normal_sync(lsn)?,
                 Synchronous::Off => self.record_durable_state(lsn)?,
             }
+            let finalize_ns = finalize_start.elapsed().as_nanos() as u64;
+            record_commit_phases(frame_build_ns, wal_write_ns, fsync_ns, finalize_ns);
             guard.committed = true;
             drop(guard);
             pager_test_log!("[pager.commit] borrowed path done lsn={}", lsn.0);
@@ -2212,48 +2234,71 @@ impl Pager {
             })
             .collect();
         pager_test_log!(
-            "[pager.commit] enqueue owned frames lsn={} frames={}",
+            "[pager.commit] trying direct commit lsn={} frames={}",
             lsn.0,
             owned_frames.len()
         );
         debug!(
             lsn = lsn.0,
             frames = owned_frames.len(),
-            "pager.commit_txn.enqueue_start"
+            "pager.commit_txn.try_direct_start"
         );
-        let ticket = self.wal_committer.enqueue(owned_frames, sync_mode);
-        guard.release_writer_lock();
-        pager_test_log!(
-            "[pager.commit] writer lock released lsn={} ticket_present={}",
-            lsn.0,
-            ticket.is_some()
-        );
-        debug!(
-            lsn = lsn.0,
-            has_ticket = ticket.is_some(),
-            "pager.commit_txn.writer_lock_released"
-        );
-        let (commit_result, offsets) = match ticket {
-            Some(waiter) => {
-                pager_test_log!("[pager.commit] waiting on WAL ticket lsn={}", lsn.0);
-                debug!(lsn = lsn.0, "pager.commit_txn.waiting_on_ticket");
-                let result = waiter.wait();
-                if let Err(err) = &result {
-                    pager_test_log!("[pager.commit] ticket error lsn={} err={}", lsn.0, err);
-                    debug!(lsn = lsn.0, error = %err, "pager.commit_txn.ticket_error");
-                } else {
-                    pager_test_log!("[pager.commit] ticket done lsn={}", lsn.0);
-                    debug!(lsn = lsn.0, "pager.commit_txn.ticket_done");
-                }
-                match result {
-                    Ok(offsets) => (Ok(()), offsets),
-                    Err(err) => (Err(err), Vec::new()),
-                }
+
+        // Try direct commit path first (bypasses thread handoff when no contention)
+        let (commit_result, offsets) = match self.wal_committer.try_direct_commit(owned_frames, sync_mode) {
+            Ok(offsets) => {
+                pager_test_log!("[pager.commit] direct commit succeeded lsn={}", lsn.0);
+                debug!(lsn = lsn.0, "pager.commit_txn.direct_commit_success");
+                guard.release_writer_lock();
+                (Ok(()), offsets)
             }
-            None => {
-                pager_test_log!("[pager.commit] no ticket needed lsn={}", lsn.0);
-                debug!(lsn = lsn.0, "pager.commit_txn.no_ticket_needed");
-                (Ok(()), Vec::new())
+            Err(owned_frames) => {
+                // Fall back to group commit path
+                pager_test_log!(
+                    "[pager.commit] direct commit contention, falling back lsn={} frames={}",
+                    lsn.0,
+                    owned_frames.len()
+                );
+                debug!(
+                    lsn = lsn.0,
+                    frames = owned_frames.len(),
+                    "pager.commit_txn.direct_commit_fallback"
+                );
+                let ticket = self.wal_committer.enqueue(owned_frames, sync_mode);
+                guard.release_writer_lock();
+                pager_test_log!(
+                    "[pager.commit] writer lock released lsn={} ticket_present={}",
+                    lsn.0,
+                    ticket.is_some()
+                );
+                debug!(
+                    lsn = lsn.0,
+                    has_ticket = ticket.is_some(),
+                    "pager.commit_txn.writer_lock_released"
+                );
+                match ticket {
+                    Some(waiter) => {
+                        pager_test_log!("[pager.commit] waiting on WAL ticket lsn={}", lsn.0);
+                        debug!(lsn = lsn.0, "pager.commit_txn.waiting_on_ticket");
+                        let result = waiter.wait();
+                        if let Err(err) = &result {
+                            pager_test_log!("[pager.commit] ticket error lsn={} err={}", lsn.0, err);
+                            debug!(lsn = lsn.0, error = %err, "pager.commit_txn.ticket_error");
+                        } else {
+                            pager_test_log!("[pager.commit] ticket done lsn={}", lsn.0);
+                            debug!(lsn = lsn.0, "pager.commit_txn.ticket_done");
+                        }
+                        match result {
+                            Ok(offsets) => (Ok(()), offsets),
+                            Err(err) => (Err(err), Vec::new()),
+                        }
+                    }
+                    None => {
+                        pager_test_log!("[pager.commit] no ticket needed lsn={}", lsn.0);
+                        debug!(lsn = lsn.0, "pager.commit_txn.no_ticket_needed");
+                        (Ok(()), Vec::new())
+                    }
+                }
             }
         };
         if let Err(err) = commit_result {
@@ -2284,9 +2329,9 @@ impl Pager {
         &self,
         frames: &[PendingWalFrame],
         sync_mode: WalSyncMode,
-    ) -> Result<Vec<WalFramePtr>> {
+    ) -> Result<(Vec<WalFramePtr>, u64, u64)> {
         if frames.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0, 0));
         }
         let mut refs: Vec<WalFrame<'_>> = Vec::with_capacity(frames.len());
         for frame in frames {
@@ -2296,11 +2341,8 @@ impl Pager {
                 payload: frame.payload.as_slice(),
             });
         }
-        let offsets = self.wal.append_frame_batch(&refs)?;
-        if matches!(sync_mode, WalSyncMode::Immediate) {
-            self.wal.sync()?;
-        }
-        Ok(offsets)
+        // Use WalCommitter's borrowed frame path for coalesced fsync
+        self.wal_committer.write_borrowed_frames(&refs, sync_mode)
     }
 
     fn run_checkpoint(&self, mode: CheckpointMode) -> Result<()> {

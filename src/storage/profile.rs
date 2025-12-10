@@ -120,6 +120,24 @@ pub struct StorageProfileSnapshot {
     pub btree_leaf_allocator_snapshot_free_regions: u64,
     /// Number of MVCC writer lock conflicts.
     pub mvcc_write_lock_conflicts: u64,
+    /// Number of commits via direct path (no thread handoff).
+    pub wal_commit_direct: u64,
+    /// Number of commits via group commit path.
+    pub wal_commit_group: u64,
+    /// Number of direct commit attempts that fell back due to contention.
+    pub wal_commit_direct_contention: u64,
+    /// Number of syncs that coalesced multiple commits.
+    pub wal_sync_coalesced: u64,
+    /// Total nanoseconds spent building WAL frames (CRC, page gather).
+    pub commit_frame_build_ns: u64,
+    /// Total nanoseconds spent writing to WAL.
+    pub commit_wal_write_ns: u64,
+    /// Total nanoseconds spent in fsync.
+    pub commit_fsync_ns: u64,
+    /// Total nanoseconds spent in post-commit finalization.
+    pub commit_finalize_ns: u64,
+    /// Number of commit phase measurements.
+    pub commit_phase_count: u64,
 }
 
 #[derive(Default)]
@@ -175,6 +193,15 @@ struct StorageProfileCounters {
     #[allow(dead_code)]
     mvcc_commit_latency: LatencyHistogram,
     mvcc_write_lock_conflicts: AtomicU64,
+    wal_commit_direct: AtomicU64,
+    wal_commit_group: AtomicU64,
+    wal_commit_direct_contention: AtomicU64,
+    wal_sync_coalesced: AtomicU64,
+    commit_frame_build_ns: AtomicU64,
+    commit_wal_write_ns: AtomicU64,
+    commit_fsync_ns: AtomicU64,
+    commit_finalize_ns: AtomicU64,
+    commit_phase_count: AtomicU64,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -493,6 +520,15 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
             &counters.btree_leaf_allocator_snapshot_free_regions,
         ),
         mvcc_write_lock_conflicts: load(&counters.mvcc_write_lock_conflicts),
+        wal_commit_direct: load(&counters.wal_commit_direct),
+        wal_commit_group: load(&counters.wal_commit_group),
+        wal_commit_direct_contention: load(&counters.wal_commit_direct_contention),
+        wal_sync_coalesced: load(&counters.wal_sync_coalesced),
+        commit_frame_build_ns: load(&counters.commit_frame_build_ns),
+        commit_wal_write_ns: load(&counters.commit_wal_write_ns),
+        commit_fsync_ns: load(&counters.commit_fsync_ns),
+        commit_finalize_ns: load(&counters.commit_finalize_ns),
+        commit_phase_count: load(&counters.commit_phase_count),
     })
 }
 
@@ -743,6 +779,62 @@ pub fn record_btree_leaf_rebalance_rebuilds(count: u64) {
         counters
             .btree_leaf_rebalance_rebuilds
             .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records a commit via the direct path (no thread handoff).
+pub fn record_wal_commit_direct() {
+    if let Some(counters) = counters() {
+        counters.wal_commit_direct.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records a commit via the group commit path.
+pub fn record_wal_commit_group() {
+    if let Some(counters) = counters() {
+        counters.wal_commit_group.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records a direct commit attempt that fell back due to contention.
+pub fn record_wal_commit_direct_contention() {
+    if let Some(counters) = counters() {
+        counters
+            .wal_commit_direct_contention
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records a sync that coalesced multiple commits.
+pub fn record_wal_sync_coalesced(count: u64) {
+    if count == 0 {
+        return;
+    }
+    if let Some(counters) = counters() {
+        counters
+            .wal_sync_coalesced
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records commit phase timings for detailed profiling.
+pub fn record_commit_phases(frame_build_ns: u64, wal_write_ns: u64, fsync_ns: u64, finalize_ns: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .commit_frame_build_ns
+            .fetch_add(frame_build_ns, Ordering::Relaxed);
+        counters
+            .commit_wal_write_ns
+            .fetch_add(wal_write_ns, Ordering::Relaxed);
+        counters
+            .commit_fsync_ns
+            .fetch_add(fsync_ns, Ordering::Relaxed);
+        counters
+            .commit_finalize_ns
+            .fetch_add(finalize_ns, Ordering::Relaxed);
+        counters
+            .commit_phase_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
