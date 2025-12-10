@@ -197,5 +197,3 @@ bun install        # installs JS deps and builds the native addon
 bun run build      # release-mode napi build
 bun run test       # AVA-based contract tests
 ```
-
-Release automation is handled by Release Please; see `CHANGELOG-js.md` for the latest published notes.
