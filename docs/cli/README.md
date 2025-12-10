@@ -27,6 +27,9 @@ Every subcommand accepts the following flags before the command name:
 | `--page-size <bytes>` / `--cache-pages <pages>` | Override pager layout per command. |
 | `--synchronous {full\|normal\|off}` | Override pager sync mode. |
 | `--distinct-neighbors-default` | Sets the default neighbor-behavior bit for graphs. |
+| `--pager-group-commit-max-writers <writers>` | Limit concurrent writers per group commit. |
+| `--pager-async-fsync {on\|off}` | Enable async fsync handling. |
+| `--version-codec {none\|snappy}` | Compression codec for historical versions. |
 | `--format {text\|json}` | Switch between human output and machine-friendly JSON. |
 | `--theme {auto\|dark\|light\|plain}` | Control ANSI coloring. |
 | `--quiet` | Suppress decorative output/icons (spinners become silent). |
@@ -77,7 +80,11 @@ Manage profiles from the CLI:
 ```bash
 sombra profile list
 sombra profile show dev
-sombra profile save staging --database prod.sombra --page-size 65536
+sombra profile save staging \
+  --database prod.sombra \
+  --page-size 65536 \
+  --pager-async-fsync on \
+  --version-codec snappy
 sombra profile delete staging
 ```
 

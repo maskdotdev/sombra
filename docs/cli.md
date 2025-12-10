@@ -15,6 +15,20 @@ All subcommands share the following flags (must appear before the subcommand):
 | `--cache-pages <count>` | Override pager cache size (in pages). |
 | `--synchronous {full\|normal\|off}` | Override the pager synchronous mode. |
 | `--distinct-neighbors-default` | Sets the default for storage neighbor queries (matches Stage 7/8 behavior). |
+| `--pager-group-commit-max-writers <writers>` | Maximum writers batched per WAL group commit. |
+| `--pager-group-commit-max-frames <frames>` | Maximum WAL frames per group commit. |
+| `--pager-group-commit-max-wait-ms <ms>` | Time window in milliseconds to wait for group commits. |
+| `--pager-async-fsync {on\|off}` | Enable async fsync handling. |
+| `--pager-async-fsync-max-wait-ms <ms>` | Maximum coalesce delay for async fsync batching. |
+| `--pager-wal-segment-bytes <bytes>` | Preferred WAL segment size. |
+| `--pager-wal-preallocate-segments <count>` | Number of WAL segments to preallocate. |
+| `--inline-history {on\|off}` | Embed newest historical version inline on page heads. |
+| `--inline-history-max-bytes <bytes>` | Maximum inline history payload size. |
+| `--version-codec {none\|snappy}` | Codec to apply to historical versions. |
+| `--version-codec-min-bytes <bytes>` | Minimum payload size before compressing historical versions. |
+| `--version-codec-min-savings-bytes <bytes>` | Minimum bytes saved to keep compression output. |
+| `--snapshot-pool-size <count>` | Cached snapshots to reuse for reads (0 disables). |
+| `--snapshot-pool-max-age-ms <ms>` | Maximum age for pooled read snapshots. |
 | `--format {text\|json}` | Controls output formatting (text by default). |
 | `--theme {auto\|dark\|light\|plain}` | Controls ANSI coloring for text output (auto-detects TTYs by default). |
 | `--quiet` | Suppresses decorative output/icons; useful when piping logs. |
@@ -43,6 +57,22 @@ page_size = 16384            # bytes
 cache_pages = 8192
 synchronous = "normal"       # full | normal | off
 distinct_neighbors_default = true
+# Advanced Pager/WAL settings
+pager_group_commit_max_writers = 10
+pager_group_commit_max_frames = 64
+pager_group_commit_max_wait_ms = 5
+pager_async_fsync = true
+pager_async_fsync_max_wait_ms = 2
+pager_wal_segment_bytes = 4194304 # 4MB
+pager_wal_preallocate_segments = 2
+# MVCC / History settings
+inline_history = true
+inline_history_max_bytes = 128
+version_codec = "snappy"
+version_codec_min_bytes = 64
+version_codec_min_savings_bytes = 10
+snapshot_pool_size = 4
+snapshot_pool_max_age_ms = 5000
 ```
 
 Set `default_profile = "dev"` at the top of the file (or pass `--profile dev`) to apply these
@@ -85,6 +115,9 @@ sombra profile save dev \
   --cache-pages 8192 \
   --synchronous full \
   --distinct-neighbors-default \
+  --pager-group-commit-max-writers 16 \
+  --pager-async-fsync on \
+  --version-codec snappy \
   --set-default
 ```
 
