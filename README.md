@@ -32,7 +32,6 @@ Sombra is a single-file property graph database inspired by SQLite’s architect
 - **Node.js/TypeScript `sombradb` (0.5.4)** is built with `napi-rs` + Bun 1.3, exposing a strongly typed fluent query/mutation DSL, transactions, pragmas, and streaming AsyncIterables.
 - **Python `sombra` (0.3.7)** relies on PyO3/maturin and mirrors the Stage 8 builder (`Database.query()`, `db.create()`, `db.transaction(...)`, streaming, explain plans).
 - **Axum-based Dashboard Server** (compiled into the Rust binary) hosts the JSON API and static React bundle; `packages/dashboard` can also run in dev mode with Vite for rapid UI iteration.
-- **Next.js Docs Site** (`packages/docs`) centralizes guides, release notes, and design snippets with Tailwind + shadcn UI components.
 
 ### Reliability & Operations
 - **Write-Ahead Logging** with WAL files colocated next to the main DB, configurable sync levels, WAL commit coalescing, and forced checkpoints (`sombra checkpoint`, `db.pragma("autocheckpoint_ms", …)`).
@@ -49,7 +48,7 @@ Sombra is a single-file property graph database inspired by SQLite’s architect
 - **Static Analysis Everywhere**: Rust forbids `unsafe`, warns on missing docs, and pins Rust 1.88 (`rust-toolchain.toml`); Node bindings run `oxlint`, `taplo`, and `prettier`; Python bindings rely on `pytest` + type/lint hooks.
 - **Release Automation** uses `release-please`, language-specific `CHANGELOG-*.md`, and publish workflows for crates.io, npm, and PyPI.
 - **Sandboxes & Fixtures** include deterministic demo databases (`tests/fixtures/demo-db/graph-demo.sombra`), CSV generators (`scripts/generate_graph_demo.py`), and LDBC conversion helpers (`scripts/ldbc_to_sombra.py`).
-- **Dashboard & Docs Checks**: `packages/dashboard` ships `npm run typecheck` + Vitest-friendly setup, while `packages/docs` uses Next.js lint/build pipelines.
+- **Dashboard Checks**: `packages/dashboard` ships `npm run typecheck` + Vitest-friendly setup.
 
 ## 📦 Version Compatibility
 
@@ -264,7 +263,7 @@ sombra-db/
 ├── packages/
 │   ├── api-server/     # Axum handlers compiled into the CLI binary
 │   ├── dashboard/      # React + Vite UI served by the CLI
-│   └── docs/           # Next.js site (pnpm dev / build / start)
+│   └── docs/           # Documentation site
 ├── benches/            # Criterion micro/macro workloads
 ├── bench-results/      # Checked-in benchmark logs (latest: 2025-11-08)
 ├── bench/              # Flamegraphs, aggregated reports, baseline notes
@@ -285,7 +284,7 @@ sombra-db/
 - **Dashboard & UI**
   - [docs/dashboard-plan.md](docs/dashboard-plan.md) – delivery phases, security posture, API surface.
   - [packages/dashboard/README.md](packages/dashboard/README.md) – Vite dev server, CLI integration, demo dataset regeneration.
-  - [packages/docs](packages/docs) – Next.js site (`pnpm install && pnpm dev`) with shadcn components.
+  - [packages/docs](packages/docs) – Documentation site with shadcn components.
 - **Developer Workflow**
   - [docs/build/create_builder_plan.md](docs/build/create_builder_plan.md), [docs/build/dx-fluent-query.md](docs/build/dx-fluent-query.md), and the `insert-optimization-*` series document how the Stage 8 builder, mutation DSL, and storage layout evolved.
 
@@ -304,9 +303,8 @@ SOMBRA_BENCH_FAST=1 cargo bench -p sombra-bench --benches
 # Python bindings
 (cd bindings/python && maturin develop && pytest -q)
 
-# Dashboard + Docs
+# Dashboard
 (cd packages/dashboard && npm install && npm run typecheck && npm run build)
-(cd packages/docs && pnpm install && pnpm lint)
 ```
 
 - Use `cargo test -- --ignored` for the longer storage fuzzers.
@@ -372,14 +370,13 @@ cargo run -p sombra-bench --bin ldbc-baseline -- --nodes ldbc_nodes.csv --edges 
 - Node `sombradb` bundles the fluent query builder, mutation/create DSLs, transactions, schema-aware projections, streaming, and request cancellation APIs.
 - Python bindings mirror the same builder semantics, add async streaming helpers, and expose CRUD shortcuts plus metadata envelopes for dashboards.
 - Axum dashboard server (embedded) streams stats + query results, while the React/Vite frontend offers overview cards, query console, and graph explorer.
-- Next.js docs app centralizes guides, and the repo ships deterministic demo datasets + scripts for reproducible dashboards.
+- The repo ships deterministic demo datasets + scripts for reproducible dashboards.
 
 ## 🚀 Roadmap to Production (v1.0)
 
 **In Progress**
 - Dashboard background job executor + long-running admin endpoints (vacuum/import) with progress polling.
 - Query planner profiling + literal redaction improvements for multi-tenant dashboards.
-- Docs site & API reference migration into `packages/docs` with shadcn/Next.js components.
 
 **Planned**
 - MVCC + concurrent writers ([docs/build/mvcc/plan.md](docs/build/mvcc/plan.md)).
