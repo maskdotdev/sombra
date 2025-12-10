@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.8.0...sombrajs-v0.8.1) (2025-12-10)
+
+
+### Bug Fixes
+
+* **js:** remove release automation note from README ([73c676c](https://github.com/maskdotdev/sombra/commit/73c676cb1c80f15693cc3464326e1ab70b487721))
+
 ## [0.8.0](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.7.3...sombrajs-v0.8.0) (2025-12-09)
 
 
