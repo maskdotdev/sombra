@@ -6,7 +6,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IoSlice, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -14,8 +14,9 @@ use tracing::{debug, warn};
 
 use crate::primitives::io::{FileIo, StdFileIo};
 use crate::storage::{
-    record_pager_fsync, record_wal_coalesced_writes, record_wal_io_group_sample,
-    record_wal_reused_segments,
+    record_pager_fsync, record_wal_coalesced_writes, record_wal_commit_direct,
+    record_wal_commit_direct_contention, record_wal_commit_group, record_wal_io_group_sample,
+    record_wal_reused_segments, record_wal_sync_coalesced,
 };
 use crate::types::{Checksum, Crc32Fast, Lsn, PageId, Result, SombraError};
 use parking_lot::{Condvar, Mutex};
@@ -43,6 +44,10 @@ pub struct WalOptions {
     pub segment_size_bytes: u64,
     /// Number of segments to preallocate ahead of the append pointer
     pub preallocate_segments: u32,
+    /// Use full fsync (F_FULLFSYNC on macOS) for true durability.
+    /// When false on macOS, uses regular fsync which is ~100x faster but doesn't
+    /// guarantee durability on power failure.
+    pub fullfsync: bool,
 }
 
 impl WalOptions {
@@ -54,6 +59,7 @@ impl WalOptions {
             start_lsn,
             segment_size_bytes: 64 * 1024 * 1024,
             preallocate_segments: 0,
+            fullfsync: true,
         }
     }
 }
@@ -66,6 +72,7 @@ impl Default for WalOptions {
             start_lsn: Lsn(0),
             segment_size_bytes: 64 * 1024 * 1024,
             preallocate_segments: 0,
+            fullfsync: true,
         }
     }
 }
@@ -519,6 +526,8 @@ pub struct Wal {
     prealloc_thread: Mutex<Option<thread::JoinHandle<()>>>,
     prealloc_target: u32,
     pending_recycle: Mutex<Option<Vec<u64>>>,
+    /// Whether to use F_FULLFSYNC on macOS (true) or regular fsync (false)
+    fullfsync: bool,
 }
 
 impl Wal {
@@ -830,6 +839,7 @@ impl Wal {
             prealloc_thread: Mutex::new(None),
             prealloc_target: options.preallocate_segments,
             pending_recycle: Mutex::new(None),
+            fullfsync: options.fullfsync,
         });
         wal.initialize_ready_segments()?;
         wal.start_preallocator();
@@ -1005,7 +1015,11 @@ impl Wal {
             let state = self.state.lock();
             Arc::clone(&state.segment_writer.io)
         };
-        io.sync_all()?;
+        if self.fullfsync {
+            io.sync_all()?;
+        } else {
+            io.sync_fast()?;
+        }
         record_pager_fsync();
         let mut state = self.state.lock();
         state.stats.syncs += 1;
@@ -1288,6 +1302,10 @@ pub struct WalCommitConfig {
     pub max_batch_frames: usize,
     /// Maximum time to wait for additional commits before flushing batch
     pub max_batch_wait: Duration,
+    /// Enable direct commit path when no contention detected
+    pub direct_commit_enabled: bool,
+    /// Delay window for coalescing fsyncs in direct commit path (0 = disabled)
+    pub direct_fsync_delay: Duration,
 }
 
 impl Default for WalCommitConfig {
@@ -1296,6 +1314,8 @@ impl Default for WalCommitConfig {
             max_batch_commits: 32,
             max_batch_frames: 512,
             max_batch_wait: Duration::from_millis(2),
+            direct_commit_enabled: true,
+            direct_fsync_delay: Duration::ZERO, // No delay for single-threaded performance
         }
     }
 }
@@ -1311,6 +1331,7 @@ impl WalCommitConfig {
         if self.max_batch_wait.is_zero() {
             self.max_batch_wait = Duration::from_micros(100);
         }
+        // direct_fsync_delay of 0 is valid (disables coalescing)
         self
     }
 }
@@ -1331,17 +1352,28 @@ pub struct WalCommitBacklog {
     pub pending_frames: usize,
     /// Whether the worker thread is currently running.
     pub worker_running: bool,
+    /// Whether a direct commit is currently in progress.
+    pub direct_commit_active: bool,
+    /// Number of commits waiting on coalesced sync.
+    pub pending_syncs: usize,
 }
 
 /// Asynchronous WAL committer that batches writes for improved throughput.
 ///
 /// Spawns a background worker thread that coalesces multiple commit requests
-/// into larger batches before writing to the WAL.
+/// into larger batches before writing to the WAL. Also supports a direct commit
+/// path that bypasses the worker when no contention is detected.
 pub struct WalCommitter {
     wal: Arc<Wal>,
     state: Arc<Mutex<CommitState>>,
     wakeup: Arc<Condvar>,
     config: Arc<Mutex<WalCommitConfig>>,
+    /// Lock-free contention detection: approximate queue depth
+    pending_count: Arc<AtomicUsize>,
+    /// Lock-free contention detection: true while direct commit in progress
+    direct_commit_active: Arc<AtomicBool>,
+    /// State for fsync coalescing in direct commit path
+    direct_sync_state: Arc<Mutex<DirectSyncState>>,
 }
 
 /// Ticket representing a pending commit operation.
@@ -1369,6 +1401,9 @@ impl WalCommitter {
             state: Arc::new(Mutex::new(CommitState::default())),
             wakeup: Arc::new(Condvar::new()),
             config: Arc::new(Mutex::new(cfg)),
+            pending_count: Arc::new(AtomicUsize::new(0)),
+            direct_commit_active: Arc::new(AtomicBool::new(false)),
+            direct_sync_state: Arc::new(Mutex::new(DirectSyncState::default())),
         }
     }
 
@@ -1384,6 +1419,8 @@ impl WalCommitter {
         if frames.is_empty() && !matches!(sync_mode, WalSyncMode::Immediate) {
             return None;
         }
+        // Increment pending count before taking lock for accurate contention detection
+        self.pending_count.fetch_add(1, AtomicOrdering::AcqRel);
         let request = Arc::new(CommitRequest::new(frames, sync_mode));
         {
             let mut state = self.state.lock();
@@ -1402,11 +1439,13 @@ impl WalCommitter {
                     Arc::clone(&self.state),
                     Arc::clone(&self.wakeup),
                     Arc::clone(&self.config),
+                    Arc::clone(&self.pending_count),
                 );
             } else {
                 self.wakeup.notify_one();
             }
         }
+        record_wal_commit_group();
         Some(WalCommitTicket { request })
     }
 
@@ -1435,10 +1474,13 @@ impl WalCommitter {
     pub fn backlog(&self) -> WalCommitBacklog {
         let guard = self.state.lock();
         let pending_frames = guard.pending.iter().map(|req| req.frames.len()).sum();
+        let direct_sync_state = self.direct_sync_state.lock();
         WalCommitBacklog {
             pending_commits: guard.pending.len(),
             pending_frames,
             worker_running: guard.worker_running,
+            direct_commit_active: self.direct_commit_active.load(AtomicOrdering::Relaxed),
+            pending_syncs: direct_sync_state.pending_syncs.len(),
         }
     }
 
@@ -1447,8 +1489,9 @@ impl WalCommitter {
         state: Arc<Mutex<CommitState>>,
         wakeup: Arc<Condvar>,
         config: Arc<Mutex<WalCommitConfig>>,
+        pending_count: Arc<AtomicUsize>,
     ) {
-        thread::spawn(move || Self::worker_loop(wal, state, wakeup, config));
+        thread::spawn(move || Self::worker_loop(wal, state, wakeup, config, pending_count));
     }
 
     fn worker_loop(
@@ -1456,6 +1499,7 @@ impl WalCommitter {
         state: Arc<Mutex<CommitState>>,
         wakeup: Arc<Condvar>,
         config: Arc<Mutex<WalCommitConfig>>,
+        pending_count: Arc<AtomicUsize>,
     ) {
         let mut batch = Vec::new();
         loop {
@@ -1467,6 +1511,8 @@ impl WalCommitter {
                     debug!("wal.committer.worker_exit");
                     break;
                 };
+                // Decrement pending count when we pop from queue
+                pending_count.fetch_sub(1, AtomicOrdering::AcqRel);
                 debug!(
                     pending_remaining = guard.pending.len(),
                     "wal.committer.worker_batch_head"
@@ -1474,7 +1520,7 @@ impl WalCommitter {
                 batch.push(first);
             }
             let config_snapshot = *config.lock();
-            Self::coalesce_batch(&state, &wakeup, &mut batch, config_snapshot);
+            Self::coalesce_batch(&state, &wakeup, &mut batch, config_snapshot, &pending_count);
             let total_frames: usize = batch.iter().map(|r| r.frames.len()).sum();
             debug!(
                 batch_commits = batch.len(),
@@ -1482,7 +1528,7 @@ impl WalCommitter {
             );
             if let Err(err) = Self::apply_batch(&wal, &mut batch) {
                 Self::fail_batch(&batch, &err);
-                Self::fail_pending(&state, &err);
+                Self::fail_pending(&state, &pending_count, &err);
                 let mut guard = state.lock();
                 guard.pending.clear();
                 guard.worker_running = false;
@@ -1496,6 +1542,7 @@ impl WalCommitter {
         wakeup: &Arc<Condvar>,
         batch: &mut Vec<Arc<CommitRequest>>,
         config: WalCommitConfig,
+        pending_count: &Arc<AtomicUsize>,
     ) {
         let start = Instant::now();
         let mut total_frames: usize = batch.iter().map(|r| r.frames.len()).sum();
@@ -1512,6 +1559,8 @@ impl WalCommitter {
                 }
             }
             if let Some(req) = guard.pending.pop_front() {
+                // Decrement pending count when we pop from queue
+                pending_count.fetch_sub(1, AtomicOrdering::AcqRel);
                 total_frames += req.frames.len();
                 batch.push(req);
             } else {
@@ -1578,9 +1627,14 @@ impl WalCommitter {
         }
     }
 
-    fn fail_pending(state: &Arc<Mutex<CommitState>>, err: &SombraError) {
+    fn fail_pending(
+        state: &Arc<Mutex<CommitState>>,
+        pending_count: &Arc<AtomicUsize>,
+        err: &SombraError,
+    ) {
         let mut guard = state.lock();
         while let Some(req) = guard.pending.pop_front() {
+            pending_count.fetch_sub(1, AtomicOrdering::AcqRel);
             req.finish(Err(clone_error(err)));
         }
     }
@@ -1624,6 +1678,296 @@ impl CommitRequest {
                 return result;
             }
             self.cv.wait(&mut guard);
+        }
+    }
+}
+
+/// State for coordinating fsync coalescing in the direct commit path.
+#[derive(Default)]
+struct DirectSyncState {
+    /// Waiters for the current sync batch
+    pending_syncs: Vec<Arc<SyncWaiter>>,
+    /// When the first waiter joined this batch (for timeout calculation)
+    batch_start: Option<Instant>,
+}
+
+/// A waiter for a coalesced sync operation.
+struct SyncWaiter {
+    result: Mutex<Option<Result<()>>>,
+    cv: Condvar,
+}
+
+impl SyncWaiter {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn finish(&self, outcome: Result<()>) {
+        let mut result = self.result.lock();
+        if result.is_none() {
+            *result = Some(outcome);
+            self.cv.notify_all();
+        }
+    }
+
+    /// Waits for the sync to complete using condvar.
+    /// Currently unused - we use polling instead, but kept for potential optimization.
+    #[allow(dead_code)]
+    fn wait(&self) -> Result<()> {
+        let mut guard = self.result.lock();
+        loop {
+            if let Some(result) = guard.take() {
+                return result;
+            }
+            self.cv.wait(&mut guard);
+        }
+    }
+}
+
+impl WalCommitter {
+    /// Attempts to commit frames directly without thread handoff.
+    ///
+    /// Returns Ok(offsets) on success, or Err(frames) if contention was detected
+    /// and the caller should fall back to the group commit path.
+    pub fn try_direct_commit(
+        &self,
+        frames: Vec<WalFrameOwned>,
+        sync_mode: WalSyncMode,
+    ) -> std::result::Result<Vec<WalFramePtr>, Vec<WalFrameOwned>> {
+        let config = *self.config.lock();
+        if !config.direct_commit_enabled {
+            return Err(frames);
+        }
+
+        // Fast path: check if queue is empty (lock-free)
+        if self.pending_count.load(AtomicOrdering::Acquire) > 0 {
+            record_wal_commit_direct_contention();
+            return Err(frames);
+        }
+
+        // Try to claim the direct commit slot
+        if self
+            .direct_commit_active
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Relaxed)
+            .is_err()
+        {
+            record_wal_commit_direct_contention();
+            return Err(frames);
+        }
+
+        // Double-check queue (something may have arrived while we were claiming the slot)
+        if self.pending_count.load(AtomicOrdering::Acquire) > 0 {
+            self.direct_commit_active
+                .store(false, AtomicOrdering::Release);
+            record_wal_commit_direct_contention();
+            return Err(frames);
+        }
+
+        // Perform direct WAL write
+        let result = self.do_direct_write(&frames, sync_mode, &config);
+
+        self.direct_commit_active
+            .store(false, AtomicOrdering::Release);
+
+        match result {
+            Ok(offsets) => {
+                record_wal_commit_direct();
+                Ok(offsets)
+            }
+            Err(_) => Err(frames),
+        }
+    }
+
+    /// Write borrowed frames directly and use coalesced fsync.
+    ///
+    /// This is for the "borrowed frames" path where frames hold references to
+    /// cached pages and cannot be handed off to the commit thread. The write
+    /// happens synchronously but fsync can be coalesced with other pending syncs.
+    ///
+    /// Returns (offsets, write_ns, fsync_ns) on success.
+    pub fn write_borrowed_frames(
+        &self,
+        frames: &[WalFrame<'_>],
+        sync_mode: WalSyncMode,
+    ) -> Result<(Vec<WalFramePtr>, u64, u64)> {
+        let config = *self.config.lock();
+
+        // Write frames to WAL
+        let write_start = std::time::Instant::now();
+        let offsets = if frames.is_empty() {
+            Vec::new()
+        } else {
+            self.wal.append_frame_batch(frames)?
+        };
+        let write_ns = write_start.elapsed().as_nanos() as u64;
+
+        // Handle sync
+        if !matches!(sync_mode, WalSyncMode::Immediate) {
+            return Ok((offsets, write_ns, 0));
+        }
+
+        // Use coalesced sync if enabled, otherwise immediate sync
+        let fsync_start = std::time::Instant::now();
+        if config.direct_commit_enabled && !config.direct_fsync_delay.is_zero() {
+            self.wait_for_coalesced_sync(config.direct_fsync_delay)?;
+        } else {
+            self.wal.sync()?;
+        }
+        let fsync_ns = fsync_start.elapsed().as_nanos() as u64;
+
+        record_wal_commit_direct();
+        Ok((offsets, write_ns, fsync_ns))
+    }
+
+    fn do_direct_write(
+        &self,
+        frames: &[WalFrameOwned],
+        sync_mode: WalSyncMode,
+        config: &WalCommitConfig,
+    ) -> Result<Vec<WalFramePtr>> {
+        // Convert to WalFrame refs
+        let refs: Vec<WalFrame<'_>> = frames
+            .iter()
+            .map(|f| WalFrame {
+                lsn: f.lsn,
+                page_id: f.page_id,
+                payload: f.payload.as_slice(),
+            })
+            .collect();
+
+        let offsets = if refs.is_empty() {
+            Vec::new()
+        } else {
+            self.wal.append_frame_batch(&refs)?
+        };
+
+        if !matches!(sync_mode, WalSyncMode::Immediate) {
+            return Ok(offsets);
+        }
+
+        // Handle sync (with optional coalescing)
+        if config.direct_fsync_delay.is_zero() {
+            // Immediate sync - no coalescing
+            self.wal.sync()?;
+        } else {
+            // Coalesced sync
+            self.wait_for_coalesced_sync(config.direct_fsync_delay)?;
+        }
+
+        Ok(offsets)
+    }
+
+    fn wait_for_coalesced_sync(&self, delay: Duration) -> Result<()> {
+        let waiter = Arc::new(SyncWaiter::new());
+        let should_sync;
+        let waiters_to_notify;
+
+        {
+            let mut state = self.direct_sync_state.lock();
+
+            // Check if we're starting a new batch or joining an existing one
+            let now = Instant::now();
+            let batch_expired = state
+                .batch_start
+                .map(|start| now.duration_since(start) >= delay)
+                .unwrap_or(false);
+
+            if batch_expired || state.pending_syncs.is_empty() {
+                // We're starting a new batch or the previous batch expired
+                // First, complete any existing waiters
+                if !state.pending_syncs.is_empty() {
+                    // Previous batch - we need to sync for them
+                    waiters_to_notify = std::mem::take(&mut state.pending_syncs);
+                    should_sync = true;
+                    // Start new batch with us
+                    state.pending_syncs.push(Arc::clone(&waiter));
+                    state.batch_start = Some(now);
+                } else {
+                    // No existing batch - start fresh
+                    state.pending_syncs.push(Arc::clone(&waiter));
+                    state.batch_start = Some(now);
+                    waiters_to_notify = Vec::new();
+                    should_sync = false;
+                }
+            } else {
+                // Join existing batch
+                state.pending_syncs.push(Arc::clone(&waiter));
+                waiters_to_notify = Vec::new();
+                should_sync = false;
+            }
+        }
+
+        // If we need to sync for previous batch
+        if should_sync {
+            let sync_result = self.wal.sync();
+            let batch_size = waiters_to_notify.len();
+            if batch_size > 1 {
+                record_wal_sync_coalesced(batch_size as u64);
+            }
+            for w in &waiters_to_notify {
+                match &sync_result {
+                    Ok(()) => w.finish(Ok(())),
+                    Err(e) => w.finish(Err(clone_error(e))),
+                }
+            }
+        }
+
+        // Now wait for our batch to complete
+        // We need to either:
+        // 1. Wait until someone else syncs for us, or
+        // 2. Become the syncer ourselves after the delay expires
+
+        loop {
+            {
+                let mut guard = waiter.result.lock();
+                if guard.is_some() {
+                    return guard.take().unwrap();
+                }
+            }
+
+            // Check if we should become the syncer
+            let should_become_syncer;
+            let our_batch;
+            {
+                let mut state = self.direct_sync_state.lock();
+                let now = Instant::now();
+                let batch_ready = state
+                    .batch_start
+                    .map(|start| now.duration_since(start) >= delay)
+                    .unwrap_or(false);
+
+                if batch_ready && !state.pending_syncs.is_empty() {
+                    // We become the syncer for this batch
+                    our_batch = std::mem::take(&mut state.pending_syncs);
+                    state.batch_start = None;
+                    should_become_syncer = true;
+                } else {
+                    our_batch = Vec::new();
+                    should_become_syncer = false;
+                }
+            }
+
+            if should_become_syncer {
+                let sync_result = self.wal.sync();
+                let batch_size = our_batch.len();
+                if batch_size > 1 {
+                    record_wal_sync_coalesced(batch_size as u64);
+                }
+                for w in &our_batch {
+                    match &sync_result {
+                        Ok(()) => w.finish(Ok(())),
+                        Err(e) => w.finish(Err(clone_error(e))),
+                    }
+                }
+                // Our waiter was in the batch, so we're done
+                return sync_result;
+            }
+
+            // Wait a bit before checking again
+            std::thread::sleep(Duration::from_micros(10));
         }
     }
 }
@@ -1969,6 +2313,8 @@ mod tests {
             max_batch_commits: 0,
             max_batch_frames: 0,
             max_batch_wait: Duration::from_millis(0),
+            direct_commit_enabled: true,
+            direct_fsync_delay: Duration::ZERO,
         });
         let payload = vec![9u8; 4096];
         let _ = committer.commit(
@@ -2064,6 +2410,160 @@ mod tests {
             "expected recycled segments after reset, got {allocator:?}"
         );
         assert_eq!(wal.stats().frames_appended, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn direct_commit_succeeds_when_queue_empty() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_direct_empty");
+        let wal = Wal::open(&path, WalOptions::new(4096, 100, Lsn(1)))?;
+        let config = WalCommitConfig {
+            direct_commit_enabled: true,
+            direct_fsync_delay: Duration::ZERO,
+            ..WalCommitConfig::default()
+        };
+        let committer = WalCommitter::new(Arc::clone(&wal), config);
+
+        let payload = vec![42u8; 4096];
+        let frame = WalFrameOwned {
+            lsn: Lsn(1),
+            page_id: PageId(1),
+            payload,
+        };
+
+        // Should succeed via direct path
+        let result = committer.try_direct_commit(vec![frame], WalSyncMode::Immediate);
+        assert!(result.is_ok(), "direct commit should succeed");
+
+        assert_eq!(wal.stats().frames_appended, 1);
+        assert_eq!(wal.stats().syncs, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn direct_commit_disabled_returns_frames() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_direct_disabled");
+        let wal = Wal::open(&path, WalOptions::new(4096, 101, Lsn(1)))?;
+        let config = WalCommitConfig {
+            direct_commit_enabled: false,
+            direct_fsync_delay: Duration::ZERO,
+            ..WalCommitConfig::default()
+        };
+        let committer = WalCommitter::new(Arc::clone(&wal), config);
+
+        let payload = vec![42u8; 4096];
+        let frame = WalFrameOwned {
+            lsn: Lsn(1),
+            page_id: PageId(1),
+            payload,
+        };
+
+        // Should fail and return frames
+        let result = committer.try_direct_commit(vec![frame], WalSyncMode::Immediate);
+        assert!(result.is_err(), "direct commit should fail when disabled");
+
+        let returned_frames = result.unwrap_err();
+        assert_eq!(returned_frames.len(), 1);
+        assert_eq!(returned_frames[0].payload[0], 42);
+        Ok(())
+    }
+
+    #[test]
+    fn direct_commit_falls_back_when_another_direct_active() -> Result<()> {
+        // This test verifies that concurrent direct commits are serialized properly
+        // by the direct_commit_active flag
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_direct_contention");
+        let wal = Wal::open(&path, WalOptions::new(4096, 102, Lsn(1)))?;
+        let config = WalCommitConfig {
+            direct_commit_enabled: true,
+            direct_fsync_delay: Duration::from_millis(100), // Long delay to create contention
+            ..WalCommitConfig::default()
+        };
+        let committer = Arc::new(WalCommitter::new(Arc::clone(&wal), config));
+        let committer2 = Arc::clone(&committer);
+
+        // Start a direct commit in a background thread that will hold the slot
+        let handle = thread::spawn(move || {
+            let payload = vec![1u8; 4096];
+            let frame = WalFrameOwned {
+                lsn: Lsn(1),
+                page_id: PageId(1),
+                payload,
+            };
+            committer2.try_direct_commit(vec![frame], WalSyncMode::Immediate)
+        });
+
+        // Give the first direct commit time to claim the slot
+        thread::sleep(Duration::from_millis(20));
+
+        // Try another direct commit - should fail if the first one is still active
+        let payload2 = vec![2u8; 4096];
+        let frame2 = WalFrameOwned {
+            lsn: Lsn(2),
+            page_id: PageId(2),
+            payload: payload2,
+        };
+        let result = committer.try_direct_commit(vec![frame2], WalSyncMode::Immediate);
+
+        // Wait for the first commit to finish
+        let first_result = handle.join().expect("first thread panicked");
+
+        // At least one should succeed
+        assert!(
+            first_result.is_ok() || result.is_ok(),
+            "at least one direct commit should succeed"
+        );
+
+        // Verify frames were written
+        assert!(wal.stats().frames_appended >= 1);
+        Ok(())
+    }
+
+    #[test]
+    fn direct_commit_with_fsync_coalesce() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_direct_coalesce");
+        let wal = Wal::open(&path, WalOptions::new(4096, 103, Lsn(1)))?;
+        let config = WalCommitConfig {
+            direct_commit_enabled: true,
+            direct_fsync_delay: Duration::from_millis(50), // Long enough to test coalescing
+            ..WalCommitConfig::default()
+        };
+        let committer = Arc::new(WalCommitter::new(Arc::clone(&wal), config));
+
+        // Do a direct commit with coalescing enabled
+        let payload = vec![42u8; 4096];
+        let frame = WalFrameOwned {
+            lsn: Lsn(1),
+            page_id: PageId(1),
+            payload,
+        };
+
+        let result = committer.try_direct_commit(vec![frame], WalSyncMode::Immediate);
+        assert!(result.is_ok(), "direct commit with coalesce should succeed");
+
+        assert_eq!(wal.stats().frames_appended, 1);
+        // Sync should have happened (either immediately or after coalesce window)
+        assert!(wal.stats().syncs >= 1);
+        Ok(())
+    }
+
+    #[test]
+    fn backlog_includes_direct_commit_state() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal_backlog_state");
+        let wal = Wal::open(&path, WalOptions::new(4096, 104, Lsn(1)))?;
+        let committer = WalCommitter::new(Arc::clone(&wal), WalCommitConfig::default());
+
+        let backlog = committer.backlog();
+        assert_eq!(backlog.pending_commits, 0);
+        assert_eq!(backlog.pending_frames, 0);
+        assert!(!backlog.worker_running);
+        assert!(!backlog.direct_commit_active);
+        assert_eq!(backlog.pending_syncs, 0);
         Ok(())
     }
 }

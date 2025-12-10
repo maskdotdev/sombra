@@ -92,6 +92,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = DatabaseSelection::Both)]
     databases: DatabaseSelection,
 
+    /// Number of pages to cache in memory.
+    #[arg(long, default_value_t = 128)]
+    cache_pages: usize,
+
     /// Enable group commit batching for Sombra.
     #[arg(long)]
     sombra_group_commit: bool,
@@ -111,6 +115,14 @@ struct Args {
     /// Enable async fsync for Sombra.
     #[arg(long)]
     sombra_async_fsync: bool,
+
+    /// Disable F_FULLFSYNC on macOS (use regular fsync ~100x faster, less durable).
+    #[arg(long)]
+    no_fullfsync: bool,
+
+    /// Direct fsync coalesce delay in microseconds (0 = no coalescing, best for single-threaded).
+    #[arg(long, default_value_t = 0)]
+    direct_fsync_delay_us: u64,
 
     /// Emit CSV output to the given file.
     #[arg(long)]
@@ -186,6 +198,9 @@ struct BenchConfig {
     group_commit_max_frames: usize,
     group_commit_max_wait_ms: u64,
     async_fsync: bool,
+    cache_pages: usize,
+    fullfsync: bool,
+    direct_fsync_delay_us: u64,
 }
 
 impl From<Args> for BenchConfig {
@@ -219,6 +234,9 @@ impl From<Args> for BenchConfig {
             group_commit_max_frames: value.sombra_group_commit_max_frames,
             group_commit_max_wait_ms: value.sombra_group_commit_max_wait_ms,
             async_fsync: value.sombra_async_fsync,
+            cache_pages: value.cache_pages,
+            fullfsync: !value.no_fullfsync,
+            direct_fsync_delay_us: value.direct_fsync_delay_us,
         }
     }
 }
@@ -240,6 +258,9 @@ impl BenchConfig {
             opts.group_commit_max_wait_ms = 0;
         }
         opts.async_fsync = self.async_fsync;
+        opts.cache_pages = self.cache_pages;
+        opts.fullfsync = self.fullfsync;
+        opts.direct_fsync_delay_us = self.direct_fsync_delay_us;
         opts
     }
 
@@ -393,14 +414,22 @@ impl BenchResult {
             let wal_group_p50 = profile.wal_commit_group_p50;
             let wal_group_p95 = profile.wal_commit_group_p95;
             let borrowed_bytes = profile.pager_commit_borrowed_bytes;
+            let wal_direct = profile.wal_commit_direct;
+            let wal_group = profile.wal_commit_group;
+            let wal_direct_contention = profile.wal_commit_direct_contention;
+            let wal_sync_coalesced = profile.wal_sync_coalesced;
             println!(
-                "    metrics: wal_frames={} wal_bytes={} wal_coalesced={} wal_reused={} wal_group_p50={} wal_group_p95={} borrowed_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} (slot={} payload={} full={}) allocator_bytes_moved={} allocator_avg_bytes={:.1} allocator_builds={} allocator_build_avg_us={:.3} allocator_build_free_regions={:.1} allocator_cache_reuse={} allocator_cache_free_regions={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
+                "    metrics: wal_frames={} wal_bytes={} wal_coalesced={} wal_reused={} wal_group_p50={} wal_group_p95={} wal_direct={} wal_group={} wal_direct_contention={} wal_sync_coalesced={} borrowed_bytes={} fsyncs={} key_decodes={} key_cmps={} memcopy_bytes={} rebalance_in_place={} rebalance_rebuilds={} allocator_compactions={} allocator_failures={} (slot={} payload={} full={}) allocator_bytes_moved={} allocator_avg_bytes={:.1} allocator_builds={} allocator_build_avg_us={:.3} allocator_build_free_regions={:.1} allocator_cache_reuse={} allocator_cache_free_regions={:.1} commit_avg_ms={:.3} search_avg_us={:.3} insert_avg_us={:.3} slot_extent_avg_us={:.3} slot_extent_ns_per_slot={:.1}",
                 profile.pager_wal_frames,
                 profile.pager_wal_bytes,
                 wal_coalesced,
                 wal_reused,
                 wal_group_p50,
                 wal_group_p95,
+                wal_direct,
+                wal_group,
+                wal_direct_contention,
+                wal_sync_coalesced,
                 borrowed_bytes,
                 profile.pager_fsync_count,
                 profile.btree_leaf_key_decodes,
@@ -432,6 +461,20 @@ impl BenchResult {
                 "    pager: hits={} misses={} evictions={} dirty_writebacks={}",
                 stats.hits, stats.misses, stats.evictions, stats.dirty_writebacks
             );
+        }
+        if let Some(profile) = &self.telemetry.profile {
+            if profile.commit_phase_count > 0 {
+                let count = profile.commit_phase_count as f64;
+                let frame_build_avg_us = (profile.commit_frame_build_ns as f64 / count) / 1000.0;
+                let wal_write_avg_us = (profile.commit_wal_write_ns as f64 / count) / 1000.0;
+                let fsync_avg_us = (profile.commit_fsync_ns as f64 / count) / 1000.0;
+                let finalize_avg_us = (profile.commit_finalize_ns as f64 / count) / 1000.0;
+                let total_avg_us = frame_build_avg_us + wal_write_avg_us + fsync_avg_us + finalize_avg_us;
+                println!(
+                    "    commit_phases (avg µs): frame_build={:.1} wal_write={:.1} fsync={:.1} finalize={:.1} total={:.1}",
+                    frame_build_avg_us, wal_write_avg_us, fsync_avg_us, finalize_avg_us, total_avg_us
+                );
+            }
         }
     }
 }

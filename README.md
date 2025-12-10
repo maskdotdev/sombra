@@ -351,6 +351,55 @@ cargo run -p sombra-bench --bin ldbc-baseline -- --nodes ldbc_nodes.csv --edges 
 - Export `SOMBRA_PROFILE=1` to collect planner/executor counters during ad-hoc runs.
 - Supply `--skip-import` to `ldbc-baseline` when reusing a prepared database for repeated query mixes.
 
+### Performance Tuning
+
+Sombra exposes several options to trade durability for speed. The defaults prioritize durability; for maximum throughput (e.g., batch imports or testing), consider:
+
+| Option | Default | Fast Setting | Effect |
+|--------|---------|--------------|--------|
+| `fullfsync` | `true` | `false` | On macOS, skip F_FULLFSYNC (~10x faster fsync). Data may be lost on power failure. |
+| `synchronous` | `Full` | `Normal` or `Off` | `Normal` batches syncs; `Off` disables fsync entirely (unsafe for production). |
+| `direct_fsync_delay_us` | `0` | `0` | Delay for coalescing concurrent fsyncs. `0` is optimal for single-threaded workloads. |
+
+**Rust Example (maximum throughput, reduced durability):**
+
+```rust
+use sombra::ffi::{Database, DatabaseOptions};
+use sombra::primitives::pager::Synchronous;
+
+let mut opts = DatabaseOptions::default();
+opts.create_if_missing = true;
+opts.pager_options.fullfsync = false;        // Skip F_FULLFSYNC on macOS
+opts.pager_options.synchronous = Synchronous::Normal;  // Batch WAL syncs
+
+let db = Database::open("fast.sombra", opts)?;
+```
+
+**CLI pragmas (runtime tuning):**
+
+```bash
+# Reduce sync overhead for bulk imports
+sombra import mydb.sombra --nodes data.csv --create
+# Then in code:
+db.pragma("synchronous", "normal");
+db.pragma("autocheckpoint_ms", "5000");  # Checkpoint every 5s instead of per-commit
+```
+
+**Benchmark comparison (10K single-row commits, macOS M-series):**
+
+| Configuration | Ops/sec | µs/op |
+|--------------|---------|-------|
+| Default (`fullfsync=true`, `synchronous=Full`) | ~230 | ~4,300 |
+| `fullfsync=false`, `synchronous=Full` | ~5,200 | ~190 |
+| `fullfsync=false`, `synchronous=Normal` | ~16,000 | ~62 |
+| SQLite (WAL, `synchronous=FULL`) | ~16,200 | ~62 |
+
+**When to use each setting:**
+- **Production writes**: Keep defaults (`fullfsync=true`, `synchronous=Full`) for crash safety.
+- **Bulk imports**: Use `fullfsync=false` + `synchronous=Normal`, then checkpoint and restore defaults.
+- **Read-heavy / analytics**: `synchronous=Off` is acceptable if you can rebuild from source data.
+- **CI/testing**: `fullfsync=false` speeds up test suites significantly on macOS.
+
 ## Current Status
 
 ### Version 0.3.6 – Alpha

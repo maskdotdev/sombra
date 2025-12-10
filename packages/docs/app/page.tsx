@@ -63,7 +63,7 @@ export default function Home() {
 
           <div className="grid md:grid-cols-2 gap-6">
             <Card className="p-6 bg-card border-border">
-              <div className="text-sm text-muted-foreground mb-2">// find connections</div>
+              <div className="text-sm text-muted-foreground mb-2">{"// find connections"}</div>
               <pre className="text-sm text-foreground">
                 <code>{`db.query()
   .match('User', { id: 'alice' })
@@ -73,7 +73,7 @@ export default function Home() {
             </Card>
 
             <Card className="p-6 bg-card border-border">
-              <div className="text-sm text-muted-foreground mb-2">// create relationships</div>
+              <div className="text-sm text-muted-foreground mb-2">{"// create relationships"}</div>
               <pre className="text-sm text-foreground">
                 <code>{`db.create()
   .node('User', { name: 'bob' })
@@ -83,7 +83,7 @@ export default function Home() {
             </Card>
 
             <Card className="p-6 bg-card border-border">
-              <div className="text-sm text-muted-foreground mb-2">// aggregate data</div>
+              <div className="text-sm text-muted-foreground mb-2">{"// aggregate data"}</div>
               <pre className="text-sm text-foreground">
                 <code>{`db.query()
   .match('Post')
@@ -93,7 +93,7 @@ export default function Home() {
             </Card>
 
             <Card className="p-6 bg-card border-border">
-              <div className="text-sm text-muted-foreground mb-2">// path finding</div>
+              <div className="text-sm text-muted-foreground mb-2">{"// path finding"}</div>
               <pre className="text-sm text-foreground">
                 <code>{`db.shortestPath()
   .from('User', { id: 'alice' })
@@ -140,13 +140,13 @@ export default function Home() {
               <span className="text-sm text-muted-foreground">sombra © 2025</span>
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://github.com/sombra-db/sombra" className="hover:text-foreground transition-colors">
                 github
               </a>
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://twitter.com/sombradb" className="hover:text-foreground transition-colors">
                 twitter
               </a>
-              <a href="#" className="hover:text-foreground transition-colors">
+              <a href="https://discord.gg/sombra" className="hover:text-foreground transition-colors">
                 discord
               </a>
             </div>

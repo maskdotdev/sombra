@@ -5331,6 +5331,8 @@ mod wal_alert_tests {
             pending_commits: 12,
             pending_frames: 20_000,
             worker_running: true,
+            direct_commit_active: false,
+            pending_syncs: 0,
         };
         let allocator = WalAllocatorStats {
             segment_size_bytes: 64 * 1024 * 1024,

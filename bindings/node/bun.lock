@@ -23,10 +23,10 @@
         "typescript": "^5.9.3",
       },
       "optionalDependencies": {
-        "sombradb-darwin-arm64": "0.7.3",
-        "sombradb-darwin-x64": "0.7.3",
-        "sombradb-linux-x64-gnu": "0.7.3",
-        "sombradb-win32-x64-msvc": "0.7.3",
+        "sombradb-darwin-arm64": "0.8.1",
+        "sombradb-darwin-x64": "0.8.1",
+        "sombradb-linux-x64-gnu": "0.8.1",
+        "sombradb-win32-x64-msvc": "0.8.1",
       },
     },
   },
@@ -580,8 +580,6 @@
     "slash": ["slash@5.1.0", "", {}, "sha512-ZA6oR3T/pEyuqwMgAKT0/hAv8oAXckzbkmR0UkUosQ+Mc4RxGoJkRmwHgHufaenlyAgE1Mxgpdcrf75y6XcnDg=="],
 
     "slice-ansi": ["slice-ansi@5.0.0", "", { "dependencies": { "ansi-styles": "^6.0.0", "is-fullwidth-code-point": "^4.0.0" } }, "sha512-FC+lgizVPfie0kkhqUScwRu1O/lF6NOgJmlCgK+/LYxDCTk8sGelYaHDhFcDN+Sn3Cv+3VSa4Byeo+IMCzpMgQ=="],
-
-    "sombradb-darwin-arm64": ["sombradb-darwin-arm64@0.7.3", "", { "os": "darwin", "cpu": "arm64" }, "sha512-BTcO0feARLRaW9J2O5pCaqV+vva0uF2jx9zCQwnaEIhHjzd+X+LKSumsiLjUSag3JLwaYDyfMCOzF/T8pDYH0Q=="],
 
     "sprintf-js": ["sprintf-js@1.0.3", "", {}, "sha512-D9cPgkvLlV3t3IzL0D0YLvGA9Ahk4PcvVwUbN0dSGr1aP0Nrt4AEnTUbuGvquEC0mA64Gqt1fzirlRs5ibXx8g=="],
 

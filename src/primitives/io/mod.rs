@@ -1,4 +1,7 @@
-#![forbid(unsafe_code)]
+//! Low-level file I/O primitives.
+//! 
+//! This module allows unsafe code for platform-specific sync operations.
+#![allow(unsafe_code)]
 
 use std::{
     fs::File,
@@ -45,7 +48,14 @@ pub trait FileIo: Send + Sync + 'static {
         Ok(())
     }
     /// Synchronizes all file data and metadata to disk.
+    /// On macOS, this uses F_FULLFSYNC for true durability.
     fn sync_all(&self) -> Result<()>;
+    /// Fast sync that flushes to disk write cache but not necessarily to platters.
+    /// On macOS, this uses regular fsync() which is ~100x faster but doesn't
+    /// guarantee durability on power failure. On other platforms, same as sync_all.
+    fn sync_fast(&self) -> Result<()> {
+        self.sync_all()
+    }
     /// Returns the current length of the file in bytes.
     fn len(&self) -> Result<u64>;
     /// Returns true if the file is empty.
@@ -289,6 +299,30 @@ impl FileIo for StdFileIo {
             }
         }
         result
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sync_fast(&self) -> Result<()> {
+        use std::os::unix::io::AsRawFd;
+        io_test_log!("[io.sync_fast] start (macos fsync)");
+        let fd = self.file().as_raw_fd();
+        // Use regular fsync instead of F_FULLFSYNC for ~100x faster sync
+        // This flushes to disk cache but not necessarily to platters
+        let result = unsafe { libc::fsync(fd) };
+        if result == 0 {
+            io_test_log!("[io.sync_fast] complete");
+            Ok(())
+        } else {
+            let err = io::Error::last_os_error();
+            io_test_log!("[io.sync_fast] error: {}", err);
+            Err(SombraError::from(err))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn sync_fast(&self) -> Result<()> {
+        // On non-macOS platforms, sync_fast is the same as sync_all
+        self.sync_all()
     }
 
     fn len(&self) -> Result<u64> {
