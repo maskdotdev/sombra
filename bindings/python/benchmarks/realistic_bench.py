@@ -6,7 +6,6 @@ Run with: uv run python benchmarks/realistic_bench.py
 from __future__ import annotations
 
 import os
-import random
 import tempfile
 import time
 from pathlib import Path
