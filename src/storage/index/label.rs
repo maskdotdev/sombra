@@ -41,6 +41,8 @@ pub struct LabelIndex {
     store: Arc<dyn PageStore>,
     tree: BTree<Vec<u8>, VersionedValue<EmptyValue>>,
     indexed_labels: RwLock<HashSet<LabelId>>,
+    /// Cache of labels that are NOT indexed (negative cache for fast skip).
+    not_indexed_labels: RwLock<HashSet<LabelId>>,
 }
 
 impl LabelIndex {
@@ -53,6 +55,7 @@ impl LabelIndex {
             store: Arc::clone(store),
             tree,
             indexed_labels: RwLock::new(HashSet::new()),
+            not_indexed_labels: RwLock::new(HashSet::new()),
         };
         {
             let mut write = store.begin_write()?;
@@ -74,6 +77,10 @@ impl LabelIndex {
     pub fn is_indexed_read(&self, label: LabelId) -> Result<bool> {
         if self.indexed_labels.read().contains(&label) {
             return Ok(true);
+        }
+        // Fast path: check negative cache
+        if self.not_indexed_labels.read().contains(&label) {
+            return Ok(false);
         }
         let read = self.store.begin_latest_committed_read()?;
         let key = encode_key(label, LABEL_SENTINEL_NODE);
@@ -99,6 +106,8 @@ impl LabelIndex {
             self.indexed_labels.write().insert(label);
             Ok(true)
         } else {
+            // Cache negative result
+            self.not_indexed_labels.write().insert(label);
             Ok(false)
         }
     }
@@ -106,6 +115,10 @@ impl LabelIndex {
     pub fn is_indexed_with_write(&self, tx: &mut WriteGuard<'_>, label: LabelId) -> Result<bool> {
         if self.indexed_labels.read().contains(&label) {
             return Ok(true);
+        }
+        // Fast path: check negative cache
+        if self.not_indexed_labels.read().contains(&label) {
+            return Ok(false);
         }
         self.ensure_root_initialized(tx)?;
         let key = encode_key(label, LABEL_SENTINEL_NODE);
@@ -124,6 +137,9 @@ impl LabelIndex {
         };
         if present {
             self.indexed_labels.write().insert(label);
+        } else {
+            // Cache negative result
+            self.not_indexed_labels.write().insert(label);
         }
         Ok(present)
     }
@@ -166,6 +182,8 @@ impl LabelIndex {
             });
             self.tree.put_many(tx, iter)?;
         }
+        // Invalidate negative cache and add to positive cache
+        self.not_indexed_labels.write().remove(&label);
         self.indexed_labels.write().insert(label);
         Ok(())
     }
@@ -196,7 +214,9 @@ impl LabelIndex {
                 ));
             }
         }
+        // Remove from positive cache and add to negative cache
         self.indexed_labels.write().remove(&label);
+        self.not_indexed_labels.write().insert(label);
         Ok(())
     }
 
