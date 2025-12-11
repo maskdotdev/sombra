@@ -6,6 +6,7 @@
 //! - is_sorted guards for bulk operations
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
+#![allow(clippy::arc_with_non_send_sync)]
 
 use std::sync::Arc;
 
@@ -33,14 +34,17 @@ fn bench_put_many_sequential(c: &mut Criterion) {
                 let store: Arc<dyn PageStore> = pager.clone();
                 let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())
                     .expect("tree");
-                
+
                 let items: Vec<(u64, u64)> = (0..BATCH_SIZE as u64).map(|i| (i, i * 2)).collect();
                 (tmpdir, pager, tree, items)
             },
             |(tmpdir, pager, tree, items)| {
                 let mut write = pager.begin_write().expect("write");
-                tree.put_many(&mut write, items.iter().map(|(k, v)| PutItem { key: k, value: v }))
-                    .expect("put_many");
+                tree.put_many(
+                    &mut write,
+                    items.iter().map(|(k, v)| PutItem { key: k, value: v }),
+                )
+                .expect("put_many");
                 pager.commit(write).expect("commit");
                 black_box(tree.root_page());
                 drop(tree);
@@ -60,7 +64,7 @@ fn bench_put_many_sequential(c: &mut Criterion) {
                 let store: Arc<dyn PageStore> = pager.clone();
                 let tree = BTree::<u64, u64>::open_or_create(&store, BTreeOptions::default())
                     .expect("tree");
-                
+
                 let mut rng = ChaCha8Rng::seed_from_u64(0xDEAD_BEEF);
                 let mut items: Vec<(u64, u64)> = (0..BATCH_SIZE)
                     .map(|_| {
@@ -75,8 +79,11 @@ fn bench_put_many_sequential(c: &mut Criterion) {
             },
             |(tmpdir, pager, tree, items)| {
                 let mut write = pager.begin_write().expect("write");
-                tree.put_many(&mut write, items.iter().map(|(k, v)| PutItem { key: k, value: v }))
-                    .expect("put_many");
+                tree.put_many(
+                    &mut write,
+                    items.iter().map(|(k, v)| PutItem { key: k, value: v }),
+                )
+                .expect("put_many");
                 pager.commit(write).expect("commit");
                 black_box(tree.root_page());
                 drop(tree);
@@ -94,7 +101,7 @@ fn bench_put_many_sequential(c: &mut Criterion) {
 fn bench_put_single_vs_many(c: &mut Criterion) {
     let mut group = c.benchmark_group("perf_opts/put_comparison");
     group.sample_size(SAMPLE_SIZE);
-    
+
     let count = 1000usize;
     group.throughput(Throughput::Elements(count as u64));
 
@@ -138,8 +145,11 @@ fn bench_put_single_vs_many(c: &mut Criterion) {
             },
             |(tmpdir, pager, tree, items)| {
                 let mut write = pager.begin_write().expect("write");
-                tree.put_many(&mut write, items.iter().map(|(k, v)| PutItem { key: k, value: v }))
-                    .expect("put_many");
+                tree.put_many(
+                    &mut write,
+                    items.iter().map(|(k, v)| PutItem { key: k, value: v }),
+                )
+                .expect("put_many");
                 pager.commit(write).expect("commit");
                 black_box(tree.root_page());
                 drop(tree);
@@ -164,7 +174,7 @@ fn bench_is_sorted(c: &mut Criterion) {
         unsorted[size / 2] = 0; // Make it unsorted
 
         group.throughput(Throughput::Elements(size as u64));
-        
+
         group.bench_function(format!("sorted_{size}"), |b| {
             b.iter(|| {
                 let is_sorted = sorted.windows(2).all(|w| w[0] <= w[1]);

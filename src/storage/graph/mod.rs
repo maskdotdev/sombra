@@ -1,75 +1,58 @@
 use std::cell::{Cell, RefCell};
-use std::cmp::{Ordering as CmpOrdering, Ordering};
-#[cfg(feature = "degree-cache")]
-use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+
+
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
-use std::num::NonZeroUsize;
-use std::ops::Bound;
+
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use lru::LruCache;
+
 use parking_lot::Mutex;
 
 use crate::primitives::pager::{
-    AutockptContext, BackgroundMaintainer, PageStore, ReadGuard, WriteGuard,
+    AutockptContext, BackgroundMaintainer, PageStore, WriteGuard,
 };
-use crate::storage::btree::{BTree, PutItem, ValCodec};
+use crate::storage::btree::{BTree, ValCodec};
 use crate::storage::index::{
-    collect_all, CatalogEpoch, DdlEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef,
-    IndexKind, IndexRoots, IndexStore, LabelScan, PostingStream,
+    CatalogEpoch, DdlEpoch, GraphIndexCache, IndexDef, IndexRoots, IndexStore,
 };
 use crate::storage::vstore::VStore;
-use crate::storage::{
-    profile_timer, record_flush_adj_entries, record_flush_adj_fwd_put,
-    record_flush_adj_fwd_sort, record_flush_adj_key_encode, record_flush_adj_rev_put,
-    record_flush_adj_rev_sort, record_flush_deferred, record_flush_deferred_indexes,
-};
-use crate::storage::{DeleteMode, DeleteNodeOpts, EdgeData, EdgeSpec, NodeData, NodeSpec, PropValueOwned};
-use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId, VRef};
+
+use crate::storage::PropValueOwned;
+use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId};
 
 
-#[cfg(feature = "degree-cache")]
-use super::adjacency::DegreeDir;
-use super::adjacency::{self, Dir, ExpandOpts, Neighbor, NeighborCursor};
-use super::edge::{
-    self, EncodeOpts as EdgeEncodeOpts, PropPayload as EdgePropPayload,
-    PropStorage as EdgePropStorage,
-};
+use super::adjacency;
+use super::edge;
 use super::mvcc::{
-    CommitId, CommitTable, ReaderTimeoutActions, VersionCodecConfig, VersionHeader, VersionPtr,
-    VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
+    CommitId, CommitTable, ReaderTimeoutActions, VersionCodecConfig, VersionHeader, VersionedValue,
+    VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
-use super::node::{
-    self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
-    PropStorage as NodePropStorage,
-};
+use super::node;
 use super::options::{GraphOptions, VacuumCfg};
-use super::patch::PropPatch;
-use super::profile::{
-    profile_timer as storage_profile_timer, profiling_enabled as storage_profiling_enabled,
-    record_profile_timer as record_storage_profile_timer, StorageProfileKind,
-};
+
+
 use super::props;
 
+mod adjacency_ops;
+mod deferred_ops;
+mod edge_ops;
 mod graph_types;
 mod helpers;
+mod index_ops;
 mod mvcc_ops;
+mod node_ops;
 mod prop_ops;
 mod snapshot;
+mod tests;
 mod vacuum;
 mod version_cache;
-mod deferred_ops;
-mod index_ops;
-mod node_ops;
-mod edge_ops;
-mod adjacency_ops;
 mod writer;
-mod tests;
 
 pub use writer::{BulkEdgeValidator, CreateEdgeOptions, GraphWriter, GraphWriterStats};
 
@@ -82,15 +65,12 @@ pub use graph_types::{
 };
 
 use graph_types::RootKind;
-use helpers::{normalize_labels, open_u64_vec_tree, open_unit_tree};
 #[cfg(feature = "degree-cache")]
 use helpers::open_degree_tree;
-use vacuum::MicroGcTrigger;
-use prop_ops::{
-    clone_owned_bound, encode_range_bound, encode_value_key_owned, prop_stats_key,
-    prop_value_to_owned, update_min_max,
-};
+use helpers::{open_u64_vec_tree, open_unit_tree};
+
 use snapshot::{SnapshotLease, SnapshotPool};
+use vacuum::MicroGcTrigger;
 use version_cache::VersionCache;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -186,7 +166,6 @@ impl VacuumSched {
     }
 }
 
-
 #[derive(Default)]
 struct AdjacencyBuffer {
     inserts: Vec<(NodeId, NodeId, TypeId, EdgeId, CommitId)>,
@@ -200,10 +179,6 @@ struct IndexBuffer {
     prop_inserts: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
     prop_removes: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
 }
-
-
-
-
 
 impl Graph {
     fn overwrite_encoded_header(bytes: &mut [u8], header: &VersionHeader) {
@@ -375,6 +350,7 @@ impl Graph {
                 meta.storage_label_index_root = index_label_root;
                 meta.storage_prop_chunk_root = index_prop_chunk_root;
                 meta.storage_prop_btree_root = index_prop_btree_root;
+
                 #[cfg(feature = "degree-cache")]
                 {
                     meta.storage_degree_root = degree_root;
@@ -502,7 +478,6 @@ impl Graph {
         self.store
             .register_background_maint(Arc::downgrade(&maint_trait));
     }
-
 }
 
 impl Drop for Graph {
@@ -572,7 +547,6 @@ pub(crate) struct PropDelta {
     new_map: BTreeMap<PropId, PropValueOwned>,
     encoded: props::PropEncodeResult,
 }
-
 
 /// Computes adjacency list bounds for a given node.
 impl Graph {
@@ -673,7 +647,6 @@ impl Graph {
         Ok(())
     }
 
-
     #[cfg(feature = "degree-cache")]
     /// Inserts or removes a single degree cache entry while running tests.
     pub fn debug_set_degree_entry(
@@ -699,5 +672,3 @@ impl Graph {
         self.catalog_epoch.current().0
     }
 }
-
-

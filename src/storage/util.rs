@@ -23,6 +23,7 @@ where
 ///
 /// This is a convenience wrapper around [`is_sorted_by`] for types that implement `Ord`.
 #[inline]
+#[allow(dead_code)]
 pub fn is_sorted<T: Ord>(slice: &[T]) -> bool {
     is_sorted_by(slice, |a, b| a.cmp(b))
 }

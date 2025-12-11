@@ -22,11 +22,11 @@ use crate::query::{
     Value as QueryValue,
 };
 use crate::storage::catalog::{Dict, DictOptions};
+use crate::storage::VersionCodecKind;
 use crate::storage::{
     profile_timer as storage_profile_timer, record_profile_timer as record_storage_profile_timer,
     StorageProfileKind,
 };
-use crate::storage::VersionCodecKind;
 use crate::storage::{
     BfsOptions, DeleteNodeOpts, Dir, EdgeData, EdgeSpec as StorageEdgeSpec, ExpandOpts, Graph,
     GraphOptions, IndexDef, IndexKind, NodeData, NodeSpec as StorageNodeSpec, PropEntry, PropPatch,
@@ -1264,13 +1264,15 @@ impl Database {
 
             // Resolve label (with profiling)
             let dict_start = storage_profile_timer();
-            let label_id = self.resolve_or_cache_label(&mut write, &node_spec.label, &mut label_cache)?;
+            let label_id =
+                self.resolve_or_cache_label(&mut write, &node_spec.label, &mut label_cache)?;
             self.ensure_label_index(&mut write, label_id)?;
             record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
 
             // Convert properties (with profiling)
             let props_start = storage_profile_timer();
-            let prop_storage = self.typed_props_to_storage(&mut write, &node_spec.props, &mut prop_cache)?;
+            let prop_storage =
+                self.typed_props_to_storage(&mut write, &node_spec.props, &mut prop_cache)?;
             let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
             for (prop_id, owned) in &prop_storage {
                 prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
@@ -1309,7 +1311,8 @@ impl Database {
 
             // Convert properties (with profiling)
             let props_start = storage_profile_timer();
-            let prop_storage = self.typed_props_to_storage(&mut write, &edge_spec.props, &mut prop_cache)?;
+            let prop_storage =
+                self.typed_props_to_storage(&mut write, &edge_spec.props, &mut prop_cache)?;
             let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
             for (prop_id, owned) in &prop_storage {
                 prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
@@ -2986,23 +2989,21 @@ impl TypedPropEntry {
                 Ok(PropValueOwned::Int(v))
             }
             "float" => {
-                let v = self
-                    .float_value
-                    .ok_or_else(|| FfiError::Message("float_value required for float kind".into()))?;
+                let v = self.float_value.ok_or_else(|| {
+                    FfiError::Message("float_value required for float kind".into())
+                })?;
                 Ok(PropValueOwned::Float(v))
             }
             "string" => {
-                let v = self
-                    .string_value
-                    .clone()
-                    .ok_or_else(|| FfiError::Message("string_value required for string kind".into()))?;
+                let v = self.string_value.clone().ok_or_else(|| {
+                    FfiError::Message("string_value required for string kind".into())
+                })?;
                 Ok(PropValueOwned::Str(v))
             }
             "bytes" => {
-                let encoded = self
-                    .bytes_value
-                    .as_ref()
-                    .ok_or_else(|| FfiError::Message("bytes_value required for bytes kind".into()))?;
+                let encoded = self.bytes_value.as_ref().ok_or_else(|| {
+                    FfiError::Message("bytes_value required for bytes kind".into())
+                })?;
                 let decoded = BASE64
                     .decode(encoded.as_bytes())
                     .map_err(|_| FfiError::Message("invalid base64 encoding for bytes".into()))?;
@@ -3048,20 +3049,18 @@ impl TypedNodeRef {
     ) -> Result<NodeId> {
         match self.kind.as_str() {
             "alias" => {
-                let name = self
-                    .alias
-                    .as_ref()
-                    .ok_or_else(|| FfiError::Message("alias field required for alias kind".into()))?;
+                let name = self.alias.as_ref().ok_or_else(|| {
+                    FfiError::Message("alias field required for alias kind".into())
+                })?;
                 aliases
                     .get(name)
                     .copied()
                     .ok_or_else(|| FfiError::Message(format!("unknown alias '{name}'")))
             }
             "handle" => {
-                let idx = self
-                    .handle
-                    .ok_or_else(|| FfiError::Message("handle field required for handle kind".into()))?
-                    as usize;
+                let idx = self.handle.ok_or_else(|| {
+                    FfiError::Message("handle field required for handle kind".into())
+                })? as usize;
                 node_ids
                     .get(idx)
                     .copied()

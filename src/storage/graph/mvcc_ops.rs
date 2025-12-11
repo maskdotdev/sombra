@@ -65,7 +65,8 @@ pub(crate) fn wal_health(
             let frames_per_segment = allocator.segment_size_bytes / page_size as u64;
             if frames_per_segment > 0 {
                 if let Some(backlog) = wal_backlog {
-                    let needed_segments = (backlog.pending_frames as u64).div_ceil(frames_per_segment);
+                    let needed_segments =
+                        (backlog.pending_frames as u64).div_ceil(frames_per_segment);
                     let readyish =
                         allocator.ready_segments as u64 + allocator.recycle_segments as u64;
                     if needed_segments > readyish {
@@ -141,8 +142,7 @@ impl Graph {
         self.version_log.put(tx, &ptr_value, &encoded)?;
         self.version_log_bytes
             .fetch_add(encoded.len() as u64, Ordering::Relaxed);
-        self.version_log_entries
-            .fetch_add(1, Ordering::Relaxed);
+        self.version_log_entries.fetch_add(1, Ordering::Relaxed);
         self.publish_version_log_usage_metrics();
         self.maybe_signal_high_water();
         self.persist_tree_root(tx, RootKind::VersionLog)?;
@@ -168,8 +168,7 @@ impl Graph {
         if let Some(cache) = &self.version_cache {
             if let Some(hit) = cache.get(ptr) {
                 self.metrics.version_cache_hit();
-                self.version_cache_hits
-                    .fetch_add(1, Ordering::Relaxed);
+                self.version_cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(Some((*hit).clone()));
             }
         }
@@ -183,8 +182,7 @@ impl Graph {
         if let Some(cache) = &self.version_cache {
             cache.insert(ptr, Arc::new(decoded.clone()));
             self.metrics.version_cache_miss();
-            self.version_cache_misses
-                .fetch_add(1, Ordering::Relaxed);
+            self.version_cache_misses.fetch_add(1, Ordering::Relaxed);
         }
         Ok(Some(decoded))
     }
@@ -268,9 +266,7 @@ impl Graph {
         let version_cache_hits = self.version_cache_hits.load(Ordering::Relaxed);
         let version_cache_misses = self.version_cache_misses.load(Ordering::Relaxed);
         let version_codec_raw_bytes = self.version_codec_raw_bytes.load(Ordering::Relaxed);
-        let version_codec_encoded_bytes = self
-            .version_codec_encoded_bytes
-            .load(Ordering::Relaxed);
+        let version_codec_encoded_bytes = self.version_codec_encoded_bytes.load(Ordering::Relaxed);
         let acked_not_durable_commits = commit_table
             .as_ref()
             .map(|snapshot| snapshot.acked_not_durable)
@@ -489,9 +485,11 @@ impl Graph {
 
     pub(crate) fn recompute_version_log_bytes(&self) -> Result<()> {
         let read = self.begin_read_guard()?;
-        let mut cursor = self
-            .version_log
-            .range(&read, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)?;
+        let mut cursor = self.version_log.range(
+            &read,
+            std::ops::Bound::Unbounded,
+            std::ops::Bound::Unbounded,
+        )?;
         let mut bytes = 0u64;
         while let Some((_, value)) = cursor.next()? {
             bytes = bytes.saturating_add(value.len() as u64);

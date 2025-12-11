@@ -115,7 +115,8 @@ impl ChunkedIndex {
         };
 
         // Step 1: Build full keys and collect existing segments
-        let mut updates: Vec<(Vec<u8>, Segment, Option<CommitId>)> = Vec::with_capacity(items.len());
+        let mut updates: Vec<(Vec<u8>, Segment, Option<CommitId>)> =
+            Vec::with_capacity(items.len());
 
         for (prefix, nodes, commit) in items {
             let key = Self::make_key(&prefix, SEGMENT_PRIMARY);

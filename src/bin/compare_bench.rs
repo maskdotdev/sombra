@@ -469,10 +469,10 @@ impl BenchResult {
                 let wal_write_avg_us = (profile.commit_wal_write_ns as f64 / count) / 1000.0;
                 let fsync_avg_us = (profile.commit_fsync_ns as f64 / count) / 1000.0;
                 let finalize_avg_us = (profile.commit_finalize_ns as f64 / count) / 1000.0;
-                let total_avg_us = frame_build_avg_us + wal_write_avg_us + fsync_avg_us + finalize_avg_us;
+                let total_avg_us =
+                    frame_build_avg_us + wal_write_avg_us + fsync_avg_us + finalize_avg_us;
                 println!(
-                    "    commit_phases (avg µs): frame_build={:.1} wal_write={:.1} fsync={:.1} finalize={:.1} total={:.1}",
-                    frame_build_avg_us, wal_write_avg_us, fsync_avg_us, finalize_avg_us, total_avg_us
+                    "    commit_phases (avg µs): frame_build={frame_build_avg_us:.1} wal_write={wal_write_avg_us:.1} fsync={fsync_avg_us:.1} finalize={finalize_avg_us:.1} total={total_avg_us:.1}"
                 );
             }
         }

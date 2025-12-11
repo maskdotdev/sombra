@@ -28,9 +28,9 @@ use crate::primitives::{
     },
 };
 use crate::storage::{
-    profile_scope, record_commit_phases, record_pager_commit_borrowed_bytes, record_pager_wal_bytes,
-    record_pager_wal_frames, CommitId, CommitReader, CommitTable, IntentId, ReaderSnapshot,
-    StorageProfileKind,
+    profile_scope, record_commit_phases, record_pager_commit_borrowed_bytes,
+    record_pager_wal_bytes, record_pager_wal_frames, CommitId, CommitReader, CommitTable, IntentId,
+    ReaderSnapshot, StorageProfileKind,
 };
 use crate::types::{
     page::{self, PageHeader, PAGE_HDR_LEN},
@@ -2185,7 +2185,8 @@ impl Pager {
                 "pager.commit_txn.borrowed_flush_start"
             );
             let frame_build_ns = frame_build_start.elapsed().as_nanos() as u64;
-            let (offsets, wal_write_ns, fsync_ns) = self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
+            let (offsets, wal_write_ns, fsync_ns) =
+                self.flush_pending_wal_frames(&wal_frames, sync_mode)?;
             if !offsets.is_empty() {
                 self.attach_version_offsets(&version_targets, &offsets);
                 self.release_version_payloads_for_floor();
@@ -2245,7 +2246,10 @@ impl Pager {
         );
 
         // Try direct commit path first (bypasses thread handoff when no contention)
-        let (commit_result, offsets) = match self.wal_committer.try_direct_commit(owned_frames, sync_mode) {
+        let (commit_result, offsets) = match self
+            .wal_committer
+            .try_direct_commit(owned_frames, sync_mode)
+        {
             Ok(offsets) => {
                 pager_test_log!("[pager.commit] direct commit succeeded lsn={}", lsn.0);
                 debug!(lsn = lsn.0, "pager.commit_txn.direct_commit_success");
@@ -2282,7 +2286,11 @@ impl Pager {
                         debug!(lsn = lsn.0, "pager.commit_txn.waiting_on_ticket");
                         let result = waiter.wait();
                         if let Err(err) = &result {
-                            pager_test_log!("[pager.commit] ticket error lsn={} err={}", lsn.0, err);
+                            pager_test_log!(
+                                "[pager.commit] ticket error lsn={} err={}",
+                                lsn.0,
+                                err
+                            );
                             debug!(lsn = lsn.0, error = %err, "pager.commit_txn.ticket_error");
                         } else {
                             pager_test_log!("[pager.commit] ticket done lsn={}", lsn.0);

@@ -427,5 +427,4 @@ impl Graph {
             encoded,
         }))
     }
-
 }

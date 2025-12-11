@@ -1,6 +1,4 @@
 use crate::primitives::pager::{ReadGuard, WriteGuard};
-use crate::storage::{props, EdgeData, EdgeSpec};
-use crate::storage::{VersionPtr, VersionSpace};
 use crate::storage::graph::RootKind;
 use crate::storage::mvcc::{VersionHeader, VERSION_HEADER_LEN};
 use crate::storage::mvcc_flags;
@@ -9,7 +7,9 @@ use crate::storage::profile::{
     profile_timer as storage_profile_timer, record_profile_timer as record_storage_profile_timer,
     StorageProfileKind,
 };
-use crate::types::{EdgeId, NodeId, Result, SombraError, TypeId, VRef};
+use crate::storage::{props, EdgeData, EdgeSpec};
+use crate::storage::{VersionPtr, VersionSpace};
+use crate::types::{EdgeId, Result, SombraError, VRef};
 
 use super::edge::{
     self, EncodeOpts as EdgeEncodeOpts, PropPayload as EdgePropPayload,
@@ -28,7 +28,11 @@ impl Graph {
         result
     }
 
-    pub(crate) fn insert_edge_unchecked(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
+    pub(crate) fn insert_edge_unchecked(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        spec: EdgeSpec<'_>,
+    ) -> Result<EdgeId> {
         let total_start = storage_profile_timer();
         let result = self.insert_edge_unchecked_inner(tx, spec);
         record_storage_profile_timer(StorageProfileKind::CreateEdge, total_start);
@@ -78,7 +82,9 @@ impl Graph {
             }
         };
         record_storage_profile_timer(StorageProfileKind::CreateEdgeEncodeProps, encode_start);
-        let id_raw = self.next_edge_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id_raw = self
+            .next_edge_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let edge_id = EdgeId(id_raw);
         let next_id = edge_id.0.saturating_add(1);
         tx.update_meta(|meta| {
@@ -144,7 +150,9 @@ impl Graph {
 
     /// Scans and returns all edges in the graph.
     pub fn scan_all_edges(&self, tx: &ReadGuard) -> Result<Vec<(EdgeId, EdgeData)>> {
-        let mut cursor = self.edges.range(tx, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)?;
+        let mut cursor =
+            self.edges
+                .range(tx, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)?;
         let mut rows = Vec::new();
         while let Some((key, bytes)) = cursor.next()? {
             let Some(versioned) = self.visible_edge_from_bytes(tx, EdgeId(key), &bytes)? else {

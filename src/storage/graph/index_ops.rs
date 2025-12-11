@@ -5,32 +5,32 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
 
 use crate::primitives::pager::{ReadGuard, WriteGuard};
-use crate::storage::btree::BTree;
-use crate::storage::index::{
-    collect_all, CatalogEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef, IndexKind,
-    IndexRoots, IndexStore, LabelScan, PostingStream,
-};
-use crate::storage::mvcc::{CommitId, VersionHeader, VersionPtr, VersionSpace, VersionedValue};
-use crate::storage::mvcc_flags;
-use crate::storage::props;
-use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId};
-use crate::storage::PropValueOwned;
 
-use super::adjacency;
-use super::graph_types::{PropStats, RootKind};
+use crate::storage::index::{
+    collect_all, GraphIndexCacheStats, IndexDef, LabelScan, PostingStream,
+};
+use crate::storage::mvcc::CommitId;
+
+
+use crate::storage::PropValueOwned;
+use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId};
+
+
+use super::graph_types::PropStats;
 use super::prop_ops::{
     clone_owned_bound, encode_range_bound, encode_value_key_owned, prop_stats_key,
-    prop_value_to_owned, update_min_max,
+    update_min_max,
 };
-use super::{Graph, GraphTxnState, UnitValue};
+use super::Graph;
 
-use crate::storage::{profile_timer, record_flush_adj_entries, record_flush_adj_fwd_put, record_flush_adj_fwd_sort, record_flush_adj_key_encode, record_flush_adj_rev_put, record_flush_adj_rev_sort};
 use crate::storage::profile::{
     profile_timer as storage_profile_timer, profiling_enabled as storage_profiling_enabled,
     record_profile_timer as record_storage_profile_timer, StorageProfileKind,
 };
 
+
 impl Graph {
+    /// Creates a label index for the given label if it does not already exist.
     pub fn create_label_index(&self, tx: &mut WriteGuard<'_>, label: LabelId) -> Result<()> {
         if self.indexes.has_label_index_with_write(tx, label)? {
             return Ok(());

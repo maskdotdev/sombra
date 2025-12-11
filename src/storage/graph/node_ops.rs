@@ -1,14 +1,17 @@
 use std::collections::BTreeMap;
 
+use super::node::{
+    self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload,
+    PropStorage as NodePropStorage,
+};
+use super::Graph;
 use crate::primitives::pager::{ReadGuard, WriteGuard};
-use crate::storage::{props, DeleteMode, DeleteNodeOpts, NodeData, NodeSpec, PropValueOwned};
-use crate::types::{EdgeId, LabelId, NodeId, PropId, Result, SombraError, TypeId, VRef};
-use crate::storage::{VersionPtr, VersionSpace};
 use crate::storage::graph::RootKind;
 use crate::storage::mvcc::{VersionHeader, VERSION_HEADER_LEN};
 use crate::storage::patch;
-use super::node::{self, EncodeOpts as NodeEncodeOpts, PropPayload as NodePropPayload, PropStorage as NodePropStorage};
-use super::{Graph, PropDelta};
+use crate::storage::{props, DeleteMode, DeleteNodeOpts, NodeData, NodeSpec, PropValueOwned};
+use crate::storage::{VersionPtr, VersionSpace};
+use crate::types::{EdgeId, LabelId, NodeId, PropId, Result, SombraError, VRef};
 
 use crate::storage::profile::{
     profile_timer as storage_profile_timer, record_profile_timer as record_storage_profile_timer,
@@ -64,7 +67,9 @@ impl Graph {
             }
         };
         record_storage_profile_timer(StorageProfileKind::CreateNodeEncodeProps, encode_start);
-        let id_raw = self.next_node_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id_raw = self
+            .next_node_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let node_id = NodeId(id_raw);
         let next_id = node_id.0.saturating_add(1);
         tx.update_meta(|meta| {
@@ -165,7 +170,9 @@ impl Graph {
 
     /// Scans and returns all nodes in the graph.
     pub fn scan_all_nodes(&self, tx: &ReadGuard) -> Result<Vec<(NodeId, NodeData)>> {
-        let mut cursor = self.nodes.range(tx, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)?;
+        let mut cursor =
+            self.nodes
+                .range(tx, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)?;
         let mut rows = Vec::new();
         while let Some((key, bytes)) = cursor.next()? {
             let Some(versioned) = self.visible_node_from_bytes(tx, NodeId(key), &bytes)? else {
@@ -381,7 +388,12 @@ impl Graph {
         Ok(())
     }
 
-    pub(crate) fn node_has_label(&self, tx: &ReadGuard, id: NodeId, label: LabelId) -> Result<bool> {
+    pub(crate) fn node_has_label(
+        &self,
+        tx: &ReadGuard,
+        id: NodeId,
+        label: LabelId,
+    ) -> Result<bool> {
         if let Some(versioned) = self.visible_node(tx, id)? {
             Ok(versioned.row.labels.binary_search(&label).is_ok())
         } else {
@@ -407,7 +419,11 @@ impl Graph {
         Ok(self.visible_node(tx, node)?.is_some())
     }
 
-    pub(crate) fn node_exists_with_write(&self, tx: &mut WriteGuard<'_>, node: NodeId) -> Result<bool> {
+    pub(crate) fn node_exists_with_write(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+    ) -> Result<bool> {
         let Some(bytes) = self.nodes.get_with_write(tx, &node.0)? else {
             return Ok(false);
         };

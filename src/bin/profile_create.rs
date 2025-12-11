@@ -270,7 +270,7 @@ fn profile_nodes_with_chunked_unique_index(warmup_nodes: usize, bench_nodes: usi
         db.create_typed_batch(&spec).unwrap();
     }
 
-    // Create only the Chunked index  
+    // Create only the Chunked index
     db.ensure_property_index("Person", "name", "chunked", "string")
         .expect("create name index");
 
@@ -293,7 +293,12 @@ fn profile_nodes_with_chunked_unique_index(warmup_nodes: usize, bench_nodes: usi
     let elapsed = start.elapsed();
 
     let snapshot = storage_profile_snapshot(true);
-    print_results("create_node (chunked unique)", bench_nodes, elapsed, snapshot);
+    print_results(
+        "create_node (chunked unique)",
+        bench_nodes,
+        elapsed,
+        snapshot,
+    );
 }
 
 fn profile_nodes_with_props_and_indexes(warmup_nodes: usize, bench_nodes: usize) {
@@ -354,7 +359,12 @@ fn profile_nodes_with_props_and_indexes(warmup_nodes: usize, bench_nodes: usize)
     let elapsed = start.elapsed();
 
     let snapshot = storage_profile_snapshot(true);
-    print_results("create_node (3 props + indexes)", bench_nodes, elapsed, snapshot);
+    print_results(
+        "create_node (3 props + indexes)",
+        bench_nodes,
+        elapsed,
+        snapshot,
+    );
 }
 
 fn profile_edges_no_props(bench_edges: usize) {
@@ -408,12 +418,7 @@ fn profile_edges_no_props(bench_edges: usize) {
 
     let snapshot = storage_profile_snapshot(true);
     // Total ops = nodes + edges
-    print_results(
-        "create_edge (no props)",
-        bench_edges,
-        elapsed,
-        snapshot,
-    );
+    print_results("create_edge (no props)", bench_edges, elapsed, snapshot);
 }
 
 fn profile_edges_with_props(bench_edges: usize) {
@@ -607,8 +612,7 @@ fn print_results(
     let us_per_op = elapsed.as_micros() as f64 / ops as f64;
 
     println!(
-        "  Total: {:?} ({:.0} ops/sec, {:.2} µs/op)",
-        elapsed, ops_per_sec, us_per_op
+        "  Total: {elapsed:?} ({ops_per_sec:.0} ops/sec, {us_per_op:.2} µs/op)"
     );
 
     if let Some(s) = snapshot {
@@ -813,7 +817,10 @@ fn print_results(
         // Flush deferred adjacency breakdown
         if s.flush_adj_entries > 0 || s.flush_deferred_indexes_ns > 0 {
             let flush_total = s.flush_deferred_ns;
-            println!("\n  FLUSH DEFERRED BREAKDOWN ({} adj entries):", s.flush_adj_entries);
+            println!(
+                "\n  FLUSH DEFERRED BREAKDOWN ({} adj entries):",
+                s.flush_adj_entries
+            );
             println!(
                 "    key_encode:   {:>10} ns ({:>5.1}%, {} calls, {:.0} ns/call)",
                 s.flush_adj_key_encode_ns,

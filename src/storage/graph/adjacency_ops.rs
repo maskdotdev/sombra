@@ -1,16 +1,18 @@
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
+
+#[cfg(feature = "degree-cache")]
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 
 use crate::primitives::pager::{ReadGuard, WriteGuard};
 use crate::storage::btree::{BTree, PutItem};
-use crate::storage::{
-    profile_timer, record_flush_adj_entries, record_flush_adj_fwd_put,
-    record_flush_adj_fwd_sort, record_flush_adj_key_encode, record_flush_adj_rev_put,
-    record_flush_adj_rev_sort,
-};
 use crate::storage::mvcc::{CommitId, VersionedValue, COMMIT_MAX};
-use crate::types::{EdgeId, NodeId, TypeId, Result, SombraError};
+use crate::storage::{
+    profile_timer, record_flush_adj_entries, record_flush_adj_fwd_put, record_flush_adj_fwd_sort,
+    record_flush_adj_key_encode, record_flush_adj_rev_put, record_flush_adj_rev_sort,
+};
+use crate::types::{EdgeId, NodeId, Result, SombraError, TypeId};
 
 #[cfg(feature = "degree-cache")]
 use super::adjacency::DegreeDir;
@@ -544,7 +546,11 @@ impl Graph {
         Ok(loops)
     }
 
-    pub(crate) fn free_edge_props(&self, tx: &mut WriteGuard<'_>, props: EdgePropStorage) -> Result<()> {
+    pub(crate) fn free_edge_props(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        props: EdgePropStorage,
+    ) -> Result<()> {
         match props {
             EdgePropStorage::Inline(bytes) => self.free_prop_values_from_bytes(tx, &bytes),
             EdgePropStorage::VRef(vref) => {
@@ -711,9 +717,7 @@ impl Graph {
                 }
                 let (src, ty, _, _) = adjacency::decode_fwd_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
-                *actual
-                    .entry((src, DegreeDir::Out, ty))
-                    .or_insert(0) += 1;
+                *actual.entry((src, DegreeDir::Out, ty)).or_insert(0) += 1;
             }
         }
         {
@@ -725,9 +729,7 @@ impl Graph {
                 }
                 let (dst, ty, _, _) = adjacency::decode_rev_key(&key)
                     .ok_or(SombraError::Corruption("adjacency key decode failed"))?;
-                *actual
-                    .entry((dst, DegreeDir::In, ty))
-                    .or_insert(0) += 1;
+                *actual.entry((dst, DegreeDir::In, ty)).or_insert(0) += 1;
             }
         }
 

@@ -3,9 +3,9 @@ use std::num::NonZeroUsize;
 use lru::LruCache;
 
 use crate::primitives::pager::WriteGuard;
+use crate::storage::mvcc::CommitId;
 use crate::storage::EdgeSpec;
 use crate::types::Result;
-use crate::storage::mvcc::CommitId;
 use crate::types::{EdgeId, NodeId, SombraError};
 
 use super::Graph;

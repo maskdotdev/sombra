@@ -1162,7 +1162,12 @@ pub fn record_wal_sync_coalesced(count: u64) {
 }
 
 /// Records commit phase timings for detailed profiling.
-pub fn record_commit_phases(frame_build_ns: u64, wal_write_ns: u64, fsync_ns: u64, finalize_ns: u64) {
+pub fn record_commit_phases(
+    frame_build_ns: u64,
+    wal_write_ns: u64,
+    fsync_ns: u64,
+    finalize_ns: u64,
+) {
     if let Some(counters) = counters() {
         counters
             .commit_frame_build_ns
@@ -1176,9 +1181,7 @@ pub fn record_commit_phases(frame_build_ns: u64, wal_write_ns: u64, fsync_ns: u6
         counters
             .commit_finalize_ns
             .fetch_add(finalize_ns, Ordering::Relaxed);
-        counters
-            .commit_phase_count
-            .fetch_add(1, Ordering::Relaxed);
+        counters.commit_phase_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1250,6 +1253,7 @@ pub fn record_btree_leaf_slot_alloc(nanos: u64) {
 }
 
 /// Records time spent persisting slot directories.
+#[allow(dead_code)]
 pub fn record_btree_leaf_slot_persist(nanos: u64) {
     if let Some(counters) = counters() {
         counters

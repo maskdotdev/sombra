@@ -2,12 +2,11 @@
 
 use super::*;
 use std::ops::Bound;
-use std::time::Duration;
 
 mod vacuum_background_tests {
     use super::*;
     use crate::primitives::pager::{PageStore, Pager, PagerOptions};
-    use crate::storage::{GraphOptions, PropEntry, PropValue};
+    use crate::storage::{DeleteNodeOpts, GraphOptions, NodeSpec, PropEntry, PropValue};
     use crate::types::{LabelId, PropId, Result};
     use std::sync::Arc;
     use std::time::Duration;
@@ -131,8 +130,8 @@ mod vacuum_background_tests {
 
 mod adjacency_commit_tests {
     use super::*;
-    use crate::primitives::pager::{PageStore, Pager, PagerOptions};
-    use crate::storage::{adjacency, GraphOptions};
+    use crate::primitives::pager::{PageStore, Pager, PagerOptions, ReadGuard};
+    use crate::storage::{adjacency, EdgeSpec, GraphOptions, NodeSpec};
     use crate::types::{Result, TypeId};
     use std::ops::Bound;
     use std::sync::Arc;
@@ -161,11 +160,9 @@ mod adjacency_commit_tests {
                 continue;
             }
             let decoded = if fwd {
-                adjacency::decode_fwd_key(&key)
-                    .ok_or(SombraError::Corruption("adj key decode"))?
+                adjacency::decode_fwd_key(&key).ok_or(SombraError::Corruption("adj key decode"))?
             } else {
-                adjacency::decode_rev_key(&key)
-                    .ok_or(SombraError::Corruption("adj key decode"))?
+                adjacency::decode_rev_key(&key).ok_or(SombraError::Corruption("adj key decode"))?
             };
             entries.push(decoded);
         }
@@ -178,8 +175,20 @@ mod adjacency_commit_tests {
         let (dir, pager, graph) = setup_graph("adjacency_batch_flush.db");
 
         let mut write = pager.begin_write()?;
-        let a = graph.create_node(&mut write, NodeSpec { labels: &[], props: &[] })?;
-        let b = graph.create_node(&mut write, NodeSpec { labels: &[], props: &[] })?;
+        let a = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[],
+                props: &[],
+            },
+        )?;
+        let b = graph.create_node(
+            &mut write,
+            NodeSpec {
+                labels: &[],
+                props: &[],
+            },
+        )?;
         let ty = TypeId(1);
         let _edge1 = graph.create_edge(
             &mut write,
@@ -220,11 +229,10 @@ mod wal_recovery_tests {
     use crate::storage::mvcc::VersionLogEntry;
     use crate::storage::node;
     use crate::storage::patch::{PropPatch, PropPatchOp};
-    use crate::storage::{PropEntry, PropValue};
     use crate::storage::props;
     use crate::storage::props::RawPropValue;
+    use crate::storage::{NodeSpec, PropEntry, PropValue};
     use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::tempdir;
 
     #[test]
@@ -304,10 +312,11 @@ mod wal_recovery_tests {
 }
 
 mod wal_alert_tests {
-    use super::*;
-    use crate::primitives::wal::{WalAllocatorStats, WalCommitBacklog};
     use crate::primitives::pager::AsyncFsyncBacklog;
-    use crate::storage::graph::mvcc_ops::{wal_health, ASYNC_FSYNC_LAG_ALERT, WAL_HORIZON_LAG_ALERT};
+    use crate::primitives::wal::{WalAllocatorStats, WalCommitBacklog};
+    use crate::storage::graph::mvcc_ops::{
+        wal_health, ASYNC_FSYNC_LAG_ALERT, WAL_HORIZON_LAG_ALERT,
+    };
     use crate::types::Lsn;
 
     #[test]

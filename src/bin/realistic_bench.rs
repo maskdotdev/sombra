@@ -87,9 +87,7 @@ fn main() {
     let chunk_edges: Option<usize> = std::env::var("CHUNK_EDGES")
         .ok()
         .and_then(|s| s.parse().ok());
-    let no_fsync = std::env::var("NO_FSYNC")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let no_fsync = std::env::var("NO_FSYNC").map(|v| v == "1").unwrap_or(false);
 
     let tmpdir = TempDir::new().expect("tempdir");
     let db_path = tmpdir.path().join("bench.sombra");

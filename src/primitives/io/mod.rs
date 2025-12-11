@@ -1,5 +1,5 @@
 //! Low-level file I/O primitives.
-//! 
+//!
 //! This module allows unsafe code for platform-specific sync operations.
 #![allow(unsafe_code)]
 

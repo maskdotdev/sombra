@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use crate::primitives::pager::WriteGuard;
 use crate::storage::index::{IndexDef, IndexKind, IndexStore};
-use crate::storage::{profile_timer, record_flush_deferred, record_flush_deferred_indexes};
 use crate::storage::mvcc::CommitId;
+use crate::storage::{profile_timer, record_flush_deferred, record_flush_deferred_indexes};
 use crate::types::{EdgeId, LabelId, NodeId, Result, TypeId};
 
-use super::{AdjacencyBuffer, Graph, GraphTxnState, IndexBuffer};
+use super::{AdjacencyBuffer, Graph, IndexBuffer};
 
 impl Graph {
     pub(crate) fn stage_adjacency_inserts(
@@ -201,7 +201,6 @@ impl Graph {
             let entries: Vec<_> = buffer
                 .label_inserts
                 .drain(..)
-                .map(|(label, node, commit)| (label, node, commit))
                 .collect();
             self.indexes.insert_node_labels_batch(tx, entries)?;
         }

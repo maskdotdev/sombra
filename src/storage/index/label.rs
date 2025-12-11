@@ -317,7 +317,9 @@ impl LabelIndex {
         }
 
         // Use put_many for efficient bulk insertion
-        let iter = all_entries.iter().map(|(key, value)| PutItem { key, value });
+        let iter = all_entries
+            .iter()
+            .map(|(key, value)| PutItem { key, value });
         self.tree.put_many(tx, iter)
     }
 
