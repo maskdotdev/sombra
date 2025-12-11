@@ -46,6 +46,7 @@ fn main() {
     profile_edges_no_props(bench_edges);
     profile_edges_with_props(bench_edges);
     profile_mixed_batch(bench_nodes);
+    profile_realistic_like(bench_nodes, bench_edges);
 
     println!("\n=== Profiling Complete ===");
 }
@@ -512,6 +513,90 @@ fn profile_mixed_batch(bench_nodes: usize) {
     );
 }
 
+fn profile_realistic_like(bench_nodes: usize, bench_edges: usize) {
+    if bench_nodes == 0 {
+        println!("\n--- Realistic-like batch skipped (nodes=0) ---");
+        return;
+    }
+
+    println!("\n--- Realistic-like batch (7 node props, 2 edge props) ---");
+    let tmpdir = TempDir::new().unwrap();
+    let db_path = tmpdir.path().join("realistic_like.db");
+
+    // Match realistic_bench pager settings (fsync on, no group wait)
+    let mut opts = DatabaseOptions {
+        create_if_missing: true,
+        ..DatabaseOptions::default()
+    };
+    opts.pager.synchronous = Synchronous::Normal;
+    opts.pager.group_commit_max_wait_ms = 0;
+    opts.pager.cache_pages = 16384;
+
+    let db = Database::open(&db_path, opts).expect("open database");
+
+    let code_texts = [
+        "function foo() { return 1; }",
+        "const bar = () => { console.log('hello'); };",
+        "class Baz { constructor() {} }",
+        "export function qux() { return true; }",
+        "const quux = (x, y) => x + y;",
+    ];
+
+    let metadata = [
+        "{\"type\": \"function\", \"exported\": true}",
+        "{\"type\": \"variable\", \"exported\": false}",
+        "{\"type\": \"class\", \"exported\": true}",
+    ];
+
+    // Reset counters
+    let _ = storage_profile_snapshot(true);
+
+    let start = Instant::now();
+    {
+        let spec = TypedBatchSpec {
+            nodes: (0..bench_nodes)
+                .map(|i| TypedNodeSpec {
+                    label: "Node".to_string(),
+                    props: vec![
+                        make_string_prop("name", format!("fn_{i}")),
+                        make_string_prop("filePath", format!("/tmp/file_{}.ts", i / 50)),
+                        make_int_prop("startLine", i as i64),
+                        make_int_prop("endLine", (i + 5) as i64),
+                        make_string_prop("codeText", code_texts[i % code_texts.len()].to_string()),
+                        make_string_prop("language", "typescript".to_string()),
+                        make_string_prop("metadata", metadata[i % metadata.len()].to_string()),
+                    ],
+                    alias: None,
+                })
+                .collect(),
+            edges: (0..bench_edges)
+                .map(|i| TypedEdgeSpec {
+                    ty: "LINKS".to_string(),
+                    src: make_handle_ref(i % bench_nodes),
+                    dst: make_handle_ref((i * 13 + 7) % bench_nodes),
+                    props: vec![
+                        make_float_prop("weight", (i % 10) as f64 / 10.0),
+                        make_string_prop(
+                            "linkKind",
+                            if i % 2 == 0 { "call" } else { "reference" }.to_string(),
+                        ),
+                    ],
+                })
+                .collect(),
+        };
+        db.create_typed_batch(&spec).unwrap();
+    }
+    let elapsed = start.elapsed();
+
+    let snapshot = storage_profile_snapshot(true);
+    print_results(
+        "realistic_like (7 node props + 2 edge props)",
+        bench_nodes + bench_edges,
+        elapsed,
+        snapshot,
+    );
+}
+
 fn print_results(
     _name: &str,
     ops: usize,
@@ -688,6 +773,15 @@ fn print_results(
                 s.btree_leaf_allocator_cache_count,
                 s.btree_leaf_allocator_cache_ns as f64
                     / s.btree_leaf_allocator_cache_count.max(1) as f64
+            );
+            // Show allocator build stats (subset of alloc_cache time when cache misses)
+            println!(
+                "      -> alloc_build: {:>6} ns ({} builds, {:.0} ns/build, {} free_regions)",
+                s.btree_leaf_allocator_build_ns,
+                s.btree_leaf_allocator_build_count,
+                s.btree_leaf_allocator_build_ns as f64
+                    / s.btree_leaf_allocator_build_count.max(1) as f64,
+                s.btree_leaf_allocator_build_free_regions
             );
             let leaf_accounted = s.btree_leaf_binary_search_ns
                 + s.btree_leaf_record_encode_ns
