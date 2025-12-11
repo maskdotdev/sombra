@@ -40,6 +40,7 @@ mod profile;
 mod props;
 mod rowhash;
 mod types;
+mod util;
 
 /// Main database interface.
 ///

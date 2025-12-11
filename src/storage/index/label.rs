@@ -311,8 +311,10 @@ impl LabelIndex {
             return Ok(());
         }
 
-        // Sort by key for put_many requirement
-        all_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        // Sort by key for put_many requirement (skip if already sorted)
+        if !crate::storage::util::is_sorted_by(&all_entries, |a, b| a.0.cmp(&b.0)) {
+            all_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        }
 
         // Use put_many for efficient bulk insertion
         let iter = all_entries.iter().map(|(key, value)| PutItem { key, value });
