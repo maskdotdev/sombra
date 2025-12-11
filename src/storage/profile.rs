@@ -461,7 +461,7 @@ pub fn profiling_enabled() -> bool {
                 let lowered = value.to_ascii_lowercase();
                 lowered != "0" && lowered != "false"
             }
-            Err(_) => true, // default on
+            Err(_) => false, // default off for performance
         }
     })
 }

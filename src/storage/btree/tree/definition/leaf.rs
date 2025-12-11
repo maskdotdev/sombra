@@ -390,8 +390,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         tx: &mut WriteGuard<'_>,
         mut page: PageMut<'_>,
         header: page::Header,
-        key: Vec<u8>,
-        value: Vec<u8>,
+        key: &[u8],
+        value: &[u8],
     ) -> Result<LeafInsert> {
         let _scope = profile_scope(StorageProfileKind::BTreeLeafInsert);
         let mut fallback_snapshot = None;
@@ -400,8 +400,8 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             tx,
             &mut page,
             &header,
-            key.as_slice(),
-            value.as_slice(),
+            key,
+            value,
         )? {
             InPlaceInsertResult::Applied { new_first_key } => {
                 self.stats.inc_leaf_in_place_edits();
@@ -458,13 +458,13 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
 
         match entries.binary_search_by(|(existing, _)| {
             record_btree_leaf_key_cmps(1);
-            K::compare_encoded(existing, key.as_slice())
+            K::compare_encoded(existing, key)
         }) {
             Ok(idx) => {
-                entries[idx].1 = value;
+                entries[idx].1 = value.to_vec();
             }
             Err(idx) => {
-                entries.insert(idx, (key, value));
+                entries.insert(idx, (key.to_vec(), value.to_vec()));
             }
         }
 

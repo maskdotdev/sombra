@@ -107,7 +107,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         V::encode_val(val, &mut val_buf);
         let (leaf_id, header, path) = self.find_leaf_mut(tx, &key_buf)?;
         let leaf = tx.page_mut(leaf_id)?;
-        match self.insert_into_leaf(tx, leaf, header, key_buf, val_buf)? {
+        match self.insert_into_leaf(tx, leaf, header, &key_buf, &val_buf)? {
             LeafInsert::Done { new_first_key } => {
                 if let (Some(first_key), Some(parent_frame)) = (new_first_key.as_ref(), path.last())
                 {
@@ -135,8 +135,11 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
     {
         let mut cache: Option<LeafCache> = None;
         let mut prev_key: Option<Vec<u8>> = None;
+        // Reuse buffers across iterations to avoid repeated allocations
+        let mut key_buf = Vec::new();
+        let mut val_buf = Vec::new();
         for item in items.into_iter() {
-            let mut key_buf = Vec::new();
+            key_buf.clear();
             K::encode_key(item.key, &mut key_buf);
             if let Some(prev) = &prev_key {
                 debug_assert!(
@@ -144,7 +147,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     "put_many keys must be sorted"
                 );
             }
-            let mut val_buf = Vec::new();
+            val_buf.clear();
             V::encode_val(item.value, &mut val_buf);
             let (leaf_id, header, path) = match cache.take() {
                 Some(cached) => match self.try_reuse_leaf(tx, cached, &key_buf)? {
@@ -154,8 +157,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 None => self.find_leaf_mut(tx, &key_buf)?,
             };
             let leaf_page = tx.page_mut(leaf_id)?;
-            let key_for_insert = key_buf.clone();
-            match self.insert_into_leaf(tx, leaf_page, header, key_for_insert, val_buf)? {
+            match self.insert_into_leaf(tx, leaf_page, header, &key_buf, &val_buf)? {
                 LeafInsert::Done { new_first_key } => {
                     if let (Some(first), Some(parent_frame)) =
                         (new_first_key.as_ref(), path.last())
@@ -176,7 +178,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                     cache = None;
                 }
             }
-            prev_key = Some(key_buf);
+            prev_key = Some(key_buf.clone());
         }
         Ok(())
     }
