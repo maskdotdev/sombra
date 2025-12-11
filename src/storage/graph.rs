@@ -1560,7 +1560,14 @@ impl Graph {
         };
         let root = self.nodes.root_page();
         debug_assert!(root.0 != 0, "nodes root page not initialized");
-        let (commit_id, version) = self.tx_pending_version_header(tx);
+        // When using deferred index flush, skip the pending flag since visibility
+        // is already controlled by commit boundaries (readers can't see uncommitted data).
+        // This avoids an expensive finalize_node_head re-write.
+        let (commit_id, version) = if self.defer_index_flush {
+            self.tx_version_header(tx)
+        } else {
+            self.tx_pending_version_header(tx)
+        };
         let row_bytes = match node::encode(
             &labels,
             payload,
@@ -1623,7 +1630,10 @@ impl Graph {
             return Err(err);
         }
         record_storage_profile_timer(StorageProfileKind::CreateNodePropIndex, prop_index_start);
-        self.finalize_node_head(tx, node_id)?;
+        // Skip finalize when using deferred index flush (we wrote without pending flag)
+        if !self.defer_index_flush {
+            self.finalize_node_head(tx, node_id)?;
+        }
         self.metrics.node_created();
         record_storage_profile_timer(StorageProfileKind::CreateNode, total_start);
         Ok(node_id)
@@ -2273,7 +2283,13 @@ impl Graph {
             map_vref = Some(vref);
             EdgePropPayload::VRef(vref)
         };
-        let (commit_id, version) = self.tx_pending_version_header(tx);
+        // When using deferred index flush, skip the pending flag since visibility
+        // is already controlled by commit boundaries.
+        let (commit_id, version) = if self.defer_index_flush {
+            self.tx_version_header(tx)
+        } else {
+            self.tx_pending_version_header(tx)
+        };
         let row_bytes = match edge::encode(
             spec.src,
             spec.dst,
@@ -2327,7 +2343,10 @@ impl Graph {
             return Err(err);
         }
         record_storage_profile_timer(StorageProfileKind::CreateEdgeAdjacency, adjacency_start);
-        self.finalize_edge_head(tx, edge_id)?;
+        // Skip finalize when using deferred index flush (we wrote without pending flag)
+        if !self.defer_index_flush {
+            self.finalize_edge_head(tx, edge_id)?;
+        }
         self.metrics.edge_created();
         Ok(edge_id)
     }

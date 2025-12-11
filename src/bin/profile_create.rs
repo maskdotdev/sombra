@@ -422,6 +422,21 @@ fn profile_edges_with_props(bench_edges: usize) {
 
     let num_nodes = bench_edges + 1;
 
+    // Warmup batch (not measured) - to match edges_no_props benchmark
+    {
+        let spec = TypedBatchSpec {
+            nodes: (0..num_nodes)
+                .map(|_| TypedNodeSpec {
+                    label: "Person".to_string(),
+                    props: vec![],
+                    alias: None,
+                })
+                .collect(),
+            edges: vec![],
+        };
+        db.create_typed_batch(&spec).unwrap();
+    }
+
     // Reset counters
     let _ = storage_profile_snapshot(true);
 
