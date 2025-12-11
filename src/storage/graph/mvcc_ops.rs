@@ -23,8 +23,8 @@ use super::{Graph, MicroGcTrigger, RootKind, UnitValue};
 
 const WAL_BACKLOG_COMMITS_ALERT: usize = 8;
 const WAL_BACKLOG_FRAMES_ALERT: usize = 2_048;
-const ASYNC_FSYNC_LAG_ALERT: u64 = 4_096;
-const WAL_HORIZON_LAG_ALERT: u64 = 32_768;
+pub(crate) const ASYNC_FSYNC_LAG_ALERT: u64 = 4_096;
+pub(crate) const WAL_HORIZON_LAG_ALERT: u64 = 32_768;
 
 pub(crate) fn wal_health(
     page_size: u32,

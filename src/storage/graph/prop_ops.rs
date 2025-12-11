@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use crate::primitives::pager::{ReadGuard, WriteGuard};
-use crate::storage::edge::{self, PropStorage as EdgePropStorage};
+use crate::storage::edge::PropStorage as EdgePropStorage;
 use crate::storage::index::TypeTag;
 use crate::storage::node::{self, PropStorage as NodePropStorage};
 use crate::storage::patch::{PropPatch, PropPatchOp};
