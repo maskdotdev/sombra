@@ -171,6 +171,16 @@ impl IndexStore {
         Ok(())
     }
 
+    /// Batch insert multiple (label, node) pairs into the label index.
+    /// Much more efficient than calling `insert_node_labels_with_commit` in a loop.
+    pub fn insert_node_labels_batch(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        entries: Vec<(LabelId, NodeId, CommitId)>,
+    ) -> Result<()> {
+        self.label_index.insert_nodes_batch_with_commit(tx, entries)
+    }
+
     /// Removes a node from all relevant label indexes.
     pub fn remove_node_labels(
         &self,

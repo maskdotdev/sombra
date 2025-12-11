@@ -3176,15 +3176,17 @@ impl Graph {
             return Ok(());
         };
 
-        // Process label inserts (unchanged - typically small count)
-        for (label, node, commit) in buffer.label_inserts.drain(..) {
-            if self.indexes.has_label_index_with_write(tx, label)? {
-                self.indexes
-                    .insert_node_labels_with_commit(tx, node, &[label], Some(commit))?;
-            }
+        // === OPTIMIZED: Batch label inserts ===
+        if !buffer.label_inserts.is_empty() {
+            let entries: Vec<_> = buffer
+                .label_inserts
+                .drain(..)
+                .map(|(label, node, commit)| (label, node, commit))
+                .collect();
+            self.indexes.insert_node_labels_batch(tx, entries)?;
         }
 
-        // Process label removes (unchanged)
+        // Process label removes (unchanged - typically less frequent)
         for (label, node, commit) in buffer.label_removes.drain(..) {
             if self.indexes.has_label_index_with_write(tx, label)? {
                 self.indexes

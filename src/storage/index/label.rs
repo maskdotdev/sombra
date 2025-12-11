@@ -267,6 +267,58 @@ impl LabelIndex {
         self.tree.put(tx, &key, &tombstone)
     }
 
+    /// Batch insert multiple (label, node) pairs into the label index.
+    /// This is much more efficient than calling `insert_node_with_commit` in a loop
+    /// because it uses `put_many` which handles BTree rebalancing efficiently.
+    ///
+    /// The entries are grouped by label, filtered to only indexed labels, sorted,
+    /// and inserted in bulk.
+    pub fn insert_nodes_batch_with_commit(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        entries: Vec<(LabelId, NodeId, CommitId)>,
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        self.ensure_root_initialized(tx)?;
+
+        // Group entries by label for efficient index checking
+        let mut by_label: std::collections::BTreeMap<LabelId, Vec<(NodeId, CommitId)>> =
+            std::collections::BTreeMap::new();
+        for (label, node, commit) in entries {
+            by_label.entry(label).or_default().push((node, commit));
+        }
+
+        // Filter to only indexed labels and build key-value pairs
+        let mut all_entries: Vec<(Vec<u8>, VersionedValue<EmptyValue>)> = Vec::new();
+
+        for (label, nodes) in by_label {
+            if !self.is_indexed_with_write(tx, label)? {
+                continue;
+            }
+            for (node, commit) in nodes {
+                if node == LABEL_SENTINEL_NODE {
+                    continue;
+                }
+                let key = encode_key(label, node);
+                let value = self.versioned_empty_value(tx, false, Some(commit));
+                all_entries.push((key, value));
+            }
+        }
+
+        if all_entries.is_empty() {
+            return Ok(());
+        }
+
+        // Sort by key for put_many requirement
+        all_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Use put_many for efficient bulk insertion
+        let iter = all_entries.iter().map(|(key, value)| PutItem { key, value });
+        self.tree.put_many(tx, iter)
+    }
+
     pub fn vacuum(&self, tx: &mut WriteGuard<'_>, horizon: CommitId) -> Result<u64> {
         self.ensure_root_initialized(tx)?;
         prune_versioned_tree(&self.tree, tx, horizon)
