@@ -22,6 +22,10 @@ use crate::query::{
     Value as QueryValue,
 };
 use crate::storage::catalog::{Dict, DictOptions};
+use crate::storage::{
+    profile_timer as storage_profile_timer, record_profile_timer as record_storage_profile_timer,
+    StorageProfileKind,
+};
 use crate::storage::VersionCodecKind;
 use crate::storage::{
     BfsOptions, DeleteNodeOpts, Dir, EdgeData, EdgeSpec as StorageEdgeSpec, ExpandOpts, Graph,
@@ -671,7 +675,10 @@ impl Database {
             .version_codec_min_payload_len(opts.version_codec_min_payload_len)
             .version_codec_min_savings_bytes(opts.version_codec_min_savings_bytes)
             .snapshot_pool_size(opts.snapshot_pool_size)
-            .snapshot_pool_max_age_ms(opts.snapshot_pool_max_age_ms);
+            .snapshot_pool_max_age_ms(opts.snapshot_pool_max_age_ms)
+            // Enable deferred flush for bulk write performance
+            .defer_adjacency_flush(true)
+            .defer_index_flush(true);
         let graph = Graph::open(graph_opts)?;
 
         let dict = Arc::new(Dict::open(Arc::clone(&store), DictOptions::default())?);
@@ -829,6 +836,72 @@ impl Database {
         }
         self.pager.commit(write)?;
         Ok(to_create.len())
+    }
+
+    /// Ensures a property index exists for the given label, property, kind, and type.
+    ///
+    /// Returns `true` if the index was created, `false` if it already existed.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The label name (must already exist in the database)
+    /// * `prop` - The property name (will be interned if not already)
+    /// * `kind` - The index implementation to use (`"btree"` or `"chunked"`)
+    /// * `ty` - The property type (`"string"`, `"int"`, `"float"`, `"bool"`, `"bytes"`)
+    pub fn ensure_property_index(
+        &self,
+        label: &str,
+        prop: &str,
+        kind: &str,
+        ty: &str,
+    ) -> Result<bool> {
+        let label_id = self
+            .metadata
+            .resolve_label(label)
+            .map_err(|_| FfiError::Message(format!("unknown label '{label}'")))?;
+
+        let index_kind = match kind.to_lowercase().as_str() {
+            "btree" => IndexKind::BTree,
+            "chunked" => IndexKind::Chunked,
+            _ => {
+                return Err(FfiError::Message(format!(
+                    "unknown index kind '{kind}', expected 'btree' or 'chunked'"
+                )))
+            }
+        };
+
+        let type_tag = match ty.to_lowercase().as_str() {
+            "string" => TypeTag::String,
+            "int" | "integer" => TypeTag::Int,
+            "float" | "double" => TypeTag::Float,
+            "bool" | "boolean" => TypeTag::Bool,
+            "bytes" => TypeTag::Bytes,
+            "date" => TypeTag::Date,
+            "datetime" => TypeTag::DateTime,
+            _ => {
+                return Err(FfiError::Message(format!(
+                    "unknown type '{ty}', expected 'string', 'int', 'float', 'bool', 'bytes', 'date', or 'datetime'"
+                )))
+            }
+        };
+
+        let mut write = self.pager.begin_write()?;
+        let prop_id = PropId(self.dict.intern(&mut write, prop)?.0);
+
+        if self.graph.has_property_index(label_id, prop_id)? {
+            self.pager.commit(write)?;
+            return Ok(false);
+        }
+
+        let def = IndexDef {
+            label: label_id,
+            prop: prop_id,
+            kind: index_kind,
+            ty: type_tag,
+        };
+        self.graph.create_property_index(&mut write, def)?;
+        self.pager.commit(write)?;
+        Ok(true)
     }
 
     /// Applies a JSON mutation specification (create, update, delete operations).
@@ -1104,6 +1177,8 @@ impl Database {
             },
         )?;
 
+        // Flush deferred writes before commit
+        self.graph.flush_deferred_writes(&mut write)?;
         self.pager.commit(write)?;
         Ok(())
     }
@@ -1137,6 +1212,195 @@ impl Database {
             builder.edge(src_ref, ty, dst_ref, props)?;
         }
         builder.execute()
+    }
+
+    /// Creates nodes and edges from typed specifications (bypasses JSON/serde).
+    ///
+    /// This is a high-performance alternative to `create_script` that avoids
+    /// JSON serialization overhead by accepting property values directly as
+    /// typed Rust values.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Typed batch specification containing nodes and edges
+    ///
+    /// # Returns
+    ///
+    /// A `CreateResult` containing the IDs of created nodes/edges and aliases.
+    ///
+    /// # Performance
+    ///
+    /// This method is optimized for bulk operations:
+    /// - Uses label/type/prop caching to minimize dictionary lookups
+    /// - Avoids JSON serialization/deserialization overhead
+    /// - Single write transaction for all operations
+    pub fn create_typed_batch(&self, spec: &TypedBatchSpec) -> Result<CreateResult> {
+        let batch_start = storage_profile_timer();
+        let mut write = self.pager.begin_write()?;
+
+        // Caches for interned IDs to avoid repeated dictionary lookups
+        let mut label_cache: HashMap<String, LabelId> = HashMap::new();
+        let mut type_cache: HashMap<String, TypeId> = HashMap::new();
+        let mut prop_cache: HashMap<String, PropId> = HashMap::new();
+
+        // Track created node IDs and aliases
+        let mut node_ids: Vec<NodeId> = Vec::with_capacity(spec.nodes.len());
+        let mut aliases: HashMap<String, NodeId> = HashMap::new();
+        let mut used_aliases: HashSet<String> = HashSet::new();
+
+        // Create nodes
+        for node_spec in &spec.nodes {
+            // Validate and register alias
+            if let Some(ref alias) = node_spec.alias {
+                if alias.is_empty() {
+                    return Err(FfiError::Message(
+                        "node alias must be a non-empty string".into(),
+                    ));
+                }
+                if !used_aliases.insert(alias.clone()) {
+                    return Err(FfiError::Message(format!("duplicate node alias '{alias}'")));
+                }
+            }
+
+            // Resolve label (with profiling)
+            let dict_start = storage_profile_timer();
+            let label_id = self.resolve_or_cache_label(&mut write, &node_spec.label, &mut label_cache)?;
+            self.ensure_label_index(&mut write, label_id)?;
+            record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
+
+            // Convert properties (with profiling)
+            let props_start = storage_profile_timer();
+            let prop_storage = self.typed_props_to_storage(&mut write, &node_spec.props, &mut prop_cache)?;
+            let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
+            for (prop_id, owned) in &prop_storage {
+                prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+            }
+            record_storage_profile_timer(StorageProfileKind::FfiTypedPropsConvert, props_start);
+
+            // Create the node
+            let node_id = self.graph.create_node(
+                &mut write,
+                StorageNodeSpec {
+                    labels: &[label_id],
+                    props: &prop_entries,
+                },
+            )?;
+
+            // Register alias
+            if let Some(ref alias) = node_spec.alias {
+                aliases.insert(alias.clone(), node_id);
+            }
+
+            node_ids.push(node_id);
+        }
+
+        // Create edges
+        let mut edge_ids: Vec<EdgeId> = Vec::with_capacity(spec.edges.len());
+
+        for edge_spec in &spec.edges {
+            // Resolve edge type (with profiling)
+            let dict_start = storage_profile_timer();
+            let ty_id = self.resolve_or_cache_type(&mut write, &edge_spec.ty, &mut type_cache)?;
+            record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
+
+            // Resolve source and destination nodes
+            let src_id = edge_spec.src.resolve(&node_ids, &aliases)?;
+            let dst_id = edge_spec.dst.resolve(&node_ids, &aliases)?;
+
+            // Convert properties (with profiling)
+            let props_start = storage_profile_timer();
+            let prop_storage = self.typed_props_to_storage(&mut write, &edge_spec.props, &mut prop_cache)?;
+            let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
+            for (prop_id, owned) in &prop_storage {
+                prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+            }
+            record_storage_profile_timer(StorageProfileKind::FfiTypedPropsConvert, props_start);
+
+            // Create the edge
+            let edge_id = self.graph.create_edge(
+                &mut write,
+                StorageEdgeSpec {
+                    src: src_id,
+                    dst: dst_id,
+                    ty: ty_id,
+                    props: &prop_entries,
+                },
+            )?;
+
+            edge_ids.push(edge_id);
+        }
+
+        // Flush deferred writes before commit
+        self.graph.flush_deferred_writes(&mut write)?;
+        self.pager.commit(write)?;
+        record_storage_profile_timer(StorageProfileKind::FfiCreateBatch, batch_start);
+
+        Ok(CreateResult {
+            node_ids,
+            edge_ids,
+            aliases,
+        })
+    }
+
+    /// Resolves a label name to a LabelId, using cache when possible.
+    fn resolve_or_cache_label(
+        &self,
+        write: &mut WriteGuard<'_>,
+        name: &str,
+        cache: &mut HashMap<String, LabelId>,
+    ) -> Result<LabelId> {
+        if let Some(id) = cache.get(name) {
+            return Ok(*id);
+        }
+        let id = self.resolve_label(write, name)?;
+        cache.insert(name.to_string(), id);
+        Ok(id)
+    }
+
+    /// Resolves an edge type name to a TypeId, using cache when possible.
+    fn resolve_or_cache_type(
+        &self,
+        write: &mut WriteGuard<'_>,
+        name: &str,
+        cache: &mut HashMap<String, TypeId>,
+    ) -> Result<TypeId> {
+        if let Some(id) = cache.get(name) {
+            return Ok(*id);
+        }
+        let id = self.resolve_type(write, name)?;
+        cache.insert(name.to_string(), id);
+        Ok(id)
+    }
+
+    /// Resolves a property name to a PropId, using cache when possible.
+    fn resolve_or_cache_prop(
+        &self,
+        write: &mut WriteGuard<'_>,
+        name: &str,
+        cache: &mut HashMap<String, PropId>,
+    ) -> Result<PropId> {
+        if let Some(id) = cache.get(name) {
+            return Ok(*id);
+        }
+        let id = self.resolve_prop(write, name)?;
+        cache.insert(name.to_string(), id);
+        Ok(id)
+    }
+
+    /// Converts typed property entries to storage format.
+    fn typed_props_to_storage(
+        &self,
+        write: &mut WriteGuard<'_>,
+        props: &[TypedPropEntry],
+        cache: &mut HashMap<String, PropId>,
+    ) -> Result<Vec<(PropId, PropValueOwned)>> {
+        let mut result: Vec<(PropId, PropValueOwned)> = Vec::with_capacity(props.len());
+        for entry in props {
+            let prop_id = self.resolve_or_cache_prop(write, &entry.key, cache)?;
+            let value = entry.to_prop_value_owned()?;
+            result.push((prop_id, value));
+        }
+        Ok(result)
     }
 
     fn handle_synchronous_pragma(&self, value: Option<Value>) -> Result<Value> {
@@ -1175,6 +1439,8 @@ impl Database {
         for op in spec.ops {
             self.apply_mutation_op(&mut write, &mut summary, op)?;
         }
+        // Flush deferred writes before commit
+        self.graph.flush_deferred_writes(&mut write)?;
         self.pager.commit(write)?;
         Ok(summary)
     }
@@ -2675,6 +2941,167 @@ impl CreateResult {
     }
 }
 
+// ============================================================================
+// Typed Batch API - High-performance bulk operations bypassing JSON/serde
+// ============================================================================
+
+/// Property entry for typed batch operations.
+///
+/// This struct represents a property without JSON serialization overhead.
+/// The `kind` field indicates the value type, and only the corresponding
+/// value field will be populated.
+#[derive(Debug, Clone)]
+pub struct TypedPropEntry {
+    /// Property key name.
+    pub key: String,
+    /// Property value kind: "null", "bool", "int", "float", "string", "bytes".
+    pub kind: String,
+    /// Boolean value (when kind is "bool").
+    pub bool_value: Option<bool>,
+    /// Integer value (when kind is "int").
+    pub int_value: Option<i64>,
+    /// Float value (when kind is "float").
+    pub float_value: Option<f64>,
+    /// String value (when kind is "string").
+    pub string_value: Option<String>,
+    /// Base64-encoded bytes (when kind is "bytes").
+    pub bytes_value: Option<String>,
+}
+
+impl TypedPropEntry {
+    /// Converts the typed property entry to a storage property value.
+    pub fn to_prop_value_owned(&self) -> Result<PropValueOwned> {
+        match self.kind.as_str() {
+            "null" => Ok(PropValueOwned::Null),
+            "bool" => {
+                let v = self
+                    .bool_value
+                    .ok_or_else(|| FfiError::Message("bool_value required for bool kind".into()))?;
+                Ok(PropValueOwned::Bool(v))
+            }
+            "int" => {
+                let v = self
+                    .int_value
+                    .ok_or_else(|| FfiError::Message("int_value required for int kind".into()))?;
+                Ok(PropValueOwned::Int(v))
+            }
+            "float" => {
+                let v = self
+                    .float_value
+                    .ok_or_else(|| FfiError::Message("float_value required for float kind".into()))?;
+                Ok(PropValueOwned::Float(v))
+            }
+            "string" => {
+                let v = self
+                    .string_value
+                    .clone()
+                    .ok_or_else(|| FfiError::Message("string_value required for string kind".into()))?;
+                Ok(PropValueOwned::Str(v))
+            }
+            "bytes" => {
+                let encoded = self
+                    .bytes_value
+                    .as_ref()
+                    .ok_or_else(|| FfiError::Message("bytes_value required for bytes kind".into()))?;
+                let decoded = BASE64
+                    .decode(encoded.as_bytes())
+                    .map_err(|_| FfiError::Message("invalid base64 encoding for bytes".into()))?;
+                Ok(PropValueOwned::Bytes(decoded))
+            }
+            other => Err(FfiError::Message(format!(
+                "unknown property kind '{other}', expected null/bool/int/float/string/bytes"
+            ))),
+        }
+    }
+}
+
+/// Node specification for typed batch creation.
+#[derive(Debug, Clone)]
+pub struct TypedNodeSpec {
+    /// Node label (single label optimized path).
+    pub label: String,
+    /// Node properties.
+    pub props: Vec<TypedPropEntry>,
+    /// Optional alias for edge references.
+    pub alias: Option<String>,
+}
+
+/// Node reference for typed edge creation.
+#[derive(Debug, Clone)]
+pub struct TypedNodeRef {
+    /// Reference kind: "alias", "handle", or "id".
+    pub kind: String,
+    /// Alias name (when kind is "alias").
+    pub alias: Option<String>,
+    /// Handle index (when kind is "handle").
+    pub handle: Option<u32>,
+    /// Node ID (when kind is "id").
+    pub id: Option<u64>,
+}
+
+impl TypedNodeRef {
+    /// Resolves the node reference to a NodeId.
+    pub fn resolve(
+        &self,
+        node_ids: &[NodeId],
+        aliases: &HashMap<String, NodeId>,
+    ) -> Result<NodeId> {
+        match self.kind.as_str() {
+            "alias" => {
+                let name = self
+                    .alias
+                    .as_ref()
+                    .ok_or_else(|| FfiError::Message("alias field required for alias kind".into()))?;
+                aliases
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| FfiError::Message(format!("unknown alias '{name}'")))
+            }
+            "handle" => {
+                let idx = self
+                    .handle
+                    .ok_or_else(|| FfiError::Message("handle field required for handle kind".into()))?
+                    as usize;
+                node_ids
+                    .get(idx)
+                    .copied()
+                    .ok_or_else(|| FfiError::Message(format!("invalid handle index {idx}")))
+            }
+            "id" => {
+                let id = self
+                    .id
+                    .ok_or_else(|| FfiError::Message("id field required for id kind".into()))?;
+                Ok(NodeId(id))
+            }
+            other => Err(FfiError::Message(format!(
+                "unknown reference kind '{other}', expected alias/handle/id"
+            ))),
+        }
+    }
+}
+
+/// Edge specification for typed batch creation.
+#[derive(Debug, Clone)]
+pub struct TypedEdgeSpec {
+    /// Edge type name.
+    pub ty: String,
+    /// Source node reference.
+    pub src: TypedNodeRef,
+    /// Destination node reference.
+    pub dst: TypedNodeRef,
+    /// Edge properties.
+    pub props: Vec<TypedPropEntry>,
+}
+
+/// Batch specification for typed creation.
+#[derive(Debug, Clone)]
+pub struct TypedBatchSpec {
+    /// Nodes to create.
+    pub nodes: Vec<TypedNodeSpec>,
+    /// Edges to create.
+    pub edges: Vec<TypedEdgeSpec>,
+}
+
 /// Fluent builder for staging nodes and edges, executing them transactionally.
 ///
 /// Allows building complex graph structures with node aliasing for cross-references,
@@ -2759,6 +3186,8 @@ impl<'db> CreateBuilder<'db> {
             created_edges.push(edge_id);
         }
 
+        // Flush deferred writes before commit
+        self.db.graph.flush_deferred_writes(&mut write)?;
         self.db.pager.commit(write)?;
         Ok(CreateResult {
             node_ids: created_nodes,
