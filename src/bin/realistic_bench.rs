@@ -1,10 +1,72 @@
 //! Realistic benchmark comparing Rust core vs Node.js bindings
 //! Run with: cargo run --release --bin realistic_bench
 
-use sombra::ffi::{Database, DatabaseOptions};
+use sombra::ffi::{
+    Database, DatabaseOptions, TypedBatchSpec, TypedEdgeSpec, TypedNodeRef, TypedNodeSpec,
+    TypedPropEntry,
+};
 use sombra::primitives::pager::Synchronous;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
 use tempfile::TempDir;
+
+fn total_dir_size(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            total += total_dir_size(&entry.path())?;
+        } else {
+            total += meta.len();
+        }
+    }
+    Ok(total)
+}
+
+fn make_string_prop(key: &str, value: String) -> TypedPropEntry {
+    TypedPropEntry {
+        key: key.to_string(),
+        kind: "string".to_string(),
+        bool_value: None,
+        int_value: None,
+        float_value: None,
+        string_value: Some(value),
+        bytes_value: None,
+    }
+}
+
+fn make_int_prop(key: &str, value: i64) -> TypedPropEntry {
+    TypedPropEntry {
+        key: key.to_string(),
+        kind: "int".to_string(),
+        bool_value: None,
+        int_value: Some(value),
+        float_value: None,
+        string_value: None,
+        bytes_value: None,
+    }
+}
+
+fn make_float_prop(key: &str, value: f64) -> TypedPropEntry {
+    TypedPropEntry {
+        key: key.to_string(),
+        kind: "float".to_string(),
+        bool_value: None,
+        int_value: None,
+        float_value: Some(value),
+        string_value: None,
+        bytes_value: None,
+    }
+}
+
+fn make_handle_ref(index: usize) -> TypedNodeRef {
+    TypedNodeRef {
+        kind: "handle".to_string(),
+        alias: None,
+        handle: Some(index as u32),
+        id: None,
+    }
+}
 
 fn main() {
     let node_count: usize = std::env::var("NODES")
@@ -19,6 +81,15 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(10000);
+    let chunk_nodes: Option<usize> = std::env::var("CHUNK_NODES")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let chunk_edges: Option<usize> = std::env::var("CHUNK_EDGES")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let no_fsync = std::env::var("NO_FSYNC")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     let tmpdir = TempDir::new().expect("tempdir");
     let db_path = tmpdir.path().join("bench.sombra");
@@ -28,7 +99,11 @@ fn main() {
         create_if_missing: true,
         ..DatabaseOptions::default()
     };
-    opts.pager.synchronous = Synchronous::Normal;
+    opts.pager.synchronous = if no_fsync {
+        Synchronous::Off
+    } else {
+        Synchronous::Normal
+    };
     opts.pager.group_commit_max_wait_ms = 0;
     opts.pager.cache_pages = 16384;
 
@@ -48,57 +123,74 @@ fn main() {
         r#"{"type": "class", "exported": true}"#,
     ];
 
-    // Create nodes AND edges in a single transaction (like Node.js benchmark)
-    // Using create_json which accepts handles for edges
-    println!("Creating {node_count} nodes and {edge_count} edges in single transaction...");
+    // Create nodes AND edges using typed batch to avoid JSON overhead.
+    // Supports chunking via CHUNK_NODES / CHUNK_EDGES to avoid single huge txns.
+    let chunk_nodes = chunk_nodes.unwrap_or(node_count);
+    let chunk_edges = chunk_edges.unwrap_or(edge_count);
+
+    println!(
+        "Creating {node_count} nodes and {edge_count} edges in chunks of {chunk_nodes} nodes / {chunk_edges} edges..."
+    );
     let write_start = Instant::now();
 
-    // Build JSON spec like Node.js does
-    let nodes: Vec<serde_json::Value> = (0..node_count)
-        .map(|i| {
-            serde_json::json!({
-                "labels": ["Node"],
-                "props": {
-                    "name": format!("fn_{}", i),
-                    "filePath": format!("/tmp/file_{}.ts", i / 50),
-                    "startLine": i,
-                    "endLine": i + 5,
-                    "codeText": code_texts[i % code_texts.len()],
-                    "language": "typescript",
-                    "metadata": metadata[i % metadata.len()],
+    let mut created_nodes = 0usize;
+    let mut created_edges = 0usize;
+    let mut node_ids: Vec<u64> = Vec::with_capacity(node_count);
+
+    while created_nodes < node_count {
+        let n = std::cmp::min(chunk_nodes, node_count - created_nodes);
+        let e = if created_edges >= edge_count {
+            0
+        } else {
+            std::cmp::min(chunk_edges, edge_count - created_edges)
+        };
+
+        let nodes: Vec<TypedNodeSpec> = (0..n)
+            .map(|i| {
+                let idx = created_nodes + i;
+                TypedNodeSpec {
+                    label: "Node".to_string(),
+                    props: vec![
+                        make_string_prop("name", format!("fn_{idx}")),
+                        make_string_prop("filePath", format!("/tmp/file_{}.ts", idx / 50)),
+                        make_int_prop("startLine", idx as i64),
+                        make_int_prop("endLine", (idx + 5) as i64),
+                        make_string_prop(
+                            "codeText",
+                            code_texts[idx % code_texts.len()].to_string(),
+                        ),
+                        make_string_prop("language", "typescript".to_string()),
+                        make_string_prop("metadata", metadata[idx % metadata.len()].to_string()),
+                    ],
+                    alias: None,
                 }
             })
-        })
-        .collect();
+            .collect();
 
-    let edges: Vec<serde_json::Value> = (0..edge_count)
-        .map(|i| {
-            let src_handle = i % node_count;
-            let dst_handle = (i * 13 + 7) % node_count;
-            serde_json::json!({
-                "src": { "kind": "handle", "index": src_handle },
-                "ty": "LINKS",
-                "dst": { "kind": "handle", "index": dst_handle },
-                "props": {
-                    "weight": (i % 10) as f64 / 10.0,
-                    "linkKind": if i % 2 == 0 { "call" } else { "reference" },
-                }
+        let edges: Vec<TypedEdgeSpec> = (0..e)
+            .map(|i| TypedEdgeSpec {
+                ty: "LINKS".to_string(),
+                src: make_handle_ref(i % n.max(1)),
+                dst: make_handle_ref((i * 13 + 7) % n.max(1)),
+                props: vec![
+                    make_float_prop("weight", (i % 10) as f64 / 10.0),
+                    make_string_prop(
+                        "linkKind",
+                        if i % 2 == 0 { "call" } else { "reference" }.to_string(),
+                    ),
+                ],
             })
-        })
-        .collect();
+            .collect();
 
-    let spec = serde_json::json!({
-        "nodes": nodes,
-        "edges": edges,
-    });
+        let spec = TypedBatchSpec { nodes, edges };
+        let result = db
+            .create_typed_batch(&spec)
+            .expect("create nodes and edges");
+        node_ids.extend(result.node_ids.iter().map(|id| id.0));
 
-    let result = db.create_json(&spec).expect("create nodes and edges");
-    let node_ids: Vec<u64> = result["nodes"]
-        .as_array()
-        .expect("nodes array")
-        .iter()
-        .map(|v| v.as_u64().expect("node id"))
-        .collect();
+        created_nodes += n;
+        created_edges += e;
+    }
 
     let write_time = write_start.elapsed();
     println!("create total: {:.1} ms", write_time.as_secs_f64() * 1000.0);
@@ -136,6 +228,12 @@ fn main() {
             .collect::<Vec<_>>()
     );
 
+    let dir_size_bytes = total_dir_size(tmpdir.path()).ok();
+    if let Some(bytes) = dir_size_bytes {
+        let mb = bytes as f64 / 1_048_576.0;
+        println!("Disk usage (db dir): {:.2} MB at {:?}", mb, tmpdir.path());
+    }
+
     println!("\n📊 Benchmark Summary (Rust Core):");
     println!(
         "- Nodes: {} ({:.0} nodes/sec)",
@@ -157,4 +255,9 @@ fn main() {
         "- Total write time: {:.1}ms",
         write_time.as_secs_f64() * 1000.0
     );
+
+    if std::env::var("KEEP_DB").map(|v| v == "1").unwrap_or(false) {
+        println!("Keeping temp db at {:?}", tmpdir.path());
+        std::mem::forget(tmpdir);
+    }
 }

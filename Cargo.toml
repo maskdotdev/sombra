@@ -86,6 +86,42 @@ path = "tests/integration/mvcc_isolation_anomalies.rs"
 name = "mvcc_reader_timeout"
 path = "tests/integration/mvcc_reader_timeout.rs"
 
+[[bench]]
+name = "micro_btree"
+harness = false
+
+[[bench]]
+name = "micro_adjacency"
+harness = false
+
+[[bench]]
+name = "micro_property"
+harness = false
+
+[[bench]]
+name = "micro_vstore"
+harness = false
+
+[[bench]]
+name = "micro_wal"
+harness = false
+
+[[bench]]
+name = "perf_optimizations"
+harness = false
+
+[[bench]]
+name = "crud"
+harness = false
+
+[[bench]]
+name = "macro_import"
+harness = false
+
+[[bench]]
+name = "macro_queries"
+harness = false
+
 [features]
 default = ["bundled-dashboard"]
 bundled-dashboard = ["include_dir", "mime_guess"]
