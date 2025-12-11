@@ -82,10 +82,14 @@ pub use patch::{PropPatch, PropPatchOp};
 pub use profile::profile_snapshot as storage_profile_snapshot;
 /// Storage layer profiling and statistics.
 pub use profile::{
-    profile_scope, profile_snapshot, record_btree_leaf_key_cmps, record_btree_leaf_key_decodes,
-    record_btree_leaf_memcopy_bytes, record_commit_phases, record_mvcc_commit, record_mvcc_read_begin,
-    record_mvcc_write_begin, record_pager_commit_borrowed_bytes, record_pager_fsync,
-    record_pager_wal_bytes, record_pager_wal_frames, record_wal_coalesced_writes,
+    profile_scope, profile_snapshot, profile_timer, record_btree_leaf_key_cmps,
+    record_btree_leaf_key_decodes, record_btree_leaf_memcopy_bytes, record_commit_phases,
+    record_flush_adj_entries, record_flush_adj_finalize, record_flush_adj_fwd_put,
+    record_flush_adj_fwd_sort, record_flush_adj_key_encode, record_flush_adj_rev_put,
+    record_flush_adj_rev_sort, record_flush_deferred, record_flush_deferred_indexes,
+    record_mvcc_commit, record_mvcc_read_begin, record_mvcc_write_begin,
+    record_pager_commit_borrowed_bytes, record_pager_fsync, record_pager_wal_bytes,
+    record_pager_wal_frames, record_profile_timer, record_wal_coalesced_writes,
     record_wal_commit_direct, record_wal_commit_direct_contention, record_wal_commit_group,
     record_wal_io_group_sample, record_wal_reused_segments, record_wal_sync_coalesced,
     StorageProfileKind, StorageProfileSnapshot,

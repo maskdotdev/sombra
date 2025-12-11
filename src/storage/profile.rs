@@ -138,6 +138,124 @@ pub struct StorageProfileSnapshot {
     pub commit_finalize_ns: u64,
     /// Number of commit phase measurements.
     pub commit_phase_count: u64,
+
+    // ========================================================================
+    // Create-path profiling (node/edge creation)
+    // ========================================================================
+    /// Total nanoseconds spent in create_node (graph layer).
+    pub create_node_ns: u64,
+    /// Number of create_node calls.
+    pub create_node_count: u64,
+    /// Total nanoseconds spent encoding properties in create_node.
+    pub create_node_encode_props_ns: u64,
+    /// Number of property encoding operations in create_node.
+    pub create_node_encode_props_count: u64,
+    /// Total nanoseconds spent in BTree insert for nodes.
+    pub create_node_btree_ns: u64,
+    /// Number of node BTree inserts.
+    pub create_node_btree_count: u64,
+    /// Total nanoseconds spent updating label indexes.
+    pub create_node_label_index_ns: u64,
+    /// Number of label index update operations.
+    pub create_node_label_index_count: u64,
+    /// Total nanoseconds spent updating property indexes.
+    pub create_node_prop_index_ns: u64,
+    /// Number of property index update operations.
+    pub create_node_prop_index_count: u64,
+    /// Total nanoseconds spent in create_edge (graph layer).
+    pub create_edge_ns: u64,
+    /// Number of create_edge calls.
+    pub create_edge_count: u64,
+    /// Total nanoseconds spent encoding properties in create_edge.
+    pub create_edge_encode_props_ns: u64,
+    /// Number of property encoding operations in create_edge.
+    pub create_edge_encode_props_count: u64,
+    /// Total nanoseconds spent in BTree inserts for edges.
+    pub create_edge_btree_ns: u64,
+    /// Number of edge BTree inserts.
+    pub create_edge_btree_count: u64,
+    /// Total nanoseconds spent updating adjacency indexes.
+    pub create_edge_adjacency_ns: u64,
+    /// Number of adjacency index update operations.
+    pub create_edge_adjacency_count: u64,
+    /// Total nanoseconds spent resolving dictionary entries (labels/types/props).
+    pub dict_resolve_ns: u64,
+    /// Number of dictionary resolution operations.
+    pub dict_resolve_count: u64,
+    /// Total nanoseconds in FFI create_typed_batch.
+    pub ffi_create_batch_ns: u64,
+    /// Number of FFI create_typed_batch calls.
+    pub ffi_create_batch_count: u64,
+    /// Total nanoseconds spent converting typed props to storage format.
+    pub ffi_typed_props_convert_ns: u64,
+    /// Number of typed props conversion operations.
+    pub ffi_typed_props_convert_count: u64,
+
+    // ========================================================================
+    // Granular BTree leaf insert profiling
+    // ========================================================================
+    /// Total nanoseconds spent in binary search during leaf inserts.
+    pub btree_leaf_binary_search_ns: u64,
+    /// Number of binary search operations in leaf inserts.
+    pub btree_leaf_binary_search_count: u64,
+    /// Total nanoseconds spent encoding records (key+value) for leaf inserts.
+    pub btree_leaf_record_encode_ns: u64,
+    /// Number of record encoding operations.
+    pub btree_leaf_record_encode_count: u64,
+    /// Total nanoseconds spent in slot allocation (insert_slot).
+    pub btree_leaf_slot_alloc_ns: u64,
+    /// Number of slot allocation operations.
+    pub btree_leaf_slot_alloc_count: u64,
+    /// Total nanoseconds spent persisting slot directories.
+    pub btree_leaf_slot_persist_ns: u64,
+    /// Number of slot directory persist operations.
+    pub btree_leaf_slot_persist_count: u64,
+    /// Number of leaf page splits triggered.
+    pub btree_leaf_splits: u64,
+    /// Number of in-place inserts that succeeded.
+    pub btree_leaf_in_place_success: u64,
+    /// Total nanoseconds in allocator get/restore from cache.
+    pub btree_leaf_allocator_cache_ns: u64,
+    /// Number of allocator cache operations.
+    pub btree_leaf_allocator_cache_count: u64,
+    /// Total nanoseconds spent in flush_deferred_writes.
+    pub flush_deferred_ns: u64,
+    /// Number of flush_deferred_writes calls.
+    pub flush_deferred_count: u64,
+
+    // ========================================================================
+    // Flush deferred adjacency breakdown
+    // ========================================================================
+    /// Total nanoseconds spent encoding adjacency keys.
+    pub flush_adj_key_encode_ns: u64,
+    /// Number of adjacency key encoding batches.
+    pub flush_adj_key_encode_count: u64,
+    /// Total nanoseconds spent sorting forward adjacency keys.
+    pub flush_adj_fwd_sort_ns: u64,
+    /// Number of forward sort operations.
+    pub flush_adj_fwd_sort_count: u64,
+    /// Total nanoseconds spent in forward adjacency put_many.
+    pub flush_adj_fwd_put_ns: u64,
+    /// Number of forward put_many operations.
+    pub flush_adj_fwd_put_count: u64,
+    /// Total nanoseconds spent sorting reverse adjacency keys.
+    pub flush_adj_rev_sort_ns: u64,
+    /// Number of reverse sort operations.
+    pub flush_adj_rev_sort_count: u64,
+    /// Total nanoseconds spent in reverse adjacency put_many.
+    pub flush_adj_rev_put_ns: u64,
+    /// Number of reverse put_many operations.
+    pub flush_adj_rev_put_count: u64,
+    /// Total number of adjacency entries flushed.
+    pub flush_adj_entries: u64,
+    /// Total nanoseconds spent in finalize_adjacency_entries.
+    pub flush_adj_finalize_ns: u64,
+    /// Number of finalize operations.
+    pub flush_adj_finalize_count: u64,
+    /// Total nanoseconds spent in flush_deferred_indexes.
+    pub flush_deferred_indexes_ns: u64,
+    /// Number of flush_deferred_indexes calls.
+    pub flush_deferred_indexes_count: u64,
 }
 
 #[derive(Default)]
@@ -202,6 +320,65 @@ struct StorageProfileCounters {
     commit_fsync_ns: AtomicU64,
     commit_finalize_ns: AtomicU64,
     commit_phase_count: AtomicU64,
+
+    // Create-path profiling counters
+    create_node_ns: AtomicU64,
+    create_node_count: AtomicU64,
+    create_node_encode_props_ns: AtomicU64,
+    create_node_encode_props_count: AtomicU64,
+    create_node_btree_ns: AtomicU64,
+    create_node_btree_count: AtomicU64,
+    create_node_label_index_ns: AtomicU64,
+    create_node_label_index_count: AtomicU64,
+    create_node_prop_index_ns: AtomicU64,
+    create_node_prop_index_count: AtomicU64,
+    create_edge_ns: AtomicU64,
+    create_edge_count: AtomicU64,
+    create_edge_encode_props_ns: AtomicU64,
+    create_edge_encode_props_count: AtomicU64,
+    create_edge_btree_ns: AtomicU64,
+    create_edge_btree_count: AtomicU64,
+    create_edge_adjacency_ns: AtomicU64,
+    create_edge_adjacency_count: AtomicU64,
+    dict_resolve_ns: AtomicU64,
+    dict_resolve_count: AtomicU64,
+    ffi_create_batch_ns: AtomicU64,
+    ffi_create_batch_count: AtomicU64,
+    ffi_typed_props_convert_ns: AtomicU64,
+    ffi_typed_props_convert_count: AtomicU64,
+
+    // Granular BTree leaf insert profiling
+    btree_leaf_binary_search_ns: AtomicU64,
+    btree_leaf_binary_search_count: AtomicU64,
+    btree_leaf_record_encode_ns: AtomicU64,
+    btree_leaf_record_encode_count: AtomicU64,
+    btree_leaf_slot_alloc_ns: AtomicU64,
+    btree_leaf_slot_alloc_count: AtomicU64,
+    btree_leaf_slot_persist_ns: AtomicU64,
+    btree_leaf_slot_persist_count: AtomicU64,
+    btree_leaf_splits: AtomicU64,
+    btree_leaf_in_place_success: AtomicU64,
+    btree_leaf_allocator_cache_ns: AtomicU64,
+    btree_leaf_allocator_cache_count: AtomicU64,
+    flush_deferred_ns: AtomicU64,
+    flush_deferred_count: AtomicU64,
+
+    // Flush deferred adjacency breakdown
+    flush_adj_key_encode_ns: AtomicU64,
+    flush_adj_key_encode_count: AtomicU64,
+    flush_adj_fwd_sort_ns: AtomicU64,
+    flush_adj_fwd_sort_count: AtomicU64,
+    flush_adj_fwd_put_ns: AtomicU64,
+    flush_adj_fwd_put_count: AtomicU64,
+    flush_adj_rev_sort_ns: AtomicU64,
+    flush_adj_rev_sort_count: AtomicU64,
+    flush_adj_rev_put_ns: AtomicU64,
+    flush_adj_rev_put_count: AtomicU64,
+    flush_adj_entries: AtomicU64,
+    flush_adj_finalize_ns: AtomicU64,
+    flush_adj_finalize_count: AtomicU64,
+    flush_deferred_indexes_ns: AtomicU64,
+    flush_deferred_indexes_count: AtomicU64,
 }
 
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -293,6 +470,7 @@ fn counters() -> Option<&'static StorageProfileCounters> {
     profiling_enabled().then(|| PROFILE_COUNTERS.get_or_init(StorageProfileCounters::default))
 }
 
+/// Returns a timestamp for profiling if profiling is enabled.
 pub fn profile_timer() -> Option<Instant> {
     profiling_enabled().then(Instant::now)
 }
@@ -316,8 +494,34 @@ pub enum StorageProfileKind {
     BTreeSlotExtent,
     /// Pager commit duration.
     PagerCommit,
+    // Create-path profiling kinds
+    /// Total create_node operation.
+    CreateNode,
+    /// Property encoding in create_node.
+    CreateNodeEncodeProps,
+    /// BTree insert in create_node.
+    CreateNodeBTree,
+    /// Label index update in create_node.
+    CreateNodeLabelIndex,
+    /// Property index update in create_node.
+    CreateNodePropIndex,
+    /// Total create_edge operation.
+    CreateEdge,
+    /// Property encoding in create_edge.
+    CreateEdgeEncodeProps,
+    /// BTree insert in create_edge.
+    CreateEdgeBTree,
+    /// Adjacency index update in create_edge.
+    CreateEdgeAdjacency,
+    /// Dictionary resolution (label/type/prop lookup).
+    DictResolve,
+    /// FFI create_typed_batch total.
+    FfiCreateBatch,
+    /// FFI typed props conversion.
+    FfiTypedPropsConvert,
 }
 
+/// Records a profiling timer measurement for the given operation kind.
 pub fn record_profile_timer(kind: StorageProfileKind, start: Option<Instant>) {
     let Some(start) = start else {
         return;
@@ -387,6 +591,90 @@ pub fn record_profile_timer(kind: StorageProfileKind, start: Option<Instant>) {
             counters.pager_commit_ns.fetch_add(nanos, Ordering::Relaxed);
             counters.pager_commit_count.fetch_add(1, Ordering::Relaxed);
             counters.pager_commit_latency.record_ns(nanos);
+        }
+        StorageProfileKind::CreateNode => {
+            counters.create_node_ns.fetch_add(nanos, Ordering::Relaxed);
+            counters.create_node_count.fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateNodeEncodeProps => {
+            counters
+                .create_node_encode_props_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_node_encode_props_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateNodeBTree => {
+            counters
+                .create_node_btree_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_node_btree_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateNodeLabelIndex => {
+            counters
+                .create_node_label_index_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_node_label_index_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateNodePropIndex => {
+            counters
+                .create_node_prop_index_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_node_prop_index_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateEdge => {
+            counters.create_edge_ns.fetch_add(nanos, Ordering::Relaxed);
+            counters.create_edge_count.fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateEdgeEncodeProps => {
+            counters
+                .create_edge_encode_props_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_edge_encode_props_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateEdgeBTree => {
+            counters
+                .create_edge_btree_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_edge_btree_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::CreateEdgeAdjacency => {
+            counters
+                .create_edge_adjacency_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .create_edge_adjacency_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::DictResolve => {
+            counters.dict_resolve_ns.fetch_add(nanos, Ordering::Relaxed);
+            counters.dict_resolve_count.fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::FfiCreateBatch => {
+            counters
+                .ffi_create_batch_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .ffi_create_batch_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        StorageProfileKind::FfiTypedPropsConvert => {
+            counters
+                .ffi_typed_props_convert_ns
+                .fetch_add(nanos, Ordering::Relaxed);
+            counters
+                .ffi_typed_props_convert_count
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -529,6 +817,62 @@ pub fn profile_snapshot(reset: bool) -> Option<StorageProfileSnapshot> {
         commit_fsync_ns: load(&counters.commit_fsync_ns),
         commit_finalize_ns: load(&counters.commit_finalize_ns),
         commit_phase_count: load(&counters.commit_phase_count),
+        // Create-path profiling
+        create_node_ns: load(&counters.create_node_ns),
+        create_node_count: load(&counters.create_node_count),
+        create_node_encode_props_ns: load(&counters.create_node_encode_props_ns),
+        create_node_encode_props_count: load(&counters.create_node_encode_props_count),
+        create_node_btree_ns: load(&counters.create_node_btree_ns),
+        create_node_btree_count: load(&counters.create_node_btree_count),
+        create_node_label_index_ns: load(&counters.create_node_label_index_ns),
+        create_node_label_index_count: load(&counters.create_node_label_index_count),
+        create_node_prop_index_ns: load(&counters.create_node_prop_index_ns),
+        create_node_prop_index_count: load(&counters.create_node_prop_index_count),
+        create_edge_ns: load(&counters.create_edge_ns),
+        create_edge_count: load(&counters.create_edge_count),
+        create_edge_encode_props_ns: load(&counters.create_edge_encode_props_ns),
+        create_edge_encode_props_count: load(&counters.create_edge_encode_props_count),
+        create_edge_btree_ns: load(&counters.create_edge_btree_ns),
+        create_edge_btree_count: load(&counters.create_edge_btree_count),
+        create_edge_adjacency_ns: load(&counters.create_edge_adjacency_ns),
+        create_edge_adjacency_count: load(&counters.create_edge_adjacency_count),
+        dict_resolve_ns: load(&counters.dict_resolve_ns),
+        dict_resolve_count: load(&counters.dict_resolve_count),
+        ffi_create_batch_ns: load(&counters.ffi_create_batch_ns),
+        ffi_create_batch_count: load(&counters.ffi_create_batch_count),
+        ffi_typed_props_convert_ns: load(&counters.ffi_typed_props_convert_ns),
+        ffi_typed_props_convert_count: load(&counters.ffi_typed_props_convert_count),
+        // Granular BTree leaf insert profiling
+        btree_leaf_binary_search_ns: load(&counters.btree_leaf_binary_search_ns),
+        btree_leaf_binary_search_count: load(&counters.btree_leaf_binary_search_count),
+        btree_leaf_record_encode_ns: load(&counters.btree_leaf_record_encode_ns),
+        btree_leaf_record_encode_count: load(&counters.btree_leaf_record_encode_count),
+        btree_leaf_slot_alloc_ns: load(&counters.btree_leaf_slot_alloc_ns),
+        btree_leaf_slot_alloc_count: load(&counters.btree_leaf_slot_alloc_count),
+        btree_leaf_slot_persist_ns: load(&counters.btree_leaf_slot_persist_ns),
+        btree_leaf_slot_persist_count: load(&counters.btree_leaf_slot_persist_count),
+        btree_leaf_splits: load(&counters.btree_leaf_splits),
+        btree_leaf_in_place_success: load(&counters.btree_leaf_in_place_success),
+        btree_leaf_allocator_cache_ns: load(&counters.btree_leaf_allocator_cache_ns),
+        btree_leaf_allocator_cache_count: load(&counters.btree_leaf_allocator_cache_count),
+        flush_deferred_ns: load(&counters.flush_deferred_ns),
+        flush_deferred_count: load(&counters.flush_deferred_count),
+        // Flush deferred adjacency breakdown
+        flush_adj_key_encode_ns: load(&counters.flush_adj_key_encode_ns),
+        flush_adj_key_encode_count: load(&counters.flush_adj_key_encode_count),
+        flush_adj_fwd_sort_ns: load(&counters.flush_adj_fwd_sort_ns),
+        flush_adj_fwd_sort_count: load(&counters.flush_adj_fwd_sort_count),
+        flush_adj_fwd_put_ns: load(&counters.flush_adj_fwd_put_ns),
+        flush_adj_fwd_put_count: load(&counters.flush_adj_fwd_put_count),
+        flush_adj_rev_sort_ns: load(&counters.flush_adj_rev_sort_ns),
+        flush_adj_rev_sort_count: load(&counters.flush_adj_rev_sort_count),
+        flush_adj_rev_put_ns: load(&counters.flush_adj_rev_put_ns),
+        flush_adj_rev_put_count: load(&counters.flush_adj_rev_put_count),
+        flush_adj_entries: load(&counters.flush_adj_entries),
+        flush_adj_finalize_ns: load(&counters.flush_adj_finalize_ns),
+        flush_adj_finalize_count: load(&counters.flush_adj_finalize_count),
+        flush_deferred_indexes_ns: load(&counters.flush_deferred_indexes_ns),
+        flush_deferred_indexes_count: load(&counters.flush_deferred_indexes_count),
     })
 }
 
@@ -863,4 +1207,189 @@ impl Drop for ProfileScope {
 /// Convenience helper that creates a [`ProfileScope`].
 pub fn profile_scope(kind: StorageProfileKind) -> ProfileScope {
     ProfileScope::new(kind)
+}
+
+// ============================================================================
+// Granular BTree leaf insert profiling functions
+// ============================================================================
+
+/// Records time spent in binary search during leaf insert.
+pub fn record_btree_leaf_binary_search(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_binary_search_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .btree_leaf_binary_search_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent encoding a leaf record (key + value).
+pub fn record_btree_leaf_record_encode(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_record_encode_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .btree_leaf_record_encode_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent in slot allocation (insert_slot).
+pub fn record_btree_leaf_slot_alloc(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_slot_alloc_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .btree_leaf_slot_alloc_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent persisting slot directories.
+pub fn record_btree_leaf_slot_persist(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_slot_persist_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .btree_leaf_slot_persist_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records a leaf page split.
+pub fn record_btree_leaf_split() {
+    if let Some(counters) = counters() {
+        counters.btree_leaf_splits.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records a successful in-place insert.
+pub fn record_btree_leaf_in_place_success() {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_in_place_success
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent getting/restoring allocator from cache.
+pub fn record_btree_leaf_allocator_cache(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .btree_leaf_allocator_cache_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .btree_leaf_allocator_cache_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent in flush_deferred_writes (adjacency + index flush).
+pub fn record_flush_deferred(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_deferred_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_deferred_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent encoding adjacency keys.
+pub fn record_flush_adj_key_encode(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_key_encode_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_adj_key_encode_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent sorting forward adjacency keys.
+pub fn record_flush_adj_fwd_sort(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_fwd_sort_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_adj_fwd_sort_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent in forward adjacency put_many.
+pub fn record_flush_adj_fwd_put(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_fwd_put_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_adj_fwd_put_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent sorting reverse adjacency keys.
+pub fn record_flush_adj_rev_sort(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_rev_sort_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_adj_rev_sort_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent in reverse adjacency put_many.
+pub fn record_flush_adj_rev_put(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_rev_put_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_adj_rev_put_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records the number of adjacency entries flushed.
+pub fn record_flush_adj_entries(count: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_entries
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent in finalize_adjacency_entries.
+pub fn record_flush_adj_finalize(nanos: u64, count: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_adj_finalize_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_adj_finalize_count
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Records time spent in flush_deferred_indexes.
+pub fn record_flush_deferred_indexes(nanos: u64) {
+    if let Some(counters) = counters() {
+        counters
+            .flush_deferred_indexes_ns
+            .fetch_add(nanos, Ordering::Relaxed);
+        counters
+            .flush_deferred_indexes_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
