@@ -19,7 +19,7 @@ use crate::primitives::pager::{
     AsyncFsyncBacklog, AutockptContext, BackgroundMaintainer, PageStore, ReadGuard, WriteGuard,
 };
 use crate::primitives::wal::{WalAllocatorStats, WalCommitBacklog};
-use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
+use crate::storage::btree::{BTree, PutItem, ValCodec};
 use crate::storage::index::{
     collect_all, CatalogEpoch, DdlEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef,
     IndexKind, IndexRoots, IndexStore, IndexVacuumStats, LabelScan, PostingStream, TypeTag,
@@ -43,9 +43,8 @@ use super::edge::{
     PropStorage as EdgePropStorage,
 };
 use super::mvcc::{
-    CommitId, CommitTable, CommitTableSnapshot, ReaderTimeoutActions, VersionCodecConfig,
-    VersionHeader, VersionLogEntry, VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX,
-    VERSION_HEADER_LEN,
+    CommitId, CommitTable, ReaderTimeoutActions, VersionCodecConfig, VersionHeader,
+    VersionLogEntry, VersionPtr, VersionSpace, VersionedValue, COMMIT_MAX, VERSION_HEADER_LEN,
 };
 use super::mvcc_flags;
 use super::node::{
@@ -64,13 +63,25 @@ use super::types::{
     PropValueOwned,
 };
 
-/// Default maximum size for inline property blob storage in bytes.
-pub const DEFAULT_INLINE_PROP_BLOB: u32 = 128;
-/// Default maximum size for inline property value storage in bytes.
-pub const DEFAULT_INLINE_PROP_VALUE: u32 = 48;
-/// Storage flag indicating that degree caching is enabled.
-pub const STORAGE_FLAG_DEGREE_CACHE: u32 = 0x01;
-const MVCC_METRICS_PUBLISH_INTERVAL: Duration = Duration::from_millis(500);
+mod graph_types;
+mod helpers;
+mod snapshot;
+mod version_cache;
+
+#[allow(unused_imports)]
+pub use graph_types::{
+    AdjacencyVacuumStats, BfsOptions, BfsVisit, GraphMvccStatus, GraphVacuumStats,
+    PropStats, SnapshotPoolStatus, VacuumBudget, VacuumMode, VacuumTrigger, VersionVacuumStats,
+    DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE, MVCC_METRICS_PUBLISH_INTERVAL,
+    STORAGE_FLAG_DEGREE_CACHE,
+};
+
+use graph_types::RootKind;
+use helpers::{normalize_labels, now_millis, open_u64_vec_tree, open_unit_tree};
+#[cfg(feature = "degree-cache")]
+use helpers::open_degree_tree;
+use snapshot::{SnapshotLease, SnapshotPool};
+use version_cache::{VersionCache, VersionChainRecord};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct UnitValue;
@@ -165,38 +176,6 @@ impl VacuumSched {
     }
 }
 
-struct VersionCache {
-    shards: Vec<Mutex<LruCache<u64, Arc<VersionLogEntry>>>>,
-}
-
-impl VersionCache {
-    fn new(shards: usize, capacity: usize) -> Self {
-        let shard_count = shards.max(1);
-        let per_shard_cap = (capacity / shard_count).max(1);
-        let mut shard_vec = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
-            shard_vec.push(Mutex::new(LruCache::new(
-                NonZeroUsize::new(per_shard_cap).unwrap(),
-            )));
-        }
-        Self { shards: shard_vec }
-    }
-
-    fn shard_for(&self, ptr: VersionPtr) -> &Mutex<LruCache<u64, Arc<VersionLogEntry>>> {
-        let idx = (ptr.raw() as usize) % self.shards.len();
-        &self.shards[idx]
-    }
-
-    fn get(&self, ptr: VersionPtr) -> Option<Arc<VersionLogEntry>> {
-        let mut guard = self.shard_for(ptr).lock();
-        guard.get(&ptr.raw()).cloned()
-    }
-
-    fn insert(&self, ptr: VersionPtr, entry: Arc<VersionLogEntry>) {
-        let mut guard = self.shard_for(ptr).lock();
-        guard.put(ptr.raw(), entry);
-    }
-}
 
 #[derive(Default)]
 struct AdjacencyBuffer {
@@ -212,300 +191,7 @@ struct IndexBuffer {
     prop_removes: Vec<(IndexDef, Vec<u8>, NodeId, CommitId)>,
 }
 
-struct PooledSnapshot {
-    guard: ReadGuard,
-    acquired_at: Instant,
-}
 
-struct SnapshotPool {
-    store: Arc<dyn PageStore>,
-    metrics: Arc<dyn super::metrics::StorageMetrics>,
-    retention: Duration,
-    inner: Mutex<Vec<PooledSnapshot>>,
-    capacity: usize,
-}
-
-impl SnapshotPool {
-    fn new(
-        store: Arc<dyn PageStore>,
-        metrics: Arc<dyn super::metrics::StorageMetrics>,
-        capacity: usize,
-        retention: Duration,
-    ) -> Self {
-        Self {
-            store,
-            metrics,
-            retention,
-            inner: Mutex::new(Vec::new()),
-            capacity: capacity.max(1),
-        }
-    }
-
-    fn lease(&self) -> Result<SnapshotLease<'_>> {
-        let now = Instant::now();
-        let durable = self.store.durable_lsn().map(|lsn| lsn.0).unwrap_or(0);
-        let mut pool = self.inner.lock();
-        while let Some(snapshot) = pool.pop() {
-            let age = now.saturating_duration_since(snapshot.acquired_at);
-            if age > self.retention {
-                continue;
-            }
-            if durable > snapshot.guard.snapshot_lsn().0 {
-                continue;
-            }
-            self.metrics.snapshot_pool_hit();
-            return Ok(SnapshotLease {
-                pool: Some(self),
-                snapshot: Some(snapshot),
-            });
-        }
-        drop(pool);
-        self.metrics.snapshot_pool_miss();
-        let guard = self.store.begin_read()?;
-        Ok(SnapshotLease {
-            pool: Some(self),
-            snapshot: Some(PooledSnapshot {
-                guard,
-                acquired_at: now,
-            }),
-        })
-    }
-
-    fn return_snapshot(&self, snapshot: PooledSnapshot) {
-        let now = Instant::now();
-        let durable = self.store.durable_lsn().map(|lsn| lsn.0).unwrap_or(0);
-        if now.saturating_duration_since(snapshot.acquired_at) > self.retention {
-            return;
-        }
-        if durable > snapshot.guard.snapshot_lsn().0 {
-            return;
-        }
-        let mut pool = self.inner.lock();
-        if pool.len() >= self.capacity {
-            return;
-        }
-        pool.push(snapshot);
-    }
-
-    fn status(&self) -> SnapshotPoolStatus {
-        let pool = self.inner.lock();
-        SnapshotPoolStatus {
-            capacity: self.capacity,
-            available: pool.len(),
-        }
-    }
-}
-
-struct SnapshotLease<'a> {
-    pool: Option<&'a SnapshotPool>,
-    snapshot: Option<PooledSnapshot>,
-}
-
-impl<'a> SnapshotLease<'a> {
-    fn inner(&self) -> &ReadGuard {
-        &self.snapshot.as_ref().expect("snapshot present").guard
-    }
-
-    fn direct(guard: ReadGuard) -> Self {
-        Self {
-            pool: None,
-            snapshot: Some(PooledSnapshot {
-                guard,
-                acquired_at: Instant::now(),
-            }),
-        }
-    }
-}
-
-impl<'a> std::ops::Deref for SnapshotLease<'a> {
-    type Target = ReadGuard;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner()
-    }
-}
-
-impl<'a> Drop for SnapshotLease<'a> {
-    fn drop(&mut self) {
-        if let (Some(pool), Some(snapshot)) = (self.pool, self.snapshot.take()) {
-            pool.return_snapshot(snapshot);
-        }
-    }
-}
-
-trait VersionChainRecord {
-    fn header(&self) -> &VersionHeader;
-    fn prev_ptr(&self) -> VersionPtr;
-    fn inline_history(&self) -> Option<&[u8]>;
-}
-
-impl VersionChainRecord for node::VersionedNodeRow {
-    fn header(&self) -> &VersionHeader {
-        &self.header
-    }
-
-    fn prev_ptr(&self) -> VersionPtr {
-        self.prev_ptr
-    }
-
-    fn inline_history(&self) -> Option<&[u8]> {
-        self.inline_history.as_deref()
-    }
-}
-
-impl VersionChainRecord for edge::VersionedEdgeRow {
-    fn header(&self) -> &VersionHeader {
-        &self.header
-    }
-
-    fn prev_ptr(&self) -> VersionPtr {
-        self.prev_ptr
-    }
-
-    fn inline_history(&self) -> Option<&[u8]> {
-        self.inline_history.as_deref()
-    }
-}
-
-/// Options for breadth-first traversal over the graph.
-#[derive(Clone, Debug)]
-pub struct BfsOptions {
-    /// Maximum depth (inclusive) to explore starting from the origin node.
-    pub max_depth: u32,
-    /// Direction to follow for edge expansions.
-    pub direction: Dir,
-    /// Optional subset of edge types to consider (matches all when `None`).
-    pub edge_types: Option<Vec<TypeId>>,
-    /// Optional cap on the number of visited nodes returned (including the origin).
-    pub max_results: Option<usize>,
-}
-
-impl Default for BfsOptions {
-    fn default() -> Self {
-        Self {
-            max_depth: 1,
-            direction: Dir::Out,
-            edge_types: None,
-            max_results: None,
-        }
-    }
-}
-
-/// Node visit captured during a breadth-first traversal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BfsVisit {
-    /// Identifier of the visited node.
-    pub node: NodeId,
-    /// Depth (distance in hops) from the origin node.
-    pub depth: u32,
-}
-
-/// Statistics describing a version-log vacuum run.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct VersionVacuumStats {
-    /// Number of historical versions pruned from the log.
-    pub entries_pruned: u64,
-}
-
-/// Statistics describing adjacency cleanup.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AdjacencyVacuumStats {
-    /// Removed forward adjacency entries.
-    pub fwd_entries_pruned: u64,
-    /// Removed reverse adjacency entries.
-    pub rev_entries_pruned: u64,
-}
-
-/// Aggregate statistics for MVCC cleanup across storage components.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GraphVacuumStats {
-    /// Timestamp when the run started.
-    pub started_at: SystemTime,
-    /// Timestamp when the run completed.
-    pub finished_at: SystemTime,
-    /// Horizon commit applied for the run.
-    pub horizon_commit: CommitId,
-    /// Trigger for the run.
-    pub trigger: VacuumTrigger,
-    /// Duration of the run in milliseconds.
-    pub run_millis: u64,
-    /// Number of version-log entries examined.
-    pub log_versions_examined: u64,
-    /// Number of version-log entries pruned.
-    pub log_versions_pruned: u64,
-    /// Number of orphaned log entries pruned.
-    pub orphan_log_versions_pruned: u64,
-    /// Number of tombstone heads purged.
-    pub heads_purged: u64,
-    /// Forward adjacency entries pruned.
-    pub adjacency_fwd_pruned: u64,
-    /// Reverse adjacency entries pruned.
-    pub adjacency_rev_pruned: u64,
-    /// Label index entries pruned.
-    pub index_label_pruned: u64,
-    /// Chunked index segments pruned.
-    pub index_chunked_pruned: u64,
-    /// B-tree postings pruned.
-    pub index_btree_pruned: u64,
-    /// Estimated pages read during the pass.
-    pub pages_read: u64,
-    /// Estimated pages written during the pass.
-    pub pages_written: u64,
-    /// Estimated bytes reclaimed.
-    pub bytes_reclaimed: u64,
-}
-
-/// Current MVCC status for observability/CLI tooling.
-#[derive(Clone, Debug)]
-pub struct GraphMvccStatus {
-    /// Bytes retained inside the version log B-tree.
-    pub version_log_bytes: u64,
-    /// Number of entries currently stored in the version log.
-    pub version_log_entries: u64,
-    /// Version cache hits accumulated since startup.
-    pub version_cache_hits: u64,
-    /// Version cache misses accumulated since startup.
-    pub version_cache_misses: u64,
-    /// Raw bytes processed by the version codec.
-    pub version_codec_raw_bytes: u64,
-    /// Encoded bytes produced by the version codec.
-    pub version_codec_encoded_bytes: u64,
-    /// Configured retention window used by vacuum.
-    pub retention_window: Duration,
-    /// Snapshot of the commit table (if MVCC is enabled).
-    pub commit_table: Option<CommitTableSnapshot>,
-    /// Latest committed LSN when exposed by the pager.
-    pub latest_committed_lsn: Option<Lsn>,
-    /// Last durable LSN (async fsync watermark).
-    pub durable_lsn: Option<Lsn>,
-    /// Number of commits acknowledged but not yet durable.
-    pub acked_not_durable_commits: Option<u64>,
-    /// Pending WAL commit backlog when available.
-    pub wal_backlog: Option<WalCommitBacklog>,
-    /// WAL allocator/preallocation snapshot when available.
-    pub wal_allocator: Option<WalAllocatorStats>,
-    /// Async fsync backlog (pending vs durable) when enabled.
-    pub async_fsync_backlog: Option<AsyncFsyncBacklog>,
-    /// Snapshot pool occupancy when enabled.
-    pub snapshot_pool: Option<SnapshotPoolStatus>,
-    /// Current vacuum mode selected by the scheduler.
-    pub vacuum_mode: VacuumMode,
-    /// Current vacuum horizon, if known.
-    pub vacuum_horizon: Option<CommitId>,
-    /// WAL/async-fsync alerts derived from current state.
-    pub wal_alerts: Vec<String>,
-    /// Recommended reuse queue depth based on backlog and segment sizing.
-    pub wal_reuse_recommended: Option<u64>,
-}
-
-/// Summary of snapshot pooling state.
-#[derive(Clone, Debug, Default)]
-pub struct SnapshotPoolStatus {
-    /// Maximum cached snapshots.
-    pub capacity: usize,
-    /// Currently cached snapshots.
-    pub available: usize,
-}
 
 fn wal_health(
     page_size: u32,
@@ -581,42 +267,7 @@ fn wal_health(
     (alerts, recommended_reuse)
 }
 
-/// Reason a vacuum pass ran.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VacuumTrigger {
-    /// Periodic timer.
-    Timer,
-    /// Version log exceeded configured threshold.
-    HighWater,
-    /// Explicit manual trigger (tests/CLI).
-    Manual,
-    /// Opportunistic light pass triggered by readers.
-    Opportunistic,
-}
 
-/// Adaptive cadence tiers for vacuum scheduling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VacuumMode {
-    /// Lowest cadence; used when version log below thresholds.
-    Slow,
-    /// Default cadence.
-    Normal,
-    /// Aggressive cadence for backlog/high-water.
-    Fast,
-}
-
-impl VacuumMode {
-    fn tick_interval(&self, base: Duration) -> Duration {
-        match self {
-            VacuumMode::Fast => base
-                .checked_div(2)
-                .unwrap_or_else(|| Duration::from_millis(1))
-                .max(Duration::from_millis(1)),
-            VacuumMode::Normal => base,
-            VacuumMode::Slow => base.saturating_mul(2),
-        }
-    }
-}
 
 const MICRO_GC_MAX_BUDGET: usize = 64;
 const WAL_BACKLOG_COMMITS_ALERT: usize = 8;
@@ -653,45 +304,6 @@ enum MicroGcOutcome {
     Done,
     Retry,
     Skip,
-}
-
-/// Budget controls for a single vacuum pass.
-#[derive(Clone, Debug)]
-pub struct VacuumBudget {
-    /// Maximum version-log entries per pass.
-    pub max_versions: Option<usize>,
-    /// Maximum runtime allowed.
-    pub max_duration: Duration,
-    /// Whether index cleanup should run as part of this pass.
-    pub index_cleanup: bool,
-}
-
-#[derive(Copy, Clone)]
-enum RootKind {
-    Nodes,
-    Edges,
-    AdjFwd,
-    AdjRev,
-    VersionLog,
-    #[cfg(feature = "degree-cache")]
-    Degree,
-}
-
-/// Basic statistics for a (label, property) pair.
-#[derive(Clone, Debug, Default)]
-pub struct PropStats {
-    /// Total number of rows (nodes with the label).
-    pub row_count: u64,
-    /// Number of rows with a non-null value for the property.
-    pub non_null_count: u64,
-    /// Number of rows where the property is missing or null.
-    pub null_count: u64,
-    /// Number of distinct non-null property values.
-    pub distinct_count: u64,
-    /// Minimum observed non-null property value.
-    pub min: Option<PropValueOwned>,
-    /// Maximum observed non-null property value.
-    pub max: Option<PropValueOwned>,
 }
 
 impl Graph {
@@ -3969,14 +3581,6 @@ impl Graph {
     }
 }
 
-fn now_millis() -> u128 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 impl Drop for Graph {
     fn drop(&mut self) {}
 }
@@ -4159,28 +3763,6 @@ impl<'a> GraphWriter<'a> {
             Err(SombraError::Invalid(context))
         }
     }
-}
-
-fn open_u64_vec_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<u64, Vec<u8>>> {
-    let mut opts = BTreeOptions::default();
-    opts.root_page = (root.0 != 0).then_some(root);
-    BTree::open_or_create(store, opts)
-}
-
-fn open_unit_tree(
-    store: &Arc<dyn PageStore>,
-    root: PageId,
-) -> Result<BTree<Vec<u8>, VersionedValue<UnitValue>>> {
-    let mut opts = BTreeOptions::default();
-    opts.root_page = (root.0 != 0).then_some(root);
-    BTree::open_or_create(store, opts)
-}
-
-#[cfg(feature = "degree-cache")]
-fn open_degree_tree(store: &Arc<dyn PageStore>, root: PageId) -> Result<BTree<Vec<u8>, u64>> {
-    let mut opts = BTreeOptions::default();
-    opts.root_page = (root.0 != 0).then_some(root);
-    BTree::open_or_create(store, opts)
 }
 
 struct GraphTxnState {
@@ -4535,17 +4117,6 @@ fn adjacency_bounds_for_node(node: NodeId) -> (Vec<u8>, Vec<u8>) {
     upper.extend_from_slice(&node.0.to_be_bytes());
     upper.extend_from_slice(&[0xFF; SUFFIX_LEN]);
     (lower, upper)
-}
-
-/// Normalizes and deduplicates a list of labels.
-fn normalize_labels(labels: &[LabelId]) -> Result<Vec<LabelId>> {
-    let mut result: Vec<LabelId> = labels.to_vec();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result.dedup_by(|a, b| a.0 == b.0);
-    if result.len() > u8::MAX as usize {
-        return Err(SombraError::Invalid("too many labels for node"));
-    }
-    Ok(result)
 }
 
 impl Graph {
