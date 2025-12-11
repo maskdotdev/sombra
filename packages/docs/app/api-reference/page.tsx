@@ -1,11 +1,11 @@
 "use client"
 
-import { Terminal, Code2 } from "lucide-react"
-import { Card } from "@/components/ui/card"
-import { LanguageSelector } from "@/components/language-selector"
 import { CodeExample } from "@/components/code-example"
-import { TableOfContents } from "@/components/table-of-contents"
+import { LanguageSelector } from "@/components/language-selector"
 import { SiteHeader } from "@/components/site-header"
+import { TableOfContents } from "@/components/table-of-contents"
+import { Card } from "@/components/ui/card"
+import { Code2, Terminal } from "lucide-react"
 import { Suspense } from "react"
 
 export default function APIReferencePage() {
@@ -46,56 +46,56 @@ export default function APIReferencePage() {
           <div className="grid gap-10 lg:grid-cols-[1fr_320px]">
             <div className="order-2 lg:order-1 space-y-16">
               {/* Query Methods */}
-          <div className="space-y-8" id="query-methods">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">query methods</h2>
+              <div className="space-y-8" id="query-methods">
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">query methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.query()</code>
-                  <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Initialize a new query builder. Chain methods to construct complex graph queries with filtering,
-                  traversal, and aggregation.
-                </p>
-                <div className="space-y-4">
-                  <CodeExample
-                    label="basic query"
-                    examples={{
-                      typescript: `const users = await db.query()
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.query()</code>
+                      <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Initialize a new query builder. Chain methods to construct complex graph queries with filtering,
+                      traversal, and aggregation.
+                    </p>
+                    <div className="space-y-4">
+                      <CodeExample
+                        label="basic query"
+                        examples={{
+                          typescript: `const users = await db.query()
   .match('User', { active: true })
   .return('*')`,
-                      python: `users = await db.query() \\
+                          python: `users = await db.query() \\
     .match('User', {'active': True}) \\
     .return_all()`,
-                      go: `users, err := db.Query().
+                          go: `users, err := db.Query().
     Match("User", map[string]interface{}{"active": true}).
     Return("*")`,
-                      rust: `let users = db.query()
+                          rust: `let users = db.query()
     .match_node("User", json!({"active": true}))
     .return_all()
     .await?;`,
-                    }}
-                  />
-                  <CodeExample
-                    label="with filtering and pagination"
-                    examples={{
-                      typescript: `const results = await db.query()
+                        }}
+                      />
+                      <CodeExample
+                        label="with filtering and pagination"
+                        examples={{
+                          typescript: `const results = await db.query()
   .match('User', { age: { $gte: 18 } })
   .filter({ verified: true })
   .orderBy('createdAt', 'desc')
   .limit(10)
   .offset(20)
   .return(['id', 'name', 'email'])`,
-                      python: `results = await db.query() \\
+                          python: `results = await db.query() \\
     .match('User', {'age': {'$gte': 18}}) \\
     .filter({'verified': True}) \\
     .order_by('createdAt', 'desc') \\
     .limit(10) \\
     .offset(20) \\
     .return_fields(['id', 'name', 'email'])`,
-                      go: `results, err := db.Query().
+                          go: `results, err := db.Query().
     Match("User", map[string]interface{}{
         "age": map[string]interface{}{"$gte": 18},
     }).
@@ -104,7 +104,7 @@ export default function APIReferencePage() {
     Limit(10).
     Offset(20).
     Return([]string{"id", "name", "email"})`,
-                      rust: `let results = db.query()
+                          rust: `let results = db.query()
     .match_node("User", json!({"age": {"$gte": 18}}))
     .filter(json!({"verified": true}))
     .order_by("createdAt", Order::Desc)
@@ -112,22 +112,22 @@ export default function APIReferencePage() {
     .offset(20)
     .return_fields(&["id", "name", "email"])
     .await?;`,
-                    }}
-                  />
-                </div>
-              </Card>
+                        }}
+                      />
+                    </div>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">.match()</code>
-                  <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Match nodes by label and properties. Supports comparison operators, logical operators, and regex
-                  patterns.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`// simple match
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">.match()</code>
+                      <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Match nodes by label and properties. Supports comparison operators, logical operators, and regex
+                      patterns.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`// simple match
 .match('User', { id: 'u1' })
 
 // comparison operators
@@ -143,19 +143,19 @@ export default function APIReferencePage() {
     { premium: true }
   ]
 })`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">.traverse()</code>
-                  <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Traverse edges from matched nodes. Control depth, direction, and apply filters during traversal.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`// basic traversal
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">.traverse()</code>
+                      <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Traverse edges from matched nodes. Control depth, direction, and apply filters during traversal.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`// basic traversal
 .traverse('FOLLOWS')
 
 // with options
@@ -170,19 +170,19 @@ export default function APIReferencePage() {
 .traverse(['FOLLOWS', 'FRIENDS_WITH'], {
   depth: 2
 })`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">.aggregate()</code>
-                  <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Perform aggregations on query results. Supports count, sum, avg, min, max, and custom functions.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const stats = await db.query()
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">.aggregate()</code>
+                      <span className="text-sm text-muted-foreground">→ QueryBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Perform aggregations on query results. Supports count, sum, avg, min, max, and custom functions.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const stats = await db.query()
   .match('Post')
   .aggregate({
     total: 'count',
@@ -193,27 +193,27 @@ export default function APIReferencePage() {
   })
   .groupBy('category')
   .return('*')`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
               {/* Create Methods */}
               <div className="space-y-8" id="create-methods">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">create methods</h2>
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">create methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.create()</code>
-                  <span className="text-sm text-muted-foreground">→ CreateBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Create nodes and edges with a fluent interface. Supports batch operations and returns created
-                  entities.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`// create single node
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.create()</code>
+                      <span className="text-sm text-muted-foreground">→ CreateBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Create nodes and edges with a fluent interface. Supports batch operations and returns created
+                      entities.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`// create single node
 const user = await db.create()
   .node('User', { 
     name: 'alice',
@@ -227,20 +227,20 @@ await db.create()
   .node('Post', { id: 'p1', title: 'Hello' })
   .edge('User', { id: 'u1' }, 'AUTHORED', 'Post', { id: 'p1' })
   .execute()`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.batchCreate()</code>
-                  <span className="text-sm text-muted-foreground">→ Promise&lt;Result[]&gt;</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Efficiently create large numbers of nodes or edges. Automatically batches operations for optimal
-                  performance.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const users = Array.from({ length: 1000 }, (_, i) => ({
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.batchCreate()</code>
+                      <span className="text-sm text-muted-foreground">→ Promise&lt;Result[]&gt;</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Efficiently create large numbers of nodes or edges. Automatically batches operations for optimal
+                      performance.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const users = Array.from({ length: 1000 }, (_, i) => ({
   id: \`u\${i}\`,
   name: \`user\${i}\`,
   email: \`user\${i}@example.com\`
@@ -250,26 +250,26 @@ await db.batchCreate('User', users, {
   batchSize: 100,  // process in chunks
   parallel: true   // parallel execution
 })`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
               {/* Update Methods */}
               <div className="space-y-8" id="update-methods">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">update methods</h2>
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">update methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.update()</code>
-                  <span className="text-sm text-muted-foreground">→ UpdateBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Update node or edge properties. Supports atomic operations, conditional updates, and bulk updates.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`// simple update
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.update()</code>
+                      <span className="text-sm text-muted-foreground">→ UpdateBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Update node or edge properties. Supports atomic operations, conditional updates, and bulk updates.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`// simple update
 await db.update('User', { id: 'u1' })
   .set({ lastLogin: new Date() })
   .execute()
@@ -285,45 +285,45 @@ await db.update('User', { verified: false })
   .set({ verified: true, verifiedAt: new Date() })
   .where({ email: { $regex: '@company.com$' } })
   .execute()`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.batchUpdate()</code>
-                  <span className="text-sm text-muted-foreground">→ Promise&lt;number&gt;</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Update multiple nodes matching a filter. Returns the count of updated nodes.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const updated = await db.batchUpdate(
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.batchUpdate()</code>
+                      <span className="text-sm text-muted-foreground">→ Promise&lt;number&gt;</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Update multiple nodes matching a filter. Returns the count of updated nodes.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const updated = await db.batchUpdate(
   'User',
   { verified: false },
   { verified: true, verifiedAt: new Date() }
 )
 
 console.log(\`Updated \${updated} users\`)`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
               {/* Delete Methods */}
               <div className="space-y-8" id="delete-methods">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">delete methods</h2>
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">delete methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.delete()</code>
-                  <span className="text-sm text-muted-foreground">→ DeleteBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Delete nodes and edges. Optionally cascade delete connected edges.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`// delete node
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.delete()</code>
+                      <span className="text-sm text-muted-foreground">→ DeleteBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Delete nodes and edges. Optionally cascade delete connected edges.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`// delete node
 await db.delete('User', { id: 'u1' })
   .execute()
 
@@ -339,26 +339,26 @@ await db.delete()
     to: 'u2' 
   })
   .execute()`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
               {/* Path Methods */}
               <div className="space-y-8" id="path-methods">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">path methods</h2>
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">path methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.shortestPath()</code>
-                  <span className="text-sm text-muted-foreground">→ PathBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Find the shortest path between two nodes using Dijkstra's algorithm. Supports weighted edges.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const path = await db.shortestPath()
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.shortestPath()</code>
+                      <span className="text-sm text-muted-foreground">→ PathBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Find the shortest path between two nodes using Dijkstra's algorithm. Supports weighted edges.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const path = await db.shortestPath()
   .from('User', { id: 'alice' })
   .to('User', { id: 'charlie' })
   .via(['FOLLOWS', 'FRIENDS_WITH'])
@@ -372,19 +372,19 @@ const weighted = await db.shortestPath()
   .via('CONNECTED_TO')
   .weight('distance')
   .execute()`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.allPaths()</code>
-                  <span className="text-sm text-muted-foreground">→ PathBuilder</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Find all paths between two nodes up to a maximum depth. Useful for exploring all possible connections.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const paths = await db.allPaths()
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.allPaths()</code>
+                      <span className="text-sm text-muted-foreground">→ PathBuilder</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Find all paths between two nodes up to a maximum depth. Useful for exploring all possible connections.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const paths = await db.allPaths()
   .from('User', { id: 'alice' })
   .to('User', { id: 'bob' })
   .via('FOLLOWS')
@@ -393,26 +393,26 @@ const weighted = await db.shortestPath()
   .execute()
 
 console.log(\`Found \${paths.length} paths\`)`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
               {/* Schema & Index Methods */}
               <div className="space-y-8" id="schema-index">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">schema & index methods</h2>
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">schema & index methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.createIndex()</code>
-                  <span className="text-sm text-muted-foreground">→ Promise&lt;Index&gt;</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Create indexes to optimize query performance. Supports unique, sparse, and full-text indexes.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`// unique index
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.createIndex()</code>
+                      <span className="text-sm text-muted-foreground">→ Promise&lt;Index&gt;</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Create indexes to optimize query performance. Supports unique, sparse, and full-text indexes.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`// unique index
 await db.createIndex('User', 'email', {
   unique: true,
   sparse: false
@@ -427,19 +427,19 @@ await db.createIndex('Post', ['userId', 'createdAt'], {
 await db.createIndex('Post', 'content', {
   type: 'fulltext'
 })`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.transaction()</code>
-                  <span className="text-sm text-muted-foreground">→ Promise&lt;T&gt;</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Execute multiple operations atomically. Automatically rolls back on error.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`await db.transaction(async (tx) => {
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.transaction()</code>
+                      <span className="text-sm text-muted-foreground">→ Promise&lt;T&gt;</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Execute multiple operations atomically. Automatically rolls back on error.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`await db.transaction(async (tx) => {
   const user = await tx.create()
     .node('User', { name: 'alice' })
     .execute()
@@ -450,26 +450,26 @@ await db.createIndex('Post', 'content', {
   
   // if any operation fails, all are rolled back
 })`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
               {/* Utility Methods */}
               <div className="space-y-8" id="utility-methods">
-            <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">utility methods</h2>
+                <h2 className="text-2xl font-bold mb-8 pb-4 border-b border-border">utility methods</h2>
 
-            <div className="space-y-8">
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">.explain()</code>
-                  <span className="text-sm text-muted-foreground">→ Promise&lt;ExplainResult&gt;</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Analyze query performance and execution plan without executing the query.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const plan = await db.query()
+                <div className="space-y-8">
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">.explain()</code>
+                      <span className="text-sm text-muted-foreground">→ Promise&lt;ExplainResult&gt;</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Analyze query performance and execution plan without executing the query.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const plan = await db.query()
   .match('User')
   .traverse('FOLLOWS', { depth: 3 })
   .explain()
@@ -480,19 +480,19 @@ console.log({
   indexesUsed: plan.indexesUsed,
   queryPlan: plan.plan
 })`}</code>
-                </pre>
-              </Card>
+                    </pre>
+                  </Card>
 
-              <Card className="p-6 bg-card border-border">
-                <div className="flex items-baseline gap-2 mb-3">
-                  <code className="text-lg font-bold text-foreground">db.subscribe()</code>
-                  <span className="text-sm text-muted-foreground">→ Subscription</span>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Subscribe to real-time changes in the graph. Supports create, update, and delete events.
-                </p>
-                <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
-                  <code>{`const subscription = db.subscribe()
+                  <Card className="p-6 bg-card border-border">
+                    <div className="flex items-baseline gap-2 mb-3">
+                      <code className="text-lg font-bold text-foreground">db.subscribe()</code>
+                      <span className="text-sm text-muted-foreground">→ Subscription</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Subscribe to real-time changes in the graph. Supports create, update, and delete events.
+                    </p>
+                    <pre className="text-sm text-foreground bg-background p-4 rounded border border-border">
+                      <code>{`const subscription = db.subscribe()
   .match('User', { id: 'alice' })
   .traverse('FOLLOWS')
   .on('create', (node) => {
@@ -507,16 +507,18 @@ console.log({
 
 // cleanup
 subscription.unsubscribe()`}</code>
-                </pre>
-              </Card>
-            </div>
-          </div>
+                    </pre>
+                  </Card>
+                </div>
+              </div>
 
-          <aside className="order-1 lg:order-2 lg:sticky lg:top-28 h-fit">
-            <TableOfContents items={tocItems} eyebrow="api" title="api map" />
-          </aside>
+            </div>
+
+            <aside className="order-1 lg:order-2 lg:sticky lg:top-28 h-fit">
+              <TableOfContents items={tocItems} eyebrow="api" title="api map" />
+            </aside>
+          </div>
         </div>
-      </div>
       </section>
 
       {/* Footer */}
