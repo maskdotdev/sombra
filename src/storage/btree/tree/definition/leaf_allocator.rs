@@ -1,7 +1,4 @@
-use crate::storage::profile::{
-    profile_timer, record_leaf_allocator_build, record_leaf_allocator_compaction,
-    record_leaf_allocator_failure, record_leaf_allocator_snapshot_reuse, LeafAllocatorFailureKind,
-};
+// Note: profile imports come from mod.rs via the include! macro
 
 const INLINE_FREE_REGIONS: usize = 32;
 const INLINE_SLOT_EXTENTS: usize = 128;

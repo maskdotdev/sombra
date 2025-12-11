@@ -66,6 +66,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         low_fence: Vec<u8>,
         high_fence: Vec<u8>,
     ) -> Result<LeafInsert> {
+        record_btree_leaf_split();
         let payload = page::payload(page.data())?;
         let split_idx = self.choose_allocator_split_index(
             payload_len,
@@ -597,13 +598,21 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         }
         let (low_fence_slice, _) = header.fence_slices(page.data())?;
         let low_fence: Vec<u8> = low_fence_slice.to_vec();
+
+        // Profile allocator cache access
+        let cache_start = profile_timer();
         let snapshot = self.leaf_allocator_cache(tx).take(page.id);
         let mut allocator = if let Some(snapshot) = snapshot {
             LeafAllocator::from_snapshot(page.data_mut(), header.clone(), snapshot)?
         } else {
             LeafAllocator::new(page.data_mut(), header.clone())?
         };
+        if let Some(start) = cache_start {
+            record_btree_leaf_allocator_cache(start.elapsed().as_nanos() as u64);
+        }
 
+        // Profile binary search
+        let search_start = profile_timer();
         let mut lo = 0usize;
         let mut hi = allocator.slot_count();
         let mut insert_idx = 0usize;
@@ -626,10 +635,18 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
         if !replaces_existing {
             insert_idx = lo;
         }
+        if let Some(start) = search_start {
+            record_btree_leaf_binary_search(start.elapsed().as_nanos() as u64);
+        }
 
+        // Profile record encoding
+        let encode_start = profile_timer();
         let record_len = page::plain_leaf_record_encoded_len(key.len(), value.len())?;
         let mut record = Vec::with_capacity(record_len);
         page::encode_leaf_record(key, value, &mut record)?;
+        if let Some(start) = encode_start {
+            record_btree_leaf_record_encode(start.elapsed().as_nanos() as u64);
+        }
         debug_assert!(
             record.first().copied().unwrap_or(0) != 0,
             "leaf record encoded with zero key length byte (key_len={}, value_len={}, record_len={})",
@@ -651,7 +668,12 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
             });
         }
 
+        // Profile slot allocation
+        let slot_start = profile_timer();
         let insert_result = allocator.insert_slot(insert_idx, &record);
+        if let Some(start) = slot_start {
+            record_btree_leaf_slot_alloc(start.elapsed().as_nanos() as u64);
+        }
 
         match insert_result {
             Ok(()) => {
@@ -677,6 +699,7 @@ impl<K: KeyCodec, V: ValCodec> BTree<K, V> {
                 let new_first_key = requires_low_fence_update.then(|| key.to_vec());
                 let snapshot = allocator.into_snapshot();
                 self.leaf_allocator_cache(tx).insert(page.id, snapshot);
+                record_btree_leaf_in_place_success();
                 Ok(InPlaceInsertResult::Applied { new_first_key })
             }
             Err(err) if allocator_capacity_error(&err) => {
