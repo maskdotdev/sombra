@@ -4,7 +4,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
-use crate::storage::btree::{page, BTree, BTreeOptions, ValCodec};
+use crate::storage::btree::{page, BTree, BTreeOptions, PutItem, ValCodec};
 use crate::storage::{mvcc_flags, CommitId, VersionHeader, VersionedValue, COMMIT_MAX};
 use crate::types::{
     page::{PageHeader, PageKind, PAGE_HDR_LEN},
@@ -94,6 +94,61 @@ impl ChunkedIndex {
         let encoded = segment.encode();
         let value = self.versioned_bytes(tx, encoded, commit, segment.is_empty());
         tree.put(tx, &key, &value)
+    }
+
+    /// Batch insert nodes into segments.
+    ///
+    /// items: Vec<(prefix, Vec<NodeId>, commit)> where prefix = (label, prop, value_key)
+    /// Groups of nodes with the same prefix are inserted into the same segment.
+    pub fn put_batch(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        items: Vec<(Vec<u8>, Vec<NodeId>, Option<CommitId>)>,
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.ensure_tree_with_write(tx)?;
+        let tree_ref = self.tree.borrow();
+        let Some(tree) = tree_ref.as_ref() else {
+            return Err(SombraError::Corruption("chunked postings tree missing"));
+        };
+
+        // Step 1: Build full keys and collect existing segments
+        let mut updates: Vec<(Vec<u8>, Segment, Option<CommitId>)> = Vec::with_capacity(items.len());
+
+        for (prefix, nodes, commit) in items {
+            let key = Self::make_key(&prefix, SEGMENT_PRIMARY);
+
+            // Get existing segment or create new one
+            let mut segment = match tree.get_with_write(tx, &key)? {
+                Some(bytes) => Segment::decode(&bytes.value)?,
+                None => Segment::new(),
+            };
+
+            // Insert all nodes into segment
+            for node in nodes {
+                segment.insert(node);
+            }
+
+            updates.push((key, segment, commit));
+        }
+
+        // Step 2: Sort by key for put_many
+        updates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Step 3: Encode and put_many
+        let encoded: Vec<(Vec<u8>, VersionedValue<Vec<u8>>)> = updates
+            .into_iter()
+            .map(|(key, segment, commit)| {
+                let encoded = segment.encode();
+                let value = self.versioned_bytes(tx, encoded, commit, false);
+                (key, value)
+            })
+            .collect();
+
+        let iter = encoded.iter().map(|(k, v)| PutItem { key: k, value: v });
+        tree.put_many(tx, iter)
     }
 
     pub fn scan(&self, tx: &ReadGuard, prefix: &[u8]) -> Result<Vec<NodeId>> {

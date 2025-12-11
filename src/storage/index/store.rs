@@ -355,6 +355,52 @@ impl IndexStore {
         }
     }
 
+    /// Batch insert property values for BTree indexes.
+    /// Each item is (prefix, node, commit) where prefix = label + prop + value_key.
+    pub fn insert_property_values_batch_btree(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        items: Vec<(Vec<u8>, NodeId, Option<CommitId>)>,
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // Build full keys with values, sorting by key for put_many
+        let mut keyed: Vec<(Vec<u8>, VersionedValue<Unit>)> = items
+            .into_iter()
+            .map(|(prefix, node, commit)| {
+                let key = BTreePostings::make_key(&prefix, node);
+                let value = self.btree.versioned_unit(tx, false, commit);
+                (key, value)
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let iter = keyed.iter().map(|(k, v)| PutItem { key: k, value: v });
+        self.btree.put_many(tx, iter)
+    }
+
+    /// Batch insert property values for Chunked indexes.
+    /// Each item is (prefix, Vec<NodeId>, commit) where prefix = label + prop + value_key.
+    /// All nodes for a prefix are inserted into the same segment.
+    pub fn insert_property_values_batch_chunked(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        items: Vec<(Vec<u8>, Vec<NodeId>, Option<CommitId>)>,
+    ) -> Result<()> {
+        self.chunked.put_batch(tx, items)
+    }
+
+    /// Creates a prefix key for BTree index lookups.
+    pub fn btree_prefix(label: LabelId, prop: PropId, value_key: &[u8]) -> Vec<u8> {
+        BTreePostings::make_prefix(label, prop, value_key)
+    }
+
+    /// Creates a prefix key for Chunked index lookups.
+    pub fn chunked_prefix(label: LabelId, prop: PropId, value_key: &[u8]) -> Vec<u8> {
+        ChunkedIndex::make_prefix(label, prop, value_key)
+    }
+
     /// Scans for all nodes with a specific property value (equality).
     pub fn scan_property_eq(
         &self,

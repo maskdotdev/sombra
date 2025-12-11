@@ -407,7 +407,7 @@ fn prune_versioned_tree<V: ValCodec>(
 }
 
 impl BTreePostings {
-    fn versioned_unit(
+    pub(crate) fn versioned_unit(
         &self,
         tx: &mut WriteGuard<'_>,
         tombstone: bool,

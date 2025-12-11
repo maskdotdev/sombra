@@ -22,10 +22,15 @@ use crate::primitives::wal::{WalAllocatorStats, WalCommitBacklog};
 use crate::storage::btree::{BTree, BTreeOptions, PutItem, ValCodec};
 use crate::storage::index::{
     collect_all, CatalogEpoch, DdlEpoch, GraphIndexCache, GraphIndexCacheStats, IndexDef,
-    IndexRoots, IndexStore, IndexVacuumStats, LabelScan, PostingStream, TypeTag,
+    IndexKind, IndexRoots, IndexStore, IndexVacuumStats, LabelScan, PostingStream, TypeTag,
 };
 use crate::storage::vstore::VStore;
-use crate::storage::{record_mvcc_commit, record_mvcc_read_begin, record_mvcc_write_begin};
+use crate::storage::{
+    profile_timer, record_flush_adj_entries, record_flush_adj_fwd_put,
+    record_flush_adj_fwd_sort, record_flush_adj_key_encode, record_flush_adj_rev_put,
+    record_flush_adj_rev_sort, record_flush_deferred, record_flush_deferred_indexes,
+    record_mvcc_commit, record_mvcc_read_begin, record_mvcc_write_begin,
+};
 use crate::types::{
     EdgeId, LabelId, Lsn, NodeId, PageId, PropId, Result, SombraError, TypeId, VRef,
 };
@@ -1535,12 +1540,15 @@ impl Graph {
 
     /// Creates a new node in the graph with the given specification.
     pub fn create_node(&self, tx: &mut WriteGuard<'_>, spec: NodeSpec<'_>) -> Result<NodeId> {
+        let total_start = storage_profile_timer();
         let labels = normalize_labels(spec.labels)?;
         let mut prop_owned: BTreeMap<PropId, PropValueOwned> = BTreeMap::new();
         for entry in spec.props {
             let owned = prop_value_to_owned(entry.value.clone());
             prop_owned.insert(entry.prop, owned);
         }
+        // Encode properties (profiled)
+        let encode_start = storage_profile_timer();
         let (prop_bytes, spill_vrefs) = self.encode_property_map(tx, spec.props)?;
         let mut map_vref: Option<VRef> = None;
         let payload = if prop_bytes.len() <= self.inline_prop_blob {
@@ -1570,6 +1578,7 @@ impl Graph {
                 return Err(err);
             }
         };
+        record_storage_profile_timer(StorageProfileKind::CreateNodeEncodeProps, encode_start);
         let id_raw = self.next_node_id.fetch_add(1, AtomicOrdering::SeqCst);
         let node_id = NodeId(id_raw);
         let next_id = node_id.0.saturating_add(1);
@@ -1578,6 +1587,8 @@ impl Graph {
                 meta.storage_next_node_id = next_id;
             }
         })?;
+        // BTree insert (profiled)
+        let btree_start = storage_profile_timer();
         if let Err(err) = self.nodes.put(tx, &node_id.0, &row_bytes) {
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
@@ -1586,6 +1597,9 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Nodes)?;
+        record_storage_profile_timer(StorageProfileKind::CreateNodeBTree, btree_start);
+        // Label index update (profiled)
+        let label_index_start = storage_profile_timer();
         if let Err(err) = self.stage_label_inserts(tx, node_id, &labels, commit_id) {
             let _ = self.nodes.delete(tx, &node_id.0);
             self.persist_tree_root(tx, RootKind::Nodes)?;
@@ -1595,6 +1609,9 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        record_storage_profile_timer(StorageProfileKind::CreateNodeLabelIndex, label_index_start);
+        // Property index update (profiled)
+        let prop_index_start = storage_profile_timer();
         if let Err(err) = self.insert_indexed_props(tx, node_id, &labels, &prop_owned, commit_id) {
             let _ = self.indexes.remove_node_labels(tx, node_id, &labels);
             let _ = self.nodes.delete(tx, &node_id.0);
@@ -1605,8 +1622,10 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        record_storage_profile_timer(StorageProfileKind::CreateNodePropIndex, prop_index_start);
         self.finalize_node_head(tx, node_id)?;
         self.metrics.node_created();
+        record_storage_profile_timer(StorageProfileKind::CreateNode, total_start);
         Ok(node_id)
     }
 
@@ -2227,12 +2246,24 @@ impl Graph {
 
     /// Creates a new edge in the graph with the given specification.
     pub fn create_edge(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
+        let total_start = storage_profile_timer();
         self.ensure_node_exists(tx, spec.src, "edge source node missing")?;
         self.ensure_node_exists(tx, spec.dst, "edge destination node missing")?;
-        self.insert_edge_unchecked(tx, spec)
+        let result = self.insert_edge_unchecked_inner(tx, spec);
+        record_storage_profile_timer(StorageProfileKind::CreateEdge, total_start);
+        result
     }
 
     fn insert_edge_unchecked(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
+        let total_start = storage_profile_timer();
+        let result = self.insert_edge_unchecked_inner(tx, spec);
+        record_storage_profile_timer(StorageProfileKind::CreateEdge, total_start);
+        result
+    }
+
+    fn insert_edge_unchecked_inner(&self, tx: &mut WriteGuard<'_>, spec: EdgeSpec<'_>) -> Result<EdgeId> {
+        // Encode properties (profiled)
+        let encode_start = storage_profile_timer();
         let (prop_bytes, spill_vrefs) = self.encode_property_map(tx, spec.props)?;
         let mut map_vref: Option<VRef> = None;
         let payload = if prop_bytes.len() <= self.inline_prop_blob {
@@ -2262,6 +2293,7 @@ impl Graph {
                 return Err(err);
             }
         };
+        record_storage_profile_timer(StorageProfileKind::CreateEdgeEncodeProps, encode_start);
         let id_raw = self.next_edge_id.fetch_add(1, AtomicOrdering::SeqCst);
         let edge_id = EdgeId(id_raw);
         let next_id = edge_id.0.saturating_add(1);
@@ -2270,6 +2302,8 @@ impl Graph {
                 meta.storage_next_edge_id = next_id;
             }
         })?;
+        // BTree insert (profiled)
+        let btree_start = storage_profile_timer();
         if let Err(err) = self.edges.put(tx, &edge_id.0, &row_bytes) {
             if let Some(vref) = map_vref.take() {
                 let _ = self.vstore.free(tx, vref);
@@ -2278,6 +2312,9 @@ impl Graph {
             return Err(err);
         }
         self.persist_tree_root(tx, RootKind::Edges)?;
+        record_storage_profile_timer(StorageProfileKind::CreateEdgeBTree, btree_start);
+        // Adjacency index update (profiled)
+        let adjacency_start = storage_profile_timer();
         if let Err(err) =
             self.stage_adjacency_inserts(tx, &[(spec.src, spec.dst, spec.ty, edge_id)], commit_id)
         {
@@ -2289,6 +2326,7 @@ impl Graph {
             props::free_vrefs(&self.vstore, tx, &spill_vrefs);
             return Err(err);
         }
+        record_storage_profile_timer(StorageProfileKind::CreateEdgeAdjacency, adjacency_start);
         self.finalize_edge_head(tx, edge_id)?;
         self.metrics.edge_created();
         Ok(edge_id)
@@ -2637,7 +2675,7 @@ impl Graph {
         if tombstone {
             header.flags |= mvcc_flags::TOMBSTONE;
         }
-        header.set_pending();
+        // No pending flag - write finalized values directly for performance
         VersionedValue::new(header, UnitValue)
     }
 
@@ -2647,10 +2685,6 @@ impl Graph {
         }
         header.clear_pending();
         true
-    }
-
-    fn finalize_version_value(&self, value: &mut VersionedValue<UnitValue>) -> bool {
-        self.finalize_version_header(&mut value.header)
     }
 
     fn finalize_node_head(&self, tx: &mut WriteGuard<'_>, id: NodeId) -> Result<()> {
@@ -2676,35 +2710,6 @@ impl Graph {
         }
         Self::overwrite_encoded_header(&mut bytes, &header);
         self.edges.put(tx, &id.0, &bytes)?;
-        Ok(())
-    }
-
-    fn finalize_adjacency_entry(
-        &self,
-        tx: &mut WriteGuard<'_>,
-        tree: &BTree<Vec<u8>, VersionedValue<UnitValue>>,
-        key: &Vec<u8>,
-    ) -> Result<()> {
-        let Some(mut value) = tree.get_with_write(tx, key)? else {
-            return Err(SombraError::Corruption(
-                "adjacency entry missing during finalize",
-            ));
-        };
-        if !self.finalize_version_value(&mut value) {
-            return Ok(());
-        }
-        tree.put(tx, key, &value)
-    }
-
-    fn finalize_adjacency_entries(
-        &self,
-        tx: &mut WriteGuard<'_>,
-        keys: &[(Vec<u8>, Vec<u8>)],
-    ) -> Result<()> {
-        for (fwd, rev) in keys {
-            self.finalize_adjacency_entry(tx, &self.adj_fwd, fwd)?;
-            self.finalize_adjacency_entry(tx, &self.adj_rev, rev)?;
-        }
         Ok(())
     }
 
@@ -3010,8 +3015,12 @@ impl Graph {
 
     /// Flushes buffered adjacency and index updates for the current transaction.
     pub fn flush_deferred_writes(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        let start = profile_timer();
         self.flush_deferred_adjacency(tx)?;
         self.flush_deferred_indexes(tx)?;
+        if let Some(start) = start {
+            record_flush_deferred(start.elapsed().as_nanos() as u64);
+        }
         Ok(())
     }
 
@@ -3138,6 +3147,7 @@ impl Graph {
     }
 
     fn flush_deferred_indexes(&self, tx: &mut WriteGuard<'_>) -> Result<()> {
+        let flush_idx_start = profile_timer();
         if !self.defer_index_flush {
             return Ok(());
         }
@@ -3146,27 +3156,74 @@ impl Graph {
             self.store_txn_state(tx, state);
             return Ok(());
         };
+
+        // Process label inserts (unchanged - typically small count)
         for (label, node, commit) in buffer.label_inserts.drain(..) {
             if self.indexes.has_label_index_with_write(tx, label)? {
                 self.indexes
                     .insert_node_labels_with_commit(tx, node, &[label], Some(commit))?;
             }
         }
+
+        // Process label removes (unchanged)
         for (label, node, commit) in buffer.label_removes.drain(..) {
             if self.indexes.has_label_index_with_write(tx, label)? {
                 self.indexes
                     .remove_node_labels_with_commit(tx, node, &[label], Some(commit))?;
             }
         }
-        for (def, key, node, commit) in buffer.prop_inserts.drain(..) {
-            self.indexes
-                .insert_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
+
+        // === OPTIMIZED: Batch property inserts ===
+        if !buffer.prop_inserts.is_empty() {
+            // Separate by index kind
+            let mut btree_items: Vec<(Vec<u8>, NodeId, Option<CommitId>)> = Vec::new();
+            let mut chunked_groups: BTreeMap<Vec<u8>, (Vec<NodeId>, Option<CommitId>)> =
+                BTreeMap::new();
+
+            for (def, key, node, commit) in buffer.prop_inserts.drain(..) {
+                match def.kind {
+                    IndexKind::BTree => {
+                        let prefix = IndexStore::btree_prefix(def.label, def.prop, &key);
+                        btree_items.push((prefix, node, Some(commit)));
+                    }
+                    IndexKind::Chunked => {
+                        let prefix = IndexStore::chunked_prefix(def.label, def.prop, &key);
+                        chunked_groups
+                            .entry(prefix)
+                            .or_insert_with(|| (Vec::new(), Some(commit)))
+                            .0
+                            .push(node);
+                    }
+                }
+            }
+
+            // Batch insert BTree items
+            if !btree_items.is_empty() {
+                self.indexes
+                    .insert_property_values_batch_btree(tx, btree_items)?;
+            }
+
+            // Batch insert Chunked items
+            if !chunked_groups.is_empty() {
+                let chunked_items: Vec<_> = chunked_groups
+                    .into_iter()
+                    .map(|(prefix, (nodes, commit))| (prefix, nodes, commit))
+                    .collect();
+                self.indexes
+                    .insert_property_values_batch_chunked(tx, chunked_items)?;
+            }
         }
+
+        // Property removes (keep individual for now - typically less frequent)
         for (def, key, node, commit) in buffer.prop_removes.drain(..) {
             self.indexes
                 .remove_property_value_with_commit(tx, &def, &key, node, Some(commit))?;
         }
+
         self.store_txn_state(tx, state);
+        if let Some(start) = flush_idx_start {
+            record_flush_deferred_indexes(start.elapsed().as_nanos() as u64);
+        }
         Ok(())
     }
 
@@ -3179,16 +3236,29 @@ impl Graph {
         if entries.is_empty() {
             return Ok(());
         }
+        // Profile key encoding
+        let key_encode_start = profile_timer();
         let mut keys: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(entries.len());
         for (src, dst, ty, edge) in entries {
             let fwd_key = adjacency::encode_fwd_key(*src, *ty, *dst, *edge);
             let rev_key = adjacency::encode_rev_key(*dst, *ty, *src, *edge);
             keys.push((fwd_key, rev_key));
         }
+        if let Some(start) = key_encode_start {
+            record_flush_adj_key_encode(start.elapsed().as_nanos() as u64);
+        }
+        record_flush_adj_entries(entries.len() as u64);
         let versioned_unit = Self::adjacency_value_for_commit(commit, false);
         {
+            // Profile forward adjacency sort
+            let fwd_sort_start = profile_timer();
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(fwd, _)| fwd).collect();
             refs.sort_unstable();
+            if let Some(start) = fwd_sort_start {
+                record_flush_adj_fwd_sort(start.elapsed().as_nanos() as u64);
+            }
+            // Profile forward adjacency put_many
+            let fwd_put_start = profile_timer();
             let value_ref = &versioned_unit;
             let iter = refs.into_iter().map(|key| PutItem {
                 key,
@@ -3196,10 +3266,20 @@ impl Graph {
             });
             self.adj_fwd.put_many(tx, iter)?;
             self.persist_tree_root(tx, RootKind::AdjFwd)?;
+            if let Some(start) = fwd_put_start {
+                record_flush_adj_fwd_put(start.elapsed().as_nanos() as u64);
+            }
         }
         {
+            // Profile reverse adjacency sort
+            let rev_sort_start = profile_timer();
             let mut refs: Vec<&Vec<u8>> = keys.iter().map(|(_, rev)| rev).collect();
             refs.sort_unstable();
+            if let Some(start) = rev_sort_start {
+                record_flush_adj_rev_sort(start.elapsed().as_nanos() as u64);
+            }
+            // Profile reverse adjacency put_many
+            let rev_put_start = profile_timer();
             let value_ref = &versioned_unit;
             let iter = refs.into_iter().map(|key| PutItem {
                 key,
@@ -3210,6 +3290,9 @@ impl Graph {
                 return Err(err);
             }
             self.persist_tree_root(tx, RootKind::AdjRev)?;
+            if let Some(start) = rev_put_start {
+                record_flush_adj_rev_put(start.elapsed().as_nanos() as u64);
+            }
         }
         #[cfg(feature = "degree-cache")]
         if self.degree_cache_enabled {
@@ -3223,7 +3306,7 @@ impl Graph {
                 return Err(err);
             }
         }
-        self.finalize_adjacency_entries(tx, &keys)?;
+        // No finalization needed - adjacency values are written finalized directly
         Ok(())
     }
 
@@ -4496,13 +4579,7 @@ impl Graph {
             for def in defs.iter() {
                 if let Some(value) = props.get(&def.prop) {
                     let key = encode_value_key_owned(def.ty, value)?;
-                    self.indexes.insert_property_value_with_commit(
-                        tx,
-                        def,
-                        &key,
-                        node,
-                        Some(commit),
-                    )?;
+                    self.stage_prop_index_op(tx, *def, key, node, commit, true)?;
                 }
             }
         }
@@ -5154,7 +5231,7 @@ mod adjacency_commit_tests {
     }
 
     #[test]
-    fn adjacency_entries_clear_pending_after_insert() -> Result<()> {
+    fn adjacency_entries_not_pending_after_insert() -> Result<()> {
         let (_tmp, pager, graph) = setup_graph();
         let (src, dst) = insert_simple_nodes(&pager, &graph)?;
         let mut write = pager.begin_write()?;
@@ -5176,7 +5253,7 @@ mod adjacency_commit_tests {
             .expect("forward adjacency present");
         assert!(
             !fwd_value.header.is_pending(),
-            "forward adjacency must clear pending flag"
+            "forward adjacency must not be pending (written finalized)"
         );
         let rev_value = graph
             .adj_rev
@@ -5184,7 +5261,7 @@ mod adjacency_commit_tests {
             .expect("reverse adjacency present");
         assert!(
             !rev_value.header.is_pending(),
-            "reverse adjacency must clear pending flag"
+            "reverse adjacency must not be pending (written finalized)"
         );
         pager.commit(write)?;
         Ok(())
