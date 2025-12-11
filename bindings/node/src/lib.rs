@@ -1,9 +1,11 @@
 #![deny(clippy::all)]
 #![allow(clippy::arc_with_non_send_sync)]
 
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
 
+use napi::bindgen_prelude::BigInt;
 use napi::{bindgen_prelude::Result as NapiResult, Error as NapiError, Status};
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -441,4 +443,262 @@ impl TryFrom<BfsVisitInfo> for BfsVisitRecord {
       depth: value.depth,
     })
   }
+}
+
+// ============================================================================
+// Typed Batch API - Bypasses JSON serialization for high-performance bulk ops
+// ============================================================================
+
+/// Property value for typed batch operations (bypasses JSON).
+///
+/// This enum mirrors the property types supported by the storage layer
+/// but avoids JSON serialization overhead by using direct Rust types.
+#[derive(Debug, Clone)]
+#[napi(object)]
+pub struct TypedPropEntry {
+  /// Property key name.
+  pub key: String,
+  /// Property value kind: "null", "bool", "int", "float", "string", "bytes".
+  pub kind: String,
+  /// Boolean value (when kind is "bool").
+  pub bool_value: Option<bool>,
+  /// Integer value (when kind is "int").
+  pub int_value: Option<i64>,
+  /// Float value (when kind is "float").
+  pub float_value: Option<f64>,
+  /// String value (when kind is "string").
+  pub string_value: Option<String>,
+  /// Base64-encoded bytes (when kind is "bytes").
+  pub bytes_value: Option<String>,
+}
+
+/// Node specification for typed batch creation.
+#[derive(Debug, Clone)]
+#[napi(object)]
+pub struct TypedNodeSpec {
+  /// Node label (single label for optimization).
+  pub label: String,
+  /// Node properties.
+  pub props: Vec<TypedPropEntry>,
+  /// Optional alias for edge references.
+  pub alias: Option<String>,
+}
+
+/// Node reference for typed edge creation.
+#[derive(Debug, Clone)]
+#[napi(object)]
+pub struct TypedNodeRef {
+  /// Reference kind: "alias", "handle", or "id".
+  pub kind: String,
+  /// Alias name (when kind is "alias").
+  pub alias: Option<String>,
+  /// Handle index (when kind is "handle").
+  pub handle: Option<u32>,
+  /// Node ID as BigInt (when kind is "id").
+  pub id: Option<BigInt>,
+}
+
+/// Edge specification for typed batch creation.
+#[derive(Debug, Clone)]
+#[napi(object)]
+pub struct TypedEdgeSpec {
+  /// Edge type name.
+  pub ty: String,
+  /// Source node reference.
+  pub src: TypedNodeRef,
+  /// Destination node reference.
+  pub dst: TypedNodeRef,
+  /// Edge properties.
+  pub props: Vec<TypedPropEntry>,
+}
+
+/// Batch specification for typed creation.
+#[derive(Debug, Clone)]
+#[napi(object)]
+pub struct TypedBatchSpec {
+  /// Nodes to create.
+  pub nodes: Vec<TypedNodeSpec>,
+  /// Edges to create.
+  pub edges: Vec<TypedEdgeSpec>,
+}
+
+// ============================================================================
+// Conversion from NAPI types to core FFI types
+// ============================================================================
+
+impl TypedPropEntry {
+  fn to_ffi(&self) -> NapiResult<sombra::ffi::TypedPropEntry> {
+    Ok(sombra::ffi::TypedPropEntry {
+      key: self.key.clone(),
+      kind: self.kind.clone(),
+      bool_value: self.bool_value,
+      int_value: self.int_value,
+      float_value: self.float_value,
+      string_value: self.string_value.clone(),
+      bytes_value: self.bytes_value.clone(),
+    })
+  }
+}
+
+impl TypedNodeRef {
+  fn to_ffi(&self) -> NapiResult<sombra::ffi::TypedNodeRef> {
+    let id = match &self.id {
+      Some(bigint) => {
+        let (signed, value, _lossless) = bigint.get_u64();
+        if signed {
+          return Err(NapiError::new(
+            Status::InvalidArg,
+            "node ID cannot be negative",
+          ));
+        }
+        Some(value)
+      }
+      None => None,
+    };
+    Ok(sombra::ffi::TypedNodeRef {
+      kind: self.kind.clone(),
+      alias: self.alias.clone(),
+      handle: self.handle,
+      id,
+    })
+  }
+}
+
+impl TypedNodeSpec {
+  fn to_ffi(&self) -> NapiResult<sombra::ffi::TypedNodeSpec> {
+    let props = self
+      .props
+      .iter()
+      .map(|p| p.to_ffi())
+      .collect::<NapiResult<Vec<_>>>()?;
+    Ok(sombra::ffi::TypedNodeSpec {
+      label: self.label.clone(),
+      props,
+      alias: self.alias.clone(),
+    })
+  }
+}
+
+impl TypedEdgeSpec {
+  fn to_ffi(&self) -> NapiResult<sombra::ffi::TypedEdgeSpec> {
+    let props = self
+      .props
+      .iter()
+      .map(|p| p.to_ffi())
+      .collect::<NapiResult<Vec<_>>>()?;
+    Ok(sombra::ffi::TypedEdgeSpec {
+      ty: self.ty.clone(),
+      src: self.src.to_ffi()?,
+      dst: self.dst.to_ffi()?,
+      props,
+    })
+  }
+}
+
+impl TypedBatchSpec {
+  fn to_ffi(&self) -> NapiResult<sombra::ffi::TypedBatchSpec> {
+    let nodes = self
+      .nodes
+      .iter()
+      .map(|n| n.to_ffi())
+      .collect::<NapiResult<Vec<_>>>()?;
+    let edges = self
+      .edges
+      .iter()
+      .map(|e| e.to_ffi())
+      .collect::<NapiResult<Vec<_>>>()?;
+    Ok(sombra::ffi::TypedBatchSpec { nodes, edges })
+  }
+}
+
+/// Result of typed batch creation.
+#[derive(Debug, Clone, Serialize)]
+#[napi(object)]
+pub struct TypedBatchResult {
+  /// Created node IDs as array of BigInt-compatible values.
+  pub nodes: Vec<i64>,
+  /// Created edge IDs as array of BigInt-compatible values.
+  pub edges: Vec<i64>,
+  /// Alias to node ID mapping.
+  pub aliases: HashMap<String, i64>,
+}
+
+/// Creates nodes and edges from typed specifications (bypasses JSON).
+///
+/// This is a high-performance alternative to `databaseCreate` that avoids
+/// JSON serialization overhead. Property values are passed directly as
+/// typed Rust values.
+///
+/// # Arguments
+///
+/// * `handle` - Database handle
+/// * `spec` - Typed batch specification with nodes and edges
+///
+/// # Returns
+///
+/// Result containing created node IDs, edge IDs, and alias mappings.
+#[allow(non_snake_case)]
+#[napi]
+pub fn databaseCreateTypedBatch(
+  handle: &DatabaseHandle,
+  spec: TypedBatchSpec,
+) -> NapiResult<TypedBatchResult> {
+  handle.with_db(|db| {
+    // Convert NAPI types to core FFI types
+    let ffi_spec = spec.to_ffi()?;
+    let result = db.create_typed_batch(&ffi_spec).map_err(to_napi_err)?;
+
+    // Convert u64 to i64 for JavaScript compatibility
+    // (BigInt in napi is handled separately, but for arrays we use i64)
+    let nodes: Vec<i64> = result
+      .node_ids
+      .iter()
+      .map(|id| {
+        if id.0 > i64::MAX as u64 {
+          Err(NapiError::new(
+            Status::InvalidArg,
+            "node ID exceeds JavaScript safe integer range",
+          ))
+        } else {
+          Ok(id.0 as i64)
+        }
+      })
+      .collect::<NapiResult<Vec<_>>>()?;
+
+    let edges: Vec<i64> = result
+      .edge_ids
+      .iter()
+      .map(|id| {
+        if id.0 > i64::MAX as u64 {
+          Err(NapiError::new(
+            Status::InvalidArg,
+            "edge ID exceeds JavaScript safe integer range",
+          ))
+        } else {
+          Ok(id.0 as i64)
+        }
+      })
+      .collect::<NapiResult<Vec<_>>>()?;
+
+    let aliases: HashMap<String, i64> = result
+      .aliases
+      .iter()
+      .map(|(k, v)| {
+        if v.0 > i64::MAX as u64 {
+          Err(NapiError::new(
+            Status::InvalidArg,
+            "alias ID exceeds JavaScript safe integer range",
+          ))
+        } else {
+          Ok((k.clone(), v.0 as i64))
+        }
+      })
+      .collect::<NapiResult<HashMap<_, _>>>()?;
+
+    Ok(TypedBatchResult {
+      nodes,
+      edges,
+      aliases,
+    })
+  })
 }

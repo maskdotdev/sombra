@@ -57,6 +57,24 @@ export declare function databaseCountNodesWithLabel(handle: DatabaseHandle, labe
 
 export declare function databaseCreate(handle: DatabaseHandle, spec: any): NapiResult<any>
 
+/**
+ * Creates nodes and edges from typed specifications (bypasses JSON).
+ *
+ * This is a high-performance alternative to `databaseCreate` that avoids
+ * JSON serialization overhead. Property values are passed directly as
+ * typed Rust values.
+ *
+ * # Arguments
+ *
+ * * `handle` - Database handle
+ * * `spec` - Typed batch specification with nodes and edges
+ *
+ * # Returns
+ *
+ * Result containing created node IDs, edge IDs, and alias mappings.
+ */
+export declare function databaseCreateTypedBatch(handle: DatabaseHandle, spec: TypedBatchSpec): NapiResult<TypedBatchResult>
+
 export declare function databaseExecute(handle: DatabaseHandle, spec: any): NapiResult<any>
 
 export declare function databaseExplain(handle: DatabaseHandle, spec: any): NapiResult<any>
@@ -94,3 +112,78 @@ export interface NeighborRecord {
 }
 
 export declare function openDatabase(path: string, options?: ConnectOptions | undefined | null): NapiResult<DatabaseHandle>
+
+/** Result of typed batch creation. */
+export interface TypedBatchResult {
+  /** Created node IDs as array of BigInt-compatible values. */
+  nodes: Array<number>
+  /** Created edge IDs as array of BigInt-compatible values. */
+  edges: Array<number>
+  /** Alias to node ID mapping. */
+  aliases: Record<string, number>
+}
+
+/** Batch specification for typed creation. */
+export interface TypedBatchSpec {
+  /** Nodes to create. */
+  nodes: Array<TypedNodeSpec>
+  /** Edges to create. */
+  edges: Array<TypedEdgeSpec>
+}
+
+/** Edge specification for typed batch creation. */
+export interface TypedEdgeSpec {
+  /** Edge type name. */
+  ty: string
+  /** Source node reference. */
+  src: TypedNodeRef
+  /** Destination node reference. */
+  dst: TypedNodeRef
+  /** Edge properties. */
+  props: Array<TypedPropEntry>
+}
+
+/** Node reference for typed edge creation. */
+export interface TypedNodeRef {
+  /** Reference kind: "alias", "handle", or "id". */
+  kind: string
+  /** Alias name (when kind is "alias"). */
+  alias?: string
+  /** Handle index (when kind is "handle"). */
+  handle?: number
+  /** Node ID as BigInt (when kind is "id"). */
+  id?: bigint
+}
+
+/** Node specification for typed batch creation. */
+export interface TypedNodeSpec {
+  /** Node label (single label for optimization). */
+  label: string
+  /** Node properties. */
+  props: Array<TypedPropEntry>
+  /** Optional alias for edge references. */
+  alias?: string
+}
+
+/**
+ * Property value for typed batch operations (bypasses JSON).
+ *
+ * This enum mirrors the property types supported by the storage layer
+ * but avoids JSON serialization overhead by using direct Rust types.
+ */
+export interface TypedPropEntry {
+  /** Property key name. */
+  key: string
+  /** Property value kind: "null", "bool", "int", "float", "string", "bytes". */
+  kind: string
+  /** Boolean value (when kind is "bool"). */
+  boolValue?: boolean
+  /** Integer value (when kind is "int"). */
+  intValue?: number
+  /** Float value (when kind is "float"). */
+  floatValue?: number
+  /** String value (when kind is "string"). */
+  stringValue?: string
+  /** Base64-encoded bytes (when kind is "bytes"). */
+  bytesValue?: string
+}

@@ -639,3 +639,250 @@ test('wrapNativeError preserves existing SombraError', (t) => {
   const wrapped = wrapNativeError(original)
   t.is(wrapped, original)
 })
+
+// ============================================================================
+// Typed Batch API Tests (BatchCreateBuilder)
+// ============================================================================
+
+import { BatchCreateBuilder, BatchNodeHandle, BatchError } from '..'
+
+test('batchCreate creates nodes with typed properties', (t) => {
+  const db = Database.open(tempPath())
+  const result = db.batchCreate()
+    .node('User', { name: 'Alice', age: 30, active: true })
+    .node('User', { name: 'Bob', age: 25, active: false })
+    .execute()
+
+  t.is(result.nodes.length, 2)
+  t.is(result.edges.length, 0)
+  t.true(typeof result.nodes[0] === 'number')
+  t.true(typeof result.nodes[1] === 'number')
+  db.close()
+})
+
+test('batchCreate supports aliases with $ prefix', (t) => {
+  const db = Database.open(tempPath())
+  const result = db.batchCreate()
+    .node('User', { name: 'Alice' }, '$alice')
+    .node('User', { name: 'Bob' }, '$bob')
+    .execute()
+
+  t.is(result.nodes.length, 2)
+  t.truthy(result.aliases.$alice)
+  t.truthy(result.aliases.$bob)
+  t.is(result.alias('$alice'), result.aliases.$alice)
+  t.is(result.alias('$bob'), result.aliases.$bob)
+  db.close()
+})
+
+test('batchCreate creates edges using aliases', (t) => {
+  const db = Database.open(tempPath())
+  const result = db.batchCreate()
+    .node('User', { name: 'Alice' }, '$alice')
+    .node('User', { name: 'Bob' }, '$bob')
+    .edge('$alice', 'KNOWS', '$bob', { since: 2020 })
+    .execute()
+
+  t.is(result.nodes.length, 2)
+  t.is(result.edges.length, 1)
+  db.close()
+})
+
+test('batchCreate creates edges using handles', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  const alice = builder.node('User', { name: 'Alice' })
+  const bob = builder.node('User', { name: 'Bob' })
+  builder.edge(alice, 'KNOWS', bob, { since: 2021 })
+  const result = builder.execute()
+
+  t.is(result.nodes.length, 2)
+  t.is(result.edges.length, 1)
+  t.true(alice instanceof BatchNodeHandle)
+  t.true(bob instanceof BatchNodeHandle)
+  db.close()
+})
+
+test('batchCreate creates edges using numeric IDs', (t) => {
+  const db = Database.open(tempPath())
+  
+  // First, create some nodes
+  const firstResult = db.batchCreate()
+    .node('User', { name: 'Alice' })
+    .execute()
+  
+  const aliceId = firstResult.nodes[0]
+  
+  // Now create an edge to that node using its ID
+  const result = db.batchCreate()
+    .node('User', { name: 'Bob' }, '$bob')
+    .edge('$bob', 'KNOWS', aliceId)
+    .execute()
+
+  t.is(result.edges.length, 1)
+  db.close()
+})
+
+test('batchCreate supports all property types', (t) => {
+  const db = Database.open(tempPath())
+  const result = db.batchCreate()
+    .node('TestNode', {
+      stringProp: 'hello',
+      intProp: 42,
+      floatProp: 3.14,
+      boolProp: true,
+      nullProp: null,
+    })
+    .execute()
+
+  t.is(result.nodes.length, 1)
+  
+  // Verify the node was created by fetching it
+  const nodeId = result.nodes[0]
+  const record = db.getNodeRecord(nodeId) as { properties?: Record<string, unknown> } | null
+  t.truthy(record)
+  t.is(record?.properties?.stringProp, 'hello')
+  t.is(record?.properties?.intProp, 42)
+  t.is(record?.properties?.floatProp, 3.14)
+  t.is(record?.properties?.boolProp, true)
+  t.is(record?.properties?.nullProp, null)
+  
+  db.close()
+})
+
+test('batchCreate supports bytes properties', (t) => {
+  const db = Database.open(tempPath())
+  const data = Buffer.from([1, 2, 3, 4, 5])
+  const result = db.batchCreate()
+    .node('BinaryNode', { data })
+    .execute()
+
+  t.is(result.nodes.length, 1)
+  db.close()
+})
+
+test('batchCreate nodeWithAlias convenience method', (t) => {
+  const db = Database.open(tempPath())
+  const result = db.batchCreate()
+    .nodeWithAlias('User', '$user', { name: 'Test' })
+    .execute()
+
+  t.is(result.nodes.length, 1)
+  t.truthy(result.aliases.$user)
+  db.close()
+})
+
+test('batchCreate chaining pattern', (t) => {
+  const db = Database.open(tempPath())
+  const result = db.batchCreate()
+    .node('User', { name: 'Alice' }, '$alice')
+    .node('User', { name: 'Bob' }, '$bob')
+    .node('User', { name: 'Charlie' }, '$charlie')
+    .node('Company', { name: 'Acme' }, '$acme')
+    .edge('$alice', 'FOLLOWS', '$bob')
+    .edge('$bob', 'FOLLOWS', '$charlie')
+    .edge('$charlie', 'FOLLOWS', '$alice')
+    .edge('$alice', 'WORKS_AT', '$acme', { role: 'Engineer' })
+    .execute()
+
+  t.is(result.nodes.length, 4)
+  t.is(result.edges.length, 4)
+  t.truthy(result.aliases.$alice)
+  t.truthy(result.aliases.$bob)
+  t.truthy(result.aliases.$charlie)
+  t.truthy(result.aliases.$acme)
+  db.close()
+})
+
+test('batchCreate throws BatchError on duplicate alias', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  builder.node('User', { name: 'Alice' }, '$dup')
+  
+  const err = t.throws(() => builder.node('User', { name: 'Bob' }, '$dup'))
+  t.true(err instanceof BatchError)
+  t.regex(err?.message ?? '', /duplicate alias/)
+  db.close()
+})
+
+test('batchCreate throws BatchError on alias without $ prefix', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  
+  const err = t.throws(() => builder.node('User', { name: 'Alice' }, 'noprefix'))
+  t.true(err instanceof BatchError)
+  t.regex(err?.message ?? '', /\$/)
+  db.close()
+})
+
+test('batchCreate throws BatchError on empty alias', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  
+  const err = t.throws(() => builder.node('User', { name: 'Alice' }, ''))
+  t.true(err instanceof BatchError)
+  t.regex(err?.message ?? '', /non-empty/)
+  db.close()
+})
+
+test('batchCreate throws BatchError on invalid edge reference', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  builder.node('User', { name: 'Alice' }, '$alice')
+  
+  const err = t.throws(() => builder.edge('$alice', 'KNOWS', 'noprefix'))
+  t.true(err instanceof BatchError)
+  t.regex(err?.message ?? '', /\$/)
+  db.close()
+})
+
+test('batchCreate throws ClosedError on closed database', (t) => {
+  const db = Database.open(tempPath())
+  db.close()
+  
+  const err = t.throws(() => db.batchCreate())
+  t.true(err instanceof ClosedError)
+})
+
+test('batchCreate execute throws on closed database', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  builder.node('User', { name: 'Alice' })
+  db.close()
+  
+  const err = t.throws(() => builder.execute())
+  t.true(err instanceof ClosedError)
+})
+
+test('batchCreate throws BatchError when executed twice', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  builder.node('User', { name: 'Alice' })
+  builder.execute()
+  
+  const err = t.throws(() => builder.execute())
+  t.true(err instanceof BatchError)
+  t.regex(err?.message ?? '', /already executed/)
+  db.close()
+})
+
+test('batchCreate handles large batches', (t) => {
+  const db = Database.open(tempPath())
+  const builder = db.batchCreate()
+  
+  const count = 1000
+  for (let i = 0; i < count; i++) {
+    builder.node('User', { name: `User${i}`, index: i })
+  }
+  
+  const result = builder.execute()
+  t.is(result.nodes.length, count)
+  db.close()
+})
+
+test('BatchError has correct code', (t) => {
+  const err = new BatchError('test error')
+  t.is(err.code, ErrorCode.INVALID_ARG)
+  t.is(err.name, 'BatchError')
+  t.true(err instanceof SombraError)
+})

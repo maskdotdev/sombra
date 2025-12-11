@@ -580,6 +580,7 @@ module.exports.databaseClose = nativeBinding.databaseClose
 module.exports.databaseCountEdgesWithType = nativeBinding.databaseCountEdgesWithType
 module.exports.databaseCountNodesWithLabel = nativeBinding.databaseCountNodesWithLabel
 module.exports.databaseCreate = nativeBinding.databaseCreate
+module.exports.databaseCreateTypedBatch = nativeBinding.databaseCreateTypedBatch
 module.exports.databaseExecute = nativeBinding.databaseExecute
 module.exports.databaseExplain = nativeBinding.databaseExplain
 module.exports.databaseGetEdge = nativeBinding.databaseGetEdge

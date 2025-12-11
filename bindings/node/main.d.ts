@@ -158,6 +158,11 @@ export class ClosedError extends SombraError {
   constructor(message: string)
 }
 
+/** Error thrown when a typed batch operation fails (e.g., duplicate alias, invalid reference). */
+export class BatchError extends SombraError {
+  constructor(message: string)
+}
+
 /**
  * Parses an error message from the native layer and returns a typed error.
  * Native errors have format: "[CODE_NAME] actual message"
@@ -645,6 +650,235 @@ export interface CreateBuilder {
  */
 export interface CreateNodeHandle extends CreateBuilder {}
 
+// ============================================================================
+// Typed Batch API (High-Performance Bulk Creation)
+// ============================================================================
+
+/**
+ * Property values supported by the typed batch API.
+ * Bypasses JSON serialization for better performance.
+ */
+export type BatchPropValue = string | number | boolean | null | Uint8Array | Buffer
+
+/** Property input type for batch operations */
+export type BatchPropsInput = Record<string, BatchPropValue>
+
+/**
+ * Reference types for edges in typed batch operations.
+ * - BatchNodeHandle: Reference to a node created in the same batch
+ * - string: Alias reference (must start with '$')
+ * - number | bigint: Existing node ID
+ */
+export type BatchNodeRef = BatchNodeHandle | string | number | bigint
+
+/**
+ * Summary returned from the batchCreate() builder.
+ */
+export interface BatchCreateSummary {
+  /** IDs of created nodes (in order of creation) */
+  nodes: number[]
+  /** IDs of created edges (in order of creation) */
+  edges: number[]
+  /** Map of alias names to node IDs */
+  aliases: Record<string, number>
+  /**
+   * Look up a node ID by alias name.
+   * @param name - The alias name (must start with '$')
+   * @returns The node ID, or undefined if not found
+   */
+  alias(name: string): number | undefined
+}
+
+/**
+ * Handle returned when adding nodes to a BatchCreateBuilder.
+ * Can be used as edge source/destination reference and supports chaining.
+ * 
+ * @example
+ * ```ts
+ * const builder = db.batchCreate()
+ * const alice = builder.node('User', { name: 'Alice' })
+ * const bob = alice.node('User', { name: 'Bob' })
+ * alice.edge(alice, 'KNOWS', bob)
+ * ```
+ */
+export class BatchNodeHandle {
+  /** The index of this node in the batch (0-based) */
+  readonly index: number
+
+  /**
+   * Add another node to the batch.
+   * @param label - Node label (single label for performance)
+   * @param props - Node properties
+   * @param alias - Optional alias starting with '$' for edge references
+   * @returns Handle for the new node
+   */
+  node(label: string, props?: BatchPropsInput, alias?: string): BatchNodeHandle
+
+  /**
+   * Add a node with an alias (convenience method).
+   * @param label - Node label
+   * @param alias - Alias starting with '$'
+   * @param props - Node properties
+   * @returns Handle for the new node
+   */
+  nodeWithAlias(label: string, alias: string, props?: BatchPropsInput): BatchNodeHandle
+
+  /**
+   * Add an edge to the batch.
+   * @param src - Source node (handle, alias string with '$', or node ID)
+   * @param ty - Edge type
+   * @param dst - Destination node (handle, alias string with '$', or node ID)
+   * @param props - Edge properties
+   * @returns The builder for chaining
+   */
+  edge(src: BatchNodeRef, ty: string, dst: BatchNodeRef, props?: BatchPropsInput): BatchCreateBuilder
+
+  /**
+   * Execute the batch, creating all nodes and edges atomically.
+   * @returns Summary with created node/edge IDs and alias mappings
+   */
+  execute(): BatchCreateSummary
+}
+
+/**
+ * High-performance batch builder for creating nodes and edges.
+ * 
+ * Unlike the standard CreateBuilder, this bypasses JSON serialization
+ * by passing typed values directly to the Rust FFI layer, providing
+ * 3-5x better performance for bulk operations (10K+ records).
+ * 
+ * Key differences from CreateBuilder:
+ * - Single label per node (most common case, better performance)
+ * - Aliases must start with '$' prefix (explicit, avoids ambiguity)
+ * - Properties are passed directly without JSON encoding
+ * 
+ * @example
+ * ```ts
+ * const result = db.batchCreate()
+ *   .node('User', { name: 'Alice', age: 30 }, '$alice')
+ *   .node('User', { name: 'Bob', age: 25 }, '$bob')
+ *   .edge('$alice', 'KNOWS', '$bob', { since: 2020 })
+ *   .execute()
+ * 
+ * console.log(result.nodes)           // [1, 2]
+ * console.log(result.alias('$alice')) // 1
+ * ```
+ */
+export class BatchCreateBuilder {
+  /**
+   * Add a node to the batch.
+   * @param label - Node label (single label for performance)
+   * @param props - Node properties
+   * @param alias - Optional alias starting with '$' for edge references
+   * @returns Handle that can be used for edge references and chaining
+   */
+  node(label: string, props?: BatchPropsInput, alias?: string): BatchNodeHandle
+
+  /**
+   * Add a node with an alias (convenience method).
+   * @param label - Node label
+   * @param alias - Alias starting with '$'
+   * @param props - Node properties
+   * @returns Handle for edge references and chaining
+   */
+  nodeWithAlias(label: string, alias: string, props?: BatchPropsInput): BatchNodeHandle
+
+  /**
+   * Add an edge to the batch.
+   * @param src - Source node (handle, alias string with '$', or node ID)
+   * @param ty - Edge type
+   * @param dst - Destination node (handle, alias string with '$', or node ID)
+   * @param props - Edge properties
+   * @returns This builder for chaining
+   */
+  edge(src: BatchNodeRef, ty: string, dst: BatchNodeRef, props?: BatchPropsInput): BatchCreateBuilder
+
+  /**
+   * Execute the batch, creating all nodes and edges atomically.
+   * @returns Summary with created node/edge IDs and alias mappings
+   */
+  execute(): BatchCreateSummary
+}
+
+// ============================================================================
+// Batch Size Estimation Utilities
+// ============================================================================
+
+/**
+ * Options for batch size estimation.
+ */
+export interface EstimateBatchSizeOptions {
+  /** Maximum records to sample for estimation (default: 100) */
+  sampleSize?: number
+  /** Target batch size in bytes (default: 65536 = 64KB) */
+  targetBatchBytes?: number
+  /** Minimum batch size to return (default: 100) */
+  minBatchSize?: number
+  /** Maximum batch size to return (default: 10000) */
+  maxBatchSize?: number
+}
+
+/**
+ * Estimates the optimal batch size based on sample records.
+ * 
+ * This function samples records to estimate their average byte size,
+ * then calculates how many records should fit in the target batch size
+ * to balance throughput and memory usage.
+ * 
+ * @param sampleRecords - Sample node/edge specs to measure
+ * @param options - Estimation options
+ * @returns Estimated optimal batch size
+ * 
+ * @example
+ * ```ts
+ * // Estimate batch size for user nodes
+ * const sampleUsers = [
+ *   { label: 'User', props: { name: 'Alice', age: 30 } },
+ *   { label: 'User', props: { name: 'Bob', email: 'bob@example.com' } },
+ * ];
+ * const batchSize = estimateBatchSize(sampleUsers);
+ * // Returns ~1000-2000 depending on average property size
+ * ```
+ * 
+ * @example
+ * ```ts
+ * // Estimate with custom options for larger batches
+ * const batchSize = estimateBatchSize(samples, {
+ *   targetBatchBytes: 256 * 1024, // 256KB batches
+ *   maxBatchSize: 50000,
+ * });
+ * ```
+ */
+export function estimateBatchSize(
+  sampleRecords: ReadonlyArray<Record<string, unknown>>,
+  options?: EstimateBatchSizeOptions,
+): number
+
+/**
+ * Creates a generator that yields batches of optimal size.
+ * Useful for processing large arrays in memory-efficient chunks.
+ * 
+ * @param records - All records to batch
+ * @param options - Estimation options (same as estimateBatchSize)
+ * @returns Generator yielding batches
+ * 
+ * @example
+ * ```ts
+ * const users = generateLargeUserArray(100000);
+ * for (const batch of batchRecords(users)) {
+ *   const builder = db.batchCreate();
+ *   for (const user of batch) {
+ *     builder.node('User', user.props);
+ *   }
+ *   builder.execute();
+ * }
+ * ```
+ */
+export function batchRecords<T extends Record<string, unknown>>(
+  records: ReadonlyArray<T>,
+  options?: EstimateBatchSizeOptions,
+): Generator<T[], void, unknown>
+
 /**
  * Fluent predicate builder for complex where clauses.
  *
@@ -1019,6 +1253,24 @@ export class Database<S extends NodeSchema = DefaultSchema> {
    * @returns A CreateBuilder for batching node/edge creation
    */
   create(): CreateBuilder
+
+  /**
+   * Create a high-performance batch builder for bulk node/edge creation.
+   * 
+   * This method bypasses JSON serialization, providing 3-5x better performance
+   * for bulk operations with 10K+ records.
+   * 
+   * @returns A BatchCreateBuilder for staging nodes and edges
+   * @example
+   * ```ts
+   * const result = db.batchCreate()
+   *   .node('User', { name: 'Alice' }, '$alice')
+   *   .node('User', { name: 'Bob' }, '$bob')
+   *   .edge('$alice', 'KNOWS', '$bob')
+   *   .execute()
+   * ```
+   */
+  batchCreate(): BatchCreateBuilder
 
   /**
    * Intern a string name and return its ID.
