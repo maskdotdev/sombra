@@ -205,6 +205,13 @@ pub fn decode_raw(buf: &[u8]) -> Result<Vec<RawProp>> {
     Ok(props)
 }
 
+/// Returns the number of properties encoded in the buffer without materializing values.
+pub fn decode_prop_count(buf: &[u8]) -> Result<usize> {
+    let mut cursor = 0usize;
+    let entry_count = read_var_u64(buf, &mut cursor)?;
+    Ok(entry_count as usize)
+}
+
 pub fn materialize_props(
     raw: &[RawProp],
     vstore: &VStore,
