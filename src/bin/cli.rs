@@ -625,6 +625,13 @@ enum Command {
             help = "Database path (defaults to --database or config)"
         )]
         db_path: Option<PathBuf>,
+
+        #[arg(
+            long,
+            action = ArgAction::SetTrue,
+            help = "Include detailed storage space breakdown"
+        )]
+        detailed: bool,
     },
 
     #[command(about = "Show MVCC commit table status")]
@@ -867,10 +874,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let open_opts = build_open_options(&cli.open, profile.as_ref());
 
     match cli.command {
-        Command::Stats { db_path } => {
+        Command::Stats { db_path, detailed } => {
             let db_path = resolve_db_path(db_path, default_db.as_ref(), "stats")?;
             let report = stats(&db_path, &open_opts)?;
-            emit(cli.format, &ui, &report, print_stats_text)?;
+            if detailed {
+                emit(cli.format, &ui, &report, print_stats_text_detailed)?;
+            } else {
+                emit(cli.format, &ui, &report, print_stats_text)?;
+            }
         }
         Command::MvccStatus { db_path } => {
             let db_path = resolve_db_path(db_path, default_db.as_ref(), "mvcc-status")?;
@@ -1505,6 +1516,46 @@ fn print_stats_text(ui: &Ui, report: &sombra::admin::StatsReport) {
             ("wal_size", format_bytes(report.filesystem.wal_size_bytes)),
         ],
     );
+}
+
+fn print_stats_text_detailed(ui: &Ui, report: &sombra::admin::StatsReport) {
+    print_stats_text(ui, report);
+    if let Some(space) = &report.storage_space {
+        ui.spacer();
+        ui.section(
+            "StorageSpace",
+            [
+                ("version_log_bytes", format_bytes(space.version_log_bytes)),
+                ("version_log_entries", format_count(space.version_log_entries)),
+                ("vstore_pages_allocated", format_count(space.vstore_pages_allocated)),
+                ("vstore_pages_freed", format_count(space.vstore_pages_freed)),
+                (
+                    "vstore_live_pages",
+                    format_count(
+                        space
+                            .vstore_pages_allocated
+                            .saturating_sub(space.vstore_pages_freed),
+                    ),
+                ),
+                ("vstore_bytes_written", format_bytes(space.vstore_bytes_written)),
+                ("vstore_bytes_read", format_bytes(space.vstore_bytes_read)),
+                ("vstore_extent_writes", format_count(space.vstore_extent_writes)),
+                ("vstore_extent_segments", format_count(space.vstore_extent_segments)),
+                ("vstore_extent_pages", format_count(space.vstore_extent_pages)),
+                ("nodes_tree_pages", format_count(space.nodes_tree_pages)),
+                ("nodes_tree_bytes", format_bytes(space.nodes_tree_bytes)),
+                ("edges_tree_pages", format_count(space.edges_tree_pages)),
+                ("edges_tree_bytes", format_bytes(space.edges_tree_bytes)),
+                ("adj_fwd_tree_pages", format_count(space.adj_fwd_tree_pages)),
+                ("adj_fwd_tree_bytes", format_bytes(space.adj_fwd_tree_bytes)),
+                ("adj_rev_tree_pages", format_count(space.adj_rev_tree_pages)),
+                ("adj_rev_tree_bytes", format_bytes(space.adj_rev_tree_bytes)),
+                ("index_tree_pages", format_count(space.index_tree_pages)),
+                ("index_tree_bytes", format_bytes(space.index_tree_bytes)),
+                ("version_log_pages", format_count(space.version_log_pages)),
+            ],
+        );
+    }
 }
 
 fn print_mvcc_status_text(ui: &Ui, report: &MvccStatusReport) {

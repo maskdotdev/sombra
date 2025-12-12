@@ -1,11 +1,10 @@
 use std::cell::{Cell, RefCell};
 
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::TryFrom;
 
-
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
@@ -17,12 +16,14 @@ use crate::primitives::pager::{
     AutockptContext, BackgroundMaintainer, PageStore, WriteGuard,
 };
 use crate::storage::btree::{BTree, ValCodec};
+use crate::storage::btree::page as btree_page;
 use crate::storage::index::{
     CatalogEpoch, DdlEpoch, GraphIndexCache, IndexDef, IndexRoots, IndexStore,
 };
 use crate::storage::vstore::VStore;
 
 use crate::storage::PropValueOwned;
+use crate::types::page::PAGE_HDR_LEN;
 use crate::types::{EdgeId, LabelId, NodeId, PageId, PropId, Result, SombraError, TypeId};
 
 
@@ -58,10 +59,10 @@ pub use writer::{BulkEdgeValidator, CreateEdgeOptions, GraphWriter, GraphWriterS
 
 #[allow(unused_imports)]
 pub use graph_types::{
-    AdjacencyVacuumStats, BfsOptions, BfsVisit, GraphMvccStatus, GraphVacuumStats, PropStats,
-    SnapshotPoolStatus, VacuumBudget, VacuumMode, VacuumTrigger, VersionVacuumStats,
-    DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE, MVCC_METRICS_PUBLISH_INTERVAL,
-    STORAGE_FLAG_DEGREE_CACHE,
+    AdjacencyVacuumStats, BfsOptions, BfsVisit, GraphMvccStatus, GraphSpaceUsage,
+    GraphVacuumStats, PropStats, SnapshotPoolStatus, VacuumBudget, VacuumMode, VacuumTrigger,
+    VersionVacuumStats, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE,
+    MVCC_METRICS_PUBLISH_INTERVAL, STORAGE_FLAG_DEGREE_CACHE,
 };
 
 use graph_types::RootKind;
@@ -480,6 +481,58 @@ impl Graph {
     }
 }
 
+impl Graph {
+    /// Returns a snapshot of VStore metrics for this graph.
+    pub fn vstore_metrics_snapshot(&self) -> crate::storage::vstore::VStoreMetricsSnapshot {
+        self.vstore.metrics_snapshot()
+    }
+
+    /// Returns approximate space usage for core graph B-trees.
+    pub fn space_usage(&self) -> Result<graph_types::GraphSpaceUsage> {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        let mut usage = graph_types::GraphSpaceUsage::default();
+
+        let nodes_root = PageId(self.nodes_root.load(AtomicOrdering::SeqCst));
+        let nodes_stats = self.tree_space_stats(nodes_root)?;
+        usage.nodes_pages = nodes_stats.page_count;
+        usage.nodes_bytes = nodes_stats.used_bytes;
+
+        let edges_root = PageId(self.edges_root.load(AtomicOrdering::SeqCst));
+        let edges_stats = self.tree_space_stats(edges_root)?;
+        usage.edges_pages = edges_stats.page_count;
+        usage.edges_bytes = edges_stats.used_bytes;
+
+        let adj_fwd_root = PageId(self.adj_fwd_root.load(AtomicOrdering::SeqCst));
+        let adj_fwd_stats = self.tree_space_stats(adj_fwd_root)?;
+        usage.adj_fwd_pages = adj_fwd_stats.page_count;
+        usage.adj_fwd_bytes = adj_fwd_stats.used_bytes;
+
+        let adj_rev_root = PageId(self.adj_rev_root.load(AtomicOrdering::SeqCst));
+        let adj_rev_stats = self.tree_space_stats(adj_rev_root)?;
+        usage.adj_rev_pages = adj_rev_stats.page_count;
+        usage.adj_rev_bytes = adj_rev_stats.used_bytes;
+
+        let version_log_root = PageId(self.version_log_root.load(AtomicOrdering::SeqCst));
+        let version_stats = self.tree_space_stats(version_log_root)?;
+        usage.version_log_pages = version_stats.page_count;
+
+        let index_roots: IndexRoots = self.indexes.roots();
+        for root in [
+            index_roots.catalog,
+            index_roots.label,
+            index_roots.prop_chunk,
+            index_roots.prop_btree,
+        ] {
+            let stats = self.tree_space_stats(root)?;
+            usage.index_pages = usage.index_pages.saturating_add(stats.page_count);
+            usage.index_bytes = usage.index_bytes.saturating_add(stats.used_bytes);
+        }
+
+        Ok(usage)
+    }
+}
+
 impl Drop for Graph {
     fn drop(&mut self) {}
 }
@@ -492,7 +545,71 @@ impl BackgroundMaintainer for Graph {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct TreeSpaceStats {
+    page_count: u64,
+    leaf_pages: u64,
+    internal_pages: u64,
+    used_bytes: u64,
+}
+
 impl Graph {
+    fn tree_space_stats(&self, root: PageId) -> Result<TreeSpaceStats> {
+        use crate::storage::btree::page::BTreePageKind;
+
+        let mut stats = TreeSpaceStats::default();
+        if root.0 == 0 {
+            return Ok(stats);
+        }
+        let read = self.store.begin_latest_committed_read()?;
+        let mut stack = Vec::new();
+        let mut visited = HashSet::new();
+        stack.push(root);
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id.0) {
+                continue;
+            }
+            let page = self.store.get_page(&read, id)?;
+            let bytes = page.data();
+            let header = btree_page::Header::parse(bytes)?;
+            stats.page_count = stats.page_count.saturating_add(1);
+            match header.kind {
+                BTreePageKind::Leaf => {
+                    stats.leaf_pages = stats.leaf_pages.saturating_add(1);
+                }
+                BTreePageKind::Internal => {
+                    stats.internal_pages = stats.internal_pages.saturating_add(1);
+                }
+            }
+            let payload_len = bytes.len().saturating_sub(PAGE_HDR_LEN as usize);
+            let free_bytes = header
+                .free_end
+                .saturating_sub(header.free_start) as usize;
+            if payload_len >= free_bytes {
+                stats.used_bytes = stats.used_bytes.saturating_add(
+                    (payload_len - free_bytes) as u64,
+                );
+            }
+
+            if let BTreePageKind::Internal = header.kind {
+                let payload = &bytes[PAGE_HDR_LEN as usize..];
+                let slots = header.slot_directory(bytes)?;
+                for idx in 0..slots.len() {
+                    let (start, len) = slots.extent(idx)?;
+                    let start_usize = start as usize;
+                    let len_usize = len as usize;
+                    if start_usize + len_usize > payload.len() {
+                        continue;
+                    }
+                    let rec_slice = &payload[start_usize..start_usize + len_usize];
+                    let rec = btree_page::decode_internal_record(rec_slice)?;
+                    stack.push(rec.child);
+                }
+            }
+        }
+        Ok(stats)
+    }
+
     /// Evicts readers that have exceeded the configured timeout and emits warnings when appropriate.
     fn enforce_reader_timeouts(&self) {
         let timeout = self.vacuum_cfg.reader_timeout;

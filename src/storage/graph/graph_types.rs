@@ -232,3 +232,30 @@ pub struct PropStats {
     /// Maximum observed non-null property value.
     pub max: Option<PropValueOwned>,
 }
+
+/// Approximate space usage for core graph B-trees.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GraphSpaceUsage {
+    /// B-tree pages used by the nodes tree.
+    pub nodes_pages: u64,
+    /// Approximate bytes used in the nodes tree payloads.
+    pub nodes_bytes: u64,
+    /// B-tree pages used by the edges tree.
+    pub edges_pages: u64,
+    /// Approximate bytes used in the edges tree payloads.
+    pub edges_bytes: u64,
+    /// B-tree pages used by the forward adjacency tree.
+    pub adj_fwd_pages: u64,
+    /// Approximate bytes used in the forward adjacency tree payloads.
+    pub adj_fwd_bytes: u64,
+    /// B-tree pages used by the reverse adjacency tree.
+    pub adj_rev_pages: u64,
+    /// Approximate bytes used in the reverse adjacency tree payloads.
+    pub adj_rev_bytes: u64,
+    /// B-tree pages used by all index trees combined.
+    pub index_pages: u64,
+    /// Approximate bytes used across all index trees.
+    pub index_bytes: u64,
+    /// B-tree pages used by the version log heap.
+    pub version_log_pages: u64,
+}

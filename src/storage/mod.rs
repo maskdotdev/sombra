@@ -56,11 +56,12 @@ pub use adjacency::{Dir, ExpandOpts, Neighbor, NeighborCursor};
 
 /// Core graph storage implementation.
 pub use graph::{
-    AdjacencyVacuumStats, BfsOptions, BfsVisit, BulkEdgeValidator, CreateEdgeOptions, Graph,
-    GraphMvccStatus, GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats, VacuumMode,
-    VacuumTrigger, VersionVacuumStats, DEFAULT_INLINE_PROP_BLOB, DEFAULT_INLINE_PROP_VALUE,
-    STORAGE_FLAG_DEGREE_CACHE,
-};
+     AdjacencyVacuumStats, BfsOptions, BfsVisit, BulkEdgeValidator, CreateEdgeOptions, Graph,
+     GraphMvccStatus, GraphSpaceUsage, GraphVacuumStats, GraphWriter, GraphWriterStats, PropStats,
+     VacuumMode, VacuumTrigger, VersionVacuumStats, DEFAULT_INLINE_PROP_BLOB,
+     DEFAULT_INLINE_PROP_VALUE, STORAGE_FLAG_DEGREE_CACHE,
+ };
+
 
 /// Index definitions and label scan operations.
 pub use index::{IndexDef, IndexKind, LabelScan, TypeTag};

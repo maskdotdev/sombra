@@ -522,6 +522,16 @@ pub struct TypedBatchSpec {
   pub edges: Vec<TypedEdgeSpec>,
 }
 
+/// Options controlling typed bulk load behavior.
+#[derive(Debug, Default, Deserialize)]
+#[napi(object)]
+pub struct BulkLoadOptions {
+  #[napi(js_name = "nodeChunkSize")]
+  pub node_chunk_size: Option<u32>,
+  #[napi(js_name = "edgeChunkSize")]
+  pub edge_chunk_size: Option<u32>,
+}
+
 // ============================================================================
 // Conversion from NAPI types to core FFI types
 // ============================================================================
@@ -700,5 +710,112 @@ pub fn databaseCreateTypedBatch(
       edges,
       aliases,
     })
+  })
+}
+
+/// Bulk loads nodes from typed specifications using chunked transactions.
+///
+/// This is a non-atomic bulk-ingest API: each chunk is committed
+/// independently. Node aliases are not supported in bulk mode.
+#[allow(non_snake_case)]
+#[napi]
+pub fn databaseBulkLoadNodesTyped(
+  handle: &DatabaseHandle,
+  nodes: Vec<TypedNodeSpec>,
+  options: Option<BulkLoadOptions>,
+) -> NapiResult<Vec<i64>> {
+  handle.with_db(|db| {
+    let ffi_nodes: Vec<sombra::ffi::TypedNodeSpec> = nodes
+      .iter()
+      .map(|n| n.to_ffi())
+      .collect::<NapiResult<_>>()?;
+
+    let mut opts = sombra::ffi::BulkLoadOptions::default();
+    if let Some(o) = options {
+      if let Some(chunk) = o.node_chunk_size {
+        if chunk > 0 {
+          opts.node_chunk_size = chunk as usize;
+        }
+      }
+      if let Some(chunk) = o.edge_chunk_size {
+        if chunk > 0 {
+          opts.edge_chunk_size = chunk as usize;
+        }
+      }
+    }
+
+    let mut bulk = db.begin_bulk_load(opts);
+    let result = bulk.load_nodes(&ffi_nodes).map_err(to_napi_err)?;
+    let _stats = bulk.finish();
+
+    let ids: Vec<i64> = result
+      .iter()
+      .map(|id| {
+        if id.0 > i64::MAX as u64 {
+          Err(NapiError::new(
+            Status::InvalidArg,
+            "node ID exceeds JavaScript safe integer range",
+          ))
+        } else {
+          Ok(id.0 as i64)
+        }
+      })
+      .collect::<NapiResult<Vec<_>>>()?;
+
+    Ok(ids)
+  })
+}
+
+/// Bulk loads edges from typed specifications using chunked transactions.
+///
+/// This is a non-atomic bulk-ingest API: each chunk is committed
+/// independently. Edge endpoints must use `kind == "id"` and refer to
+/// already-existing node IDs.
+#[allow(non_snake_case)]
+#[napi]
+pub fn databaseBulkLoadEdgesTyped(
+  handle: &DatabaseHandle,
+  edges: Vec<TypedEdgeSpec>,
+  options: Option<BulkLoadOptions>,
+) -> NapiResult<Vec<i64>> {
+  handle.with_db(|db| {
+    let ffi_edges: Vec<sombra::ffi::TypedEdgeSpec> = edges
+      .iter()
+      .map(|e| e.to_ffi())
+      .collect::<NapiResult<_>>()?;
+
+    let mut opts = sombra::ffi::BulkLoadOptions::default();
+    if let Some(o) = options {
+      if let Some(chunk) = o.node_chunk_size {
+        if chunk > 0 {
+          opts.node_chunk_size = chunk as usize;
+        }
+      }
+      if let Some(chunk) = o.edge_chunk_size {
+        if chunk > 0 {
+          opts.edge_chunk_size = chunk as usize;
+        }
+      }
+    }
+
+    let mut bulk = db.begin_bulk_load(opts);
+    let result = bulk.load_edges(&ffi_edges).map_err(to_napi_err)?;
+    let _stats = bulk.finish();
+
+    let ids: Vec<i64> = result
+      .iter()
+      .map(|id| {
+        if id.0 > i64::MAX as u64 {
+          Err(NapiError::new(
+            Status::InvalidArg,
+            "edge ID exceeds JavaScript safe integer range",
+          ))
+        } else {
+          Ok(id.0 as i64)
+        }
+      })
+      .collect::<NapiResult<Vec<_>>>()?;
+
+    Ok(ids)
   })
 }

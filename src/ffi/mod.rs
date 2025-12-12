@@ -726,6 +726,23 @@ impl Database {
         drop(self);
     }
 
+    /// Begins a non-atomic bulk load session.
+    ///
+    /// The returned handle can be used to load nodes and edges in
+    /// chunked transactions, trading atomicity for better scalability
+    /// on very large ingests.
+    pub fn begin_bulk_load(&self, options: BulkLoadOptions) -> BulkLoadHandle<'_> {
+        BulkLoadHandle {
+            db: self,
+            options,
+            label_cache: HashMap::new(),
+            type_cache: HashMap::new(),
+            prop_cache: HashMap::new(),
+            ensured_label_indexes: HashSet::new(),
+            stats: BulkLoadStats::default(),
+        }
+    }
+
     /// Forces a checkpoint, flushing WAL data to the main database file.
     ///
     /// This ensures all committed data is persisted to the main database file.
@@ -945,35 +962,77 @@ impl Database {
     ///
     /// All nodes in `node_ids` see the same committed state at the time
     /// the snapshot is created.
+    ///
+    /// For batched workloads, this method internally reorders lookups by
+    /// node ID to improve storage locality, but results are returned in
+    /// the original order.
     pub fn get_nodes(&self, node_ids: &[u64]) -> Result<Vec<Option<NodeData>>> {
         let read = self.pager.begin_latest_committed_read()?;
-        let mut out = Vec::with_capacity(node_ids.len());
-        for &id in node_ids {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut indexed: Vec<(usize, u64)> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (idx, id))
+            .collect();
+        indexed.sort_by_key(|&(_, id)| id);
+
+        let mut out: Vec<Option<NodeData>> = vec![None; node_ids.len()];
+        for (idx, id) in indexed {
             let data = self.graph.get_node(&read, NodeId(id))?;
-            out.push(data);
+            out[idx] = data;
         }
         Ok(out)
     }
 
     /// Returns property counts for multiple nodes using a single read snapshot
     /// without materializing property values.
+    ///
+    /// For batched workloads, this method internally reorders lookups by
+    /// node ID to improve storage locality, but results are returned in
+    /// the original order.
     pub fn get_node_prop_counts(&self, node_ids: &[u64]) -> Result<Vec<Option<usize>>> {
         let read = self.pager.begin_latest_committed_read()?;
-        let mut out = Vec::with_capacity(node_ids.len());
-        for &id in node_ids {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut indexed: Vec<(usize, u64)> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (idx, id))
+            .collect();
+        indexed.sort_by_key(|&(_, id)| id);
+
+        let mut out: Vec<Option<usize>> = vec![None; node_ids.len()];
+        for (idx, id) in indexed {
             let count = self.graph.get_node_prop_count(&read, NodeId(id))?;
-            out.push(count);
+            out[idx] = count;
         }
         Ok(out)
     }
 
     /// Returns existence flags for multiple nodes using a single read snapshot.
+    ///
+    /// For batched workloads, this method internally reorders lookups by
+    /// node ID to improve storage locality, but results are returned in
+    /// the original order.
     pub fn nodes_exist(&self, node_ids: &[u64]) -> Result<Vec<bool>> {
         let read = self.pager.begin_latest_committed_read()?;
-        let mut out = Vec::with_capacity(node_ids.len());
-        for &id in node_ids {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut indexed: Vec<(usize, u64)> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (idx, id))
+            .collect();
+        indexed.sort_by_key(|&(_, id)| id);
+
+        let mut out: Vec<bool> = vec![false; node_ids.len()];
+        for (idx, id) in indexed {
             let exists = self.graph.visible_node(&read, NodeId(id))?.is_some();
-            out.push(exists);
+            out[idx] = exists;
         }
         Ok(out)
     }
@@ -1286,6 +1345,8 @@ impl Database {
         let mut label_cache: HashMap<String, LabelId> = HashMap::new();
         let mut type_cache: HashMap<String, TypeId> = HashMap::new();
         let mut prop_cache: HashMap<String, PropId> = HashMap::new();
+        // Tracks which label indexes have already been ensured in this batch.
+        let mut ensured_label_indexes: HashSet<LabelId> = HashSet::new();
 
         // Track created node IDs and aliases
         let mut node_ids: Vec<NodeId> = Vec::with_capacity(spec.nodes.len());
@@ -1310,7 +1371,9 @@ impl Database {
             let dict_start = storage_profile_timer();
             let label_id =
                 self.resolve_or_cache_label(&mut write, &node_spec.label, &mut label_cache)?;
-            self.ensure_label_index(&mut write, label_id)?;
+            if ensured_label_indexes.insert(label_id) {
+                self.ensure_label_index(&mut write, label_id)?;
+            }
             record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
 
             // Convert properties (with profiling)
@@ -1343,38 +1406,108 @@ impl Database {
         // Create edges
         let mut edge_ids: Vec<EdgeId> = Vec::with_capacity(spec.edges.len());
 
-        for edge_spec in &spec.edges {
-            // Resolve edge type (with profiling)
-            let dict_start = storage_profile_timer();
-            let ty_id = self.resolve_or_cache_type(&mut write, &edge_spec.ty, &mut type_cache)?;
-            record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
+        // Fast path: if all edges reference nodes created in this batch via
+        // handles or aliases (no existing IDs), we can use GraphWriter with
+        // trusted endpoints to skip per-edge existence checks.
+        let all_edges_reference_batch = spec.edges.iter().all(|edge_spec| {
+            matches!(edge_spec.src.kind.as_str(), "handle" | "alias")
+                && matches!(edge_spec.dst.kind.as_str(), "handle" | "alias")
+        });
 
-            // Resolve source and destination nodes
-            let src_id = edge_spec.src.resolve(&node_ids, &aliases)?;
-            let dst_id = edge_spec.dst.resolve(&node_ids, &aliases)?;
+        if all_edges_reference_batch {
+            use crate::storage::{BulkEdgeValidator, CreateEdgeOptions, GraphWriter};
 
-            // Convert properties (with profiling)
-            let props_start = storage_profile_timer();
-            let prop_storage =
-                self.typed_props_to_storage(&mut write, &edge_spec.props, &mut prop_cache)?;
-            let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
-            for (prop_id, owned) in &prop_storage {
-                prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+            struct BatchEdgeValidator;
+
+            impl BulkEdgeValidator for BatchEdgeValidator {
+                fn validate_batch(&self, _edges: &[(NodeId, NodeId)]) -> crate::types::Result<()> {
+                    // For typed batches that only reference in-batch handles/aliases,
+                    // node IDs are derived directly from the nodes we just created
+                    // in this transaction, so no additional on-disk validation is
+                    // required here.
+                    Ok(())
+                }
             }
-            record_storage_profile_timer(StorageProfileKind::FfiTypedPropsConvert, props_start);
 
-            // Create the edge
-            let edge_id = self.graph.create_edge(
-                &mut write,
-                StorageEdgeSpec {
+            let writer_opts = CreateEdgeOptions {
+                trusted_endpoints: true,
+                exists_cache_capacity: 0,
+            };
+            let mut writer = GraphWriter::try_new(
+                &self.graph,
+                writer_opts,
+                Some(Box::new(BatchEdgeValidator)),
+            )?;
+
+            let mut batch_pairs: Vec<(NodeId, NodeId)> = Vec::with_capacity(spec.edges.len());
+            for edge_spec in &spec.edges {
+                let src_id = edge_spec.src.resolve(&node_ids, &aliases)?;
+                let dst_id = edge_spec.dst.resolve(&node_ids, &aliases)?;
+                batch_pairs.push((src_id, dst_id));
+            }
+            writer.validate_trusted_batch(&batch_pairs)?;
+
+            for (edge_spec, (src_id, dst_id)) in spec.edges.iter().zip(batch_pairs.into_iter()) {
+                // Resolve edge type (with profiling)
+                let dict_start = storage_profile_timer();
+                let ty_id =
+                    self.resolve_or_cache_type(&mut write, &edge_spec.ty, &mut type_cache)?;
+                record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
+
+                // Convert properties (with profiling)
+                let props_start = storage_profile_timer();
+                let prop_storage = self
+                    .typed_props_to_storage(&mut write, &edge_spec.props, &mut prop_cache)?;
+                let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
+                for (prop_id, owned) in &prop_storage {
+                    prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+                }
+                record_storage_profile_timer(StorageProfileKind::FfiTypedPropsConvert, props_start);
+
+                let spec = StorageEdgeSpec {
                     src: src_id,
                     dst: dst_id,
                     ty: ty_id,
                     props: &prop_entries,
-                },
-            )?;
+                };
+                let edge_id = writer.create_edge(&mut write, spec)?;
+                edge_ids.push(edge_id);
+            }
+        } else {
+            for edge_spec in &spec.edges {
+                // Resolve edge type (with profiling)
+                let dict_start = storage_profile_timer();
+                let ty_id =
+                    self.resolve_or_cache_type(&mut write, &edge_spec.ty, &mut type_cache)?;
+                record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
 
-            edge_ids.push(edge_id);
+                // Resolve source and destination nodes
+                let src_id = edge_spec.src.resolve(&node_ids, &aliases)?;
+                let dst_id = edge_spec.dst.resolve(&node_ids, &aliases)?;
+
+                // Convert properties (with profiling)
+                let props_start = storage_profile_timer();
+                let prop_storage = self
+                    .typed_props_to_storage(&mut write, &edge_spec.props, &mut prop_cache)?;
+                let mut prop_entries: Vec<PropEntry> = Vec::with_capacity(prop_storage.len());
+                for (prop_id, owned) in &prop_storage {
+                    prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+                }
+                record_storage_profile_timer(StorageProfileKind::FfiTypedPropsConvert, props_start);
+
+                // Create the edge
+                let edge_id = self.graph.create_edge(
+                    &mut write,
+                    StorageEdgeSpec {
+                        src: src_id,
+                        dst: dst_id,
+                        ty: ty_id,
+                        props: &prop_entries,
+                    },
+                )?;
+
+                edge_ids.push(edge_id);
+            }
         }
 
         // Flush deferred writes before commit
@@ -1442,6 +1575,29 @@ impl Database {
         cache: &mut HashMap<String, PropId>,
     ) -> Result<Vec<(PropId, PropValueOwned)>> {
         let mut result: Vec<(PropId, PropValueOwned)> = Vec::with_capacity(props.len());
+        if props.is_empty() {
+            return Ok(result);
+        }
+        // Fast path for repeated schemas: if keys are all distinct and we have
+        // cached PropIds for this key set, reuse the cached IDs instead of
+        // resolving each name on every row.
+        let mut all_distinct = true;
+        let mut seen_keys: HashSet<String> = HashSet::new();
+        for entry in props {
+            if !seen_keys.insert(entry.key.clone()) {
+                all_distinct = false;
+                break;
+            }
+        }
+        if all_distinct {
+            // Resolve and cache PropIds for each key exactly once per batch.
+            for entry in props {
+                let prop_id = self.resolve_or_cache_prop(write, &entry.key, cache)?;
+                let value = entry.to_prop_value_owned()?;
+                result.push((prop_id, value));
+            }
+            return Ok(result);
+        }
         for entry in props {
             let prop_id = self.resolve_or_cache_prop(write, &entry.key, cache)?;
             let value = entry.to_prop_value_owned()?;
@@ -3145,6 +3301,210 @@ pub struct TypedBatchSpec {
     pub edges: Vec<TypedEdgeSpec>,
 }
 
+/// Options controlling bulk load behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct BulkLoadOptions {
+    /// Maximum number of nodes to insert per transaction.
+    pub node_chunk_size: usize,
+    /// Maximum number of edges to insert per transaction.
+    pub edge_chunk_size: usize,
+}
+
+impl Default for BulkLoadOptions {
+    fn default() -> Self {
+        Self {
+            node_chunk_size: 10_000,
+            edge_chunk_size: 100_000,
+        }
+    }
+}
+
+/// Aggregate statistics from a bulk load session.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BulkLoadStats {
+    /// Total number of nodes created during the session.
+    pub nodes_created: u64,
+    /// Total number of edges created during the session.
+    pub edges_created: u64,
+    /// Number of node chunks committed.
+    pub node_batches: u64,
+    /// Number of edge chunks committed.
+    pub edge_batches: u64,
+}
+
+/// Handle for performing chunked bulk loads.
+pub struct BulkLoadHandle<'db> {
+    db: &'db Database,
+    options: BulkLoadOptions,
+    label_cache: HashMap<String, LabelId>,
+    type_cache: HashMap<String, TypeId>,
+    prop_cache: HashMap<String, PropId>,
+    ensured_label_indexes: HashSet<LabelId>,
+    stats: BulkLoadStats,
+}
+
+impl<'db> BulkLoadHandle<'db> {
+    /// Loads a batch of typed nodes using chunked transactions.
+    ///
+    /// This API is designed for bulk-ingest workloads and is explicitly
+    /// non-atomic: each chunk is committed independently.
+    pub fn load_nodes(&mut self, nodes: &[TypedNodeSpec]) -> Result<Vec<NodeId>> {
+        if nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut created: Vec<NodeId> = Vec::with_capacity(nodes.len());
+        for chunk in nodes.chunks(self.options.node_chunk_size.max(1)) {
+            let mut write = self.db.pager.begin_write()?;
+            for node_spec in chunk {
+                // Reject aliases in bulk load for now to keep semantics simple.
+                if node_spec.alias.is_some() {
+                    return Err(FfiError::Message(
+                        "bulk load does not support node aliases".to_string(),
+                    ));
+                }
+                // Resolve label with shared cache.
+                let dict_start = storage_profile_timer();
+                let label_id = self.db.resolve_or_cache_label(
+                    &mut write,
+                    &node_spec.label,
+                    &mut self.label_cache,
+                )?;
+                if self.ensured_label_indexes.insert(label_id) {
+                    self.db.ensure_label_index(&mut write, label_id)?;
+                }
+                record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
+
+                // Convert properties once per label schema.
+                let props_start = storage_profile_timer();
+                let prop_storage = self.db.typed_props_to_storage(
+                    &mut write,
+                    &node_spec.props,
+                    &mut self.prop_cache,
+                )?;
+                let mut prop_entries: Vec<PropEntry> =
+                    Vec::with_capacity(prop_storage.len());
+                for (prop_id, owned) in &prop_storage {
+                    prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+                }
+                record_storage_profile_timer(
+                    StorageProfileKind::FfiTypedPropsConvert,
+                    props_start,
+                );
+
+                let node_id = self.db.graph.create_node(
+                    &mut write,
+                    StorageNodeSpec {
+                        labels: &[label_id],
+                        props: &prop_entries,
+                    },
+                )?;
+                created.push(node_id);
+                self.stats.nodes_created = self.stats.nodes_created.saturating_add(1);
+            }
+            self.db.graph.flush_deferred_writes(&mut write)?;
+            self.db.pager.commit(write)?;
+            self.stats.node_batches = self.stats.node_batches.saturating_add(1);
+        }
+        Ok(created)
+    }
+
+    /// Loads a batch of typed edges using chunked transactions.
+    ///
+    /// For bulk loads, edge endpoints must use `kind == "id"` and refer
+    /// to already-created node IDs; alias/handle references are rejected.
+    pub fn load_edges(&mut self, edges: &[TypedEdgeSpec]) -> Result<Vec<EdgeId>> {
+        if edges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut created: Vec<EdgeId> = Vec::with_capacity(edges.len());
+        for chunk in edges.chunks(self.options.edge_chunk_size.max(1)) {
+            let mut write = self.db.pager.begin_write()?;
+            for edge_spec in chunk {
+                // Only allow id-based references in bulk load.
+                let src_id = match edge_spec.src.kind.as_str() {
+                    "id" => edge_spec
+                        .src
+                        .id
+                        .map(NodeId)
+                        .ok_or_else(|| {
+                            FfiError::Message(
+                                "id field required for id kind in bulk load".into(),
+                            )
+                        })?,
+                    other => {
+                        return Err(FfiError::Message(format!(
+                            "bulk load requires id endpoints, got '{other}'",
+                        )));
+                    }
+                };
+                let dst_id = match edge_spec.dst.kind.as_str() {
+                    "id" => edge_spec
+                        .dst
+                        .id
+                        .map(NodeId)
+                        .ok_or_else(|| {
+                            FfiError::Message(
+                                "id field required for id kind in bulk load".into(),
+                            )
+                        })?,
+                    other => {
+                        return Err(FfiError::Message(format!(
+                            "bulk load requires id endpoints, got '{other}'",
+                        )));
+                    }
+                };
+
+                // Resolve edge type with shared cache.
+                let dict_start = storage_profile_timer();
+                let ty_id = self.db.resolve_or_cache_type(
+                    &mut write,
+                    &edge_spec.ty,
+                    &mut self.type_cache,
+                )?;
+                record_storage_profile_timer(StorageProfileKind::DictResolve, dict_start);
+
+                // Convert properties.
+                let props_start = storage_profile_timer();
+                let prop_storage = self.db.typed_props_to_storage(
+                    &mut write,
+                    &edge_spec.props,
+                    &mut self.prop_cache,
+                )?;
+                let mut prop_entries: Vec<PropEntry> =
+                    Vec::with_capacity(prop_storage.len());
+                for (prop_id, owned) in &prop_storage {
+                    prop_entries.push(PropEntry::new(*prop_id, prop_value_ref(owned)));
+                }
+                record_storage_profile_timer(
+                    StorageProfileKind::FfiTypedPropsConvert,
+                    props_start,
+                );
+
+                let edge_id = self.db.graph.create_edge(
+                    &mut write,
+                    StorageEdgeSpec {
+                        src: src_id,
+                        dst: dst_id,
+                        ty: ty_id,
+                        props: &prop_entries,
+                    },
+                )?;
+                created.push(edge_id);
+                self.stats.edges_created = self.stats.edges_created.saturating_add(1);
+            }
+            self.db.graph.flush_deferred_writes(&mut write)?;
+            self.db.pager.commit(write)?;
+            self.stats.edge_batches = self.stats.edge_batches.saturating_add(1);
+        }
+        Ok(created)
+    }
+
+    /// Finishes the bulk load session and returns aggregate statistics.
+    pub fn finish(self) -> BulkLoadStats {
+        self.stats
+    }
+}
+
 /// Fluent builder for staging nodes and edges, executing them transactionally.
 ///
 /// Allows building complex graph structures with node aliasing for cross-references,
@@ -3296,8 +3656,11 @@ impl<'db> CreateBuilder<'db> {
 
     fn insert_node(&self, write: &mut WriteGuard<'_>, node: &DraftNode) -> Result<NodeId> {
         let label_ids = self.db.resolve_labels(write, &node.labels)?;
+        let mut ensured_label_indexes: HashSet<LabelId> = HashSet::new();
         for label in &label_ids {
-            self.db.ensure_label_index(write, *label)?;
+            if ensured_label_indexes.insert(*label) {
+                self.db.ensure_label_index(write, *label)?;
+            }
         }
         let prop_storage = collect_prop_storage(self.db, write, &node.props)?;
         let mut prop_entries = Vec::with_capacity(prop_storage.len());

@@ -2,8 +2,8 @@
 //! Run with: cargo run --release --bin realistic_bench
 
 use sombra::ffi::{
-    Database, DatabaseOptions, TypedBatchSpec, TypedEdgeSpec, TypedNodeRef, TypedNodeSpec,
-    TypedPropEntry,
+    BulkLoadOptions, Database, DatabaseOptions, TypedBatchSpec, TypedEdgeSpec, TypedNodeRef,
+    TypedNodeSpec, TypedPropEntry,
 };
 use sombra::primitives::pager::Synchronous;
 use std::{fs, path::Path, time::Instant};
@@ -92,6 +92,7 @@ fn main() {
     let chunk_edges: Option<usize> = std::env::var("CHUNK_EDGES")
         .ok()
         .and_then(|s| s.parse().ok());
+    let load_mode = std::env::var("LOAD_MODE").unwrap_or_else(|_| "TYPED_BATCH".to_string());
     let no_fsync = std::env::var("NO_FSYNC").map(|v| v == "1").unwrap_or(false);
 
     let tmpdir = TempDir::new().expect("tempdir");
@@ -126,73 +127,153 @@ fn main() {
         r#"{"type": "class", "exported": true}"#,
     ];
 
-    // Create nodes AND edges using typed batch to avoid JSON overhead.
+    // Create nodes AND edges using typed batches by default.
     // Supports chunking via CHUNK_NODES / CHUNK_EDGES to avoid single huge txns.
-    let chunk_nodes = chunk_nodes.unwrap_or(node_count);
-    let chunk_edges = chunk_edges.unwrap_or(edge_count);
-
-    println!(
-        "Creating {node_count} nodes and {edge_count} edges in chunks of {chunk_nodes} nodes / {chunk_edges} edges..."
-    );
-    let write_start = Instant::now();
-
-    let mut created_nodes = 0usize;
-    let mut created_edges = 0usize;
     let mut node_ids: Vec<u64> = Vec::with_capacity(node_count);
 
-    while created_nodes < node_count {
-        let n = std::cmp::min(chunk_nodes, node_count - created_nodes);
-        let e = if created_edges >= edge_count {
-            0
-        } else {
-            std::cmp::min(chunk_edges, edge_count - created_edges)
-        };
+    let write_start = Instant::now();
 
-        let nodes: Vec<TypedNodeSpec> = (0..n)
+    if load_mode.eq_ignore_ascii_case("BULK") {
+        let mut opts = BulkLoadOptions::default();
+        if let Some(n) = chunk_nodes {
+            if n > 0 {
+                opts.node_chunk_size = n;
+            }
+        }
+        if let Some(e) = chunk_edges {
+            if e > 0 {
+                opts.edge_chunk_size = e;
+            }
+        }
+
+        println!(
+            "Creating {node_count} nodes and {edge_count} edges via BulkLoadHandle (node_chunk_size={}, edge_chunk_size={})...",
+            opts.node_chunk_size, opts.edge_chunk_size
+        );
+
+        // Build all node specs up front (no aliases in bulk mode).
+        let nodes: Vec<TypedNodeSpec> = (0..node_count)
+            .map(|idx| TypedNodeSpec {
+                label: "Node".to_string(),
+                props: vec![
+                    make_string_prop("name", format!("fn_{idx}")),
+                    make_string_prop("filePath", format!("/tmp/file_{}.ts", idx / 50)),
+                    make_int_prop("startLine", idx as i64),
+                    make_int_prop("endLine", (idx + 5) as i64),
+                    make_string_prop(
+                        "codeText",
+                        code_texts[idx % code_texts.len()].to_string(),
+                    ),
+                    make_string_prop("language", "typescript".to_string()),
+                    make_string_prop("metadata", metadata[idx % metadata.len()].to_string()),
+                ],
+                alias: None,
+            })
+            .collect();
+
+        let mut bulk = db.begin_bulk_load(opts);
+        let created = bulk.load_nodes(&nodes).expect("bulk load nodes");
+        node_ids = created.iter().map(|id| id.0).collect();
+
+        // Build all edges referencing node IDs directly.
+        let edges: Vec<TypedEdgeSpec> = (0..edge_count)
             .map(|i| {
-                let idx = created_nodes + i;
-                TypedNodeSpec {
-                    label: "Node".to_string(),
+                let src_idx = i % node_count.max(1);
+                let dst_idx = (i * 13 + 7) % node_count.max(1);
+                TypedEdgeSpec {
+                    ty: "LINKS".to_string(),
+                    src: TypedNodeRef {
+                        kind: "id".to_string(),
+                        alias: None,
+                        handle: None,
+                        id: Some(node_ids[src_idx]),
+                    },
+                    dst: TypedNodeRef {
+                        kind: "id".to_string(),
+                        alias: None,
+                        handle: None,
+                        id: Some(node_ids[dst_idx]),
+                    },
                     props: vec![
-                        make_string_prop("name", format!("fn_{idx}")),
-                        make_string_prop("filePath", format!("/tmp/file_{}.ts", idx / 50)),
-                        make_int_prop("startLine", idx as i64),
-                        make_int_prop("endLine", (idx + 5) as i64),
+                        make_float_prop("weight", (i % 10) as f64 / 10.0),
                         make_string_prop(
-                            "codeText",
-                            code_texts[idx % code_texts.len()].to_string(),
+                            "linkKind", if i % 2 == 0 { "call" } else { "reference" }.to_string(),
                         ),
-                        make_string_prop("language", "typescript".to_string()),
-                        make_string_prop("metadata", metadata[idx % metadata.len()].to_string()),
                     ],
-                    alias: None,
                 }
             })
             .collect();
 
-        let edges: Vec<TypedEdgeSpec> = (0..e)
-            .map(|i| TypedEdgeSpec {
-                ty: "LINKS".to_string(),
-                src: make_handle_ref(i % n.max(1)),
-                dst: make_handle_ref((i * 13 + 7) % n.max(1)),
-                props: vec![
-                    make_float_prop("weight", (i % 10) as f64 / 10.0),
-                    make_string_prop(
-                        "linkKind",
-                        if i % 2 == 0 { "call" } else { "reference" }.to_string(),
-                    ),
-                ],
-            })
-            .collect();
+        let _edge_ids = bulk.load_edges(&edges).expect("bulk load edges");
+        let _stats = bulk.finish();
+    } else {
+        let chunk_nodes = chunk_nodes.unwrap_or(node_count);
+        let chunk_edges = chunk_edges.unwrap_or(edge_count);
 
-        let spec = TypedBatchSpec { nodes, edges };
-        let result = db
-            .create_typed_batch(&spec)
-            .expect("create nodes and edges");
-        node_ids.extend(result.node_ids.iter().map(|id| id.0));
+        println!(
+            "Creating {node_count} nodes and {edge_count} edges in chunks of {chunk_nodes} nodes / {chunk_edges} edges via typed batches..."
+        );
 
-        created_nodes += n;
-        created_edges += e;
+        let mut created_nodes = 0usize;
+        let mut created_edges = 0usize;
+
+        while created_nodes < node_count {
+            let n = std::cmp::min(chunk_nodes, node_count - created_nodes);
+            let e = if created_edges >= edge_count {
+                0
+            } else {
+                std::cmp::min(chunk_edges, edge_count - created_edges)
+            };
+
+            let nodes: Vec<TypedNodeSpec> = (0..n)
+                .map(|i| {
+                    let idx = created_nodes + i;
+                    TypedNodeSpec {
+                        label: "Node".to_string(),
+                        props: vec![
+                            make_string_prop("name", format!("fn_{idx}")),
+                            make_string_prop("filePath", format!("/tmp/file_{}.ts", idx / 50)),
+                            make_int_prop("startLine", idx as i64),
+                            make_int_prop("endLine", (idx + 5) as i64),
+                            make_string_prop(
+                                "codeText",
+                                code_texts[idx % code_texts.len()].to_string(),
+                            ),
+                            make_string_prop("language", "typescript".to_string()),
+                            make_string_prop(
+                                "metadata",
+                                metadata[idx % metadata.len()].to_string(),
+                            ),
+                        ],
+                        alias: None,
+                    }
+                })
+                .collect();
+
+            let edges: Vec<TypedEdgeSpec> = (0..e)
+                .map(|i| TypedEdgeSpec {
+                    ty: "LINKS".to_string(),
+                    src: make_handle_ref(i % n.max(1)),
+                    dst: make_handle_ref((i * 13 + 7) % n.max(1)),
+                    props: vec![
+                        make_float_prop("weight", (i % 10) as f64 / 10.0),
+                        make_string_prop(
+                            "linkKind",
+                            if i % 2 == 0 { "call" } else { "reference" }.to_string(),
+                        ),
+                    ],
+                })
+                .collect();
+
+            let spec = TypedBatchSpec { nodes, edges };
+            let result = db
+                .create_typed_batch(&spec)
+                .expect("create nodes and edges");
+            node_ids.extend(result.node_ids.iter().map(|id| id.0));
+
+            created_nodes += n;
+            created_edges += e;
+        }
     }
 
     let write_time = write_start.elapsed();

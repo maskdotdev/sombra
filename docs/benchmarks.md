@@ -102,7 +102,21 @@ raw throughput (no statistical warmup). Omit `--op` to execute the full suite or
 workload via `--iterations`, `--user-count`, and `--batch-size`.
 
 `scripts/run-benchmarks.sh` does not export this flag, so CI and formal runs keep
-the full-fidelity settings.
+ the full-fidelity settings.
+
+### realistic_bench (Rust core vs bindings)
+
+The core crate ships a helper binary for larger end-to-end measurements:
+
+- Run it with `cargo run --release --bin realistic_bench`.
+- `NODES`, `EDGES`, and `READS` control dataset size and the number of point-lookups.
+- `READ_MODE` selects the read path:
+  - `PER_CALL`: one `get_node_data` per read (full typed node, latest committed view per call).
+  - `SNAPSHOT_BATCH` (default): batches `get_nodes` under a single snapshot for better non-critical prod throughput.
+  - `HOT`: only counts properties via `get_node_prop_counts`, still reading the property blobs.
+  - `VERY_HOT`: only tests node existence via `nodes_exist` and is useful as an upper-bound “lookup ceiling”, not a realistic data-serving mode.
+- `READ_BATCH_SIZE` controls batch size for the batched modes.
+
 
 ## LDBC SNB baseline
 

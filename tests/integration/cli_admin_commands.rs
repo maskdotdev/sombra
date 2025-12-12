@@ -175,6 +175,8 @@ fn stats_emits_json() {
         .clone();
     let json: Value = serde_json::from_slice(&output).expect("valid json");
     assert!(json["pager"]["page_size"].is_number());
+    assert!(json["storage_space"]["version_log_bytes"].is_number());
+    assert!(json["storage_space"]["nodes_tree_pages"].is_number());
 }
 
 #[test]

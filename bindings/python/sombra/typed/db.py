@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, List, Mapping, Optional, Sequence, Set, TypeVar, Union, cast
+from typing import Any, Dict, Generic, List, Mapping, Optional, Sequence, Set, Tuple, TypeVar, Union, cast
 
 from typing_extensions import Literal, TypedDict
 
@@ -108,6 +108,85 @@ class SombraDB(Generic[SchemaT]):
         if edge_id is None:
             raise RuntimeError("unable to create edge")
         return int(edge_id)
+
+    def bulk_load_nodes(
+        self,
+        label: NodeLabelT,
+        nodes: Sequence[Mapping[str, Any]],
+        *,
+        chunk_size: int = 10_000,
+    ) -> List[NodeId[NodeLabelT]]:
+        """Bulk load many nodes for a single label.
+
+        This API is explicitly non-atomic: each chunk is committed
+        independently using the underlying JSON `create` path.
+        """
+        normalized = self._assert_node_label(label, "bulk_load_nodes")
+        if not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+        nodes_list = list(nodes)
+        results: List[NodeId[NodeLabelT]] = []
+        if not nodes_list:
+            return results
+        for i in range(0, len(nodes_list), chunk_size):
+            chunk = nodes_list[i : i + chunk_size]
+            ops: List[Dict[str, Any]] = []
+            for props in chunk:
+                values = dict(props or {})
+                self._validate_node_props(normalized, values)
+                ops.append({"op": "createNode", "labels": [normalized], "props": values})
+            summary = self._db.mutate({"ops": ops})
+            created = summary.get("createdNodes") or []
+            for node_id in created:
+                results.append(cast(NodeId[NodeLabelT], int(node_id)))
+        return results
+
+    def bulk_load_edges(
+        self,
+        edges: Sequence[Tuple[NodeId[str], NodeId[str], EdgeLabelT, Mapping[str, Any]]],
+        *,
+        chunk_size: int = 100_000,
+    ) -> List[int]:
+        """Bulk load many edges.
+
+        This API is explicitly non-atomic: each chunk is committed
+        independently using the underlying JSON `create` path.
+        """
+        if not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+        edges_list = list(edges)
+        results: List[int] = []
+        if not edges_list:
+            return results
+        for i in range(0, len(edges_list), chunk_size):
+            chunk = edges_list[i : i + chunk_size]
+            ops: List[Dict[str, Any]] = []
+            for src, dst, edge_type, props in chunk:
+                normalized_edge = self._assert_edge_label(edge_type, "bulk_load_edges")
+                values = dict(props or {})
+                self._validate_edge_props(normalized_edge, values)
+                if self._schema:
+                    definition = self._schema["edges"].get(normalized_edge)
+                    if definition:
+                        expected_src = definition.get("from_label")
+                        expected_dst = definition.get("to_label")
+                        if expected_src:
+                            self._ensure_node_matches_label(int(src), expected_src, "bulk_load_edges source")
+                        if expected_dst:
+                            self._ensure_node_matches_label(int(dst), expected_dst, "bulk_load_edges target")
+                ops.append(
+                    {
+                        "op": "createEdge",
+                        "src": int(src),
+                        "dst": int(dst),
+                        "ty": normalized_edge,
+                        "props": values,
+                    }
+                )
+            summary = self._db.mutate({"ops": ops})
+            created = summary.get("createdEdges") or []
+            results.extend(int(edge_id) for edge_id in created)
+        return results
 
     def get_node(
         self,

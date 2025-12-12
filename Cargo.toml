@@ -22,6 +22,10 @@ path = "src/bin/fast_bench.rs"
 name = "compare-bench"
 path = "src/bin/compare_bench.rs"
 
+[[bin]]
+name = "graph_ops_bench"
+path = "src/bin/graph_ops_bench.rs"
+
 [[test]]
 name = "catalog_dict"
 path = "tests/integration/catalog_dict.rs"

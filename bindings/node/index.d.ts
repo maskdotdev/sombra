@@ -39,6 +39,12 @@ export interface ConnectOptions {
   autocheckpointMs?: number
 }
 
+export interface BulkLoadOptions {
+  nodeChunkSize?: number
+  edgeChunkSize?: number
+}
+
+
 export declare function databaseBfsTraversal(handle: DatabaseHandle, startId: number, maxDepth: number, options?: BfsTraversalOptions | undefined | null): NapiResult<Array<BfsVisitRecord>>
 
 export declare function databaseCancelRequest(handle: DatabaseHandle, requestId: string): NapiResult<boolean>
@@ -75,7 +81,20 @@ export declare function databaseCreate(handle: DatabaseHandle, spec: any): NapiR
  */
 export declare function databaseCreateTypedBatch(handle: DatabaseHandle, spec: TypedBatchSpec): NapiResult<TypedBatchResult>
 
+/**
+ * Bulk loads nodes from typed specifications using chunked transactions.
+ * This API is explicitly non-atomic: each chunk is committed independently.
+ */
+export declare function databaseBulkLoadNodesTyped(handle: DatabaseHandle, nodes: Array<TypedNodeSpec>, options?: BulkLoadOptions | undefined | null): NapiResult<Array<number>>
+
+/**
+ * Bulk loads edges from typed specifications using chunked transactions.
+ * Edge endpoints must use `kind == "id"` and refer to existing node IDs.
+ */
+export declare function databaseBulkLoadEdgesTyped(handle: DatabaseHandle, edges: Array<TypedEdgeSpec>, options?: BulkLoadOptions | undefined | null): NapiResult<Array<number>>
+
 export declare function databaseExecute(handle: DatabaseHandle, spec: any): NapiResult<any>
+
 
 export declare function databaseExplain(handle: DatabaseHandle, spec: any): NapiResult<any>
 

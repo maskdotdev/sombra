@@ -6,7 +6,7 @@ use crate::primitives::pager::PagerStats;
 use serde::Serialize;
 
 use crate::admin::options::AdminOpenOptions;
-use crate::admin::util::{open_pager, wal_path};
+use crate::admin::util::{open_graph, open_pager, wal_path};
 use crate::admin::Result;
 
 /// Comprehensive statistics report for a database instance.
@@ -23,6 +23,9 @@ pub struct StatsReport {
     pub storage: StorageStatsSection,
     /// Statistics about filesystem usage.
     pub filesystem: FilesystemStats,
+    /// Detailed storage space breakdown across components.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_space: Option<StorageSpaceStats>,
 }
 
 /// Pager-related statistics and configuration.
@@ -137,6 +140,51 @@ pub struct FilesystemStats {
     pub wal_size_bytes: u64,
 }
 
+/// Detailed storage space statistics for core graph components.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageSpaceStats {
+    /// Bytes retained inside the version log B-tree.
+    pub version_log_bytes: u64,
+    /// Number of entries stored in the version log.
+    pub version_log_entries: u64,
+    /// Overflow pages allocated by the VStore.
+    pub vstore_pages_allocated: u64,
+    /// Overflow pages freed by the VStore.
+    pub vstore_pages_freed: u64,
+    /// Total bytes written into VStore overflow pages.
+    pub vstore_bytes_written: u64,
+    /// Total bytes read from VStore overflow pages.
+    pub vstore_bytes_read: u64,
+    /// Number of writes that used at least one extent.
+    pub vstore_extent_writes: u64,
+    /// Total number of extent segments allocated.
+    pub vstore_extent_segments: u64,
+    /// Total number of pages covered by extent allocations.
+    pub vstore_extent_pages: u64,
+    /// B-tree pages used by the nodes tree.
+    pub nodes_tree_pages: u64,
+    /// Approximate bytes used in the nodes tree payloads.
+    pub nodes_tree_bytes: u64,
+    /// B-tree pages used by the edges tree.
+    pub edges_tree_pages: u64,
+    /// Approximate bytes used in the edges tree payloads.
+    pub edges_tree_bytes: u64,
+    /// B-tree pages used by the forward adjacency tree.
+    pub adj_fwd_tree_pages: u64,
+    /// Approximate bytes used in the forward adjacency tree payloads.
+    pub adj_fwd_tree_bytes: u64,
+    /// B-tree pages used by the reverse adjacency tree.
+    pub adj_rev_tree_pages: u64,
+    /// Approximate bytes used in the reverse adjacency tree payloads.
+    pub adj_rev_tree_bytes: u64,
+    /// B-tree pages used by all index trees combined.
+    pub index_tree_pages: u64,
+    /// Approximate bytes used across all index trees.
+    pub index_tree_bytes: u64,
+    /// B-tree pages used by the version log heap.
+    pub version_log_pages: u64,
+}
+
 /// Collects comprehensive statistics about a database.
 ///
 /// This function gathers statistics from the pager, WAL, storage layer, and filesystem
@@ -172,6 +220,8 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
         .map(|_| directory_size(&wal_path).unwrap_or(0))
         .unwrap_or(0);
     let wal_exists = wal_meta.is_some();
+
+    let storage_space = collect_storage_space_stats(path, opts)?;
 
     let pager_section = PagerStatsSection {
         page_size: meta.page_size,
@@ -234,6 +284,40 @@ pub fn stats(path: impl AsRef<Path>, opts: &AdminOpenOptions) -> Result<StatsRep
         wal: wal_section,
         storage: storage_section,
         filesystem: filesystem_section,
+        storage_space: Some(storage_space),
+    })
+}
+
+fn collect_storage_space_stats(
+    path: &Path,
+    opts: &AdminOpenOptions,
+) -> Result<StorageSpaceStats> {
+    let handle = open_graph(path, opts)?;
+    let mvcc = handle.graph.mvcc_status();
+    let vstore = handle.graph.vstore_metrics_snapshot();
+    let usage = handle.graph.space_usage()?;
+
+    Ok(StorageSpaceStats {
+        version_log_bytes: mvcc.version_log_bytes,
+        version_log_entries: mvcc.version_log_entries,
+        vstore_pages_allocated: vstore.pages_allocated,
+        vstore_pages_freed: vstore.pages_freed,
+        vstore_bytes_written: vstore.bytes_written,
+        vstore_bytes_read: vstore.bytes_read,
+        vstore_extent_writes: vstore.extent_writes,
+        vstore_extent_segments: vstore.extent_segments,
+        vstore_extent_pages: vstore.extent_pages,
+        nodes_tree_pages: usage.nodes_pages,
+        nodes_tree_bytes: usage.nodes_bytes,
+        edges_tree_pages: usage.edges_pages,
+        edges_tree_bytes: usage.edges_bytes,
+        adj_fwd_tree_pages: usage.adj_fwd_pages,
+        adj_fwd_tree_bytes: usage.adj_fwd_bytes,
+        adj_rev_tree_pages: usage.adj_rev_pages,
+        adj_rev_tree_bytes: usage.adj_rev_bytes,
+        index_tree_pages: usage.index_pages,
+        index_tree_bytes: usage.index_bytes,
+        version_log_pages: usage.version_log_pages,
     })
 }
 
