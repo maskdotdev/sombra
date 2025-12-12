@@ -81,6 +81,11 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(10000);
+    let read_mode = std::env::var("READ_MODE").unwrap_or_else(|_| "SNAPSHOT_BATCH".to_string());
+    let read_batch_size: usize = std::env::var("READ_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
     let chunk_nodes: Option<usize> = std::env::var("CHUNK_NODES")
         .ok()
         .and_then(|s| s.parse().ok());
@@ -198,17 +203,121 @@ fn main() {
     let read_start = Instant::now();
 
     let mut total_props = 0usize;
-    let mut first_20_times = Vec::new();
-    for i in 0..read_count {
-        let id = node_ids[(i * 17) % node_ids.len()];
-        let single_start = Instant::now();
-        let node = db
-            .get_node_record(id)
-            .expect("get node")
-            .expect("node exists");
-        total_props += node.properties.len(); // Force reading the data
-        if i < 20 {
-            first_20_times.push(single_start.elapsed());
+    let mut first_20_times = Vec::with_capacity(20);
+
+    if read_mode == "SNAPSHOT_BATCH" {
+        // Precompute IDs to keep the access pattern identical.
+        let mut read_ids = Vec::with_capacity(read_count);
+        for i in 0..read_count {
+            let id = node_ids[(i * 17) % node_ids.len()];
+            read_ids.push(id);
+        }
+
+        let mut idx = 0usize;
+        while idx < read_count {
+            let end = usize::min(idx + read_batch_size, read_count);
+            let batch = &read_ids[idx..end];
+
+            let batch_start = if idx < 20 { Some(Instant::now()) } else { None };
+            let nodes = db.get_nodes(batch).expect("get nodes (typed)");
+
+            for (offset, node_opt) in nodes.into_iter().enumerate() {
+                let node = node_opt.expect("node exists");
+                total_props += node.props.len();
+
+                let global_i = idx + offset;
+                if global_i < 20 {
+                    if let Some(batch_start) = batch_start {
+                        let elapsed = batch_start.elapsed();
+                        let per = elapsed / (end - idx) as u32;
+                        first_20_times.push(per);
+                    }
+                }
+            }
+
+            idx = end;
+        }
+    } else if read_mode == "HOT" {
+        // Hot read mode: only count properties without materializing values.
+        let mut read_ids = Vec::with_capacity(read_count);
+        for i in 0..read_count {
+            let id = node_ids[(i * 17) % node_ids.len()];
+            read_ids.push(id);
+        }
+
+        let mut idx = 0usize;
+        while idx < read_count {
+            let end = usize::min(idx + read_batch_size, read_count);
+            let batch = &read_ids[idx..end];
+
+            let batch_start = if idx < 20 { Some(Instant::now()) } else { None };
+            let counts = db
+                .get_node_prop_counts(batch)
+                .expect("get node prop counts (hot)");
+
+            for (offset, count_opt) in counts.into_iter().enumerate() {
+                let count = count_opt.expect("node exists");
+                total_props += count;
+
+                let global_i = idx + offset;
+                if global_i < 20 {
+                    if let Some(batch_start) = batch_start {
+                        let elapsed = batch_start.elapsed();
+                        let per = elapsed / (end - idx) as u32;
+                        first_20_times.push(per);
+                    }
+                }
+            }
+
+            idx = end;
+        }
+    } else if read_mode == "VERY_HOT" {
+        // Very hot read mode: only test node existence.
+        let mut read_ids = Vec::with_capacity(read_count);
+        for i in 0..read_count {
+            let id = node_ids[(i * 17) % node_ids.len()];
+            read_ids.push(id);
+        }
+
+        let mut idx = 0usize;
+        while idx < read_count {
+            let end = usize::min(idx + read_batch_size, read_count);
+            let batch = &read_ids[idx..end];
+
+            let batch_start = if idx < 20 { Some(Instant::now()) } else { None };
+            let exists_flags = db
+                .nodes_exist(batch)
+                .expect("nodes_exist (very hot)");
+
+            for (offset, exists) in exists_flags.into_iter().enumerate() {
+                if exists {
+                    total_props += 1;
+                }
+
+                let global_i = idx + offset;
+                if global_i < 20 {
+                    if let Some(batch_start) = batch_start {
+                        let elapsed = batch_start.elapsed();
+                        let per = elapsed / (end - idx) as u32;
+                        first_20_times.push(per);
+                    }
+                }
+            }
+
+            idx = end;
+        }
+    } else {
+        for i in 0..read_count {
+            let id = node_ids[(i * 17) % node_ids.len()];
+            let single_start = Instant::now();
+            let node = db
+                .get_node_data(id)
+                .expect("get node (typed)")
+                .expect("node exists");
+            total_props += node.props.len(); // Force reading the data
+            if i < 20 {
+                first_20_times.push(single_start.elapsed());
+            }
         }
     }
 
@@ -233,6 +342,7 @@ fn main() {
     }
 
     println!("\n📊 Benchmark Summary (Rust Core):");
+    println!("- Read mode: {read_mode}");
     println!(
         "- Nodes: {} ({:.0} nodes/sec)",
         node_count,

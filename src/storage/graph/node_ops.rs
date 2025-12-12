@@ -143,6 +143,27 @@ impl Graph {
         }))
     }
 
+    /// Retrieves the number of properties for a node without materializing values.
+    pub fn get_node_prop_count(
+        &self,
+        tx: &ReadGuard,
+        id: NodeId,
+    ) -> Result<Option<usize>> {
+        let Some(bytes) = self.nodes.get(tx, &id.0)? else {
+            return Ok(None);
+        };
+        let Some(versioned) = self.visible_node_from_bytes(tx, id, &bytes)? else {
+            return Ok(None);
+        };
+        let row = versioned.row;
+        let prop_bytes = match row.props {
+            NodePropStorage::Inline(bytes) => bytes,
+            NodePropStorage::VRef(vref) => self.vstore.read(tx, vref)?,
+        };
+        let count = props::decode_prop_count(&prop_bytes)?;
+        Ok(Some(count))
+    }
+
     /// Retrieves node data using an active write transaction.
     ///
     /// This surfaces pending versions created by the current writer so that

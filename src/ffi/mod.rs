@@ -934,6 +934,50 @@ impl Database {
         Ok(result)
     }
 
+    /// Fetches a node by ID and returns its typed representation without JSON conversion.
+    pub fn get_node_data(&self, node_id: u64) -> Result<Option<NodeData>> {
+        let read = self.pager.begin_latest_committed_read()?;
+        let data = self.graph.get_node(&read, NodeId(node_id))?;
+        Ok(data)
+    }
+
+    /// Fetches multiple nodes by ID using a single read snapshot.
+    ///
+    /// All nodes in `node_ids` see the same committed state at the time
+    /// the snapshot is created.
+    pub fn get_nodes(&self, node_ids: &[u64]) -> Result<Vec<Option<NodeData>>> {
+        let read = self.pager.begin_latest_committed_read()?;
+        let mut out = Vec::with_capacity(node_ids.len());
+        for &id in node_ids {
+            let data = self.graph.get_node(&read, NodeId(id))?;
+            out.push(data);
+        }
+        Ok(out)
+    }
+
+    /// Returns property counts for multiple nodes using a single read snapshot
+    /// without materializing property values.
+    pub fn get_node_prop_counts(&self, node_ids: &[u64]) -> Result<Vec<Option<usize>>> {
+        let read = self.pager.begin_latest_committed_read()?;
+        let mut out = Vec::with_capacity(node_ids.len());
+        for &id in node_ids {
+            let count = self.graph.get_node_prop_count(&read, NodeId(id))?;
+            out.push(count);
+        }
+        Ok(out)
+    }
+
+    /// Returns existence flags for multiple nodes using a single read snapshot.
+    pub fn nodes_exist(&self, node_ids: &[u64]) -> Result<Vec<bool>> {
+        let read = self.pager.begin_latest_committed_read()?;
+        let mut out = Vec::with_capacity(node_ids.len());
+        for &id in node_ids {
+            let exists = self.graph.visible_node(&read, NodeId(id))?.is_some();
+            out.push(exists);
+        }
+        Ok(out)
+    }
+
     /// Fetches an edge by ID and returns its metadata.
     pub fn get_edge_record(&self, edge_id: u64) -> Result<Option<EdgeRecord>> {
         let read = self.pager.begin_latest_committed_read()?;
