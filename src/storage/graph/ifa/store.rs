@@ -11,9 +11,9 @@ use std::sync::Arc;
 use crate::primitives::pager::{PageStore, ReadGuard, WriteGuard};
 use crate::storage::adjacency::Dir;
 use crate::storage::btree::{BTree, BTreeOptions, KeyCodec, ValCodec};
-use crate::types::{NodeId, PageId, Result, SombraError, TypeId};
+use crate::types::{EdgeId, NodeId, PageId, Result, SombraError, TypeId};
 
-use super::types::{NodeAdjHeader, OverflowBlock, SegmentPtr};
+use super::types::{InlineAdjEntry, NodeAdjHeader, OverflowBlock, SegmentPtr};
 
 /// Codec for NodeId keys in the IFA B-trees.
 ///
@@ -90,10 +90,48 @@ pub struct IfaStore {
 /// Result of looking up a type in a node's adjacency header.
 #[derive(Debug, Clone)]
 pub enum TypeLookupResult {
-    /// Type found with segment pointer.
-    Found(SegmentPtr),
+    /// Type found with external segment pointer.
+    External(SegmentPtr),
+    /// Type found with inline entries (no separate segment needed).
+    Inline(smallvec::SmallVec<[InlineAdjEntry; 3]>),
     /// Type not found (doesn't exist for this node).
     NotFound,
+}
+
+impl TypeLookupResult {
+    /// Returns true if the type was found (either external or inline).
+    #[allow(dead_code)]
+    pub fn is_found(&self) -> bool {
+        !matches!(self, TypeLookupResult::NotFound)
+    }
+
+    /// Returns the segment pointer if this is an external result.
+    #[allow(dead_code)]
+    pub fn segment_ptr(&self) -> Option<SegmentPtr> {
+        match self {
+            TypeLookupResult::External(ptr) => Some(*ptr),
+            _ => None,
+        }
+    }
+
+    /// Returns the inline entries if this is an inline result.
+    #[allow(dead_code)]
+    pub fn inline_entries(&self) -> Option<&[InlineAdjEntry]> {
+        match self {
+            TypeLookupResult::Inline(entries) => Some(entries.as_slice()),
+            _ => None,
+        }
+    }
+}
+
+/// Result of attempting to insert an inline entry.
+#[derive(Debug, Clone)]
+pub enum InlineInsertResult {
+    /// Entry was successfully inserted inline.
+    Inserted,
+    /// Inline capacity exceeded - type needs promotion to external storage.
+    /// Contains existing inline entries that should be migrated.
+    NeedsPromotion(smallvec::SmallVec<[InlineAdjEntry; 3]>),
 }
 
 impl IfaStore {
@@ -180,8 +218,13 @@ impl IfaStore {
     ///
     /// This is the primary read path for neighbor traversal:
     /// 1. Get NodeAdjHeader
-    /// 2. Check inline buckets
+    /// 2. Check inline buckets for inline entries or external segment ptr
     /// 3. If overflow present, search overflow chain
+    ///
+    /// Returns:
+    /// - `TypeLookupResult::Inline(entries)` if type uses inline storage
+    /// - `TypeLookupResult::External(ptr)` if type uses external segment storage
+    /// - `TypeLookupResult::NotFound` if type doesn't exist for this node
     pub fn lookup_type(
         &self,
         tx: &ReadGuard,
@@ -194,9 +237,14 @@ impl IfaStore {
             None => return Ok(TypeLookupResult::NotFound),
         };
 
-        // Try inline lookup first
+        // Try inline entries first (new fast path)
+        if let Some(entries) = header.lookup_inline_entries(type_id) {
+            return Ok(TypeLookupResult::Inline(entries.iter().copied().collect()));
+        }
+
+        // Try external segment pointer
         if let Some(ptr) = header.lookup_inline(type_id) {
-            return Ok(TypeLookupResult::Found(ptr));
+            return Ok(TypeLookupResult::External(ptr));
         }
 
         // Check if we need to search overflow
@@ -205,7 +253,7 @@ impl IfaStore {
                 // Search overflow chain
                 let result = self.search_overflow_chain(tx, node, dir, type_id, overflow_ptr)?;
                 return Ok(match result {
-                    Some(ptr) => TypeLookupResult::Found(ptr),
+                    Some(ptr) => TypeLookupResult::External(ptr),
                     None => TypeLookupResult::NotFound,
                 });
             }
@@ -215,7 +263,7 @@ impl IfaStore {
     }
 
     /// Searches the overflow chain for a type.
-    fn search_overflow_chain(
+    pub fn search_overflow_chain(
         &self,
         tx: &ReadGuard,
         node: NodeId,
@@ -282,6 +330,11 @@ impl IfaStore {
     }
 
     /// Looks up the segment head for a specific (node, dir, type) triple (write path).
+    ///
+    /// Returns:
+    /// - `TypeLookupResult::Inline(entries)` if type uses inline storage
+    /// - `TypeLookupResult::External(ptr)` if type uses external segment storage
+    /// - `TypeLookupResult::NotFound` if type doesn't exist for this node
     pub fn lookup_type_mut(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -294,9 +347,14 @@ impl IfaStore {
             None => return Ok(TypeLookupResult::NotFound),
         };
 
-        // Try inline lookup first
+        // Try inline entries first (new fast path)
+        if let Some(entries) = header.lookup_inline_entries(type_id) {
+            return Ok(TypeLookupResult::Inline(entries.iter().copied().collect()));
+        }
+
+        // Try external segment pointer
         if let Some(ptr) = header.lookup_inline(type_id) {
-            return Ok(TypeLookupResult::Found(ptr));
+            return Ok(TypeLookupResult::External(ptr));
         }
 
         // Check if we need to search overflow
@@ -304,7 +362,7 @@ impl IfaStore {
             if let Some(overflow_ptr) = header.overflow_ptr() {
                 let result = self.search_overflow_chain_mut(tx, node, dir, type_id, overflow_ptr)?;
                 return Ok(match result {
-                    Some(ptr) => TypeLookupResult::Found(ptr),
+                    Some(ptr) => TypeLookupResult::External(ptr),
                     None => TypeLookupResult::NotFound,
                 });
             }
@@ -376,6 +434,126 @@ impl IfaStore {
                 tree.put(tx, &node, &header)?;
                 self.refresh_roots();
                 Ok(())
+            }
+        }
+    }
+
+    /// Inserts an inline entry for a type in a node's adjacency header.
+    ///
+    /// This is the preferred insertion method for new edges, as it:
+    /// - Uses inline storage when possible (fast path)
+    /// - Returns `NeedsPromotion` if the inline capacity is exceeded
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(InlineInsertResult::Inserted)` if entry was added inline
+    /// - `Ok(InlineInsertResult::NeedsPromotion(entries))` if type needs promotion to external storage
+    /// - `Err` on I/O error
+    pub fn upsert_inline_entry(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        type_id: TypeId,
+        entry: InlineAdjEntry,
+    ) -> Result<InlineInsertResult> {
+        let tree = self.tree_for_dir(dir);
+        
+        // Get or create header
+        let mut header = tree.get_with_write(tx, &node)?.unwrap_or_else(NodeAdjHeader::new);
+
+        // Try inline insert
+        match header.insert_inline_entry(type_id, entry) {
+            Ok(()) => {
+                // Successfully inserted inline
+                tree.put(tx, &node, &header)?;
+                self.refresh_roots();
+                Ok(InlineInsertResult::Inserted)
+            }
+            Err(_) => {
+                // Inline capacity exceeded - need to promote to external storage
+                // Return existing entries so caller can create an external segment
+                let entries = header.lookup_inline_entries(type_id)
+                    .map(|e| e.iter().copied().collect())
+                    .unwrap_or_else(smallvec::SmallVec::new);
+                Ok(InlineInsertResult::NeedsPromotion(entries))
+            }
+        }
+    }
+
+    /// Promotes a type from inline storage to external segment storage.
+    ///
+    /// This updates the header to point to an external segment instead of
+    /// storing entries inline.
+    pub fn promote_to_external(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        type_id: TypeId,
+        segment_ptr: SegmentPtr,
+    ) -> Result<()> {
+        let tree = self.tree_for_dir(dir);
+        
+        let mut header = match tree.get_with_write(tx, &node)? {
+            Some(h) => h,
+            None => return Ok(()), // Node doesn't exist, nothing to promote
+        };
+
+        // Promote to external - this clears inline entries and sets segment ptr
+        header.promote_to_external(type_id, segment_ptr);
+        tree.put(tx, &node, &header)?;
+        self.refresh_roots();
+        Ok(())
+    }
+
+    /// Removes a single inline entry from a type's inline storage.
+    ///
+    /// This method handles deletion from inline storage without requiring
+    /// promotion to external storage.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` if the entry was found and removed
+    /// - `Ok(false)` if the entry wasn't found or type uses external storage
+    /// - `Err` on I/O error
+    pub fn remove_inline_entry(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        type_id: TypeId,
+        neighbor: NodeId,
+        edge: EdgeId,
+    ) -> Result<bool> {
+        let tree = self.tree_for_dir(dir);
+
+        let mut header = match tree.get_with_write(tx, &node)? {
+            Some(h) => h,
+            None => return Ok(false),
+        };
+
+        // Try to remove from inline entries
+        let result = header.remove_inline_entry(type_id, neighbor, edge);
+
+        match result {
+            Some(true) => {
+                // Successfully removed - update or delete header
+                if header.active_count() == 0 && !header.has_overflow() {
+                    tree.delete(tx, &node)?;
+                } else {
+                    tree.put(tx, &node, &header)?;
+                }
+                self.refresh_roots();
+                Ok(true)
+            }
+            Some(false) => {
+                // Entry not found in inline storage
+                Ok(false)
+            }
+            None => {
+                // Type doesn't use inline storage
+                Ok(false)
             }
         }
     }
@@ -480,6 +658,7 @@ impl IfaStore {
     }
 
     /// Returns an iterator over all types for a node in a given direction (write path).
+    #[allow(dead_code)]
     pub fn iter_types_mut(
         &self,
         tx: &mut WriteGuard<'_>,
@@ -498,18 +677,292 @@ impl IfaStore {
             result.push((type_id, ptr));
         }
 
-        // Collect overflow types
+        // Collect overflow types - walk the entire chain
         if header.has_overflow() {
-            let overflow_key = Self::overflow_key(node, dir);
-            if let Some(block) = self.overflow.get_with_write(tx, &overflow_key)? {
-                for (type_id, ptr) in block.iter() {
-                    result.push((type_id, ptr));
-                }
-                // TODO: Walk chain if block.next is not null
-            }
+            self.collect_overflow_types_mut(tx, node, dir, &mut result)?;
         }
 
         Ok(result)
+    }
+    
+    /// Collects all types from overflow blocks (write path).
+    #[allow(dead_code)]
+    fn collect_overflow_types_mut(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        result: &mut Vec<(TypeId, SegmentPtr)>,
+    ) -> Result<()> {
+        let overflow_key = Self::overflow_key(node, dir);
+        let mut current_key = overflow_key;
+        let mut chain_depth = 0;
+        const MAX_CHAIN_DEPTH: u32 = 100; // Prevent infinite loops
+        
+        loop {
+            let block = match self.overflow.get_with_write(tx, &current_key)? {
+                Some(b) => b,
+                None => break,
+            };
+            
+            for (type_id, ptr) in block.iter() {
+                result.push((type_id, ptr));
+            }
+            
+            if block.next.is_null() {
+                break;
+            }
+            
+            chain_depth += 1;
+            if chain_depth >= MAX_CHAIN_DEPTH {
+                return Err(SombraError::Corruption("overflow chain too deep"));
+            }
+            
+            current_key = overflow_key.wrapping_add(block.next.0);
+        }
+        
+        Ok(())
+    }
+
+    /// Returns an iterator over overflow types for a node (write path).
+    #[allow(dead_code)]
+    pub fn iter_overflow_types_mut(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+    ) -> Result<Vec<(TypeId, SegmentPtr)>> {
+        let mut result = Vec::new();
+        let overflow_key = Self::overflow_key(node, dir);
+        let mut current_key = overflow_key;
+        let mut chain_depth = 0;
+        const MAX_CHAIN_DEPTH: u32 = 100;
+
+        loop {
+            let block = match self.overflow.get_with_write(tx, &current_key)? {
+                Some(b) => b,
+                None => break,
+            };
+
+            for (type_id, ptr) in block.iter() {
+                result.push((type_id, ptr));
+            }
+
+            if block.next.is_null() {
+                break;
+            }
+
+            chain_depth += 1;
+            if chain_depth >= MAX_CHAIN_DEPTH {
+                return Err(SombraError::Corruption("overflow chain too deep"));
+            }
+
+            current_key = overflow_key.wrapping_add(block.next.0);
+        }
+
+        Ok(result)
+    }
+    
+    /// Returns an iterator over overflow types for a node (read-only path).
+    pub fn iter_overflow_types_ro(
+        &self,
+        tx: &ReadGuard,
+        node: NodeId,
+        dir: Dir,
+    ) -> Result<Vec<(TypeId, SegmentPtr)>> {
+        let mut result = Vec::new();
+        let overflow_key = Self::overflow_key(node, dir);
+        let mut current_key = overflow_key;
+        let mut chain_depth = 0;
+        const MAX_CHAIN_DEPTH: u32 = 100;
+        
+        loop {
+            let block = match self.overflow.get(tx, &current_key)? {
+                Some(b) => b,
+                None => break,
+            };
+            
+            for (type_id, ptr) in block.iter() {
+                result.push((type_id, ptr));
+            }
+            
+            if block.next.is_null() {
+                break;
+            }
+            
+            chain_depth += 1;
+            if chain_depth >= MAX_CHAIN_DEPTH {
+                return Err(SombraError::Corruption("overflow chain too deep"));
+            }
+            
+            current_key = overflow_key.wrapping_add(block.next.0);
+        }
+        
+        Ok(result)
+    }
+    
+    /// Searches overflow chain for a specific type (write path).
+    pub fn search_overflow_chain_for_type(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        type_id: TypeId,
+    ) -> Result<Option<SegmentPtr>> {
+        let overflow_key = Self::overflow_key(node, dir);
+        let mut current_key = overflow_key;
+        let mut chain_depth = 0;
+        const MAX_CHAIN_DEPTH: u32 = 100;
+        
+        loop {
+            let block = match self.overflow.get_with_write(tx, &current_key)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            
+            if let Some(ptr) = block.lookup(type_id) {
+                return Ok(Some(ptr));
+            }
+            
+            if block.next.is_null() {
+                return Ok(None);
+            }
+            
+            chain_depth += 1;
+            if chain_depth >= MAX_CHAIN_DEPTH {
+                return Err(SombraError::Corruption("overflow chain too deep"));
+            }
+            
+            current_key = overflow_key.wrapping_add(block.next.0);
+        }
+    }
+    
+    /// Updates a type mapping in overflow blocks (write path).
+    pub fn update_overflow_type(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        type_id: TypeId,
+        new_ptr: SegmentPtr,
+    ) -> Result<()> {
+        let overflow_key = Self::overflow_key(node, dir);
+        let mut current_key = overflow_key;
+        let mut chain_depth = 0;
+        const MAX_CHAIN_DEPTH: u32 = 100;
+        
+        loop {
+            let mut block = match self.overflow.get_with_write(tx, &current_key)? {
+                Some(b) => b,
+                None => return Err(SombraError::Invalid("type not found in overflow")),
+            };
+            
+            // Check if type is in this block
+            let count = block.entry_count as usize;
+            if count > 0 {
+                let entries = &block.entries[..count];
+                if let Ok(idx) = entries.binary_search_by_key(&type_id.0, |e| e.type_id.0) {
+                    // Found it - update the head pointer
+                    block.entries[idx].head = new_ptr;
+                    self.overflow.put(tx, &current_key, &block)?;
+                    self.refresh_roots();
+                    return Ok(());
+                }
+            }
+            
+            if block.next.is_null() {
+                return Err(SombraError::Invalid("type not found in overflow chain"));
+            }
+            
+            chain_depth += 1;
+            if chain_depth >= MAX_CHAIN_DEPTH {
+                return Err(SombraError::Corruption("overflow chain too deep"));
+            }
+            
+            current_key = overflow_key.wrapping_add(block.next.0);
+        }
+    }
+    
+    /// Inserts a type into overflow when inline buckets are full (for true IFA path).
+    pub fn insert_overflow(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        node: NodeId,
+        dir: Dir,
+        type_id: TypeId,
+        head: SegmentPtr,
+        header: &mut NodeAdjHeader,
+    ) -> Result<()> {
+        let overflow_key = Self::overflow_key(node, dir);
+        
+        if header.has_overflow() {
+            // Already have overflow - insert into existing chain
+            let mut block = self.overflow.get_with_write(tx, &overflow_key)?
+                .unwrap_or_else(OverflowBlock::new);
+            
+            if block.is_full() {
+                // Need to chain a new block
+                let mut new_block = OverflowBlock::new();
+                new_block.insert(type_id, head)?;
+                
+                // Find the end of the chain and append
+                let chain_end = self.find_overflow_chain_end(tx, overflow_key)?;
+                new_block.next = SegmentPtr::null();
+                
+                // Store new block with incremented key
+                let new_key = chain_end.wrapping_add(1);
+                self.overflow.put(tx, &new_key, &new_block)?;
+                
+                // Update the last block's next pointer
+                if let Some(mut last_block) = self.overflow.get_with_write(tx, &chain_end)? {
+                    last_block.next = SegmentPtr(new_key.wrapping_sub(overflow_key));
+                    self.overflow.put(tx, &chain_end, &last_block)?;
+                }
+            } else {
+                block.insert(type_id, head)?;
+                self.overflow.put(tx, &overflow_key, &block)?;
+            }
+        } else {
+            // First overflow - create new block
+            let mut block = OverflowBlock::new();
+            block.insert(type_id, head)?;
+            self.overflow.put(tx, &overflow_key, &block)?;
+            
+            // Set overflow pointer in header
+            header.set_overflow(SegmentPtr::from_page(PageId(overflow_key)));
+        }
+        
+        self.refresh_roots();
+        Ok(())
+    }
+    
+    /// Finds the end key of an overflow chain.
+    fn find_overflow_chain_end(
+        &self,
+        tx: &mut WriteGuard<'_>,
+        overflow_key: u64,
+    ) -> Result<u64> {
+        let mut current_key = overflow_key;
+        let mut chain_depth = 0;
+        const MAX_CHAIN_DEPTH: u32 = 100;
+        
+        loop {
+            let block = match self.overflow.get_with_write(tx, &current_key)? {
+                Some(b) => b,
+                None => return Ok(current_key),
+            };
+            
+            if block.next.is_null() {
+                return Ok(current_key);
+            }
+            
+            chain_depth += 1;
+            if chain_depth >= MAX_CHAIN_DEPTH {
+                return Err(SombraError::Corruption("overflow chain too deep"));
+            }
+            
+            current_key = overflow_key.wrapping_add(block.next.0);
+        }
     }
 
     /// Helper to get the appropriate B-tree for a direction.
@@ -583,7 +1036,7 @@ mod store_tests {
         // Lookup using write path
         let result = store.lookup_type_mut(&mut tx, node, Dir::Out, type_id).unwrap();
         match result {
-            TypeLookupResult::Found(ptr) => assert_eq!(ptr, head),
+            TypeLookupResult::External(ptr) => assert_eq!(ptr, head),
             _ => panic!("Expected Found"),
         }
 
@@ -642,7 +1095,7 @@ mod store_tests {
         for i in 1..=5 {
             let result = store.lookup_type_mut(&mut tx, node, Dir::Out, TypeId(i)).unwrap();
             match result {
-                TypeLookupResult::Found(ptr) => assert_eq!(ptr.0, i as u64 * 100),
+                TypeLookupResult::External(ptr) => assert_eq!(ptr.0, i as u64 * 100),
                 _ => panic!("Expected Found for type {}", i),
             }
         }
@@ -667,11 +1120,11 @@ mod store_tests {
         let in_result = store.lookup_type_mut(&mut tx, node, Dir::In, type_id).unwrap();
 
         match out_result {
-            TypeLookupResult::Found(ptr) => assert_eq!(ptr, out_head),
+            TypeLookupResult::External(ptr) => assert_eq!(ptr, out_head),
             _ => panic!("Expected Found for Out"),
         }
         match in_result {
-            TypeLookupResult::Found(ptr) => assert_eq!(ptr, in_head),
+            TypeLookupResult::External(ptr) => assert_eq!(ptr, in_head),
             _ => panic!("Expected Found for In"),
         }
     }
@@ -696,7 +1149,7 @@ mod store_tests {
             let read_tx = pager.begin_read().unwrap();
             let result = store.lookup_type(&read_tx, node, Dir::Out, type_id).unwrap();
             match result {
-                TypeLookupResult::Found(ptr) => assert_eq!(ptr, head),
+                TypeLookupResult::External(ptr) => assert_eq!(ptr, head),
                 _ => panic!("Expected Found after commit"),
             }
         }

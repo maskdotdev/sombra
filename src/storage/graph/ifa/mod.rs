@@ -34,13 +34,18 @@ mod store;
 mod types;
 
 pub use adjacency::IfaAdjacency;
+#[allow(unused_imports)]
 pub use node_adj_page::{NodeAdjPage, NodeAdjPagePtr, NODE_ADJ_PAGE_DATA_LEN};
+#[allow(unused_imports)]
 pub use segment::{
     AdjEntry, AdjSegment, AdjSegmentHeader, ADJ_ENTRY_LEN, ADJ_SEGMENT_HEADER_LEN,
     max_entries_per_page,
 };
+#[allow(unused_imports)]
 pub use segment_manager::SegmentManager;
+#[allow(unused_imports)]
 pub use store::{IfaRoots, IfaStore, TypeLookupResult};
+#[allow(unused_imports)]
 pub use types::{
     NodeAdjHeader, OverflowBlock, SegmentPtr, TypeBucket,
     INLINE_BUCKET_COUNT, NODE_ADJ_HEADER_LEN, OVERFLOW_BLOCK_ENTRIES, OVERFLOW_BLOCK_LEN,

@@ -4,11 +4,13 @@
 //! NodeAdjHeaders. This enables O(1) neighbor lookups by storing a single
 //! `adj_page_id` in the node row, eliminating B-tree lookups for adjacency.
 //!
-//! # Page Layout
+//! # Page Layout (v2)
 //!
 //! ```text
 //! +------------------+
 //! | Page Header (8B) |  - magic, version, flags
+//! +------------------+
+//! | Owner NodeId(8B) |  - node that owns this adjacency page
 //! +------------------+
 //! | OUT Header (72B) |  - NodeAdjHeader for outgoing edges
 //! +------------------+
@@ -18,10 +20,10 @@
 //! +------------------+
 //! ```
 //!
-//! Total fixed size: 152 bytes, fits easily in a 4KB page.
+//! Total fixed size: 160 bytes, fits easily in a 4KB page.
 
 use crate::storage::adjacency::Dir;
-use crate::types::{PageId, Result, SombraError};
+use crate::types::{NodeId, PageId, Result, SombraError};
 
 use super::types::{NodeAdjHeader, NODE_ADJ_HEADER_LEN};
 
@@ -29,23 +31,33 @@ use super::types::{NodeAdjHeader, NODE_ADJ_HEADER_LEN};
 const NODE_ADJ_PAGE_MAGIC: u32 = 0x4E414450; // "NADP"
 
 /// Version of the node adjacency page format.
-const NODE_ADJ_PAGE_VERSION: u16 = 1;
+/// v2 adds owner NodeId field for hybrid overflow support.
+const NODE_ADJ_PAGE_VERSION: u16 = 2;
 
-/// Size of the page header.
+/// Size of the page header (magic + version + flags).
 const PAGE_HEADER_LEN: usize = 8;
 
+/// Size of the owner field.
+const OWNER_LEN: usize = 8;
+
+/// Offset of owner NodeId in the page.
+const OWNER_OFFSET: usize = PAGE_HEADER_LEN;
+
 /// Offset of OUT header in the page.
-const OUT_HEADER_OFFSET: usize = PAGE_HEADER_LEN;
+const OUT_HEADER_OFFSET: usize = OWNER_OFFSET + OWNER_LEN;
 
 /// Offset of IN header in the page.
 const IN_HEADER_OFFSET: usize = OUT_HEADER_OFFSET + NODE_ADJ_HEADER_LEN;
 
-/// Total size of the node adjacency data (header + both directions).
-pub const NODE_ADJ_PAGE_DATA_LEN: usize = PAGE_HEADER_LEN + 2 * NODE_ADJ_HEADER_LEN;
+/// Total size of the node adjacency data (header + owner + both directions).
+pub const NODE_ADJ_PAGE_DATA_LEN: usize = PAGE_HEADER_LEN + OWNER_LEN + 2 * NODE_ADJ_HEADER_LEN;
 
 /// A node's adjacency page containing headers for both directions.
 #[derive(Clone, Debug)]
 pub struct NodeAdjPage {
+    /// The node that owns this adjacency page.
+    /// Used for hybrid overflow lookup via B-tree store.
+    pub owner: NodeId,
     /// Header for outgoing edges.
     pub out_header: NodeAdjHeader,
     /// Header for incoming edges.
@@ -54,17 +66,24 @@ pub struct NodeAdjPage {
 
 impl Default for NodeAdjPage {
     fn default() -> Self {
-        Self::new()
+        Self::new(NodeId(0))
     }
 }
 
 impl NodeAdjPage {
-    /// Creates a new empty node adjacency page.
-    pub fn new() -> Self {
+    /// Creates a new empty node adjacency page for the given owner.
+    pub fn new(owner: NodeId) -> Self {
         Self {
+            owner,
             out_header: NodeAdjHeader::new(),
             in_header: NodeAdjHeader::new(),
         }
+    }
+
+    /// Returns the owner node ID.
+    #[inline]
+    pub fn owner(&self) -> NodeId {
+        self.owner
     }
 
     /// Gets the header for the specified direction.
@@ -94,6 +113,9 @@ impl NodeAdjPage {
         buf.extend_from_slice(&NODE_ADJ_PAGE_VERSION.to_be_bytes());
         buf.extend_from_slice(&[0u8; 2]); // flags/reserved
         
+        // Owner NodeId
+        buf.extend_from_slice(&self.owner.0.to_be_bytes());
+        
         // OUT header
         buf.extend_from_slice(&self.out_header.encode());
         
@@ -104,8 +126,11 @@ impl NodeAdjPage {
     }
 
     /// Decodes a page from bytes.
+    /// 
+    /// Supports both v1 (without owner) and v2 (with owner) formats.
+    /// v1 pages will have owner set to NodeId(0).
     pub fn decode(data: &[u8]) -> Result<Self> {
-        if data.len() < NODE_ADJ_PAGE_DATA_LEN {
+        if data.len() < PAGE_HEADER_LEN {
             return Err(SombraError::Corruption("node adj page too short"));
         }
 
@@ -115,17 +140,51 @@ impl NodeAdjPage {
             return Err(SombraError::Corruption("invalid node adj page magic"));
         }
 
-        // Verify version
+        // Check version
         let version = u16::from_be_bytes(data[4..6].try_into().unwrap());
-        if version != NODE_ADJ_PAGE_VERSION {
-            return Err(SombraError::Corruption("unsupported node adj page version"));
+        
+        match version {
+            1 => Self::decode_v1(data),
+            2 => Self::decode_v2(data),
+            _ => Err(SombraError::Corruption("unsupported node adj page version")),
         }
-
+    }
+    
+    /// Decodes v1 format (without owner field).
+    fn decode_v1(data: &[u8]) -> Result<Self> {
+        const V1_OUT_OFFSET: usize = PAGE_HEADER_LEN;
+        const V1_IN_OFFSET: usize = V1_OUT_OFFSET + NODE_ADJ_HEADER_LEN;
+        const V1_DATA_LEN: usize = PAGE_HEADER_LEN + 2 * NODE_ADJ_HEADER_LEN;
+        
+        if data.len() < V1_DATA_LEN {
+            return Err(SombraError::Corruption("node adj page v1 too short"));
+        }
+        
+        let out_header = NodeAdjHeader::decode(&data[V1_OUT_OFFSET..V1_OUT_OFFSET + NODE_ADJ_HEADER_LEN])?;
+        let in_header = NodeAdjHeader::decode(&data[V1_IN_OFFSET..V1_IN_OFFSET + NODE_ADJ_HEADER_LEN])?;
+        
+        Ok(Self {
+            owner: NodeId(0), // v1 didn't have owner, default to 0
+            out_header,
+            in_header,
+        })
+    }
+    
+    /// Decodes v2 format (with owner field).
+    fn decode_v2(data: &[u8]) -> Result<Self> {
+        if data.len() < NODE_ADJ_PAGE_DATA_LEN {
+            return Err(SombraError::Corruption("node adj page v2 too short"));
+        }
+        
+        // Decode owner
+        let owner = NodeId(u64::from_be_bytes(data[OWNER_OFFSET..OWNER_OFFSET + 8].try_into().unwrap()));
+        
         // Decode headers
         let out_header = NodeAdjHeader::decode(&data[OUT_HEADER_OFFSET..OUT_HEADER_OFFSET + NODE_ADJ_HEADER_LEN])?;
         let in_header = NodeAdjHeader::decode(&data[IN_HEADER_OFFSET..IN_HEADER_OFFSET + NODE_ADJ_HEADER_LEN])?;
 
         Ok(Self {
+            owner,
             out_header,
             in_header,
         })
@@ -153,29 +212,34 @@ impl NodeAdjPagePtr {
 
     /// Returns true if this pointer is null.
     #[inline]
+    #[allow(dead_code)]
     pub const fn is_null(self) -> bool {
         self.0.0 == 0
     }
 
     /// Creates a pointer from a PageId.
     #[inline]
+    #[allow(dead_code)]
     pub const fn from_page(page: PageId) -> Self {
         Self(page)
     }
 
     /// Returns the PageId.
     #[inline]
+    #[allow(dead_code)]
     pub const fn page_id(self) -> PageId {
         self.0
     }
 
     /// Encodes as big-endian bytes.
     #[inline]
+    #[allow(dead_code)]
     pub fn to_bytes(self) -> [u8; 8] {
         self.0.0.to_be_bytes()
     }
 
     /// Decodes from big-endian bytes.
+    #[allow(dead_code)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 8 {
             return Err(SombraError::Corruption("node adj page ptr truncated"));
@@ -193,17 +257,18 @@ mod tests {
 
     #[test]
     fn empty_page_roundtrip() {
-        let page = NodeAdjPage::new();
+        let page = NodeAdjPage::new(NodeId(42));
         let encoded = page.encode();
         let decoded = NodeAdjPage::decode(&encoded).unwrap();
         
+        assert_eq!(decoded.owner(), NodeId(42));
         assert_eq!(decoded.out_header.active_count(), 0);
         assert_eq!(decoded.in_header.active_count(), 0);
     }
 
     #[test]
     fn page_with_types_roundtrip() {
-        let mut page = NodeAdjPage::new();
+        let mut page = NodeAdjPage::new(NodeId(123));
         
         // Add some types to OUT header
         page.out_header.insert_inline(TypeId(1), SegmentPtr::from_page(PageId(100))).unwrap();
@@ -215,6 +280,7 @@ mod tests {
         let encoded = page.encode();
         let decoded = NodeAdjPage::decode(&encoded).unwrap();
         
+        assert_eq!(decoded.owner(), NodeId(123));
         assert_eq!(decoded.out_header.active_count(), 2);
         assert_eq!(decoded.in_header.active_count(), 1);
         
@@ -239,5 +305,11 @@ mod tests {
         let bytes = ptr.to_bytes();
         let decoded = NodeAdjPagePtr::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, ptr);
+    }
+    
+    #[test]
+    fn owner_accessor() {
+        let page = NodeAdjPage::new(NodeId(999));
+        assert_eq!(page.owner(), NodeId(999));
     }
 }

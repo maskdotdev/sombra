@@ -46,6 +46,7 @@ impl AdjEntry {
 
     /// Creates a new adjacency entry with full visibility info.
     #[inline]
+    #[allow(dead_code)]
     pub const fn with_visibility(neighbor: NodeId, edge: EdgeId, xmin: TxId, xmax: TxId) -> Self {
         Self { neighbor, edge, xmin, xmax }
     }
@@ -122,6 +123,7 @@ impl AdjSegmentHeader {
 
     /// Returns true if this version is still active (not superseded).
     #[inline]
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.xmax == 0
     }
@@ -313,6 +315,7 @@ impl AdjSegment {
 
     /// Returns the number of entries.
     #[inline]
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -391,6 +394,7 @@ impl AdjSegment {
     }
 
     /// Looks up all entries for a specific neighbor.
+    #[allow(dead_code)]
     pub fn lookup_neighbor(&self, neighbor: NodeId) -> Vec<AdjEntry> {
         let mut result = Vec::new();
         if let Ok(start_idx) = self
@@ -412,11 +416,13 @@ impl AdjSegment {
     }
 
     /// Returns an iterator over all entries.
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = &AdjEntry> {
         self.entries.iter()
     }
 
     /// Calculates the encoded size of this segment.
+    #[allow(dead_code)]
     pub fn encoded_size(&self) -> usize {
         ADJ_SEGMENT_HEADER_LEN + self.entries.len() * ADJ_ENTRY_LEN
     }
@@ -460,6 +466,7 @@ impl AdjSegment {
 ///
 /// Given a page size (e.g., 8192), returns the maximum number of AdjEntry
 /// that can fit alongside the header.
+#[allow(dead_code)]
 pub const fn max_entries_per_page(page_size: usize) -> usize {
     if page_size <= ADJ_SEGMENT_HEADER_LEN {
         return 0;

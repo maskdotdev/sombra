@@ -856,6 +856,7 @@ impl Graph {
     ///
     /// This is primarily for testing and debugging purposes.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn ifa_adjacency(&self) -> Option<&ifa::IfaAdjacency> {
         self.ifa.as_ref()
     }

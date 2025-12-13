@@ -1,5 +1,7 @@
 //! Tests for Index-Free Adjacency structures.
 
+#![allow(unused_imports)]
+
 use super::types::*;
 use super::segment::*;
 use super::*;
