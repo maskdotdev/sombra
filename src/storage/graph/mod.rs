@@ -35,7 +35,7 @@ use super::mvcc::{
 };
 use super::mvcc_flags;
 use super::node;
-use super::options::{GraphOptions, VacuumCfg};
+use super::options::{AdjacencyBackend, GraphOptions, VacuumCfg};
 
 
 use super::props;
@@ -45,6 +45,7 @@ mod deferred_ops;
 mod edge_ops;
 mod graph_types;
 mod helpers;
+pub mod ifa;
 mod index_ops;
 mod mvcc_ops;
 mod node_ops;
@@ -143,6 +144,16 @@ pub struct Graph {
     micro_gc_last_ms: AtomicU64,
     micro_gc_budget_hint: AtomicUsize,
     micro_gc_running: AtomicBool,
+    /// Index-Free Adjacency storage (optional, based on adjacency_backend).
+    ifa: Option<ifa::IfaAdjacency>,
+    /// IFA root page tracking for outgoing adjacency headers.
+    ifa_adj_out_root: AtomicU64,
+    /// IFA root page tracking for incoming adjacency headers.
+    ifa_adj_in_root: AtomicU64,
+    /// IFA root page tracking for overflow blocks.
+    ifa_overflow_root: AtomicU64,
+    /// Selected adjacency backend.
+    adjacency_backend: AdjacencyBackend,
 }
 
 struct VacuumSched {
@@ -410,6 +421,23 @@ impl Graph {
             None
         };
 
+        // Initialize IFA subsystem if enabled
+        let adjacency_backend = opts.adjacency_backend;
+        let ifa_adj_out_root_id = meta.ifa_adj_out_root.0;
+        let ifa_adj_in_root_id = meta.ifa_adj_in_root.0;
+        let ifa_overflow_root_id = meta.ifa_overflow_root.0;
+
+        let ifa = if adjacency_backend != AdjacencyBackend::BTree {
+            let ifa_roots = ifa::IfaRoots {
+                adj_out: meta.ifa_adj_out_root,
+                adj_in: meta.ifa_adj_in_root,
+                overflow: meta.ifa_overflow_root,
+            };
+            Some(ifa::IfaAdjacency::open(Arc::clone(&store), ifa_roots)?)
+        } else {
+            None
+        };
+
         let graph = Arc::new(Self {
             store,
             commit_table,
@@ -466,6 +494,11 @@ impl Graph {
             micro_gc_last_ms: AtomicU64::new(0),
             micro_gc_budget_hint: AtomicUsize::new(0),
             micro_gc_running: AtomicBool::new(false),
+            ifa,
+            ifa_adj_out_root: AtomicU64::new(ifa_adj_out_root_id),
+            ifa_adj_in_root: AtomicU64::new(ifa_adj_in_root_id),
+            ifa_overflow_root: AtomicU64::new(ifa_overflow_root_id),
+            adjacency_backend,
         });
         graph.recompute_version_log_bytes()?;
         graph.register_vacuum_hook();
@@ -743,6 +776,36 @@ impl Graph {
                     Ok(())
                 }
             }
+            RootKind::IfaAdjOut => {
+                if let Some(ifa) = &self.ifa {
+                    let roots = ifa.roots();
+                    self.persist_root_impl(tx, &self.ifa_adj_out_root, roots.adj_out, |meta, root| {
+                        meta.ifa_adj_out_root = root;
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            RootKind::IfaAdjIn => {
+                if let Some(ifa) = &self.ifa {
+                    let roots = ifa.roots();
+                    self.persist_root_impl(tx, &self.ifa_adj_in_root, roots.adj_in, |meta, root| {
+                        meta.ifa_adj_in_root = root;
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            RootKind::IfaOverflow => {
+                if let Some(ifa) = &self.ifa {
+                    let roots = ifa.roots();
+                    self.persist_root_impl(tx, &self.ifa_overflow_root, roots.overflow, |meta, root| {
+                        meta.ifa_overflow_root = root;
+                    })
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -787,5 +850,18 @@ impl Graph {
     /// Returns the current catalog epoch used for DDL invalidation.
     pub fn catalog_epoch(&self) -> u64 {
         self.catalog_epoch.current().0
+    }
+
+    /// Returns a reference to the IFA adjacency subsystem (if enabled).
+    ///
+    /// This is primarily for testing and debugging purposes.
+    #[cfg(test)]
+    pub(crate) fn ifa_adjacency(&self) -> Option<&ifa::IfaAdjacency> {
+        self.ifa.as_ref()
+    }
+
+    /// Returns the current adjacency backend mode.
+    pub fn adjacency_backend(&self) -> AdjacencyBackend {
+        self.adjacency_backend
     }
 }

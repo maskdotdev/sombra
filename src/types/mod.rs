@@ -208,6 +208,8 @@ pub mod page {
         BTreeInternal = 4,
         /// Overflow page for large values.
         Overflow = 5,
+        /// IFA adjacency segment page.
+        IfaSegment = 6,
     }
 
     impl PageKind {
@@ -227,6 +229,7 @@ pub mod page {
                 3 => Ok(PageKind::BTreeLeaf),
                 4 => Ok(PageKind::BTreeInternal),
                 5 => Ok(PageKind::Overflow),
+                6 => Ok(PageKind::IfaSegment),
                 _ => Err(SombraError::Corruption("unknown page kind")),
             }
         }

@@ -203,6 +203,12 @@ pub(crate) enum RootKind {
     VersionLog,
     #[cfg(feature = "degree-cache")]
     Degree,
+    /// IFA outgoing adjacency headers B-tree.
+    IfaAdjOut,
+    /// IFA incoming adjacency headers B-tree.
+    IfaAdjIn,
+    /// IFA overflow blocks B-tree.
+    IfaOverflow,
 }
 
 /// Budget controls for a single vacuum pass.

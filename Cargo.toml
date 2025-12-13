@@ -26,6 +26,10 @@ path = "src/bin/compare_bench.rs"
 name = "graph_ops_bench"
 path = "src/bin/graph_ops_bench.rs"
 
+[[bin]]
+name = "ifa_bench"
+path = "src/bin/ifa_bench.rs"
+
 [[test]]
 name = "catalog_dict"
 path = "tests/integration/catalog_dict.rs"

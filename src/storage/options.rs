@@ -4,6 +4,19 @@ use std::time::Duration;
 use crate::primitives::pager::PageStore;
 use crate::storage::mvcc::VersionCodecKind;
 
+/// Adjacency storage backend selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdjacencyBackend {
+    /// B-tree based adjacency (legacy, proven).
+    #[default]
+    BTree,
+    /// Index-Free Adjacency with O(1) neighbor lookups (experimental).
+    /// When enabled, writes go to both BTree and IFA (shadow-write mode).
+    Ifa,
+    /// IFA-only mode (no BTree writes). Use only after migration.
+    IfaOnly,
+}
+
 /// Configuration options supplied when opening a [`super::Graph`].
 #[derive(Clone)]
 pub struct GraphOptions {
@@ -33,7 +46,7 @@ pub struct GraphOptions {
     pub version_codec_min_savings_bytes: usize,
     /// Whether to embed the newest historical version inline on page heads.
     pub inline_history: bool,
-    /// Maximum inline history payload size in bytes.
+    /// Maximum inline history payload length.
     pub inline_history_max_bytes: usize,
     /// Number of shards to split the version cache across.
     pub version_cache_shards: usize,
@@ -47,6 +60,8 @@ pub struct GraphOptions {
     pub snapshot_pool_size: usize,
     /// Maximum age in milliseconds for cached snapshots.
     pub snapshot_pool_max_age_ms: u64,
+    /// Adjacency storage backend selection.
+    pub adjacency_backend: AdjacencyBackend,
 }
 
 impl GraphOptions {
@@ -73,6 +88,7 @@ impl GraphOptions {
             defer_index_flush: false,
             snapshot_pool_size: 0,
             snapshot_pool_max_age_ms: 200,
+            adjacency_backend: AdjacencyBackend::default(),
         }
     }
 
@@ -187,6 +203,16 @@ impl GraphOptions {
     /// Sets the maximum cached snapshot age in milliseconds.
     pub fn snapshot_pool_max_age_ms(mut self, ms: u64) -> Self {
         self.snapshot_pool_max_age_ms = ms;
+        self
+    }
+
+    /// Sets the adjacency storage backend.
+    ///
+    /// - `BTree`: Legacy B-tree based adjacency (default).
+    /// - `Ifa`: Index-Free Adjacency with shadow-writes to both backends.
+    /// - `IfaOnly`: IFA-only mode (use after migration from BTree).
+    pub fn adjacency_backend(mut self, backend: AdjacencyBackend) -> Self {
+        self.adjacency_backend = backend;
         self
     }
 }

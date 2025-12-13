@@ -81,6 +81,8 @@ pub mod flags {
     pub const PENDING: u16 = 0x0004;
     /// Record carries an inline historical version payload.
     pub const INLINE_HISTORY: u16 = 0x0008;
+    /// Node has an IFA adjacency page pointer appended.
+    pub const HAS_ADJ_PAGE: u16 = 0x0010;
 }
 
 /// Fixed-size header prepended to every MVCC-aware payload.

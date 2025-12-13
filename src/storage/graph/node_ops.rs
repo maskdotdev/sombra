@@ -317,6 +317,7 @@ impl Graph {
             labels,
             props: storage,
             row_hash,
+            adj_page,
         } = versioned.row;
         let prop_bytes = self.read_node_prop_bytes_with_write(tx, &storage)?;
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
@@ -348,10 +349,14 @@ impl Graph {
         if inline_history.is_some() {
             new_header.flags |= crate::storage::mvcc_flags::INLINE_HISTORY;
         }
+        let mut encode_opts = NodeEncodeOpts::new(self.row_hash_header);
+        if let Some(adj) = adj_page {
+            encode_opts = encode_opts.with_adj_page(adj);
+        }
         let encoded_row = match node::encode(
             &labels,
             payload,
-            NodeEncodeOpts::new(self.row_hash_header),
+            encode_opts,
             new_header,
             prev_ptr,
             inline_history.as_deref(),

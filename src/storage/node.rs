@@ -1,7 +1,7 @@
 #[cfg(test)]
 use super::mvcc::COMMIT_MAX;
 use super::mvcc::{flags, VersionHeader, VersionPtr, VERSION_HEADER_LEN, VERSION_PTR_LEN};
-use crate::types::{LabelId, Result, SombraError, VRef};
+use crate::types::{LabelId, PageId, Result, SombraError, VRef};
 
 use super::rowhash::row_hash64;
 
@@ -27,6 +27,9 @@ pub struct NodeRow {
     pub props: PropStorage,
     #[cfg_attr(not(test), allow(dead_code))]
     pub row_hash: Option<u64>,
+    /// Optional adjacency page for IFA (Index-Free Adjacency).
+    /// When present, this page contains both OUT and IN adjacency headers.
+    pub adj_page: Option<PageId>,
 }
 
 /// Node payload paired with its MVCC metadata.
@@ -43,11 +46,19 @@ pub struct VersionedNodeRow {
 pub struct EncodeOpts {
     /// Whether to append an 8-byte SipHash64 footer.
     pub append_row_hash: bool,
+    /// Optional IFA adjacency page ID to store with the node.
+    pub adj_page: Option<PageId>,
 }
 
 impl EncodeOpts {
     pub const fn new(append_row_hash: bool) -> Self {
-        Self { append_row_hash }
+        Self { append_row_hash, adj_page: None }
+    }
+    
+    /// Sets the adjacency page for IFA.
+    pub const fn with_adj_page(mut self, page: PageId) -> Self {
+        self.adj_page = Some(page);
+        self
     }
 }
 
@@ -117,6 +128,11 @@ pub fn encode(
     } else {
         None
     };
+    // Append adjacency page pointer if present (for IFA)
+    if let Some(adj_page) = opts.adj_page {
+        version.flags |= flags::HAS_ADJ_PAGE;
+        payload.extend_from_slice(&adj_page.0.to_be_bytes());
+    }
     if let Some(history) = inline_history {
         let history_len = u16::try_from(history.len())
             .map_err(|_| SombraError::Invalid("inline history too large"))?;
@@ -236,13 +252,24 @@ pub fn decode(data: &[u8]) -> Result<VersionedNodeRow> {
         }
         let mut hash_bytes = [0u8; 8];
         hash_bytes.copy_from_slice(&payload[offset..offset + 8]);
+        offset += 8;
         Some(u64::from_be_bytes(hash_bytes))
     } else {
         None
     };
-    offset += if has_hash { 8 } else { 0 };
+    // Read adjacency page pointer if present (for IFA)
+    let adj_page = if (header.flags & flags::HAS_ADJ_PAGE) != 0 {
+        if offset + 8 > payload.len() {
+            return Err(SombraError::Corruption("node adj page ptr truncated"));
+        }
+        let page_id = u64_from_be(&payload[offset..offset + 8]);
+        offset += 8;
+        Some(PageId(page_id))
+    } else {
+        None
+    };
     let mut inline_history: Option<Vec<u8>> = None;
-    if offset < payload.len() {
+    if (header.flags & flags::INLINE_HISTORY) != 0 {
         if payload.len() - offset < 2 {
             return Err(SombraError::Corruption("inline history length missing"));
         }
@@ -271,6 +298,7 @@ pub fn decode(data: &[u8]) -> Result<VersionedNodeRow> {
             labels,
             props,
             row_hash,
+            adj_page,
         },
         inline_history,
     })

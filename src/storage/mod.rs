@@ -76,7 +76,7 @@ pub use mvcc::{
 pub use metrics::{default_metrics, CounterMetrics, NoopMetrics, StorageMetrics};
 
 /// Graph configuration options.
-pub use options::{GraphOptions, VacuumCfg};
+pub use options::{AdjacencyBackend, GraphOptions, VacuumCfg};
 
 /// Property patch operations for updates.
 pub use patch::{PropPatch, PropPatchOp};

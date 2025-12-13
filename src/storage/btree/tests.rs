@@ -565,7 +565,7 @@ fn delete_rebalances_via_left_sibling_borrow() -> Result<()> {
     let dir = tempdir().map_err(SombraError::Io)?;
     let path = dir.path().join("btree_delete_borrow_left.db");
     let mut pager_opts = PagerOptions::default();
-    pager_opts.page_size = 256;
+    pager_opts.page_size = 512; // Min size to fit meta page with IFA fields
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
@@ -816,7 +816,7 @@ fn borrow_in_place_updates_stats() -> Result<()> {
     let dir = tempdir().map_err(SombraError::Io)?;
     let path = dir.path().join("btree_delete_borrow_stats.db");
     let mut pager_opts = PagerOptions::default();
-    pager_opts.page_size = 256;
+    pager_opts.page_size = 512; // Min size to fit meta page with IFA fields
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
@@ -878,7 +878,7 @@ fn merge_in_place_updates_stats() -> Result<()> {
     let dir = tempdir().map_err(SombraError::Io)?;
     let path = dir.path().join("btree_delete_merge_stats.db");
     let mut pager_opts = PagerOptions::default();
-    pager_opts.page_size = 256;
+    pager_opts.page_size = 512; // Min size to fit meta page with IFA fields
     let pager = Arc::new(Pager::create(&path, pager_opts)?);
     let store: Arc<dyn PageStore> = pager.clone();
     let mut tree_opts = BTreeOptions::default();
