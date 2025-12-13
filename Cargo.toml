@@ -94,6 +94,10 @@ path = "tests/integration/mvcc_isolation_anomalies.rs"
 name = "mvcc_reader_timeout"
 path = "tests/integration/mvcc_reader_timeout.rs"
 
+[[test]]
+name = "ifa_validation"
+path = "tests/integration/ifa_validation.rs"
+
 [[bench]]
 name = "micro_btree"
 harness = false
@@ -137,6 +141,7 @@ degree-cache = []
 ffi-benches = []
 btree-in-place-debug = []
 dashboard = []
+ifa-profile = []
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }

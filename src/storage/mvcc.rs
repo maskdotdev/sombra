@@ -83,6 +83,8 @@ pub mod flags {
     pub const INLINE_HISTORY: u16 = 0x0008;
     /// Node has an IFA adjacency page pointer appended.
     pub const HAS_ADJ_PAGE: u16 = 0x0010;
+    /// Node row carries inline adjacency entries.
+    pub const HAS_INLINE_ADJ: u16 = 0x0020;
 }
 
 /// Fixed-size header prepended to every MVCC-aware payload.

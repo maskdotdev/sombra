@@ -318,6 +318,7 @@ impl Graph {
             props: storage,
             row_hash,
             adj_page,
+            inline_adj,
         } = versioned.row;
         let prop_bytes = self.read_node_prop_bytes_with_write(tx, &storage)?;
         let Some(delta) = self.build_prop_delta(tx, &prop_bytes, &patch)? else {
@@ -352,6 +353,9 @@ impl Graph {
         let mut encode_opts = NodeEncodeOpts::new(self.row_hash_header);
         if let Some(adj) = adj_page {
             encode_opts = encode_opts.with_adj_page(adj);
+        }
+        if let Some(inline) = inline_adj.as_ref() {
+            encode_opts = encode_opts.with_inline_adj(inline);
         }
         let encoded_row = match node::encode(
             &labels,

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use super::mvcc::COMMIT_MAX;
 use super::mvcc::{flags, VersionHeader, VersionPtr, VERSION_HEADER_LEN, VERSION_PTR_LEN};
-use crate::types::{LabelId, PageId, Result, SombraError, VRef};
+use crate::types::{EdgeId, LabelId, NodeId, PageId, Result, SombraError, VRef};
 
 use super::rowhash::row_hash64;
 
@@ -21,6 +21,75 @@ pub enum PropStorage {
     VRef(VRef),
 }
 
+pub const DIR_OUT: u8 = 0;
+pub const DIR_IN: u8 = 1;
+
+/// Single inline adjacency entry stored in a node row.
+/// Layout: [dir:1][type_id:3][neighbor:8][edge:8] (20 bytes)
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineAdjEntry {
+    pub direction: u8,   // 0 = OUT, 1 = IN
+    pub type_id: u32,    // lower 24 bits encoded
+    pub neighbor: NodeId,
+    pub edge: EdgeId,
+}
+
+impl InlineAdjEntry {
+    pub const ENCODED_LEN: usize = 20;
+
+    pub fn encode(&self, buf: &mut [u8]) {
+        debug_assert!(buf.len() >= Self::ENCODED_LEN);
+        buf[0] = self.direction;
+        let type_bytes = self.type_id.to_be_bytes();
+        buf[1..4].copy_from_slice(&type_bytes[1..4]);
+        buf[4..12].copy_from_slice(&self.neighbor.0.to_be_bytes());
+        buf[12..20].copy_from_slice(&self.edge.0.to_be_bytes());
+    }
+
+    pub fn decode(buf: &[u8]) -> Self {
+        debug_assert!(buf.len() >= Self::ENCODED_LEN);
+        let direction = buf[0];
+        let type_id = u32::from_be_bytes([0, buf[1], buf[2], buf[3]]);
+        let neighbor = NodeId(u64::from_be_bytes(buf[4..12].try_into().unwrap()));
+        let edge = EdgeId(u64::from_be_bytes(buf[12..20].try_into().unwrap()));
+        Self {
+            direction,
+            type_id,
+            neighbor,
+            edge,
+        }
+    }
+}
+
+pub const MAX_INLINE_ADJ_ENTRIES: usize = 8;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineNodeAdj {
+    pub entries: Vec<InlineAdjEntry>,
+}
+
+impl InlineNodeAdj {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn needs_promotion(&self, additional: usize) -> bool {
+        self.entries.len() + additional > MAX_INLINE_ADJ_ENTRIES
+    }
+
+    pub fn add(&mut self, entry: InlineAdjEntry) {
+        self.entries.push(entry);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeRow {
     pub labels: Vec<LabelId>,
@@ -30,6 +99,8 @@ pub struct NodeRow {
     /// Optional adjacency page for IFA (Index-Free Adjacency).
     /// When present, this page contains both OUT and IN adjacency headers.
     pub adj_page: Option<PageId>,
+    /// Optional inline adjacency stored directly in the node row.
+    pub inline_adj: Option<InlineNodeAdj>,
 }
 
 /// Node payload paired with its MVCC metadata.
@@ -43,21 +114,33 @@ pub struct VersionedNodeRow {
 
 /// Encoding options for node rows.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct EncodeOpts {
+pub struct EncodeOpts<'a> {
     /// Whether to append an 8-byte SipHash64 footer.
     pub append_row_hash: bool,
     /// Optional IFA adjacency page ID to store with the node.
     pub adj_page: Option<PageId>,
+    /// Optional inline adjacency to encode into the payload.
+    pub inline_adj: Option<&'a InlineNodeAdj>,
 }
 
-impl EncodeOpts {
+impl<'a> EncodeOpts<'a> {
     pub const fn new(append_row_hash: bool) -> Self {
-        Self { append_row_hash, adj_page: None }
+        Self {
+            append_row_hash,
+            adj_page: None,
+            inline_adj: None,
+        }
     }
-    
+
     /// Sets the adjacency page for IFA.
     pub const fn with_adj_page(mut self, page: PageId) -> Self {
         self.adj_page = Some(page);
+        self
+    }
+
+    /// Sets inline adjacency to be encoded.
+    pub fn with_inline_adj(mut self, adj: &'a InlineNodeAdj) -> Self {
+        self.inline_adj = Some(adj);
         self
     }
 }
@@ -74,14 +157,16 @@ pub struct EncodedNodeRow {
     pub row_hash: Option<u64>,
 }
 
-pub fn encode(
+pub fn encode<'a>(
     labels: &[LabelId],
     props: PropPayload<'_>,
-    opts: EncodeOpts,
+    opts: EncodeOpts<'a>,
     mut version: VersionHeader,
     prev_ptr: VersionPtr,
     inline_history: Option<&[u8]>,
 ) -> Result<EncodedNodeRow> {
+    // Clear inline-adjacency flag; it will be recomputed below based on opts.
+    version.flags &= !flags::HAS_INLINE_ADJ;
     if labels.len() > u8::MAX as usize {
         return Err(SombraError::Invalid(
             "too many labels for inline node encoding",
@@ -132,6 +217,27 @@ pub fn encode(
     if let Some(adj_page) = opts.adj_page {
         version.flags |= flags::HAS_ADJ_PAGE;
         payload.extend_from_slice(&adj_page.0.to_be_bytes());
+    }
+    // Append inline adjacency if present (for true IFA inline mode)
+    if let Some(inline_adj) = opts.inline_adj {
+        if !inline_adj.is_empty() {
+            if inline_adj.len() > u8::MAX as usize {
+                return Err(SombraError::Invalid("too many inline adjacency entries"));
+            }
+            let needed = payload
+                .len()
+                .saturating_add(1 + inline_adj.len() * InlineAdjEntry::ENCODED_LEN);
+            if needed > u16::MAX as usize {
+                return Err(SombraError::Invalid("inline adjacency exceeds payload limit"));
+            }
+            version.flags |= flags::HAS_INLINE_ADJ;
+            payload.push(inline_adj.len() as u8);
+            for entry in &inline_adj.entries {
+                let mut buf = [0u8; InlineAdjEntry::ENCODED_LEN];
+                entry.encode(&mut buf);
+                payload.extend_from_slice(&buf);
+            }
+        }
     }
     if let Some(history) = inline_history {
         let history_len = u16::try_from(history.len())
@@ -268,6 +374,30 @@ pub fn decode(data: &[u8]) -> Result<VersionedNodeRow> {
     } else {
         None
     };
+    // Read inline adjacency entries if present.
+    let inline_adj = if (header.flags & flags::HAS_INLINE_ADJ) != 0 {
+        if offset >= payload.len() {
+            return Err(SombraError::Corruption("node inline adj length missing"));
+        }
+        let count = payload[offset] as usize;
+        offset += 1;
+        let needed = count
+            .checked_mul(InlineAdjEntry::ENCODED_LEN)
+            .ok_or(SombraError::Corruption("node inline adj entry count overflow"))?;
+        if offset + needed > payload.len() {
+            return Err(SombraError::Corruption("node inline adj entries truncated"));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let start = offset;
+            let end = start + InlineAdjEntry::ENCODED_LEN;
+            entries.push(InlineAdjEntry::decode(&payload[start..end]));
+            offset += InlineAdjEntry::ENCODED_LEN;
+        }
+        Some(InlineNodeAdj { entries })
+    } else {
+        None
+    };
     let mut inline_history: Option<Vec<u8>> = None;
     if (header.flags & flags::INLINE_HISTORY) != 0 {
         if payload.len() - offset < 2 {
@@ -299,6 +429,7 @@ pub fn decode(data: &[u8]) -> Result<VersionedNodeRow> {
             props,
             row_hash,
             adj_page,
+            inline_adj,
         },
         inline_history,
     })
