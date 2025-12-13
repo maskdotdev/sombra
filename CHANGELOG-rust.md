@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.5.0](https://github.com/maskdotdev/sombra/compare/sombra-v0.4.0...sombra-v0.5.0) (2025-12-13)
+
+
+### Features
+
+* **bench:** add fullfsync and direct-fsync-delay options to compare-bench ([2c418b6](https://github.com/maskdotdev/sombra/commit/2c418b62b3c143af3bc6740a64b5526d6591205c))
+* **docs-site:** add CLI and configuration documentation pages ([5adcefd](https://github.com/maskdotdev/sombra/commit/5adcefd8e3983a54c88fe33936b65c401ac23dc0))
+* **docs-site:** add table of contents and improve page navigation ([08f7756](https://github.com/maskdotdev/sombra/commit/08f77563cee6f3d1e5b6a24a4f16234285da77a5))
+* **ffi:** add ensure_property_index API and profile_create benchmark ([14794db](https://github.com/maskdotdev/sombra/commit/14794dbd256847e2562ccd93e465d748da2edd14))
+* **graph:** implement True Index-Free Adjacency (IFA) for O(1) neighbor lookups ([c872f92](https://github.com/maskdotdev/sombra/commit/c872f92b245d61ad6810bae65ffc477e6cdbba98))
+* **ifa:** inline node adjacency and true IFA write path ([28b8f50](https://github.com/maskdotdev/sombra/commit/28b8f50c7bb020042f7118cf8533141a8b6e5078))
+* **node:** add TypedBatch API with BatchCreateBuilder ([4d6b74a](https://github.com/maskdotdev/sombra/commit/4d6b74ac183ead4c7d3b27d15198ea935c29090d))
+* **storage:** add detailed profiling for create_node, create_edge, and flush operations ([1f55595](https://github.com/maskdotdev/sombra/commit/1f555959872daddcba3dc06b55bd8492ffccbc1f))
+* **wal:** add adaptive commit path with direct fsync and coalescing ([f0dae7e](https://github.com/maskdotdev/sombra/commit/f0dae7ea3bda1cb5c498a1f3b570cfa7fe65dc09))
+
+
+### Bug Fixes
+
+* **ci:** migrate from retired macos-13 to macos-15-large runners ([0fd410f](https://github.com/maskdotdev/sombra/commit/0fd410f4288cf0b24d63fb5900ef9843e977143b))
+* **js:** remove release automation note from README ([73c676c](https://github.com/maskdotdev/sombra/commit/73c676cb1c80f15693cc3464326e1ab70b487721))
+* **profile_create:** remove references to non-existent profile fields ([536ed81](https://github.com/maskdotdev/sombra/commit/536ed81ddda37c4eb5bf178a1743855b72ef6044))
+* **test:** update WalCommitBacklog mock with new fields ([26c6dd4](https://github.com/maskdotdev/sombra/commit/26c6dd49d879e852c64d214639fee32e141ce2d0))
+
+
+### Performance Improvements
+
+* **batch:** skip finalize_node_head/edge_head when defer_index_flush=true ([b98e08b](https://github.com/maskdotdev/sombra/commit/b98e08bf758897b31125a3c1cdaf01f3200c81f3))
+* **btree:** add detailed leaf insert profiling metrics ([ed236f8](https://github.com/maskdotdev/sombra/commit/ed236f85d98e9e294f3fd1b5c801435d7f8078f0))
+* **btree:** reduce allocations in put_many and disable profiling by default ([e1debf3](https://github.com/maskdotdev/sombra/commit/e1debf3ce249770667c34d205827e38e83de2603))
+* **graph:** speed up typed batch writes ([dea3aae](https://github.com/maskdotdev/sombra/commit/dea3aae3c4435451fae106415bfbf4de4657f5c5))
+* **label-index:** add is_sorted guard to skip redundant sorting ([25b0eb7](https://github.com/maskdotdev/sombra/commit/25b0eb72e4e34eea668f74489c4ce212d8294b28))
+* **label-index:** add negative cache for non-indexed labels ([dcf338f](https://github.com/maskdotdev/sombra/commit/dcf338f57dbcdb82d0793af4928f2f248eb594e9))
+* **label-index:** batch insert for deferred label index flush ([c05b245](https://github.com/maskdotdev/sombra/commit/c05b2454606b0a6f8d7f51da167d65f83de95790))
+* **storage:** add btree buffer pool and perf benches ([d6b560f](https://github.com/maskdotdev/sombra/commit/d6b560fe226a046cf5d17b978a666e7e9e948b4a))
+* **storage:** optimize flush_deferred with batched indexes and eliminated adjacency finalization ([f1e2990](https://github.com/maskdotdev/sombra/commit/f1e29904e2e801bba18d9aded1380b188b15055c))
+
+
+### Documentation
+
+* add performance tuning section to README ([f2e2be3](https://github.com/maskdotdev/sombra/commit/f2e2be3d9e8d4c6821bf8e25165f353a17741cb3))
+* **cli:** document advanced pager, WAL, and MVCC options ([9accb81](https://github.com/maskdotdev/sombra/commit/9accb81d51af776f8bd0a9e72fa928b360eb4ebd))
+* **design:** add adaptive commit path design document ([ca2b09c](https://github.com/maskdotdev/sombra/commit/ca2b09c9b7efa4ab7441ea0aeaf16dda076f6cf0))
+* **docs-site:** add comprehensive content library ([4d66393](https://github.com/maskdotdev/sombra/commit/4d6639324143aaf6e785c40faff3b8da1005a03c))
+* **js:** expand Node.js README with comprehensive API reference ([3e6c5a5](https://github.com/maskdotdev/sombra/commit/3e6c5a5882aea922362828a2a7de32974e66a761))
+* mark CLI telemetry events export as complete ([6a8bc03](https://github.com/maskdotdev/sombra/commit/6a8bc03fe88a8d87ac523e1b9f7672a10307e50b))
+* update mvcc/typed-batch/perf plans ([1c160c3](https://github.com/maskdotdev/sombra/commit/1c160c3a5dd7fdf8f7642b4568b2aa8c0025dbdc))
+
 ## [0.4.0](https://github.com/maskdotdev/sombra/compare/sombra-v0.3.6...sombra-v0.4.0) (2025-12-10)
 
 
