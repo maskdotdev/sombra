@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.8.1...sombrajs-v0.9.0) (2025-12-13)
+
+
+### Features
+
+* **node:** add TypedBatch API with BatchCreateBuilder ([4d6b74a](https://github.com/maskdotdev/sombra/commit/4d6b74ac183ead4c7d3b27d15198ea935c29090d))
+
+
+### Documentation
+
+* **js:** expand Node.js README with comprehensive API reference ([3e6c5a5](https://github.com/maskdotdev/sombra/commit/3e6c5a5882aea922362828a2a7de32974e66a761))
+
 ## [0.8.1](https://github.com/maskdotdev/sombra/compare/sombrajs-v0.8.0...sombrajs-v0.8.1) (2025-12-10)
 
 
